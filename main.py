@@ -6,13 +6,14 @@ import os
 
 app = FastAPI(title="Mimir Advisors API")
 
-# Allow your Vercel URL and Localhost
+# 1. This is the part that is currently blocking your dashboard
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://market-intel-api-jmil.onrender.com" # Replace with your real Vercel domain
+        "https://market-intel-ui.vercel.app"  # Ensure this matches your Vercel domain exactly
     ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
