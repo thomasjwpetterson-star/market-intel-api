@@ -81,21 +81,24 @@ def build_where_clause(vendor, domain, agency, platform):
 
 # --- ENDPOINTS ---
 
+# main.py update
 @app.get("/api/dashboard/kpis")
-def get_market_kpis(year: int = 2024, vendor: Optional[str] = None, domain: Optional[str] = None, agency: Optional[str] = None, platform: Optional[str] = None):
-    where = build_where_clause(vendor, domain, agency, platform)
+def get_market_kpis(year: int = 2024, vendor: Optional[str] = None):
+    # Denominator safety: get total spend first
+    total_res = parse_athena_results(get_cached_results(f"SELECT SUM(total_spend) as t FROM {DATABASE}.{SUMMARY_TABLE} WHERE year = {year}"))
+    grand_total = total_res[0]['t'] if total_res and total_res[0]['t'] > 0 else 1
+    
+    v_filter = f"AND vendor_name = '{vendor}'" if vendor else ""
     sql = f"""
-    SELECT 
-        SUM(total_spend) / 1000000000 as total_spend_b,
-        SUM(contract_count) as total_contracts,
-        MAX_BY(platform_family, total_spend) as top_program,
-        MAX_BY(market_segment, total_spend) as top_domain,
-        (MAX(total_spend) / NULLIF(SUM(total_spend), 0)) * 100 as concentration_pct
-    FROM {DATABASE}.{SUMMARY_TABLE}
-    WHERE year = {year} AND {where}
+        SELECT 
+            SUM(total_spend) / 1000000000 as total_spend_b,
+            SUM(contract_count) as total_contracts,
+            (SUM(total_spend) / {grand_total}) * 100 as market_share_pct
+        FROM {DATABASE}.{SUMMARY_TABLE}
+        WHERE year = {year} {v_filter}
     """
     data = parse_athena_results(get_cached_results(sql))
-    return data[0] if data else {}
+    return data[0] if data else {"total_spend_b": 0, "total_contracts": 0, "market_share_pct": 0}
 
 @app.get("/api/dashboard/top-vendors")
 def get_top_vendors(threshold_m: float = 1.0, domain: Optional[str] = None, agency: Optional[str] = None):
