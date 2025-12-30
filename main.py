@@ -60,7 +60,27 @@ def parse_athena_results(results):
     rows = results['ResultSet']['Rows']
     if len(rows) < 1: return []
     headers = [col['VarCharValue'] for col in rows[0]['Data']]
-    return [dict(zip(headers, [c.get('VarCharValue', '0') for c in r['Data']])) for r in rows[1:]]
+    
+    formatted_data = []
+    for r in rows[1:]:
+        row_dict = {}
+        for i, col in enumerate(r['Data']):
+            val = col.get('VarCharValue', '0')
+            
+            # ATTEMPT CONVERSION: Try to turn strings into numbers
+            # This prevents the .toFixed() error in the frontend
+            try:
+                # If it's a digit or decimal, convert to float/int
+                if "." in val:
+                    row_dict[headers[i]] = float(val)
+                else:
+                    row_dict[headers[i]] = int(val)
+            except ValueError:
+                # If it's actual text (like a name), leave it as a string
+                row_dict[headers[i]] = val
+                
+        formatted_data.append(row_dict)
+    return formatted_data
 
 # --- FAST SUMMARY ENDPOINTS (Dashboard Core) ---
 
