@@ -6,32 +6,38 @@ import os
 
 app = FastAPI(title="Mimir Advisors API")
 
-# 1. Allow your React Dashboard to talk to this Server
+# Allow your Vercel URL and Localhost
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://market-intel-api-jmil.onrender.com" # Replace with your real Vercel domain
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 2. AWS Configuration
 athena = boto3.client('athena', region_name='us-east-1')
 DATABASE = 'market_intel_gold'
-# ⚠️ MAKE SURE THIS BUCKET NAME IS CORRECT
-OUTPUT_BUCKET = 's3://a-and-d-intel-lake-newaccount/athena_temp_results/' 
+OUTPUT_BUCKET = os.getenv('ATHENA_OUTPUT_BUCKET', 's3://a-and-d-intel-lake-newaccount/athena_temp_results/')
 
 def run_athena_query(query_string):
-    """Helper to run SQL and wait for results."""
     try:
-        # Start Query
+        # ATHENA CACHING: ResultReuseByAgeConfiguration
+        # This saves costs by reusing identical query results for 60 minutes.
         response = athena.start_query_execution(
             QueryString=query_string,
             QueryExecutionContext={'Database': DATABASE},
-            ResultConfiguration={'OutputLocation': OUTPUT_BUCKET}
+            ResultConfiguration={'OutputLocation': OUTPUT_BUCKET},
+            ResultReuseConfiguration={
+                'ResultReuseByAgeConfiguration': {
+                    'Enabled': True,
+                    'MaxAgeInMinutes': 60 
+                }
+            }
         )
         query_id = response['QueryExecutionId']
 
-        # Wait for Completion
         while True:
             status = athena.get_query_execution(QueryExecutionId=query_id)
             state = status['QueryExecution']['Status']['State']
@@ -40,42 +46,23 @@ def run_athena_query(query_string):
             time.sleep(0.5)
 
         if state != 'SUCCEEDED':
-            raise Exception(f"Query Failed: {status['QueryExecution']['Status'].get('StateChangeReason')}")
+            reason = status['QueryExecution']['Status'].get('StateChangeReason', 'Unknown')
+            raise Exception(f"Athena Query Failed: {reason}")
 
-        # Get Results
-        results = athena.get_query_results(QueryExecutionId=query_id)
-        return results
+        return athena.get_query_results(QueryExecutionId=query_id)
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"API Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 def parse_athena_results(results):
-    """Converts complex Athena JSON into a clean list of dictionaries."""
     rows = results['ResultSet']['Rows']
-    # If empty or just header
-    if len(rows) < 2:
-        return []
-        
+    if len(rows) < 2: return []
     headers = [col['VarCharValue'] for col in rows[0]['Data']]
-    clean_data = []
-    
-    for row in rows[1:]:
-        values = [col.get('VarCharValue', None) for col in row['Data']]
-        clean_data.append(dict(zip(headers, values)))
-        
-    return clean_data
-
-@app.get("/")
-def health_check():
-    return {"status": "Mimir Intelligence Online", "version": "1.0"}
+    return [dict(zip(headers, [c.get('VarCharValue', '0') for c in r['Data']])) for r in rows[1:]]
 
 @app.get("/api/dashboard/trend")
 def get_spend_trend():
-    """
-    Returns monthly spend for the main bar chart.
-    Uses 'spend_amount' and parses 'action_date' safely.
-    """
     sql = """
     SELECT 
         DATE_FORMAT(DATE_PARSE(action_date, '%Y-%m-%d'), '%b') as month,
@@ -85,16 +72,11 @@ def get_spend_trend():
     GROUP BY 1, MONTH(DATE_PARSE(action_date, '%Y-%m-%d'))
     ORDER BY MONTH(DATE_PARSE(action_date, '%Y-%m-%d')) ASC
     """
-    
-    # Run and Parse
-    raw = run_athena_query(sql)
-    data = parse_athena_results(raw)
-    
-    # Convert 'spend' from string to float so the chart can read it
+    data = parse_athena_results(run_athena_query(sql))
     for row in data:
-        if row.get('spend'):
-            row['spend'] = float(row['spend'])
-        else:
-            row['spend'] = 0.0
-        
+        row['spend'] = float(row['spend']) if row.get('spend') else 0.0
     return data
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
