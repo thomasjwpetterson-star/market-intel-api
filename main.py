@@ -19,6 +19,7 @@ from difflib import SequenceMatcher
 import re
 import concurrent.futures
 import time
+import gc # Garbage collection for memory management
 
 # --- CONFIGURATION ---
 BUCKET_NAME = "a-and-d-intel-lake-newaccount" # Ensure this matches your real bucket
@@ -28,7 +29,7 @@ CACHE_PREFIX = "app_cache/"
 # We will load DataFrames here so they stay in RAM.
 global_data: Dict[str, pd.DataFrame] = {}
 
-# ✅ FIX: Startup Logic using Lifespan (Prevents timeouts & handles errors better)
+# ✅ FIX: Startup Logic using Lifespan with MEMORY OPTIMIZATION
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- PHASE 1: DOWNLOAD FROM S3 ---
@@ -56,17 +57,50 @@ async def lifespan(app: FastAPI):
             else:
                 print(f"   ✅ {file} exists locally.")
 
-        # --- PHASE 2: LOAD INTO RAM (The "Instant Speed" Step) ---
-        print("🧠 Loading data into memory...")
+        # --- PHASE 2: LOAD INTO RAM WITH OPTIMIZATION ---
+        print("🧠 Loading data into memory with OPTIMIZATIONS...")
         
+        # Columns that are definitely categories (Low cardinality)
+        known_categories = [
+            'platform_family', 'sub_agency', 'market_segment', 'psc_code', 
+            'naics_code', 'state', 'city', 'year', 'month', 'set_aside_type'
+        ]
+
         for file in files:
             key_name = file.replace(".parquet", "") # e.g. "products"
             local_path = f"local_data/{file}"
             
-            # Read parquet into the global dictionary
-            # 'pyarrow' engine is usually fastest for parquet
-            global_data[key_name] = pd.read_parquet(local_path, engine='auto')
-            print(f"   ⚡ Loaded {key_name} ({len(global_data[key_name]):,} rows)")
+            try:
+                # 1. Read the file
+                # 'pyarrow' engine is usually fastest for parquet
+                df = pd.read_parquet(local_path, engine='auto')
+                
+                # 2. OPTIMIZE MEMORY: Convert Objects/Strings to Categories
+                # This drastically reduces RAM usage (often by 50-80%)
+                for col in df.columns:
+                    # If column is in our known list OR if it's a string object
+                    if col in known_categories or df[col].dtype == 'object':
+                        # Heuristic: Only convert if unique values are < 50% of total rows
+                        # (Prevents converting unique IDs like 'contract_id' to categories)
+                        num_unique = df[col].nunique()
+                        num_total = len(df)
+                        
+                        if num_total > 0 and (num_unique / num_total) < 0.5:
+                            df[col] = df[col].astype('category')
+
+                # 3. Store in global cache
+                global_data[key_name] = df
+                
+                # 4. Force Garbage Collection
+                # Helps free up memory from the raw read operation immediately
+                gc.collect()
+
+                print(f"   ⚡ Loaded {key_name} ({len(df):,} rows) - Optimized")
+                
+            except Exception as load_err:
+                 print(f"   ⚠️ Failed to load {file}: {load_err}")
+                 # We continue loading other files even if one fails
+                 pass
 
         print("🎉 SYSTEM READY. All data is in memory.")
                 
@@ -81,6 +115,7 @@ async def lifespan(app: FastAPI):
     # 3. SHUTDOWN: Cleanup (Optional)
     print("🛑 API Shutting down...")
     global_data.clear() # Free up RAM on shutdown
+    gc.collect()
 
 # ✅ Pass lifespan to FastAPI
 app = FastAPI(
@@ -99,15 +134,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- CONFIGURATION ---
-origins = ["*"]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# --- HEALTH CHECK (Keeps Render Happy) ---
+@app.get("/")
+def health_check():
+    return {"status": "ok", "message": "Mimir V5 is Live"}
+
+@app.head("/")
+def health_check_head():
+    return {"status": "ok"}
 
 # Bucket & Athena Config
 raw_bucket = os.getenv('ATHENA_OUTPUT_BUCKET', 'a-and-d-intel-lake-newaccount')
@@ -3235,12 +3269,3 @@ def get_solicitation_details(id: str):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=10000)
-
-# --- HEALTH CHECK (Keeps Render Happy) ---
-@app.get("/")
-def health_check():
-    return {"status": "ok", "message": "Mimir V5 is Live"}
-
-@app.head("/")
-def health_check_head():
-    return {"status": "ok"}
