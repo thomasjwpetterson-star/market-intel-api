@@ -23,4 +23,5 @@ typing_extensions==4.15.0
 tzdata==2025.3
 urllib3==1.26.20
 uvicorn==0.39.0
-pyarrow
+pyarrow>=19.0.0
+fastparquet>=2024.11.0
