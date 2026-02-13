@@ -19,20 +19,18 @@ from difflib import SequenceMatcher
 import re
 import concurrent.futures
 import time
-import gc # Garbage collection for memory management
+import gc 
 
 # --- CONFIGURATION ---
-BUCKET_NAME = "a-and-d-intel-lake-newaccount" # Ensure this matches your real bucket
+BUCKET_NAME = "a-and-d-intel-lake-newaccount" 
 CACHE_PREFIX = "app_cache/"
 
-# ✅ GLOBAL MEMORY STORE (This makes it "Instant")
-# We will load DataFrames here so they stay in RAM.
+# ✅ GLOBAL MEMORY STORE 
 global_data: Dict[str, pd.DataFrame] = {}
 
-# ✅ FIX: Startup Logic using Lifespan with MEMORY OPTIMIZATION
+# ✅ FIX: MEMORY OPTIMIZED LOADING (PyArrow Backend)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- PHASE 1: DOWNLOAD FROM S3 ---
     print("🚀 API Starting up...")
     
     files = [
@@ -42,7 +40,7 @@ async def lifespan(app: FastAPI):
     ]
 
     try:
-        s3 = boto3.client('s3', region_name='us-east-1') # Explicit region is safer
+        s3 = boto3.client('s3', region_name='us-east-1')
         
         if not os.path.exists("local_data"):
             os.makedirs("local_data")
@@ -50,71 +48,51 @@ async def lifespan(app: FastAPI):
         print("⬇️ Checking S3 Cache...")
         for file in files:
             local_path = f"local_data/{file}"
-            # Check if file exists locally to save bandwidth/time on restarts
             if not os.path.exists(local_path): 
                 print(f"   📥 Downloading {file}...")
                 s3.download_file(BUCKET_NAME, f"{CACHE_PREFIX}{file}", local_path)
             else:
                 print(f"   ✅ {file} exists locally.")
 
-        # --- PHASE 2: LOAD INTO RAM WITH OPTIMIZATION ---
-        print("🧠 Loading data into memory with OPTIMIZATIONS...")
+        print("🧠 Loading data into memory (PyArrow Optimized)...")
         
-        # Columns that are definitely categories (Low cardinality)
-        known_categories = [
-            'platform_family', 'sub_agency', 'market_segment', 'psc_code', 
-            'naics_code', 'state', 'city', 'year', 'month', 'set_aside_type'
-        ]
-
+        # We load files one by one and force cleanup to keep RAM usage low
         for file in files:
-            key_name = file.replace(".parquet", "") # e.g. "products"
+            key_name = file.replace(".parquet", "") 
             local_path = f"local_data/{file}"
             
             try:
-                # 1. Read the file
-                # 'pyarrow' engine is usually fastest for parquet
-                df = pd.read_parquet(local_path, engine='auto')
+                # ✅ CRITICAL FIX: Use PyArrow backend for 70% RAM savings
+                # This keeps strings compressed in memory
+                df = pd.read_parquet(
+                    local_path, 
+                    engine='pyarrow', 
+                    dtype_backend='pyarrow' 
+                )
                 
-                # 2. OPTIMIZE MEMORY: Convert Objects/Strings to Categories
-                # This drastically reduces RAM usage (often by 50-80%)
-                for col in df.columns:
-                    # If column is in our known list OR if it's a string object
-                    if col in known_categories or df[col].dtype == 'object':
-                        # Heuristic: Only convert if unique values are < 50% of total rows
-                        # (Prevents converting unique IDs like 'contract_id' to categories)
-                        num_unique = df[col].nunique()
-                        num_total = len(df)
-                        
-                        if num_total > 0 and (num_unique / num_total) < 0.5:
-                            df[col] = df[col].astype('category')
-
-                # 3. Store in global cache
+                # Store and cleanup
                 global_data[key_name] = df
-                
-                # 4. Force Garbage Collection
-                # Helps free up memory from the raw read operation immediately
-                gc.collect()
+                del df
+                gc.collect() 
 
-                print(f"   ⚡ Loaded {key_name} ({len(df):,} rows) - Optimized")
+                # Quick check
+                rows = len(global_data[key_name])
+                print(f"   ⚡ Loaded {key_name} ({rows:,} rows)")
                 
             except Exception as load_err:
                  print(f"   ⚠️ Failed to load {file}: {load_err}")
-                 # We continue loading other files even if one fails
                  pass
 
         print("🎉 SYSTEM READY. All data is in memory.")
                 
     except Exception as e:
         print(f"❌ CRITICAL STARTUP ERROR: {str(e)}")
-        # We raise the error to crash the deployment if data fails. 
-        # Better to crash than to serve an empty API.
         raise e  
     
-    yield  # 2. APP RUNS HERE (Traffic is accepted now)
+    yield
     
-    # 3. SHUTDOWN: Cleanup (Optional)
     print("🛑 API Shutting down...")
-    global_data.clear() # Free up RAM on shutdown
+    global_data.clear()
     gc.collect()
 
 # ✅ Pass lifespan to FastAPI
@@ -134,7 +112,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- HEALTH CHECK (Keeps Render Happy) ---
+# --- HEALTH CHECK ---
 @app.get("/")
 def health_check():
     return {"status": "ok", "message": "Mimir V5 is Live"}
