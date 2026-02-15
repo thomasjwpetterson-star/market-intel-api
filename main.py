@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse 
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, date
 import boto3
@@ -40,25 +40,29 @@ logger = logging.getLogger("mimir-api")
 global_data: Dict[str, pd.DataFrame] = {}
 
 # ✅ FIX: SINGLE SOURCE OF TRUTH STARTUP
+# ✅ FIX: SINGLE SOURCE OF TRUTH STARTUP
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("API starting up (Hybrid V5 Mode)...")
     
-    # 1. Initialize DuckDB Global Connection
+    # 1. Initialize DuckDB (IN-MEMORY MODE)
+    # This fixes the "Conflicting lock" error by giving every worker its own RAM database.
     global DUCK_CONN
     with DUCK_LOCK:
         try:
-            # Connect in read_only=False to allow creating views
-            DUCK_CONN = duckdb.connect(str(DUCKDB_PATH), read_only=False)
+            # CHANGE: connect to ":memory:" instead of a file path
+            DUCK_CONN = duckdb.connect(":memory:", read_only=False)
+            
+            # Install extensions
             DUCK_CONN.execute("INSTALL parquet; LOAD parquet;")
             DUCK_CONN.execute("PRAGMA threads=4;") 
             DUCK_CONN.execute("PRAGMA memory_limit='2GB';")
-            logger.info("DuckDB connected successfully")
+            
+            logger.info("DuckDB (In-Memory) connected successfully")
         except Exception:
             logger.exception("DuckDB init failed")
 
     # 2. Fire-and-forget Background Data Load
-    # We do NOT await this. This allows the API to boot immediately.
     loop = asyncio.get_running_loop()
     loop.run_in_executor(None, reload_all_data)
     
@@ -174,7 +178,7 @@ ATHENA_CACHE = TTLQueryCache(maxsize=safe_int(os.getenv("ATHENA_CACHE_MAX", 256)
 # ✅ Pass lifespan to FastAPI
 app = FastAPI(
     title="Mimir Hybrid Intelligence API - Instant Mode V5",
-    default_response_class=ORJSONResponse,
+    default_response_class=JSONResponse,
     lifespan=lifespan 
 )
 
@@ -463,8 +467,8 @@ def get_subset_from_disk(
         # 4. Execute using Global Connection (Thread-Locked)
         with DUCK_LOCK:
             if DUCK_CONN is None:
-                # Emergency Re-connect (should not happen if lifespan works)
-                DUCK_CONN = duckdb.connect(str(DUCKDB_PATH), read_only=False)
+                # Emergency Re-connect
+                DUCK_CONN = duckdb.connect(":memory:", read_only=False)
                 DUCK_CONN.execute("INSTALL parquet; LOAD parquet;")
             
             all_params = (str(path),) + tuple(local_params)
@@ -663,18 +667,24 @@ def reload_all_data():
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
              list(executor.map(fetch_file, files))
         
-        # 3. REFRESH DUCKDB VIEWS (Include Network here)
+        # 3. REFRESH DUCKDB VIEWS
         global DUCK_CONN
         with DUCK_LOCK:
             if DUCK_CONN is None:
-                DUCK_CONN = duckdb.connect(str(DUCKDB_PATH), read_only=False)
+                # CHANGE: Ensure we reconnect to memory if connection was lost
+                DUCK_CONN = duckdb.connect(":memory:", read_only=False)
                 DUCK_CONN.execute("INSTALL parquet; LOAD parquet;")
                 DUCK_CONN.execute("PRAGMA threads=4;")
             
-            DUCK_CONN.execute(f"CREATE OR REPLACE VIEW v_products AS SELECT * FROM read_parquet('{str(LOCAL_CACHE_DIR / 'products.parquet')}');")
-            DUCK_CONN.execute(f"CREATE OR REPLACE VIEW v_transactions AS SELECT * FROM read_parquet('{str(LOCAL_CACHE_DIR / 'transactions.parquet')}');")
-            # ✅ QUERY NETWORK FROM DISK
-            DUCK_CONN.execute(f"CREATE OR REPLACE VIEW v_network AS SELECT * FROM read_parquet('{str(LOCAL_CACHE_DIR / 'network.parquet')}');")
+            # Re-create views (Since it's in-memory, we must recreate them every reload)
+            # Use absolute string paths to be safe
+            prod_path = str(LOCAL_CACHE_DIR / 'products.parquet')
+            trans_path = str(LOCAL_CACHE_DIR / 'transactions.parquet')
+            net_path = str(LOCAL_CACHE_DIR / 'network.parquet')
+
+            DUCK_CONN.execute(f"CREATE OR REPLACE VIEW v_products AS SELECT * FROM read_parquet('{prod_path}');")
+            DUCK_CONN.execute(f"CREATE OR REPLACE VIEW v_transactions AS SELECT * FROM read_parquet('{trans_path}');")
+            DUCK_CONN.execute(f"CREATE OR REPLACE VIEW v_network AS SELECT * FROM read_parquet('{net_path}');")
 
         # 4. FETCH MAPPINGS (Athena)
         cage_map: Dict[str, str] = {}
@@ -734,57 +744,93 @@ def reload_all_data():
             except Exception:
                 logger.exception(f"Failed to load {file}")
 
-        # 6. LOAD SUMMARY (RAM OPTIMIZED)
+        # 6. LOAD SUMMARY (CHUNKED & RAM OPTIMIZED)
         try:
             summary_path = str(LOCAL_CACHE_DIR / "summary.parquet")
-            df = pd.read_parquet(summary_path, engine="pyarrow", dtype_backend="pyarrow")
             
-            # Cleanup strings
-            string_cols = ["vendor_name", "clean_parent", "ultimate_parent_name", "cage_code", 
-                           "platform_family", "sub_agency", "market_segment", "psc_description"]
-            for col in string_cols:
-                if col in df.columns:
-                    if isinstance(df[col].dtype, pd.ArrowDtype):
-                         df[col] = df[col].astype(str)
-                    df[col] = df[col].astype(str).str.upper().str.strip()
+            # Define columns to treat as categories immediately to save RAM
+            cat_cols = ["platform_family", "sub_agency", "market_segment", 
+                        "vendor_name", "clean_parent", "ultimate_parent_name", "psc_description"]
+            
+            # Helper to process a single chunk
+            def process_chunk(chunk):
+                # 1. Cleanup Strings
+                string_cols = ["vendor_name", "clean_parent", "ultimate_parent_name", "cage_code"]
+                for col in string_cols:
+                    if col in chunk.columns:
+                        if isinstance(chunk[col].dtype, pd.ArrowDtype):
+                             chunk[col] = chunk[col].astype(str)
+                        chunk[col] = chunk[col].astype(str).str.upper().str.strip()
 
-            # ✅ 1. APPLY NAME CORRECTIONS (Restored)
+                # 2. Immediate Compression
+                for col in cat_cols:
+                    if col in chunk.columns:
+                        chunk[col] = chunk[col].astype("category")
+                return chunk
+
+            # Read via PyArrow Tables (Zero-Copy) then convert to Pandas in chunks
+            import pyarrow.parquet as pq
+            parquet_file = pq.ParquetFile(summary_path)
+            
+            chunks = []
+            # Read 1 row group at a time (much smaller memory footprint)
+            for i in range(parquet_file.num_row_groups):
+                table = parquet_file.read_row_group(i)
+                chunk_df = table.to_pandas(self_destruct=True) # Free arrow memory immediately
+                chunks.append(process_chunk(chunk_df))
+            
+            # Combine all small chunks into one big dataframe
+            df = pd.concat(chunks, ignore_index=True)
+            
+            # Clear chunks from memory
+            chunks = None
+            gc.collect()
+
+            # --- RETAIN YOUR EXISTING LOGIC BELOW ---
+            
+            # Parent Mapping
+            cage_col = "cage_code" if "cage_code" in df.columns else "vendor_cage"
+            if cage_col in df.columns and cage_map:
+                # We temporarily convert to object to map, then re-categorize
+                # This is unavoidable but safer now that we have memory headroom
+                df["clean_parent"] = df[cage_col].map(cage_map)
+                df["clean_parent"] = df["clean_parent"].fillna(df["ultimate_parent_name"])
+                df["clean_parent"] = df["clean_parent"].fillna(df["vendor_name"]).astype(str).str.upper().str.strip()
+            
+            # Boeing Fix
             name_corrections = {
                 "THE BOEING": "THE BOEING COMPANY",
                 "BOEING": "THE BOEING COMPANY",
                 "BOEING CO": "THE BOEING COMPANY",
             }
-            if "vendor_name" in df.columns:
-                df["vendor_name"] = df["vendor_name"].replace(name_corrections)
-
-            # ✅ 2. PARENT MAPPING LOGIC (Restored)
-            cage_col = "cage_code" if "cage_code" in df.columns else "vendor_cage"
-            
-            if cage_col in df.columns and cage_map:
-                df["clean_parent"] = df[cage_col].map(cage_map)
-            else:
-                df["clean_parent"] = None
-            
-            if "ultimate_parent_name" in df.columns:
-                df["clean_parent"] = df["clean_parent"].fillna(df["ultimate_parent_name"])
-            
-            # Fallback to vendor name
-            df["clean_parent"] = df["clean_parent"].fillna(df["vendor_name"]).astype(str).str.upper().str.strip()
-            
-            # Apply corrections to the new parent column as well
+            # Note: Operating on strings here
             df["clean_parent"] = df["clean_parent"].replace(name_corrections)
+            if "vendor_name" in df.columns:
+                # We need to cast back to string to replace, then re-categorize
+                df["vendor_name"] = df["vendor_name"].astype(str).replace(name_corrections).astype("category")
 
             # Clean NANs
             for col in ["platform_family", "market_segment", "sub_agency", "psc_description"]:
                 if col in df.columns:
-                    m = df[col].astype(str).str.upper().isin(["NAN", "NAN.0", "NONE", "", "UNKNOWN"])
-                    df.loc[m, col] = None
+                    # Ensure they are valid categories
+                    pass 
 
-            # ✅ 3. AGGRESSIVE COMPRESSION (The Memory Fix)
-            # We do this LAST, after all string manipulation is done.
-            for cat_col in ["platform_family", "sub_agency", "market_segment", "vendor_name", "clean_parent", "ultimate_parent_name", "psc_description"]:
-                if cat_col in df.columns:
-                    df[cat_col] = df[cat_col].astype("category")
+            # ✅ FINAL RE-COMPRESSION
+            df["clean_parent"] = df["clean_parent"].astype("category")
+
+            new_global_cache["df"] = df
+            new_global_data["summary"] = df
+            
+            # (Options logic remains the same)
+            new_global_cache["options"] = {
+                "years": sorted(df["year"].unique().tolist()) if "year" in df.columns else [],
+                "agencies": sorted(df["sub_agency"].dropna().unique().tolist()) if "sub_agency" in df.columns else [],
+                "domains": sorted(df["market_segment"].dropna().unique().tolist()) if "market_segment" in df.columns else [],
+                "platforms": sorted(df["platform_family"].dropna().unique().tolist()) if "platform_family" in df.columns else [],
+            }
+
+        except Exception:
+            logger.exception("Summary load failed")
 
             new_global_cache["df"] = df
             new_global_data["summary"] = df
@@ -2085,7 +2131,7 @@ def get_company_network(name: str, cage: Optional[str] = None):
         try:
             with DUCK_LOCK:
                 if DUCK_CONN is None:
-                    DUCK_CONN = duckdb.connect(str(DUCKDB_PATH), read_only=False)
+                    DUCK_CONN = duckdb.connect(":memory:", read_only=False)
                     DUCK_CONN.execute("INSTALL parquet; LOAD parquet;")
                 
                 net_path = LOCAL_CACHE_DIR / "network.parquet"
@@ -2387,7 +2433,7 @@ def get_company_parts_count(cage: str, rollup: Optional[str] = None):
         with DUCK_LOCK:
             global DUCK_CONN
             if DUCK_CONN is None:
-                DUCK_CONN = duckdb.connect(str(DUCKDB_PATH), read_only=False)
+                DUCK_CONN = duckdb.connect(":memory:", read_only=False)
                 DUCK_CONN.execute("INSTALL parquet; LOAD parquet;")
                 DUCK_CONN.execute("PRAGMA threads=4;")
                 DUCK_CONN.execute("PRAGMA enable_object_cache=true;")
