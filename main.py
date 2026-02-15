@@ -195,11 +195,30 @@ async def log_requests(request: Request, call_next):
         except Exception:
             pass
 
-# Production: set CORS_ORIGINS="https://market-intel-mc87mey5f-tom-pettersons-projects.vercel.app,https://mimiradvisors.org"
-cors_env = os.getenv("CORS_ORIGINS", "")
-origins = [o.strip() for o in cors_env.split(",") if o.strip()]
+# ==========================================
+# CORS CONFIGURATION (Updated)
+# ==========================================
 
-# Optional escape hatch for quick testing:
+# 1. Define your trusted domains (Hardcoded Fallback)
+default_origins = [
+    "https://market-intel-mc87mey5f-tom-pettersons-projects.vercel.app", # Your specific deployment
+    "https://market-intel-ui.vercel.app",                                # Your production alias
+    "https://market-intel-ui-git-main-tom-pettersons-projects.vercel.app", # Your git branch alias
+    "https://mimiradvisors.org",                                         # Your main domain
+    "http://localhost:3000",                                               # Local development
+    "http://localhost:5173"                                                # Local development (Vite)
+]
+
+# 2. Check for Environment Variable override (Optional)
+cors_env = os.getenv("CORS_ORIGINS", "")
+if cors_env:
+    # If you set CORS_ORIGINS in Render, use that instead
+    origins = [o.strip() for o in cors_env.split(",") if o.strip()]
+else:
+    # Otherwise, use the hardcoded list above
+    origins = default_origins
+
+# 3. Optional escape hatch for quick testing:
 allow_all = os.getenv("CORS_ALLOW_ALL", "false").lower() == "true"
 if allow_all:
     origins = ["*"]
@@ -590,16 +609,15 @@ def get_parent_aggregate_stats(parent_name: str):
     }
 
 def reload_all_data():
-    # 1. ACQUIRE LOCK (Prevent double reloads)
     if not RELOAD_LOCK.acquire(blocking=False):
         logger.info("Reload already in progress, skipping.")
         return
 
     try:
-        # Note: We do NOT lock CACHE_LOCK here. The app continues to serve old data while we load.
-        logger.info("STARTING DATA LOAD...")
+        logger.info("STARTING DATA LOAD (Logic Restored + RAM Optimized)...")
         
-        # 2. PREPARE TEMPORARY STATE (Don't touch globals yet)
+        # 1. PREPARE TEMPORARY STATE
+        # NOTE: network_df is REMOVED from cache to save RAM
         new_global_cache = {
             "is_loading": False,
             "last_loaded": time.time(),
@@ -612,7 +630,6 @@ def reload_all_data():
             "geo_df": pd.DataFrame(),
             "profiles_df": pd.DataFrame(),
             "risk_df": pd.DataFrame(),
-            "network_df": pd.DataFrame(),
             "df_opportunities": pd.DataFrame()
         }
         
@@ -621,13 +638,13 @@ def reload_all_data():
             "geo": pd.DataFrame(),
             "profiles": pd.DataFrame(),
             "risk": pd.DataFrame(),
-            "network": pd.DataFrame(),
             "opportunities": pd.DataFrame(),
             "transactions": pd.DataFrame(),
             "products": pd.DataFrame(),
+            # "network": pd.DataFrame() <--- Removed from RAM
         }
 
-        # 3. DOWNLOAD FILES
+        # 2. DOWNLOAD FILES
         LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         files = [
             "products.parquet", "summary.parquet", "geo.parquet", 
@@ -646,7 +663,7 @@ def reload_all_data():
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
              list(executor.map(fetch_file, files))
         
-        # 4. REFRESH DUCKDB VIEWS (Thread-Safe)
+        # 3. REFRESH DUCKDB VIEWS (Include Network here)
         global DUCK_CONN
         with DUCK_LOCK:
             if DUCK_CONN is None:
@@ -654,11 +671,12 @@ def reload_all_data():
                 DUCK_CONN.execute("INSTALL parquet; LOAD parquet;")
                 DUCK_CONN.execute("PRAGMA threads=4;")
             
-            # Refresh views pointing to the new files
             DUCK_CONN.execute(f"CREATE OR REPLACE VIEW v_products AS SELECT * FROM read_parquet('{str(LOCAL_CACHE_DIR / 'products.parquet')}');")
             DUCK_CONN.execute(f"CREATE OR REPLACE VIEW v_transactions AS SELECT * FROM read_parquet('{str(LOCAL_CACHE_DIR / 'transactions.parquet')}');")
+            # ✅ QUERY NETWORK FROM DISK
+            DUCK_CONN.execute(f"CREATE OR REPLACE VIEW v_network AS SELECT * FROM read_parquet('{str(LOCAL_CACHE_DIR / 'network.parquet')}');")
 
-        # 5. FETCH MAPPINGS (Athena)
+        # 4. FETCH MAPPINGS (Athena)
         cage_map: Dict[str, str] = {}
         naics_map: Dict[str, str] = {}
         try:
@@ -675,31 +693,20 @@ def reload_all_data():
         
         new_global_cache["naics_map"] = naics_map
 
-        # 6. LOAD RAM FILES (Into temporary dicts)
-        ram_files = ["summary.parquet", "geo.parquet", "profiles.parquet", "risk.parquet", "network.parquet", "opportunities.parquet"]
+        # 5. LOAD RAM FILES (Network REMOVED)
+        # We load only small files here
+        ram_files = ["geo.parquet", "profiles.parquet", "risk.parquet", "opportunities.parquet"]
         
         for file in ram_files:
             local_path = str(LOCAL_CACHE_DIR / file)
             try:
-                # Use PyArrow backend for 50% less RAM usage
                 df = pd.read_parquet(local_path, engine="pyarrow", dtype_backend="pyarrow")
                 
-                # YOUR STRING CLEANING LOGIC
-                string_cols = [
-                    "vendor_name", "clean_parent", "ultimate_parent_name", 
-                    "cage_code", "platform_family", "sub_agency", "market_segment"
-                ]
-                for col in string_cols:
+                # Quick string cleanup
+                for col in ["vendor_name", "cage_code"]:
                     if col in df.columns:
-                        if isinstance(df[col].dtype, pd.ArrowDtype):
-                             df[col] = df[col].astype(str)
                         df[col] = df[col].astype(str).str.upper().str.strip()
-                
-                # Categoricals
-                if col in ["platform_family", "sub_agency", "market_segment"]:
-                    df[col] = df[col].astype("category")
 
-                # Specific fix for profiles
                 if file == "profiles.parquet" and "top_platforms" in df.columns:
                     df["top_platforms"] = (
                         df["top_platforms"].astype(str)
@@ -707,65 +714,81 @@ def reload_all_data():
                         .str.replace(r",+$", "", regex=True)
                         .str.replace(r"^,+", "", regex=True)
                     )
-                
-                # Map to correct keys in temporary storage
+
                 key_map = {
-                    "summary.parquet": "summary",
                     "geo.parquet": "geo",
                     "profiles.parquet": "profiles",
                     "risk.parquet": "risk",
-                    "network.parquet": "network",
                     "opportunities.parquet": "opportunities"
                 }
-                new_global_data[key_map[file]] = df
                 
-                # Also populate cache keys
+                k = key_map.get(file)
+                if k: new_global_data[k] = df
+                
+                # Cache refs
                 if file == "geo.parquet": new_global_cache["geo_df"] = df
                 if file == "profiles.parquet": new_global_cache["profiles_df"] = df
                 if file == "risk.parquet": new_global_cache["risk_df"] = df
-                if file == "network.parquet": new_global_cache["network_df"] = df
                 if file == "opportunities.parquet": new_global_cache["df_opportunities"] = df
 
             except Exception:
-                logger.exception("Failed to load %s", file)
+                logger.exception(f"Failed to load {file}")
 
-        # 7. PROCESS SUMMARY SPECIFICS (On temporary data)
-        df = new_global_data["summary"]
-        if not df.empty:
-            cage_col = "cage_code" if "cage_code" in df.columns else "vendor_cage"
+        # 6. LOAD SUMMARY (RAM OPTIMIZED)
+        try:
+            summary_path = str(LOCAL_CACHE_DIR / "summary.parquet")
+            df = pd.read_parquet(summary_path, engine="pyarrow", dtype_backend="pyarrow")
             
-            # Parent Mapping
-            if cage_col in df.columns and cage_map:
-                df["clean_parent"] = df[cage_col].map(cage_map)
-            else:
-                df["clean_parent"] = None
-                
-            if "ultimate_parent_name" in df.columns:
-                df["clean_parent"] = df["clean_parent"].fillna(df["ultimate_parent_name"])
-            
-            df["clean_parent"] = df["clean_parent"].fillna(df["vendor_name"]).astype(str).str.upper().str.strip()
-            
-            # Boeing Fix
+            # Cleanup strings
+            string_cols = ["vendor_name", "clean_parent", "ultimate_parent_name", "cage_code", 
+                           "platform_family", "sub_agency", "market_segment", "psc_description"]
+            for col in string_cols:
+                if col in df.columns:
+                    if isinstance(df[col].dtype, pd.ArrowDtype):
+                         df[col] = df[col].astype(str)
+                    df[col] = df[col].astype(str).str.upper().str.strip()
+
+            # ✅ 1. APPLY NAME CORRECTIONS (Restored)
             name_corrections = {
                 "THE BOEING": "THE BOEING COMPANY",
                 "BOEING": "THE BOEING COMPANY",
                 "BOEING CO": "THE BOEING COMPANY",
             }
-            df["clean_parent"] = df["clean_parent"].replace(name_corrections)
             if "vendor_name" in df.columns:
                 df["vendor_name"] = df["vendor_name"].replace(name_corrections)
+
+            # ✅ 2. PARENT MAPPING LOGIC (Restored)
+            cage_col = "cage_code" if "cage_code" in df.columns else "vendor_cage"
+            
+            if cage_col in df.columns and cage_map:
+                df["clean_parent"] = df[cage_col].map(cage_map)
+            else:
+                df["clean_parent"] = None
+            
+            if "ultimate_parent_name" in df.columns:
+                df["clean_parent"] = df["clean_parent"].fillna(df["ultimate_parent_name"])
+            
+            # Fallback to vendor name
+            df["clean_parent"] = df["clean_parent"].fillna(df["vendor_name"]).astype(str).str.upper().str.strip()
+            
+            # Apply corrections to the new parent column as well
+            df["clean_parent"] = df["clean_parent"].replace(name_corrections)
 
             # Clean NANs
             for col in ["platform_family", "market_segment", "sub_agency", "psc_description"]:
                 if col in df.columns:
                     m = df[col].astype(str).str.upper().isin(["NAN", "NAN.0", "NONE", "", "UNKNOWN"])
                     df.loc[m, col] = None
-            
-            # Store in Temp Cache
+
+            # ✅ 3. AGGRESSIVE COMPRESSION (The Memory Fix)
+            # We do this LAST, after all string manipulation is done.
+            for cat_col in ["platform_family", "sub_agency", "market_segment", "vendor_name", "clean_parent", "ultimate_parent_name", "psc_description"]:
+                if cat_col in df.columns:
+                    df[cat_col] = df[cat_col].astype("category")
+
             new_global_cache["df"] = df
-            new_global_data["summary"] = df # Update the reference
+            new_global_data["summary"] = df
             
-            # Options
             new_global_cache["options"] = {
                 "years": sorted(df["year"].unique().tolist()) if "year" in df.columns else [],
                 "agencies": sorted(df["sub_agency"].dropna().unique().tolist()) if "sub_agency" in df.columns else [],
@@ -773,7 +796,10 @@ def reload_all_data():
                 "platforms": sorted(df["platform_family"].dropna().unique().tolist()) if "platform_family" in df.columns else [],
             }
 
-        # 8. BUILD MAPS (On temporary data)
+        except Exception:
+            logger.exception("Summary load failed")
+
+        # 7. BUILD MAPS & SEARCH INDEX (Standard Logic)
         if not new_global_cache["profiles_df"].empty:
              p_df = new_global_cache["profiles_df"]
              if {"cage_code", "vendor_name"}.issubset(p_df.columns):
@@ -784,14 +810,13 @@ def reload_all_data():
              if "cage_code" in g_df.columns:
                 new_global_cache["location_map"] = g_df.set_index("cage_code")[["city", "state"]].to_dict(orient="index")
 
-        # 9. BUILD SEARCH INDEX (On temporary data)
         search_list = []
         if not new_global_cache["df"].empty:
             summary_df = new_global_cache["df"]
             col = "clean_parent" if "clean_parent" in summary_df.columns else "vendor_name"
             
-            # Parents
-            p_stats = summary_df.groupby(col).agg({"total_spend": "sum", "cage_code": "nunique"}).reset_index()
+            # Using observed=True handles the categorical data correctly and quickly
+            p_stats = summary_df.groupby(col, observed=True).agg({"total_spend": "sum", "cage_code": "nunique"}).reset_index()
             for r in p_stats.itertuples():
                 val = getattr(r, col)
                 if r.total_spend > 0 and (r.cage_code > 1 or r.total_spend > 1e9):
@@ -800,51 +825,49 @@ def reload_all_data():
                         "type": "PARENT", "score": float(r.total_spend), "cage": "AGGREGATE"
                     })
             
-            # Children
-            c_stats = summary_df.groupby(["vendor_name", "cage_code"])["total_spend"].sum().reset_index()
+            c_stats = summary_df.groupby(["vendor_name", "cage_code"], observed=True)["total_spend"].sum().reset_index()
             loc_map = new_global_cache.get("location_map", {})
             for r in c_stats.itertuples():
                 if r.total_spend > 0:
                     raw_cage = str(r.cage_code).strip().upper()
                     if raw_cage in ["NAN", "NONE"]: continue
-                    
                     loc = loc_map.get(raw_cage, {})
                     search_list.append({
-                        "label": r.vendor_name, "value": r.vendor_name, "type": "CHILD",
+                        "label": str(r.vendor_name), "value": str(r.vendor_name), "type": "CHILD",
                         "score": float(r.total_spend), "cage": raw_cage,
                         "city": loc.get("city", ""), "state": loc.get("state", "")
                     })
 
-            # Platforms & Agencies
             if "platform_family" in summary_df.columns:
-                for r in summary_df.groupby("platform_family")["total_spend"].sum().reset_index().itertuples():
+                for r in summary_df.groupby("platform_family", observed=True)["total_spend"].sum().reset_index().itertuples():
                     if r.platform_family:
                         search_list.append({"label": str(r.platform_family), "value": str(r.platform_family), "type": "PLATFORM", "score": float(r.total_spend)})
             
             if "sub_agency" in summary_df.columns:
-                for r in summary_df.groupby("sub_agency")["total_spend"].sum().reset_index().itertuples():
+                for r in summary_df.groupby("sub_agency", observed=True)["total_spend"].sum().reset_index().itertuples():
                     if r.sub_agency:
                         search_list.append({"label": str(r.sub_agency), "value": str(r.sub_agency), "type": "AGENCY", "score": float(r.total_spend)})
 
             search_list.sort(key=lambda x: x.get("score", 0), reverse=True)
             new_global_cache["search_index"] = search_list
 
-        # 10. ATOMIC SWAP (The only part that touches global state)
+        gc.collect()
+
+        # 8. ATOMIC SWAP
         with CACHE_LOCK:
             GLOBAL_CACHE.clear()
             GLOBAL_CACHE.update(new_global_cache)
-            
             global_data.clear()
             global_data.update(new_global_data)
-            
-            # Reset Loading Flag
             GLOBAL_CACHE["is_loading"] = False
             
-        logger.info("RELOAD COMPLETE. search_index=%d", len(search_list))
+        logger.info("RELOAD COMPLETE (Optimized). search_index=%d", len(search_list))
+        new_global_cache = None
+        new_global_data = None
+        gc.collect()
 
     except Exception:
         logger.exception("Reload crash")
-        # Ensure we reset the loading flag even if we crash
         with CACHE_LOCK:
             GLOBAL_CACHE["is_loading"] = False
     finally:
@@ -2052,68 +2075,71 @@ def format_profile_response_with_loc(row, city, state, type="CHILD"):
 
 @app.get("/api/company/network")
 def get_company_network(name: str, cage: Optional[str] = None):
-    # 1. LOAD DATA FROM RAM
-    df = global_data.get("network", pd.DataFrame())
-    if df.empty: return {"subs": [], "primes": []}
-
-    # 2. CLEAN INPUTS
-    safe_name = sanitize(name).replace("'", "")
+    # This endpoint now uses DuckDB to query 'network.parquet' from disk.
     
-    # 3. DETERMINE MODE
+    safe_name = sanitize(name).replace("'", "")
     is_drill_down = (cage and len(cage) > 2 and cage != 'AGGREGATE')
+    
+    def run_duck_query(sql, params):
+        global DUCK_CONN
+        try:
+            with DUCK_LOCK:
+                if DUCK_CONN is None:
+                    DUCK_CONN = duckdb.connect(str(DUCKDB_PATH), read_only=False)
+                    DUCK_CONN.execute("INSTALL parquet; LOAD parquet;")
+                
+                net_path = LOCAL_CACHE_DIR / "network.parquet"
+                if not net_path.exists(): return []
+                
+                # Use read_parquet directly
+                final_sql = sql.replace("FROM network_source", f"FROM read_parquet('{str(net_path)}')")
+                return DUCK_CONN.execute(final_sql, params).fetchdf().to_dict(orient="records")
+        except Exception as e:
+            logger.error(f"Network query failed: {e}")
+            return []
 
-    # --- HELPER: Aggregation Logic ---
-    def aggregate_network(subset, group_col, cage_col):
-        if subset.empty: return []
-        
-        # Group by Name (and CAGE if available)
-        grouped = subset.groupby([group_col, cage_col], observed=True).agg({
-            'flow_amount_capped': 'sum',
-            'flow_amount_raw': 'sum',
-            'subaward_description': 'first', # Grab a sample platform/description
-            'contract_id': 'count' # Count transactions
-        }).reset_index()
-        
-        # Rename for Frontend
-        grouped = grouped.rename(columns={
-            group_col: 'name',
-            cage_col: 'cage',
-            'subaward_description': 'platform',
-            'flow_amount_capped': 'total',
-            'flow_amount_raw': 'total_raw',
-            'contract_id': 'transactions'
-        })
-        
-        # Sort and Limit
-        return grouped.sort_values('total', ascending=False).head(50).to_dict(orient='records')
+    # SQL Template for Aggregation
+    sql_template = """
+        SELECT 
+            {group_col} as name, 
+            {cage_col} as cage, 
+            arbitrary(subaward_description) as platform, 
+            sum(flow_amount_capped) as total, 
+            sum(flow_amount_raw) as total_raw, 
+            count(contract_id) as transactions
+        FROM network_source
+        WHERE {where_clause}
+        GROUP BY {group_col}, {cage_col}
+        ORDER BY total DESC
+        LIMIT 50
+    """
 
-    # --- MODE A: SITE LEVEL (Drill-Down) ---
     if is_drill_down:
         safe_cage = sanitize(cage)
-        
-        # Downstream: Who does this CAGE hire?
-        down_subset = df[df['prime_cage'] == safe_cage]
-        subs = aggregate_network(down_subset, 'sub_name', 'sub_cage')
-        
-        # Upstream: Who hires this CAGE?
-        up_subset = df[df['sub_cage'] == safe_cage]
-        primes = aggregate_network(up_subset, 'prime_name', 'prime_cage')
-
-    # --- MODE B: PARENT AGGREGATE (Corporate Level) ---
+        # Downstream
+        subs = run_duck_query(
+            sql_template.format(group_col="sub_name", cage_col="sub_cage", where_clause="prime_cage = ?"), 
+            (safe_cage,)
+        )
+        # Upstream
+        primes = run_duck_query(
+            sql_template.format(group_col="prime_name", cage_col="prime_cage", where_clause="sub_cage = ?"), 
+            (safe_cage,)
+        )
     else:
-        # Downstream: Who does Lockheed (Corp) hire?
-        # We match on the GOLD PARENT column we created in ETL
-        down_subset = df[df['prime_gold_parent'] == safe_name]
-        subs = aggregate_network(down_subset, 'sub_name', 'sub_cage')
-        
-        # Upstream: Who hires Lockheed (Corp)?
-        up_subset = df[df['sub_gold_parent'] == safe_name]
-        primes = aggregate_network(up_subset, 'prime_name', 'prime_cage')
-    
-    return {
-        "subs": subs, 
-        "primes": primes
-    }
+        # Parent Mode
+        # Downstream
+        subs = run_duck_query(
+            sql_template.format(group_col="sub_name", cage_col="sub_cage", where_clause="upper(prime_gold_parent) = ?"), 
+            (safe_name,)
+        )
+        # Upstream
+        primes = run_duck_query(
+            sql_template.format(group_col="prime_name", cage_col="prime_cage", where_clause="upper(sub_gold_parent) = ?"), 
+            (safe_name,)
+        )
+
+    return {"subs": subs, "primes": primes}
 
 
 # --- HELPER FUNCTIONS FOR TREND LOGIC (Ensure these are defined in main.py) ---
