@@ -19,15 +19,14 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from html import unescape
 from difflib import SequenceMatcher
-import re
 import concurrent.futures
-import time
 import gc 
 import duckdb # ✅ NEW: Disk-based query engine
 import asyncio  # <--- Add this
 from pathlib import Path
 import logging
 import random
+import anyio 
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -36,51 +35,189 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mimir-api")
 
-# ✅ GLOBAL MEMORY STORE 
-global_data: Dict[str, pd.DataFrame] = {}
+# ✅ GLOBAL MEMORY STORE (Initialized with empty defaults)
+# We will swap this entire dictionary reference atomically.
+GLOBAL_CACHE = {
+    "df": pd.DataFrame(),
+    "geo_df": pd.DataFrame(),
+    "profiles_df": pd.DataFrame(),
+    "risk_df": pd.DataFrame(),
+    "df_opportunities": pd.DataFrame(),
+    "options": {},
+    "search_index": [],
+    "is_loading": True, # Start as loading
+    "last_loaded": 0,
+    "cage_name_map": {},
+    "location_map": {},
+    "naics_map": {}
+}
+
+# NOTE: global_data is no longer needed as we use DuckDB for heavy data
+# CACHE_LOCK is removed because we use atomic pointer swapping
+
+LOCAL_CACHE_DIR = Path(os.getenv("LOCAL_CACHE_DIR", "./local_data"))
+LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+DUCKDB_PATH = LOCAL_CACHE_DIR / "mimir.duckdb"
+DUCK_CONN = None
+DUCK_LOCK = threading.RLock()
+
+DUCKDB_PATH = (LOCAL_CACHE_DIR / "mimir.duckdb").resolve()
+
+# ✅ Keep a single base connection to minimize RAM use
+DUCK_CONN = None
+DUCK_INIT_LOCK = threading.RLock()
+
+# ✅ Tiny execution pool to allow a little concurrency without opening many connections
+# Pool size 1 is safest/lowest RAM; 2 is usually fine.
+DUCK_POOL_SIZE = int(os.getenv("DUCK_POOL_SIZE", "1"))
+_DUCK_POOL = None  # will be a queue.Queue of connections
+
+def _apply_duck_pragmas(conn: duckdb.DuckDBPyConnection):
+    duck_tmp = str((LOCAL_CACHE_DIR / "duckdb_tmp").resolve())
+    Path(duck_tmp).mkdir(parents=True, exist_ok=True)
+
+    # Parquet is built-in; LOAD is harmless if missing
+    try:
+        conn.execute("LOAD parquet;")
+    except Exception:
+        pass
+
+    # ✅ Render/OOM-friendly defaults (tune via env vars)
+    conn.execute(f"PRAGMA temp_directory='{duck_tmp}';")
+    conn.execute(f"PRAGMA threads={int(os.getenv('DUCKDB_THREADS', '1'))};")
+    conn.execute(f"PRAGMA memory_limit='{os.getenv('DUCKDB_MEM', '900MB')}';")
+    conn.execute("PRAGMA enable_object_cache=false;")
+
+def ensure_duck_conn() -> duckdb.DuckDBPyConnection:
+    """
+    Backwards-compatible initializer. Returns a connection.
+    Also initializes a small pool used for query execution.
+    """
+    global DUCK_CONN, _DUCK_POOL
+
+    if DUCK_CONN is not None and _DUCK_POOL is not None:
+        return DUCK_CONN
+
+    with DUCK_INIT_LOCK:
+        if DUCK_CONN is None:
+            DUCK_CONN = duckdb.connect(str(DUCKDB_PATH), read_only=False)
+            _apply_duck_pragmas(DUCK_CONN)
+
+        if _DUCK_POOL is None:
+            import queue
+            _DUCK_POOL = queue.Queue(maxsize=DUCK_POOL_SIZE)
+
+            # Pool connections: keep them read_only=False so VIEW refresh works without re-opening.
+            # If you want strict separation, set these to read_only=True and keep DUCK_CONN for writes.
+            for _ in range(DUCK_POOL_SIZE):
+                c = duckdb.connect(str(DUCKDB_PATH), read_only=False)
+                _apply_duck_pragmas(c)
+                _DUCK_POOL.put(c)
+
+    return DUCK_CONN
+
+# ✅ New names you referenced in lifespan/reload — now they exist.
+def ensure_duck_write_conn() -> duckdb.DuckDBPyConnection:
+    # For low-memory mode, we reuse DUCK_CONN as the writer.
+    return ensure_duck_conn()
+
+def _close_all_duck_read_conns():
+    # In low-memory mode, pool conns are the "read conns".
+    global _DUCK_POOL, DUCK_CONN
+    if _DUCK_POOL is not None:
+        try:
+            while True:
+                c = _DUCK_POOL.get_nowait()
+                try:
+                    c.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        _DUCK_POOL = None
+
+def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool = False) -> pd.DataFrame:
+    """
+    Executes a DuckDB query using a pooled connection.
+    This avoids opening many connections (OOM) while still preventing one slow query from blocking *all* code paths.
+    """
+    if params is None:
+        params = []
+
+    ensure_duck_conn()
+
+    # Writer mode: serialize through init lock (DDL during reload)
+    if use_writer:
+        with DUCK_INIT_LOCK:
+            return DUCK_CONN.execute(sql, params).fetchdf()
+
+    # Read mode: use pool
+    c = None
+    try:
+        c = _DUCK_POOL.get(timeout=float(os.getenv("DUCK_POOL_TIMEOUT", "5")))
+        # Use a cursor for isolation of statement state
+        return c.cursor().execute(sql, params).fetchdf()
+    finally:
+        if c is not None:
+            try:
+                _DUCK_POOL.put(c)
+            except Exception:
+                pass
+
+
+
 
 # ✅ FIX: SINGLE SOURCE OF TRUTH STARTUP
 # ✅ FIX: SINGLE SOURCE OF TRUTH STARTUP
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("API starting up (Hybrid V5 Mode)...")
-    
-    # 1. Initialize DuckDB (IN-MEMORY MODE)
-    # This fixes the "Conflicting lock" error by giving every worker its own RAM database.
-    global DUCK_CONN
-    with DUCK_LOCK:
-        try:
-            # CHANGE: connect to ":memory:" instead of a file path
-            DUCK_CONN = duckdb.connect(":memory:", read_only=False)
-            
-            # Install extensions
-            DUCK_CONN.execute("INSTALL parquet; LOAD parquet;")
-            DUCK_CONN.execute("PRAGMA threads=4;") 
-            DUCK_CONN.execute("PRAGMA memory_limit='2GB';")
-            
-            logger.info("DuckDB (In-Memory) connected successfully")
-        except Exception:
-            logger.exception("DuckDB init failed")
 
-    # 2. Fire-and-forget Background Data Load
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, reload_all_data)
-    
+    # ✅ OOM-friendly thread limiter (don’t set too high on small Render instances)
+    try:
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        limiter.total_tokens = int(os.getenv("ANYIO_THREADS", "40"))
+        logger.info("AnyIO thread limiter set to %s", limiter.total_tokens)
+    except Exception:
+        logger.exception("Failed to set AnyIO thread limiter")
+
+    # ✅ Initialize DuckDB + pool
+    try:
+        ensure_duck_conn()
+        logger.info("DuckDB connected successfully: %s", str(DUCKDB_PATH))
+    except Exception:
+        logger.exception("DuckDB init failed")
+
+    # ✅ Background reload
+    async def safe_reload():
+        try:
+            logger.info("Triggering background reload...")
+            await asyncio.to_thread(reload_all_data)
+        except Exception:
+            logger.exception("Background reload failed")
+
+    asyncio.create_task(safe_reload())
+
     yield
-    
-    # 3. Shutdown
+
     logger.info("API shutting down...")
-    with CACHE_LOCK:
-        global_data.clear()
-        GLOBAL_CACHE.clear()
-        gc.collect()
-    
-    with DUCK_LOCK:
-        if DUCK_CONN:
-            try:
-                DUCK_CONN.close()
-            except Exception:
-                pass
+    gc.collect()
+
+    # Close pool conns first, then base conn
+    _close_all_duck_read_conns()
+
+    global DUCK_CONN
+    if DUCK_CONN is not None:
+        try:
+            DUCK_CONN.close()
+        except Exception:
+            pass
+        DUCK_CONN = None
+
+    # Best-effort close of any thread-local read conns we created
+    _close_all_duck_read_conns()
+
 
 SAFE_IDENT_RE = re.compile(r"^[A-Z0-9_ \-./]{1,200}$")
 
@@ -94,6 +231,9 @@ def safe_int(v: Any, default: int = 0, min_v: int = 0, max_v: int = 10_000_000) 
     if n > max_v:
         return max_v
     return n
+
+MAX_JSON_ROWS = safe_int(os.getenv("MAX_JSON_ROWS", 2000), 2000, 100, 200_000)
+
 
 def safe_years(years: Optional[List[int]], min_year: int = 1900, max_year: int = 2100, max_len: int = 50) -> List[int]:
     if not years:
@@ -173,6 +313,11 @@ class TTLQueryCache:
 
 ATHENA_CACHE = TTLQueryCache(maxsize=safe_int(os.getenv("ATHENA_CACHE_MAX", 256), 256, 16, 5000),
                             ttl_seconds=safe_int(os.getenv("ATHENA_CACHE_TTL", 60), 60, 1, 3600))
+NEWS_CACHE = TTLQueryCache(
+    maxsize=safe_int(os.getenv("NEWS_CACHE_MAX", 512), 512, 16, 5000),
+    ttl_seconds=safe_int(os.getenv("NEWS_CACHE_TTL", 600), 600, 5, 86400)
+)
+
 
 
 # ✅ Pass lifespan to FastAPI
@@ -242,21 +387,43 @@ app.add_middleware(
 def live_check():
     return {"status": "ok"}
 
-@app.get("/ready")
-def ready_check():
-    with CACHE_LOCK:
-        df = GLOBAL_CACHE.get("df", pd.DataFrame())
-        is_loading = bool(GLOBAL_CACHE.get("is_loading", False))
-        last_loaded = GLOBAL_CACHE.get("last_loaded", 0)
-    with DUCK_LOCK:
-        duck_ok = DUCK_CONN is not None
-    ready = (not df.empty) and duck_ok
+def get_readiness_state() -> Dict[str, Any]:
+    cache = GLOBAL_CACHE
+
+    is_loading = bool(cache.get("is_loading", False))
+    last_loaded = cache.get("last_loaded", 0)
+
+    geo_ok = not cache.get("geo_df", pd.DataFrame()).empty
+    profiles_ok = not cache.get("profiles_df", pd.DataFrame()).empty
+
+    duck_ok = DUCK_CONN is not None
+
+    # ✅ "Real readiness" means: data loaded and not currently loading
+    ready = bool(duck_ok and geo_ok and profiles_ok and (not is_loading) and (last_loaded and last_loaded > 0))
+
     return {
-        "status": "ok" if ready else "starting",
-        "ready": bool(ready),
+        "ready": ready,
+        "duck_ok": bool(duck_ok),
+        "geo_ok": bool(geo_ok),
+        "profiles_ok": bool(profiles_ok),
         "is_loading": bool(is_loading),
         "last_loaded": last_loaded,
     }
+
+
+@app.get("/ready")
+def ready_check():
+    s = get_readiness_state()
+    return {
+        "status": "ok" if s["ready"] else "starting",
+        "ready": bool(s["ready"]),
+        "is_loading": bool(s["is_loading"]),
+        "last_loaded": s["last_loaded"],
+        "duck_ok": bool(s["duck_ok"]),
+        "geo_ok": bool(s["geo_ok"]),
+        "profiles_ok": bool(s["profiles_ok"]),
+    }
+
 
 @app.get("/")
 def health_check():
@@ -271,9 +438,8 @@ def health_check_head():
 raw_bucket = os.getenv('ATHENA_OUTPUT_BUCKET', 'a-and-d-intel-lake-newaccount')
 BUCKET_NAME = raw_bucket.replace('s3://', '').split('/')[0]
 CACHE_PREFIX = "app_cache/"
-LOCAL_CACHE_DIR = Path(os.getenv("LOCAL_CACHE_DIR", "./local_data"))
-LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE = 'market_intel_gold'
+SUMMARY_PARQUET_CLEAN = "summary_clean.parquet"
 
 # Detect Environment
 IS_PRODUCTION = os.getenv('RENDER') or os.getenv('IS_PROD')
@@ -291,36 +457,25 @@ BOTO_CFG = BotoConfig(
 s3 = session.client("s3", config=BOTO_CFG)
 athena = session.client("athena", config=BOTO_CFG)
 
-# --- GLOBAL STATE ---
-GLOBAL_CACHE = {
-    "df": pd.DataFrame(),           
-    "geo_df": pd.DataFrame(),       
-    "profiles_df": pd.DataFrame(),  
-    "options": {},
-    "search_index": [],
-    "is_loading": False,
-    "last_loaded": 0,
 
-    "cage_name_map": {},   # cage_code -> vendor_name
-    "location_map": {}, 
-}
-
-# ✅ DuckDB: single shared connection + lock (safe + fast)
-DUCKDB_PATH = LOCAL_CACHE_DIR / "mimir.duckdb"
-DUCK_CONN = None
-DUCK_LOCK = threading.RLock()
 RELOAD_LOCK = threading.Lock()
 
-CACHE_LOCK = threading.RLock()
-
 def get_cache_snapshot() -> Dict[str, Any]:
-    with CACHE_LOCK:
-        # return references; handlers should not mutate
-        return {
-            "GLOBAL_CACHE": GLOBAL_CACHE,
-            "global_data": global_data,
-            "DUCK_CONN": DUCK_CONN,
-        }
+    # Atomic pointer swap means reading GLOBAL_CACHE is safe without a lock.
+    cache = GLOBAL_CACHE
+
+    # DUCK_CONN is protected by DUCK_LOCK
+    with DUCK_LOCK:
+        conn = DUCK_CONN
+
+    # return references; handlers should not mutate
+    return {
+        "GLOBAL_CACHE": cache,
+        "DUCK_CONN": conn,
+    }
+
+
+
 
 # --- HELPER: Sanitize Inputs ---
 def sanitize(input_str: Optional[str]) -> str:
@@ -336,12 +491,23 @@ def cached_athena_query(query: str):
     ATHENA_CACHE.set(key, res)
     return res
 
+def _cancel_athena_query(qid: Optional[str]):
+    if not qid:
+        return
+    try:
+        athena.stop_query_execution(QueryExecutionId=qid)
+        logger.warning("Athena query cancelled qid=%s", qid)
+    except Exception:
+        # best effort
+        pass
+
+
 def run_athena_query(query: str):
     if not query or not str(query).strip():
         return []
 
     start_ts = time.time()
-    qid = None
+    qid: Optional[str] = None
 
     try:
         resp = athena.start_query_execution(
@@ -373,12 +539,21 @@ def run_athena_query(query: str):
                 break
             time.sleep(poll_interval_s)
 
+        # ✅ TIMEOUT: stop query if still running
+        if final_state not in ["SUCCEEDED", "FAILED", "CANCELLED"]:
+            final_state = "TIMED_OUT"
+            _cancel_athena_query(qid)
+            logger.error("Athena query timed out qid=%s wait_s=%s", qid, max_wait_s)
+            return []
+
         if final_state != "SUCCEEDED":
             reason = ""
             try:
                 reason = (status["QueryExecution"]["Status"] or {}).get("StateChangeReason", "") if status else ""
             except Exception:
                 reason = ""
+            # ✅ Failure: stop query just in case it is still burning resources
+            _cancel_athena_query(qid)
             logger.error("Athena query failed state=%s qid=%s reason=%s", final_state, qid, reason)
             return []
 
@@ -393,8 +568,11 @@ def run_athena_query(query: str):
         return out
 
     except Exception:
+        # ✅ Exception: stop query best-effort
+        _cancel_athena_query(qid)
         logger.exception("Athena query exception qid=%s", qid)
         return []
+
 
 ALLOWED_ORDER_BY = {
     "action_date", "year", "total_spend", "spend_amount", "total_revenue"
@@ -433,8 +611,8 @@ def get_subset_from_disk(
         offset = max(0, int(offset or 0))
         
         # Hard cap: Prevent massive JSON serialization payloads
-        if limit > 2000: 
-            limit = 2000 
+        if limit > MAX_JSON_ROWS:
+            limit = MAX_JSON_ROWS
 
         # Validate ORDER BY
         order_clause = ""
@@ -466,17 +644,131 @@ def get_subset_from_disk(
 
         # 4. Execute using Global Connection (Thread-Locked)
         with DUCK_LOCK:
-            if DUCK_CONN is None:
-                # Emergency Re-connect
-                DUCK_CONN = duckdb.connect(":memory:", read_only=False)
-                DUCK_CONN.execute("INSTALL parquet; LOAD parquet;")
-            
+            ensure_duck_conn()
             all_params = (str(path),) + tuple(local_params)
             return DUCK_CONN.execute(sql, all_params).fetchdf()
 
     except Exception:
         logger.exception(f"DuckDB Query Failed: {filename}")
         return pd.DataFrame()
+    
+
+def _like_param_contains(val: str) -> str:
+    """
+    Returns a parameter value for: upper(col) LIKE ? ESCAPE '\\'
+    Uses your existing sql_like_contains() which returns a SQL literal string.
+    We want the raw param, so we build it ourselves.
+    """
+    raw = "" if val is None else str(val)
+    raw = raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{raw.upper()}%"
+
+def build_summary_where(years: Optional[List[int]], filters: Dict[str, Optional[str]]) -> Tuple[str, List[Any]]:
+    """
+    Returns (where_sql, params) for summary.parquet queries.
+    All comparisons are done in UPPER space (matching your sanitize approach).
+    """
+    where_parts: List[str] = ["1=1"]
+    params: List[Any] = []
+
+    # Years: summary is already aggregated by year/month, keep it simple
+    if years and len(years) > 0:
+        ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
+        if ys:
+            where_parts.append(f"year IN ({','.join(['?' for _ in ys])})")
+            params.extend(ys)
+
+    def eq(col: str, v: str):
+        where_parts.append(f"upper({col}) = ?")
+        params.append(str(v).strip().upper())
+
+    def contains(col: str, v: str):
+        where_parts.append(f"upper({col}) LIKE ? ESCAPE '\\\\'")
+        params.append(_like_param_contains(v))
+
+    # Map your filter keys -> summary columns
+    vendor = filters.get("vendor")
+    parent = filters.get("parent")
+    cage = filters.get("cage")
+    domain = filters.get("domain")
+    agency = filters.get("agency")
+    platform = filters.get("platform")
+    psc = filters.get("psc")
+
+    if vendor:
+        # contains search (vendor_name)
+        contains("vendor_name", vendor)
+
+    if parent:
+        # exact match on clean_parent if present, else ultimate_parent_name
+        # Your summary ETL creates clean_parent; use it as primary.
+        eq("clean_parent", parent)
+
+    if cage:
+        eq("cage_code", cage)
+
+    if domain:
+        # exact match to match your UI dropdown behavior
+        eq("market_segment", domain)
+
+    if agency:
+        eq("sub_agency", agency)
+
+    if platform:
+        eq("platform_family", platform)
+
+    if psc:
+        # PSC filter checks both psc_code and psc_description (contains)
+        where_parts.append("(upper(psc_code) LIKE ? ESCAPE '\\\\' OR upper(psc_description) LIKE ? ESCAPE '\\\\')")
+        p = _like_param_contains(psc)
+        params.extend([p, p])
+
+    return " AND ".join(where_parts), params
+
+def query_summary_df(
+    where_sql: str,
+    params: List[Any],
+    select_sql: str,
+    group_by_sql: str = "", 
+    order_by_sql: str = "",
+    limit: int = 0,
+    offset: int = 0,
+) -> pd.DataFrame:
+    """
+    Runs a DuckDB query against summary.parquet without loading the full file into RAM.
+    """
+    global DUCK_CONN
+    path = LOCAL_CACHE_DIR / SUMMARY_PARQUET_CLEAN
+    if not path.exists():
+        return pd.DataFrame()
+
+    limit = max(0, int(limit or 0))
+    offset = max(0, int(offset or 0))
+    if limit > MAX_JSON_ROWS:
+        limit = MAX_JSON_ROWS
+
+    sql = f"SELECT {select_sql} FROM read_parquet(?) WHERE {where_sql}"
+    
+    if group_by_sql:
+        sql += f" GROUP BY {group_by_sql}"
+        
+    if order_by_sql:
+        sql += f" ORDER BY {order_by_sql}"
+        
+    local_params = [str(path)] + list(params)
+
+    if limit > 0:
+        sql += " LIMIT ?"
+        local_params.append(limit)
+    if offset > 0:
+        sql += " OFFSET ?"
+        local_params.append(offset)
+
+    # ✅ FIX: Always use the lock and standard ensure_duck_conn
+    with DUCK_LOCK:
+        ensure_duck_conn() 
+        return DUCK_CONN.execute(sql, local_params).fetchdf()
+
 
 
 # --- FILTER ENGINE (Optimized / Vectorized) ---
@@ -559,72 +851,87 @@ class FilterEngine:
 # [Find and Replace in api.py]
 
 def get_parent_aggregate_stats(parent_name: str):
-    """
-    Aggregates data from the global cache for a specific parent entity.
-    Used to generate the "Corporate Group" view.
-    """
-    df = GLOBAL_CACHE["df"]
-    if df.empty or not parent_name: return None
+    if not parent_name:
+        return None
 
-    clean_name = parent_name.strip().upper().replace("'", "")
-    
-    # Identify the column to group by
-    col_to_check = 'clean_parent' if 'clean_parent' in df.columns else 'ultimate_parent_name'
-    if col_to_check not in df.columns: return None
+    clean = parent_name.strip().upper().replace("'", "")
+    where_sql = "upper(clean_parent) = ?"
+    params = [clean]
 
-    # Filter for the specific parent family
-    mask = df[col_to_check].astype(str).str.upper().eq(clean_name)
-    
-    if not mask.any(): return None
+    # totals
+    totals = query_summary_df(
+        where_sql, params,
+        select_sql="sum(total_spend) as total_spend, sum(contract_count) as contract_count, max(year) as last_active",
+        limit=1
+    )
+    if totals.empty:
+        return None
 
-    slice_df = df[mask]
-    
-    # --- SAFE METADATA EXTRACTION ---
-    
-    # 1. Top Capabilities (NAICS)
-    top_naics = []
-    
-    # Check if we have both columns available
-    if 'naics_code' in slice_df.columns and 'naics_description' in slice_df.columns:
-        # ✅ FIX: Convert to string first to avoid Categorical errors
-        code_series = slice_df['naics_code'].astype(str)
-        # Convert Categorical to String before filling NA
-        desc_series = slice_df['naics_description'].astype(object).fillna("Unknown").astype(str)
-        
-        combined_naics = code_series + " - " + desc_series
-        
-        # Count the top 5 most common COMBINED strings
-        top_naics = combined_naics.value_counts().head(5).index.tolist()
-        
-    elif 'naics_code' in slice_df.columns:
-        top_naics = slice_df['naics_code'].dropna().value_counts().head(5).index.tolist()
-            
-    # 2. Top Platforms
-    top_platforms = []
-    if 'platform_family' in slice_df.columns:
-        top_platforms = slice_df['platform_family'].value_counts().head(5).index.tolist()
-    
+    total_spend = float(totals["total_spend"].iloc[0]) if "total_spend" in totals.columns else 0.0
+    total_contracts = int(totals["contract_count"].iloc[0]) if "contract_count" in totals.columns else 0
+    last_active = int(totals["last_active"].iloc[0]) if "last_active" in totals.columns and pd.notna(totals["last_active"].iloc[0]) else 0
+
+    # top NAICS (code + description if present)
+    naics = query_summary_df(
+        where_sql, params,
+        select_sql="naics_code, naics_description, count(*) as n",
+        group_by_sql="naics_code, naics_description",  # ✅ ADDED
+        order_by_sql="n DESC",
+        limit=5
+    )
+    top_naics: List[str] = []
+    if not naics.empty and "naics_code" in naics.columns:
+        for r in naics.itertuples(index=False):
+            code = str(getattr(r, "naics_code", "")).strip()
+            desc = str(getattr(r, "naics_description", "")).strip() if "naics_description" in naics.columns else ""
+            if code and desc and desc.lower() != "nan":
+                top_naics.append(f"{code} - {desc}")
+            elif code:
+                top_naics.append(code)
+
+    plats = query_summary_df(
+        where_sql, params,
+        select_sql="platform_family, sum(total_spend) as spend",
+        group_by_sql="platform_family",  # ✅ ADDED
+        order_by_sql="spend DESC",
+        limit=5
+    )
+    top_platforms = plats["platform_family"].dropna().astype(str).tolist() if ("platform_family" in plats.columns and not plats.empty) else []
+
+    if total_spend <= 0:
+        return None
+
     return {
-        "total_obligations": float(slice_df['total_spend'].sum()),
-        "total_contracts": int(slice_df['contract_count'].sum()),
-        "last_active": int(slice_df['year'].max()),
-        "top_naics": top_naics, 
+        "total_obligations": float(total_spend),
+        "total_contracts": int(total_contracts),
+        "last_active": int(last_active),
+        "top_naics": top_naics,
         "top_platforms": top_platforms
     }
 
+
 def reload_all_data():
+    # Lock is the single source of truth for in-progress reloads
     if not RELOAD_LOCK.acquire(blocking=False):
         logger.info("Reload already in progress, skipping.")
         return
 
+    # ✅ Immediately mark live cache as loading so /ready and /reload are truthful
+    global GLOBAL_CACHE
     try:
-        logger.info("STARTING DATA LOAD (Logic Restored + RAM Optimized)...")
-        
+        GLOBAL_CACHE = {**GLOBAL_CACHE, "is_loading": True}
+    except Exception:
+        # If anything weird happens, we still proceed; reload lock prevents concurrent reloads
+        pass
+
+    try:
+        logger.info("STARTING DATA LOAD (Chunked + RAM Optimized)...")
+
         # 1. PREPARE TEMPORARY STATE
-        # NOTE: network_df is REMOVED from cache to save RAM
+        # We build this completely isolated from the live API
         new_global_cache = {
-            "is_loading": False,
-            "last_loaded": time.time(),
+            "is_loading": True,              # ✅ stays True until the final swap
+            "last_loaded": GLOBAL_CACHE.get("last_loaded", 0),  # ✅ keep previous until success
             "options": {},
             "cage_name_map": {},
             "location_map": {},
@@ -636,17 +943,7 @@ def reload_all_data():
             "risk_df": pd.DataFrame(),
             "df_opportunities": pd.DataFrame()
         }
-        
-        new_global_data = {
-            "summary": pd.DataFrame(),
-            "geo": pd.DataFrame(),
-            "profiles": pd.DataFrame(),
-            "risk": pd.DataFrame(),
-            "opportunities": pd.DataFrame(),
-            "transactions": pd.DataFrame(),
-            "products": pd.DataFrame(),
-            # "network": pd.DataFrame() <--- Removed from RAM
-        }
+
 
         # 2. DOWNLOAD FILES
         LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -657,34 +954,52 @@ def reload_all_data():
         ]
 
         def fetch_file(filename: str) -> str:
-            local_path = str(LOCAL_CACHE_DIR / filename)
-            if not os.path.exists(local_path):
-                logger.info("Downloading %s...", filename)
+            final_path = (LOCAL_CACHE_DIR / filename).resolve()
+            tmp_path = (LOCAL_CACHE_DIR / f"{filename}.tmp").resolve()
+
+            logger.info("Downloading %s...", filename)
+            try:
+                # Clean up old temp from prior crash
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except Exception:
+                        pass
+
                 s3_local = boto3.client("s3", region_name=AWS_REGION, config=BOTO_CFG)
-                s3_local.download_file(BUCKET_NAME, f"{CACHE_PREFIX}{filename}", local_path)
+                s3_local.download_file(BUCKET_NAME, f"{CACHE_PREFIX}{filename}", str(tmp_path))
+
+                # ✅ Atomic replace on same filesystem
+                tmp_path.replace(final_path)
+
+            except Exception as e:
+                logger.error(f"Download failed for {filename}: {e}")
+                # Cleanup temp on failure
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except Exception:
+                    pass
+
             return filename
+
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
              list(executor.map(fetch_file, files))
         
-        # 3. REFRESH DUCKDB VIEWS
+        # 3. REFRESH DUCKDB VIEWS (Include Network here for disk access)
         global DUCK_CONN
         with DUCK_LOCK:
-            if DUCK_CONN is None:
-                # CHANGE: Ensure we reconnect to memory if connection was lost
-                DUCK_CONN = duckdb.connect(":memory:", read_only=False)
-                DUCK_CONN.execute("INSTALL parquet; LOAD parquet;")
-                DUCK_CONN.execute("PRAGMA threads=4;")
-            
-            # Re-create views (Since it's in-memory, we must recreate them every reload)
-            # Use absolute string paths to be safe
-            prod_path = str(LOCAL_CACHE_DIR / 'products.parquet')
-            trans_path = str(LOCAL_CACHE_DIR / 'transactions.parquet')
-            net_path = str(LOCAL_CACHE_DIR / 'network.parquet')
+            ensure_duck_conn()
 
-            DUCK_CONN.execute(f"CREATE OR REPLACE VIEW v_products AS SELECT * FROM read_parquet('{prod_path}');")
-            DUCK_CONN.execute(f"CREATE OR REPLACE VIEW v_transactions AS SELECT * FROM read_parquet('{trans_path}');")
-            DUCK_CONN.execute(f"CREATE OR REPLACE VIEW v_network AS SELECT * FROM read_parquet('{net_path}');")
+            # Re-create views using absolute paths
+            prod_path = str((LOCAL_CACHE_DIR / "products.parquet").resolve())
+            trans_path = str((LOCAL_CACHE_DIR / "transactions.parquet").resolve())
+            net_path = str((LOCAL_CACHE_DIR / "network.parquet").resolve())
+
+            DUCK_CONN.execute("CREATE OR REPLACE VIEW v_products AS SELECT * FROM read_parquet(?);", [prod_path])
+            DUCK_CONN.execute("CREATE OR REPLACE VIEW v_transactions AS SELECT * FROM read_parquet(?);", [trans_path])
+            DUCK_CONN.execute("CREATE OR REPLACE VIEW v_network AS SELECT * FROM read_parquet(?);", [net_path])
 
         # 4. FETCH MAPPINGS (Athena)
         cage_map: Dict[str, str] = {}
@@ -703,8 +1018,7 @@ def reload_all_data():
         
         new_global_cache["naics_map"] = naics_map
 
-        # 5. LOAD RAM FILES (Network REMOVED)
-        # We load only small files here
+        # 5. LOAD SMALL FILES (Standard Load)
         ram_files = ["geo.parquet", "profiles.parquet", "risk.parquet", "opportunities.parquet"]
         
         for file in ram_files:
@@ -712,11 +1026,14 @@ def reload_all_data():
             try:
                 df = pd.read_parquet(local_path, engine="pyarrow", dtype_backend="pyarrow")
                 
-                # Quick string cleanup
+                # Basic string cleanup
                 for col in ["vendor_name", "cage_code"]:
                     if col in df.columns:
+                        if isinstance(df[col].dtype, pd.ArrowDtype):
+                            df[col] = df[col].astype(str)
                         df[col] = df[col].astype(str).str.upper().str.strip()
 
+                # Specific fix for profiles
                 if file == "profiles.parquet" and "top_platforms" in df.columns:
                     df["top_platforms"] = (
                         df["top_platforms"].astype(str)
@@ -725,17 +1042,7 @@ def reload_all_data():
                         .str.replace(r"^,+", "", regex=True)
                     )
 
-                key_map = {
-                    "geo.parquet": "geo",
-                    "profiles.parquet": "profiles",
-                    "risk.parquet": "risk",
-                    "opportunities.parquet": "opportunities"
-                }
-                
-                k = key_map.get(file)
-                if k: new_global_data[k] = df
-                
-                # Cache refs
+                # ✅ DIRECT MAPPING TO CACHE (No global_data)
                 if file == "geo.parquet": new_global_cache["geo_df"] = df
                 if file == "profiles.parquet": new_global_cache["profiles_df"] = df
                 if file == "risk.parquet": new_global_cache["risk_df"] = df
@@ -744,108 +1051,141 @@ def reload_all_data():
             except Exception:
                 logger.exception(f"Failed to load {file}")
 
-        # 6. LOAD SUMMARY (CHUNKED & RAM OPTIMIZED)
+        # 6. LOAD SUMMARY (CHUNKED) -> CLEAN TO DISK (NO RAM CONCAT) ✅ ATOMIC SWAP FIX
         try:
-            summary_path = str(LOCAL_CACHE_DIR / "summary.parquet")
-            
-            # Define columns to treat as categories immediately to save RAM
-            cat_cols = ["platform_family", "sub_agency", "market_segment", 
-                        "vendor_name", "clean_parent", "ultimate_parent_name", "psc_description"]
-            
-            # Helper to process a single chunk
-            def process_chunk(chunk):
-                # 1. Cleanup Strings
-                string_cols = ["vendor_name", "clean_parent", "ultimate_parent_name", "cage_code"]
-                for col in string_cols:
-                    if col in chunk.columns:
-                        if isinstance(chunk[col].dtype, pd.ArrowDtype):
-                             chunk[col] = chunk[col].astype(str)
-                        chunk[col] = chunk[col].astype(str).str.upper().str.strip()
-
-                # 2. Immediate Compression
-                for col in cat_cols:
-                    if col in chunk.columns:
-                        chunk[col] = chunk[col].astype("category")
-                return chunk
-
-            # Read via PyArrow Tables (Zero-Copy) then convert to Pandas in chunks
+            import pyarrow as pa
             import pyarrow.parquet as pq
-            parquet_file = pq.ParquetFile(summary_path)
-            
-            chunks = []
-            # Read 1 row group at a time (much smaller memory footprint)
-            for i in range(parquet_file.num_row_groups):
-                table = parquet_file.read_row_group(i)
-                chunk_df = table.to_pandas(self_destruct=True) # Free arrow memory immediately
-                chunks.append(process_chunk(chunk_df))
-            
-            # Combine all small chunks into one big dataframe
-            df = pd.concat(chunks, ignore_index=True)
-            
-            # Clear chunks from memory
-            chunks = None
-            gc.collect()
 
-            # --- RETAIN YOUR EXISTING LOGIC BELOW ---
+            summary_in_path = (LOCAL_CACHE_DIR / "summary.parquet").resolve()
             
-            # Parent Mapping
-            cage_col = "cage_code" if "cage_code" in df.columns else "vendor_cage"
-            if cage_col in df.columns and cage_map:
-                # We temporarily convert to object to map, then re-categorize
-                # This is unavoidable but safer now that we have memory headroom
-                df["clean_parent"] = df[cage_col].map(cage_map)
-                df["clean_parent"] = df["clean_parent"].fillna(df["ultimate_parent_name"])
-                df["clean_parent"] = df["clean_parent"].fillna(df["vendor_name"]).astype(str).str.upper().str.strip()
-            
-            # Boeing Fix
+            # 1. Define Paths (Final vs Temp)
+            summary_final_path = (LOCAL_CACHE_DIR / SUMMARY_PARQUET_CLEAN).resolve()
+            summary_temp_path = (LOCAL_CACHE_DIR / f"{SUMMARY_PARQUET_CLEAN}.tmp").resolve()
+
+            # Remove old temp file if it exists (cleanup from failed runs)
+            if summary_temp_path.exists():
+                try:
+                    summary_temp_path.unlink()
+                except Exception:
+                    pass
+
+            parquet_file = pq.ParquetFile(str(summary_in_path))
+
+            # Your exact name corrections logic
             name_corrections = {
                 "THE BOEING": "THE BOEING COMPANY",
                 "BOEING": "THE BOEING COMPANY",
                 "BOEING CO": "THE BOEING COMPANY",
             }
-            # Note: Operating on strings here
-            df["clean_parent"] = df["clean_parent"].replace(name_corrections)
-            if "vendor_name" in df.columns:
-                # We need to cast back to string to replace, then re-categorize
-                df["vendor_name"] = df["vendor_name"].astype(str).replace(name_corrections).astype("category")
 
-            # Clean NANs
-            for col in ["platform_family", "market_segment", "sub_agency", "psc_description"]:
-                if col in df.columns:
-                    # Ensure they are valid categories
-                    pass 
+            writer = None
 
-            # ✅ FINAL RE-COMPRESSION
-            df["clean_parent"] = df["clean_parent"].astype("category")
+            for i in range(parquet_file.num_row_groups):
+                # Read 1 row group -> pandas (bounded)
+                chunk = parquet_file.read_row_group(i).to_pandas()
 
-            new_global_cache["df"] = df
-            new_global_data["summary"] = df
+                # --- YOUR ORIGINAL BUSINESS LOGIC STARTS HERE ---
+                
+                # 1) Cleanup Strings
+                string_cols = [
+                    "vendor_name", "clean_parent", "ultimate_parent_name", "cage_code",
+                    "platform_family", "sub_agency", "market_segment", "psc_description"
+                ]
+                for col in string_cols:
+                    if col in chunk.columns:
+                        if isinstance(chunk[col].dtype, pd.ArrowDtype):
+                            chunk[col] = chunk[col].astype(str)
+                        chunk[col] = chunk[col].astype(str).str.upper().str.strip()
+
+                # 2) Apply Parent Mapping
+                cage_col = "cage_code" if "cage_code" in chunk.columns else "vendor_cage"
+                if cage_col in chunk.columns and cage_map:
+                    chunk["clean_parent"] = chunk[cage_col].map(cage_map)
+                else:
+                    chunk["clean_parent"] = None
+
+                if "ultimate_parent_name" in chunk.columns:
+                    chunk["clean_parent"] = chunk["clean_parent"].fillna(chunk["ultimate_parent_name"])
+
+                # Fallback to vendor name
+                if "vendor_name" in chunk.columns:
+                    chunk["clean_parent"] = chunk["clean_parent"].fillna(chunk["vendor_name"])
+
+                chunk["clean_parent"] = chunk["clean_parent"].astype(str).str.upper().str.strip()
+
+                # 3) Apply Name Corrections
+                chunk["clean_parent"] = chunk["clean_parent"].replace(name_corrections)
+                if "vendor_name" in chunk.columns:
+                    chunk["vendor_name"] = chunk["vendor_name"].replace(name_corrections)
+
+                # 4) Clean NANs
+                for col in ["platform_family", "market_segment", "sub_agency", "psc_description"]:
+                    if col in chunk.columns:
+                        m = chunk[col].astype(str).str.upper().isin(["NAN", "NAN.0", "NONE", "", "UNKNOWN"])
+                        chunk.loc[m, col] = None
+
+                # OPTIONAL: Ensure CAGE stays normalized if present
+                if "cage_code" in chunk.columns:
+                    chunk["cage_code"] = chunk["cage_code"].astype(str).str.upper().str.strip()
+                    bad = chunk["cage_code"].isin(["NAN", "NONE", "NULL", ""])
+                    chunk.loc[bad, "cage_code"] = None
+                
+                # --- YOUR ORIGINAL BUSINESS LOGIC ENDS HERE ---
+
+                # Write chunk to TEMP file (instead of final path)
+                table = pa.Table.from_pandas(chunk, preserve_index=False)
+
+                if writer is None:
+                    # Initialize writer with TEMP path
+                    writer = pq.ParquetWriter(str(summary_temp_path), table.schema, compression="zstd")
+                
+                writer.write_table(table)
+
+                # Free chunk memory
+                del chunk
+                del table
+                if i % 5 == 0:
+                    gc.collect()
+
+            if writer:
+                writer.close()
+
+            # 4. ATOMIC SWAP (Safe Switch)
+            # This is the critical fix that prevents downtime during reload
+            with DUCK_LOCK:
+                ensure_duck_conn()
+                
+                if summary_temp_path.exists():
+                    summary_temp_path.replace(summary_final_path) 
+                
+                # 5. Refresh View to point to the new file
+                DUCK_CONN.execute(
+                    "CREATE OR REPLACE VIEW v_summary AS SELECT * FROM read_parquet(?);",
+                    [str(summary_final_path)],
+                )
             
-            # (Options logic remains the same)
+            logger.info("Summary updated safely via atomic swap.")
+
+            # ✅ IMPORTANT: Reset RAM references to empty to force DuckDB usage
+            new_global_cache["df"] = pd.DataFrame()
+
+            # ✅ Re-compute options from the new View (DuckDB)
+            years_df = duck_fetch_df("SELECT DISTINCT year FROM v_summary WHERE year IS NOT NULL ORDER BY year ASC;")
+            agencies_df = duck_fetch_df("SELECT DISTINCT sub_agency FROM v_summary WHERE sub_agency IS NOT NULL AND TRIM(CAST(sub_agency AS VARCHAR)) <> '' ORDER BY sub_agency ASC LIMIT 5000;")
+            domains_df = duck_fetch_df("SELECT DISTINCT market_segment FROM v_summary WHERE market_segment IS NOT NULL AND TRIM(CAST(market_segment AS VARCHAR)) <> '' ORDER BY market_segment ASC LIMIT 5000;")
+            platforms_df = duck_fetch_df("SELECT DISTINCT platform_family FROM v_summary WHERE platform_family IS NOT NULL AND TRIM(CAST(platform_family AS VARCHAR)) <> '' ORDER BY platform_family ASC LIMIT 5000;")
+
             new_global_cache["options"] = {
-                "years": sorted(df["year"].unique().tolist()) if "year" in df.columns else [],
-                "agencies": sorted(df["sub_agency"].dropna().unique().tolist()) if "sub_agency" in df.columns else [],
-                "domains": sorted(df["market_segment"].dropna().unique().tolist()) if "market_segment" in df.columns else [],
-                "platforms": sorted(df["platform_family"].dropna().unique().tolist()) if "platform_family" in df.columns else [],
+                "years": years_df["year"].dropna().astype(int).tolist() if "year" in years_df.columns else [],
+                "agencies": agencies_df["sub_agency"].dropna().astype(str).tolist() if "sub_agency" in agencies_df.columns else [],
+                "domains": domains_df["market_segment"].dropna().astype(str).tolist() if "market_segment" in domains_df.columns else [],
+                "platforms": platforms_df["platform_family"].dropna().astype(str).tolist() if "platform_family" in platforms_df.columns else [],
             }
 
         except Exception:
-            logger.exception("Summary load failed")
+            logger.exception("Summary clean-to-disk failed")
 
-            new_global_cache["df"] = df
-            new_global_data["summary"] = df
-            
-            new_global_cache["options"] = {
-                "years": sorted(df["year"].unique().tolist()) if "year" in df.columns else [],
-                "agencies": sorted(df["sub_agency"].dropna().unique().tolist()) if "sub_agency" in df.columns else [],
-                "domains": sorted(df["market_segment"].dropna().unique().tolist()) if "market_segment" in df.columns else [],
-                "platforms": sorted(df["platform_family"].dropna().unique().tolist()) if "platform_family" in df.columns else [],
-            }
-
-        except Exception:
-            logger.exception("Summary load failed")
-
-        # 7. BUILD MAPS & SEARCH INDEX (Standard Logic)
+        # 7. BUILD MAPS
         if not new_global_cache["profiles_df"].empty:
              p_df = new_global_cache["profiles_df"]
              if {"cage_code", "vendor_name"}.issubset(p_df.columns):
@@ -856,66 +1196,136 @@ def reload_all_data():
              if "cage_code" in g_df.columns:
                 new_global_cache["location_map"] = g_df.set_index("cage_code")[["city", "state"]].to_dict(orient="index")
 
-        search_list = []
-        if not new_global_cache["df"].empty:
-            summary_df = new_global_cache["df"]
-            col = "clean_parent" if "clean_parent" in summary_df.columns else "vendor_name"
-            
-            # Using observed=True handles the categorical data correctly and quickly
-            p_stats = summary_df.groupby(col, observed=True).agg({"total_spend": "sum", "cage_code": "nunique"}).reset_index()
-            for r in p_stats.itertuples():
-                val = getattr(r, col)
-                if r.total_spend > 0 and (r.cage_code > 1 or r.total_spend > 1e9):
+        # 8. BUILD SEARCH INDEX ✅ same business logic, but from DuckDB (no RAM summary)
+        search_list: List[Dict[str, Any]] = []
+        try:
+            loc_map = new_global_cache.get("location_map", {}) or {}
+
+            # A) PARENT: keep if spend > 0 AND (cage_count > 1 OR spend > 1e9)
+            parent_df = duck_fetch_df("""
+                SELECT
+                    clean_parent AS label,
+                    SUM(total_spend) AS total_spend,
+                    COUNT(DISTINCT cage_code) AS cage_count
+                FROM v_summary
+                WHERE clean_parent IS NOT NULL AND TRIM(CAST(clean_parent AS VARCHAR)) <> ''
+                GROUP BY 1
+                ORDER BY total_spend DESC
+                LIMIT 5000;
+            """)
+
+            if not parent_df.empty:
+                for r in parent_df.itertuples(index=False):
+                    val = getattr(r, "label", None)
+                    spend = float(getattr(r, "total_spend", 0) or 0)
+                    cages = int(getattr(r, "cage_count", 0) or 0)
+                    if val and spend > 0 and (cages > 1 or spend > 1e9):
+                        search_list.append({
+                            "label": str(val),
+                            "value": str(val),
+                            "type": "PARENT",
+                            "score": float(spend),
+                            "cage": "AGGREGATE"
+                        })
+
+            # B) CHILD: group by vendor_name + cage_code, attach city/state
+            child_df = duck_fetch_df("""
+                SELECT
+                    vendor_name,
+                    cage_code,
+                    SUM(total_spend) AS total_spend
+                FROM v_summary
+                WHERE vendor_name IS NOT NULL AND TRIM(CAST(vendor_name AS VARCHAR)) <> ''
+                  AND cage_code IS NOT NULL AND TRIM(CAST(cage_code AS VARCHAR)) <> ''
+                GROUP BY 1,2
+                ORDER BY total_spend DESC
+                LIMIT 20000;
+            """)
+
+            if not child_df.empty:
+                for r in child_df.itertuples(index=False):
+                    if float(getattr(r, "total_spend", 0) or 0) <= 0:
+                        continue
+                    raw_cage = str(getattr(r, "cage_code", "")).strip().upper()
+                    if raw_cage in ["NAN", "NONE", "NULL", ""]:
+                        continue
+                    loc = loc_map.get(raw_cage, {}) or {}
                     search_list.append({
-                        "label": str(val), "value": str(val),
-                        "type": "PARENT", "score": float(r.total_spend), "cage": "AGGREGATE"
-                    })
-            
-            c_stats = summary_df.groupby(["vendor_name", "cage_code"], observed=True)["total_spend"].sum().reset_index()
-            loc_map = new_global_cache.get("location_map", {})
-            for r in c_stats.itertuples():
-                if r.total_spend > 0:
-                    raw_cage = str(r.cage_code).strip().upper()
-                    if raw_cage in ["NAN", "NONE"]: continue
-                    loc = loc_map.get(raw_cage, {})
-                    search_list.append({
-                        "label": str(r.vendor_name), "value": str(r.vendor_name), "type": "CHILD",
-                        "score": float(r.total_spend), "cage": raw_cage,
-                        "city": loc.get("city", ""), "state": loc.get("state", "")
+                        "label": str(getattr(r, "vendor_name", "")),
+                        "value": str(getattr(r, "vendor_name", "")),
+                        "type": "CHILD",
+                        "score": float(getattr(r, "total_spend", 0) or 0),
+                        "cage": raw_cage,
+                        "city": loc.get("city", ""),
+                        "state": loc.get("state", "")
                     })
 
-            if "platform_family" in summary_df.columns:
-                for r in summary_df.groupby("platform_family", observed=True)["total_spend"].sum().reset_index().itertuples():
-                    if r.platform_family:
-                        search_list.append({"label": str(r.platform_family), "value": str(r.platform_family), "type": "PLATFORM", "score": float(r.total_spend)})
-            
-            if "sub_agency" in summary_df.columns:
-                for r in summary_df.groupby("sub_agency", observed=True)["total_spend"].sum().reset_index().itertuples():
-                    if r.sub_agency:
-                        search_list.append({"label": str(r.sub_agency), "value": str(r.sub_agency), "type": "AGENCY", "score": float(r.total_spend)})
+            # C) PLATFORM totals
+            plat_df = duck_fetch_df("""
+                SELECT platform_family AS label, SUM(total_spend) AS total_spend
+                FROM v_summary
+                WHERE platform_family IS NOT NULL AND TRIM(CAST(platform_family AS VARCHAR)) <> ''
+                GROUP BY 1
+                ORDER BY total_spend DESC
+                LIMIT 2000;
+            """)
+            if not plat_df.empty:
+                for r in plat_df.itertuples(index=False):
+                    if getattr(r, "label", None):
+                        search_list.append({
+                            "label": str(getattr(r, "label")),
+                            "value": str(getattr(r, "label")),
+                            "type": "PLATFORM",
+                            "score": float(getattr(r, "total_spend", 0) or 0)
+                        })
+
+            # D) AGENCY totals
+            ag_df = duck_fetch_df("""
+                SELECT sub_agency AS label, SUM(total_spend) AS total_spend
+                FROM v_summary
+                WHERE sub_agency IS NOT NULL AND TRIM(CAST(sub_agency AS VARCHAR)) <> ''
+                GROUP BY 1
+                ORDER BY total_spend DESC
+                LIMIT 2000;
+            """)
+            if not ag_df.empty:
+                for r in ag_df.itertuples(index=False):
+                    if getattr(r, "label", None):
+                        search_list.append({
+                            "label": str(getattr(r, "label")),
+                            "value": str(getattr(r, "label")),
+                            "type": "AGENCY",
+                            "score": float(getattr(r, "total_spend", 0) or 0)
+                        })
 
             search_list.sort(key=lambda x: x.get("score", 0), reverse=True)
             new_global_cache["search_index"] = search_list
 
+        except Exception:
+            logger.exception("Search index build failed")
+            new_global_cache["search_index"] = []
+
+
         gc.collect()
 
-        # 8. ATOMIC SWAP
-        with CACHE_LOCK:
-            GLOBAL_CACHE.clear()
-            GLOBAL_CACHE.update(new_global_cache)
-            global_data.clear()
-            global_data.update(new_global_data)
-            GLOBAL_CACHE["is_loading"] = False
-            
-        logger.info("RELOAD COMPLETE (Optimized). search_index=%d", len(search_list))
+                # 9. ATOMIC POINTER SWAP (Thread-Safe replacement)
+        # We replace the reference to the dictionary instantly.
+
+        new_global_cache["is_loading"] = False
+        new_global_cache["last_loaded"] = time.time()  # ✅ only update last_loaded on success
+
+        global GLOBAL_CACHE
+        GLOBAL_CACHE = new_global_cache
+
+        logger.info("RELOAD COMPLETE (Atomic Swap). search_index=%d", len(search_list))
+
+        
+        # Explicit cleanup
         new_global_cache = None
-        new_global_data = None
         gc.collect()
 
     except Exception:
         logger.exception("Reload crash")
-        with CACHE_LOCK:
-            GLOBAL_CACHE["is_loading"] = False
     finally:
         RELOAD_LOCK.release()
 
@@ -927,16 +1337,29 @@ def reload_all_data():
 
 @app.get("/api/dashboard/status")
 def get_status():
-    return {"ready": not GLOBAL_CACHE["df"].empty, "count": len(GLOBAL_CACHE["df"])}
+    s = get_readiness_state()
+    return {
+        "ready": bool(s["ready"]),
+        "is_loading": bool(s["is_loading"]),
+        "last_loaded": s["last_loaded"],
+        "duck_ok": bool(s["duck_ok"]),
+        "geo_ok": bool(s["geo_ok"]),
+        "profiles_ok": bool(s["profiles_ok"]),
+    }
+
 
 
 
 @app.post("/api/dashboard/reload")
-def trigger_reload(background_tasks: BackgroundTasks):
-    if GLOBAL_CACHE.get("is_loading"):
+async def trigger_reload():
+    # Truthful guard: lock + is_loading
+    if RELOAD_LOCK.locked() or GLOBAL_CACHE.get("is_loading"):
         return {"message": "Reload already running"}
-    background_tasks.add_task(reload_all_data)
+
+    # ✅ Offload reload from request thread
+    asyncio.create_task(asyncio.to_thread(reload_all_data))
     return {"message": "Reloading..."}
+
 
 
 # [FIND THIS FUNCTION]
@@ -951,11 +1374,6 @@ def get_filter_options(
     platform: Optional[str] = None,
     psc: Optional[str] = None
 ):
-    with CACHE_LOCK:
-        df = global_data.get("summary", pd.DataFrame())
-    if df.empty:
-        return []
-
     filters = {
         "vendor": vendor,
         "parent": parent,
@@ -966,43 +1384,47 @@ def get_filter_options(
         "psc": psc
     }
 
-    # If NO filters, return the cached dropdown options + top parents (respecting year selection)
+    # If no filters: return cached options + top parents (DuckDB)
     if not any(filters.values()):
-        opts = GLOBAL_CACHE.get("options", {}).copy()
+        opts = (GLOBAL_CACHE.get("options", {}) or {}).copy()
 
-        # Handle None years as "all years"
-        if years:
-            v_mask = df["year"].isin(years)
-        else:
-            v_mask = pd.Series(True, index=df.index)
-
-        col = "clean_parent" if "clean_parent" in df.columns else "vendor_name"
-        opts["top_parents"] = (
-            df[v_mask]
-            .groupby(col, observed=True)["total_spend"]
-            .sum()
-            .nlargest(50)
-            .index
-            .tolist()
+        where_sql, params = build_summary_where(years, {})
+        top_df = query_summary_df(
+            where_sql=where_sql,
+            params=params,
+            select_sql="clean_parent as label, sum(total_spend) as spend",
+            order_by_sql="spend DESC",
+            limit=50
         )
+        opts["top_parents"] = top_df["label"].dropna().astype(str).tolist() if not top_df.empty else []
         return opts
 
-    # Apply filters using your existing engine (keeps existing logic)
-    filtered = FilterEngine.apply_pandas(df, years, filters)
+    # With filters: compute option lists from filtered universe (DuckDB DISTINCTs)
+    where_sql, params = build_summary_where(years, filters)
+
+    agencies_df = query_summary_df(where_sql, params, "DISTINCT sub_agency", order_by_sql="sub_agency ASC", limit=5000)
+    domains_df  = query_summary_df(where_sql, params, "DISTINCT market_segment", order_by_sql="market_segment ASC", limit=5000)
+    plats_df    = query_summary_df(where_sql, params, "DISTINCT platform_family", order_by_sql="platform_family ASC", limit=5000)
+
+    psc_df = query_summary_df(
+        where_sql, params,
+        "DISTINCT psc_code, psc_description",
+        order_by_sql="psc_code ASC, psc_description ASC",
+        limit=5000
+    )
 
     return {
-        "years": sorted(df["year"].unique().tolist()) if "year" in df.columns else [],
-        "agencies": sorted(filtered["sub_agency"].dropna().unique().tolist()) if "sub_agency" in filtered.columns else [],
-        "domains": sorted(filtered["market_segment"].dropna().unique().tolist()) if "market_segment" in filtered.columns else [],
-        "platforms": sorted(filtered["platform_family"].dropna().unique().tolist()) if "platform_family" in filtered.columns else [],
+        "years": (GLOBAL_CACHE.get("options", {}) or {}).get("years", []),
+        "agencies": agencies_df["sub_agency"].dropna().astype(str).tolist() if "sub_agency" in agencies_df.columns else [],
+        "domains": domains_df["market_segment"].dropna().astype(str).tolist() if "market_segment" in domains_df.columns else [],
+        "platforms": plats_df["platform_family"].dropna().astype(str).tolist() if "platform_family" in plats_df.columns else [],
         "psc_pairs": (
-            filtered[["psc_code", "psc_description"]]
-            .dropna()
-            .drop_duplicates()
-            .sort_values(["psc_code", "psc_description"])
-            .to_dict(orient="records")
-        ) if ("psc_code" in filtered.columns and "psc_description" in filtered.columns) else [],
+            psc_df.dropna().drop_duplicates()[["psc_code", "psc_description"]].to_dict(orient="records")
+            if ("psc_code" in psc_df.columns and "psc_description" in psc_df.columns)
+            else []
+        ),
     }
+
 
 
 
@@ -1012,15 +1434,13 @@ def get_recompete_kpi(filters):
     """
     Calculates Risk using the specialized 'risk_df' sidecar.
     """
-    # 1. Access the Sidecar from Cache
-    # We use .get() to prevent crashing if the file hasn't loaded yet
-    df = global_data.get("risk", pd.DataFrame())
+    # ✅ FIX: Use GLOBAL_CACHE["risk_df"]
+    df = GLOBAL_CACHE.get("risk_df", pd.DataFrame())
     
     if df.empty: 
         return {"label": "Expiring Value (90d)", "value": "N/A", "sub_label": "No Data"}
 
     # 2. Apply Filters (Vendor, Agency, etc.) to the Sidecar
-    # We pass 'None' for years because risk data is always future-looking
     filtered_risk = FilterEngine.apply_pandas(df, None, filters)
 
     # 3. Filter for the 90-Day Window
@@ -1046,19 +1466,15 @@ def get_recompete_kpi(filters):
 
 @app.get("/api/dashboard/kpis")
 def get_market_kpis(
-    years: Optional[List[int]] = Query(None), 
-    vendor: Optional[str]=None,
-    parent: Optional[str]=None, 
-    cage: Optional[str]=None, 
-    domain: Optional[str]=None, 
-    agency: Optional[str]=None, 
-    platform: Optional[str]=None, 
-    psc: Optional[str]=None
+    years: Optional[List[int]] = Query(None),
+    vendor: Optional[str] = None,
+    parent: Optional[str] = None,
+    cage: Optional[str] = None,
+    domain: Optional[str] = None,
+    agency: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None
 ):
-    df = global_data.get("summary", pd.DataFrame())
-    if df.empty: return {"total_spend_b": 0, "total_contracts": 0}
-    
-    # 1. Define Filters
     filters = {
         "vendor": vendor,
         "parent": parent,
@@ -1068,28 +1484,27 @@ def get_market_kpis(
         "platform": platform,
         "psc": psc
     }
-    
-    # 2. Apply Filters to MAIN Data (For Total Spend/Contracts)
-    filtered = FilterEngine.apply_pandas(df, years, filters)
-    
-    # 3. Apply Filters to RISK Data
+
+    where_sql, params = build_summary_where(years, filters)
+
+    kpi_df = query_summary_df(
+        where_sql=where_sql,
+        params=params,
+        select_sql="sum(total_spend) as total_spend, sum(contract_count) as total_contracts",
+        limit=1
+    )
+
+    total_spend = float(kpi_df["total_spend"].iloc[0]) if (not kpi_df.empty and "total_spend" in kpi_df.columns) else 0.0
+    total_contracts = int(kpi_df["total_contracts"].iloc[0]) if (not kpi_df.empty and "total_contracts" in kpi_df.columns) else 0
+
     recompete_data = get_recompete_kpi(filters)
 
-    # 4. Return Result
-    # ✅ FIX: Explicit cast to python int/float to avoid numpy serialization errors
-    if 'contract_count' in filtered.columns:
-        total_contracts = int(filtered['contract_count'].sum())
-    else:
-        total_contracts = len(filtered)
-    
-    # Ensure spend is a native float
-    total_spend = float(filtered['total_spend'].sum())
-
     return {
-        "total_spend_b": total_spend / 1_000_000_000.0, 
+        "total_spend_b": total_spend / 1_000_000_000.0,
         "total_contracts": total_contracts,
         "recompete_risk": recompete_data
     }
+
 
 # --- ADD TO API.PY ---
 
@@ -1111,88 +1526,69 @@ def get_spend_trend(
     agency: Optional[str] = None,
     platform: Optional[str] = None,
     psc: Optional[str] = None,
-    mode: str = "yearly", 
+    mode: str = "yearly",
 ):
-    # 1. Use the Summary Data (Fastest)
-    with CACHE_LOCK:
-        df = global_data.get("summary", pd.DataFrame())
-    if df.empty:
-        return []
-
-    # 2. SETUP FILTERS
     filters = {
         "vendor": vendor, "parent": parent, "cage": cage,
         "domain": domain, "agency": agency, "platform": platform, "psc": psc,
     }
 
-    filtered = FilterEngine.apply_pandas(df, None, filters) # Pass None for years initially
-    if filtered.empty: return []
+    where_sql, params = build_summary_where(None, filters)
 
-    # 🛑 WORK ON COPY (Prevents cache corruption)
-    working_df = filtered.copy()
+    # We reproduce your FY logic:
+    # FY = year + (month>=10)
+    # month_num = month (or 1 default)
+    base_df = query_summary_df(
+        where_sql=where_sql,
+        params=params,
+        select_sql="""
+            CAST(year AS INTEGER) AS year_num,
+            CAST(COALESCE(month, 1) AS INTEGER) AS month_num,
+            SUM(total_spend) AS spend
+        """,
+        group_by_sql="CAST(year AS INTEGER), CAST(COALESCE(month, 1) AS INTEGER)",  # ✅ ADDED
+        order_by_sql="year_num ASC, month_num ASC",
+        limit=0
+    )
 
-    # 3. CALCULATE FISCAL YEAR (Smart Logic)
-    # Scenario A: We have 'action_date' (Transactions)
-    if "action_date" in working_df.columns:
-        working_df["dt"] = pd.to_datetime(working_df["action_date"], errors="coerce")
-        working_df["month_num"] = working_df["dt"].dt.month
-        # FY Logic: If Month >= 10, FY = Year + 1
-        base_year = working_df["year"] if "year" in working_df.columns else working_df["dt"].dt.year
-        working_df["fy"] = base_year + (working_df["month_num"] >= 10).astype(int).fillna(0)
+    if base_df.empty:
+        return []
 
-    # Scenario B: We have explicit 'month' and 'year' columns (Your Summary Data)
-    elif "month" in working_df.columns and "year" in working_df.columns:
-        # Ensure numeric types
-        working_df["month_num"] = pd.to_numeric(working_df["month"], errors='coerce').fillna(1).astype(int)
-        working_df["year_num"] = pd.to_numeric(working_df["year"], errors='coerce').fillna(0).astype(int)
-        
-        # FY Logic: If Month >= 10, FY = Year + 1
-        working_df["fy"] = working_df["year_num"] + (working_df["month_num"] >= 10).astype(int)
-        
-    else:
-        # Fallback: Just use year, default month to 1
-        if "year" in working_df.columns:
-            working_df["fy"] = working_df["year"]
-            working_df["month_num"] = 1 
-        else:
-            return []
+    base_df["year_num"] = pd.to_numeric(base_df["year_num"], errors="coerce").fillna(0).astype(int)
+    base_df["month_num"] = pd.to_numeric(base_df["month_num"], errors="coerce").fillna(1).astype(int)
+    base_df["spend"] = pd.to_numeric(base_df["spend"], errors="coerce").fillna(0.0).astype(float)
 
-    # 4. APPLY YEAR FILTER (Using the new 'fy')
+    base_df["fy"] = base_df["year_num"] + (base_df["month_num"] >= 10).astype(int)
+
+    # Apply FY filter (your step 4)
     if years and len(years) > 0:
-        working_df = working_df[working_df["fy"].isin(years)]
-        if working_df.empty: return []
+        ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
+        if ys:
+            base_df = base_df[base_df["fy"].isin(ys)]
+            if base_df.empty:
+                return []
 
-    # 5. YEARLY MODE (Standard Logic)
     if mode == "yearly":
-        grouped = working_df.groupby("fy", observed=True)["total_spend"].sum().reset_index()
-        
-        # Active Range Logic (Trim empty leading/trailing years)
-        active_years = grouped[grouped['total_spend'] > 0]
-        if not active_years.empty:
-            min_year = int(active_years["fy"].min())
-            max_year = int(active_years["fy"].max())
-        else:
+        grouped = base_df.groupby("fy", dropna=False)["spend"].sum().reset_index()
+
+        active = grouped[grouped["spend"] > 0]
+        if active.empty:
             return []
 
-        # Gap Filling (Ensure 0s for missing years)
-        all_years = range(min_year, max_year + 1)
-        data_map = {row["fy"]: row['total_spend'] for _, row in grouped.iterrows()}
-        
+        min_year = int(active["fy"].min())
+        max_year = int(active["fy"].max())
+
+        data_map = {int(r["fy"]): float(r["spend"]) for _, r in grouped.iterrows()}
+
         final_data = []
-        for y in all_years:
-            val = data_map.get(y, 0.0)
-            final_data.append({
-                "label": str(y),
-                "spend": float(val) 
-            })
+        for y in range(min_year, max_year + 1):
+            final_data.append({"label": str(y), "spend": float(data_map.get(y, 0.0))})
         return final_data
 
-    # 6. MONTHLY MODE (With Fiscal Sorting)
-    elif mode == "monthly":
-        grouped = working_df.groupby("month_num", observed=True)["total_spend"].sum().reset_index()
-        grouped.columns = ["label", "spend"] # label is 1..12
+    if mode == "monthly":
+        grouped = base_df.groupby("month_num", dropna=False)["spend"].sum().reset_index()
+        grouped.columns = ["label", "spend"]
 
-        # Fiscal Sorting: Oct(10) is first, Sep(9) is last
         def get_fiscal_sort(m):
             try:
                 m = int(m)
@@ -1202,74 +1598,68 @@ def get_spend_trend(
 
         grouped["sort_index"] = grouped["label"].apply(get_fiscal_sort)
         grouped = grouped.sort_values("sort_index", ascending=True)
-        
-        # Explicit Float Cast
         grouped["spend"] = grouped["spend"].astype(float)
 
         return grouped[["label", "spend"]].to_dict(orient="records")
 
     return []
 
+
 # ✅ NEW: Drill-down endpoint
 @app.get("/api/dashboard/subsidiaries")
 def get_dashboard_subsidiaries(parent: str):
-    df = global_data.get("summary", pd.DataFrame())
-    if df.empty: return []
+    if not parent:
+        return []
 
     clean_parent = sanitize(parent)
-    
-    # 1. Filter by the clean parent column
-    mask = pd.Series(False, index=df.index)
-    if "clean_parent" in df.columns:
-        mask |= df["clean_parent"].eq(clean_parent)
-    elif "ultimate_parent_name" in df.columns:
-        mask |= df["ultimate_parent_name"].astype(str).str.upper().eq(clean_parent)
-        
-    filtered = df[mask]
-    if filtered.empty: return []
+    loc_map = GLOBAL_CACHE.get("location_map", {}) or {}
 
-    # 2. Group by CAGE AND Name (So we get the specific ID for drill-down)
-    # We use the cage column we identified in load_data
-    cage_col = 'cage_code' if 'cage_code' in df.columns else 'vendor_cage'
-    
-    grouped = filtered.groupby([cage_col, 'vendor_name'], observed=True).agg({
-        'total_spend': 'sum', 
-        'contract_count': 'sum',
-        'city': 'first',   # <--- Grab location
-        'state': 'first'
-    }).reset_index()
-    
-    grouped = grouped.sort_values('total_spend', ascending=False).head(200)
-    
-    return [
-        {
-            "cage": r[cage_col],           # ✅ CRITICAL: Needed for drill-down
-            "name": r['vendor_name'],      # Frontend expects 'name', not 'vendor_name'
-            "total_obligations": r['total_spend'], # Frontend expects this key
-            "contract_count": int(r['contract_count']),
-            "city": str(r['city']) if pd.notna(r['city']) else "N/A",
-            "state": str(r['state']) if pd.notna(r['state']) else "N/A"
-        } 
-        for _, r in grouped.iterrows()
-    ]
+    # Filter by clean_parent and aggregate by cage + vendor_name
+    df = query_summary_df(
+        where_sql="upper(clean_parent) = ?",
+        params=[clean_parent],
+        select_sql="""
+            cage_code,
+            vendor_name,
+            SUM(total_spend) AS total_spend,
+            SUM(contract_count) AS contract_count
+        """,
+        group_by_sql="cage_code, vendor_name",  # ✅ ADDED
+        order_by_sql="total_spend DESC",
+        limit=200
+    )
+
+    if df.empty:
+        return []
+
+    out = []
+    for r in df.itertuples(index=False):
+        cage_val = str(getattr(r, "cage_code", "")).strip().upper()
+        loc = loc_map.get(cage_val, {}) or {}
+        out.append({
+            "cage": cage_val,
+            "name": str(getattr(r, "vendor_name", "")),
+            "total_obligations": float(getattr(r, "total_spend", 0) or 0),
+            "contract_count": int(getattr(r, "contract_count", 0) or 0),
+            "city": str(loc.get("city", "")) if loc.get("city") else "N/A",
+            "state": str(loc.get("state", "")) if loc.get("state") else "N/A",
+        })
+
+    return out
+
 
 
 @app.get("/api/dashboard/top-vendors")
 def get_top_vendors(
-    years: Optional[List[int]] = Query(None), 
-    vendor: Optional[str]=None,
-    parent: Optional[str]=None,
-    cage: Optional[str]=None,
-    domain: Optional[str]=None, 
-    agency: Optional[str]=None, 
-    platform: Optional[str]=None, 
-    psc: Optional[str]=None
+    years: Optional[List[int]] = Query(None),
+    vendor: Optional[str] = None,
+    parent: Optional[str] = None,
+    cage: Optional[str] = None,
+    domain: Optional[str] = None,
+    agency: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None
 ):
-    with CACHE_LOCK:
-        df = global_data.get("summary", pd.DataFrame())
-    if df.empty:
-        return []
-    
     filters = {
         "vendor": vendor,
         "parent": parent,
@@ -1279,26 +1669,30 @@ def get_top_vendors(
         "platform": platform,
         "psc": psc
     }
-    filtered = FilterEngine.apply_pandas(df, years, filters)
-    
-    group_col = 'clean_parent' if 'clean_parent' in filtered.columns else 'vendor_name'
-    
-    grouped = filtered.groupby(group_col, observed=True).agg({
-        'total_spend': 'sum', 
-        'contract_count': 'sum'
-    })
-    
-    grouped = grouped.sort_values('total_spend', ascending=False).head(50).reset_index()
-    
-    return [
-        {
-            "vendor": r[group_col],  
-            # ✅ FIX: Explicit float() and int() casts
-            "spend_m": float(r['total_spend']) / 1_000_000.0, 
-            "contracts": int(r['contract_count'])
-        } 
-        for _, r in grouped.iterrows()
-    ]
+
+    where_sql, params = build_summary_where(years, filters)
+
+    df = query_summary_df(
+        where_sql=where_sql,
+        params=params,
+        select_sql="clean_parent as vendor, sum(total_spend) as total_spend, sum(contract_count) as contract_count",
+        group_by_sql="clean_parent",  # ✅ ADDED
+        order_by_sql="total_spend DESC",
+        limit=50
+    )
+
+    if df.empty:
+        return []
+
+    out = []
+    for r in df.itertuples(index=False):
+        out.append({
+            "vendor": str(getattr(r, "vendor", "")),
+            "spend_m": float(getattr(r, "total_spend", 0.0) or 0.0) / 1_000_000.0,
+            "contracts": int(getattr(r, "contract_count", 0) or 0),
+        })
+    return out
+
 
 # --- REPLACE THIS FUNCTION IN API.PY ---
 
@@ -1306,18 +1700,15 @@ def get_top_vendors(
 
 @app.get("/api/dashboard/distributions")
 def get_market_distributions(
-    years: Optional[List[int]] = Query(None), 
-    vendor: Optional[str]=None,
-    parent: Optional[str]=None,
-    cage: Optional[str]=None,
-    domain: Optional[str]=None, 
-    agency: Optional[str]=None, 
-    platform: Optional[str]=None, 
-    psc: Optional[str]=None
+    years: Optional[List[int]] = Query(None),
+    vendor: Optional[str] = None,
+    parent: Optional[str] = None,
+    cage: Optional[str] = None,
+    domain: Optional[str] = None,
+    agency: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None
 ):
-    df = global_data.get("summary", pd.DataFrame())
-    if df.empty: return {"platform_dist": [], "domain_dist": []}
-    
     filters = {
         "vendor": vendor,
         "parent": parent,
@@ -1327,101 +1718,123 @@ def get_market_distributions(
         "platform": platform,
         "psc": psc
     }
-    filtered = FilterEngine.apply_pandas(df, years, filters)
-    
-    def get_dist(group_col):
-        if group_col not in filtered.columns: return []
-        
-        # 1. Calculate TRUE Total Spend (✅ FIX: Explicit Float Cast)
-        total_market_spend = float(filtered['total_spend'].sum())
-        if total_market_spend == 0: return []
 
-        # 2. Filter for NAMED categories
-        valid_rows = filtered[
-            filtered[group_col].notna() & 
-            (filtered[group_col].astype(str).str.lower() != 'nan')
-        ]
-        
-        # 3. Group and Sort
-        grouped = valid_rows.groupby(group_col, observed=True)['total_spend'].sum().reset_index()
-        grouped = grouped.sort_values('total_spend', ascending=False)
+    where_sql, params = build_summary_where(years, filters)
 
-        # 4. Take Top 4
-        top_4 = grouped.head(4)
-        
-        # 5. Calculate "Other"
-        top_4_sum = float(top_4['total_spend'].sum()) # ✅ FIX: Cast
-        other_val = total_market_spend - top_4_sum
+    total_df = query_summary_df(where_sql, params, "sum(total_spend) as total_spend", limit=1)
+    total = float(total_df["total_spend"].iloc[0]) if (not total_df.empty and "total_spend" in total_df.columns) else 0.0
+    if total <= 0:
+        return {"platform_dist": [], "domain_dist": []}
 
-        # 6. Build Result List
-        results = [
-            {
-                "label": str(r[group_col]), 
-                # ✅ FIX: Cast r['total_spend'] to float
-                "value": round((float(r['total_spend']) / total_market_spend) * 100, 1)
-            } 
-            for _, r in top_4.iterrows()
-        ]
+    def dist_for(col: str) -> List[Dict[str, Any]]:
+        d = query_summary_df(
+            where_sql, params,
+            select_sql=f"{col} as label, sum(total_spend) as spend",
+            group_by_sql="1",  # ✅ ADDED (Groups by 1st column, which is 'label')
+            order_by_sql="spend DESC",
+            limit=10
+        )
+        if d.empty or "label" not in d.columns:
+            return []
+        d = d.dropna(subset=["label"])
+        if d.empty:
+            return []
 
-        # 7. Append "Other"
-        if other_val > 0:
-            results.append({
-                "label": "Other",
-                "value": round((other_val / total_market_spend) * 100, 1)
+        top = d.head(4)
+        top_sum = float(top["spend"].sum()) if "spend" in top.columns else 0.0
+        other_val = max(0.0, total - top_sum)
+
+        out = []
+        for r in top.itertuples(index=False):
+            out.append({
+                "label": str(getattr(r, "label", "")),
+                "value": round((float(getattr(r, "spend", 0.0) or 0.0) / total) * 100.0, 1),
             })
-
-        return results
+        if other_val > 0:
+            out.append({"label": "Other", "value": round((other_val / total) * 100.0, 1)})
+        return out
 
     return {
-        "platform_dist": get_dist('platform_family'), 
-        "domain_dist": get_dist('psc_description') 
+        "platform_dist": dist_for("platform_family"),
+        "domain_dist": dist_for("psc_description"),
     }
+
 
 @app.get("/api/dashboard/map")
 def get_map_data(
-    # CHANGE: Default to None
-    years: Optional[List[int]] = Query(None), 
+    years: Optional[List[int]] = Query(None),
     vendor: Optional[str]=None,
     parent: Optional[str]=None,
-    cage: Optional[str]=None,           # ✅ NEW
-    domain: Optional[str]=None, 
-    agency: Optional[str]=None, 
-    platform: Optional[str]=None, 
+    cage: Optional[str]=None,
+    domain: Optional[str]=None,
+    agency: Optional[str]=None,
+    platform: Optional[str]=None,
     psc: Optional[str]=None
 ):
-    df = global_data.get("summary", pd.DataFrame())
-    geo_df = global_data.get("geo", pd.DataFrame())
-    if df.empty or geo_df.empty: return []
-    
+    # ✅ FIX: Use GLOBAL_CACHE["geo_df"]
+    geo_df = GLOBAL_CACHE.get("geo_df", pd.DataFrame())
+    if geo_df.empty:
+        return []
+
     filters = {
-    "vendor": vendor,
-    "parent": parent,
-    "cage": cage,                        # ✅ NEW
-    "domain": domain,
-    "agency": agency,
-    "platform": platform,
-    "psc": psc
-}
-    filtered_summary = FilterEngine.apply_pandas(df, years, filters)
-    
-    active_vendors = filtered_summary.groupby(['cage_code', 'vendor_name'], observed=True)['total_spend'].sum().reset_index()
-    
-    mapped_vendors = pd.merge(geo_df, active_vendors, on="cage_code", how="inner", suffixes=("_geo", "_act"))
+        "vendor": vendor,
+        "parent": parent,
+        "cage": cage,
+        "domain": domain,
+        "agency": agency,
+        "platform": platform,
+        "psc": psc
+    }
+
+    where_sql, params = build_summary_where(years, filters)
+
+    # Aggregate spend by cage + vendor
+    active_vendors = query_summary_df(
+        where_sql=where_sql,
+        params=params,
+        select_sql="""
+            cage_code,
+            vendor_name,
+            SUM(total_spend) AS total_spend
+        """,
+        group_by_sql="cage_code, vendor_name",
+        order_by_sql="total_spend DESC",
+        limit=50000
+    )
+
+    if active_vendors.empty:
+        return []
+
+    # Merge to geo
+    mapped_vendors = pd.merge(
+        geo_df,
+        active_vendors,
+        on="cage_code",
+        how="inner",
+        suffixes=("_geo", "_act")
+    )
+
+    if mapped_vendors.empty:
+        return []
+
     mapped_vendors = mapped_vendors.sort_values("total_spend", ascending=False).head(50000)
 
-    vendor_col = "vendor_name_act" if "vendor_name_act" in mapped_vendors.columns else ("vendor_name" if "vendor_name" in mapped_vendors.columns else None)
+    vendor_col = "vendor_name_act" if "vendor_name_act" in mapped_vendors.columns else (
+        "vendor_name" if "vendor_name" in mapped_vendors.columns else None
+    )
 
-    return [
-        {
+    out = []
+    for i, r in mapped_vendors.iterrows():
+        out.append({
             "id": i,
             "vendor": (r[vendor_col] if vendor_col else ""),
             "cage": str(r["cage_code"]).strip().upper(),
             "lat": float(r["latitude"]),
             "lon": float(r["longitude"]),
             "spend": float(r["total_spend"]),
-        }
-        for i, r in mapped_vendors.iterrows()
-]
+        })
+    return out
+
 
 
 # --- RESTORED: MARKET OPPORTUNITIES ---
@@ -1574,6 +1987,7 @@ def search_global(q: str):
 #        PLATFORM INTELLIGENCE
 # ==========================================
 
+
 @app.get("/api/platform/profile")
 def get_platform_profile(
     name: str,
@@ -1581,81 +1995,116 @@ def get_platform_profile(
     agency: Optional[str] = None,
     domain: Optional[str] = None
 ):
-    df = global_data.get("summary", pd.DataFrame())
-    if df.empty or not name:
+    if not name:
         return {"found": False}
 
-    # 1. Base Platform Filter (Strict + Strip)
     search_upper = name.strip().upper()
-    
-    # We work on a filtered copy to avoid settingwithcopy warnings on global cache
-    # First, filter by platform to reduce size immediately
-    mask = df["platform_family"].astype(str).str.upper().str.strip().eq(search_upper)
-    
-    # 2. Strict Agency Filter
-    if agency:
-        safe_ag = sanitize(agency)
-        mask = mask & df["sub_agency"].astype(str).str.upper().str.strip().eq(safe_ag)
 
-    if domain:
-        mask = mask & df["market_segment"].astype(str).str.upper().str.strip().eq(sanitize(domain))
+    # Build filters using the SAME semantics as your original:
+    # platform is strict equality; agency/domain strict equality
+    filters = {
+        "vendor": None,
+        "parent": None,
+        "cage": None,
+        "domain": domain,
+        "agency": agency,
+        "platform": search_upper,
+        "psc": None
+    }
 
-    filtered = df[mask].copy()
+    where_sql, params = build_summary_where(None, filters)
 
-    # 3. APPLY FISCAL YEAR FILTER (The Fix)
-    if years and len(years) > 0:
-        # Check if we have month/year columns (Summary Data)
-        if "month" in filtered.columns and "year" in filtered.columns:
-            # Ensure numeric
-            m = pd.to_numeric(filtered["month"], errors='coerce').fillna(1).astype(int)
-            y = pd.to_numeric(filtered["year"], errors='coerce').fillna(0).astype(int)
-            
-            # FY Calculation: If Month >= 10, FY = Year + 1
-            filtered["fy"] = y + (m >= 10).astype(int)
-            
-            # Filter by FY
-            filtered = filtered[filtered["fy"].isin(years)]
-            
-        elif "year" in filtered.columns:
-            # Fallback (Just use CY if month is missing, but Summary usually has it)
-            filtered = filtered[filtered["year"].isin(years)]
+    # Pull minimal rows needed for stats
+    df = query_summary_df(
+        where_sql=where_sql,
+        params=params,
+        select_sql="""
+            platform_family,
+            vendor_name,
+            cage_code,
+            sub_agency,
+            SUM(total_spend) AS total_spend,
+            SUM(contract_count) AS contract_count
+        """,
+        group_by_sql="platform_family, vendor_name, cage_code, sub_agency",  # ✅ ADDED
+        order_by_sql="total_spend DESC",
+        limit=0
+    )
 
-    # Get official name safely
-    official_name = name
-    if not filtered.empty:
-        official_name = filtered["platform_family"].mode()[0]
-    elif not df[df["platform_family"].astype(str).str.upper().eq(search_upper)].empty:
-        official_name = df[df["platform_family"].astype(str).str.upper().eq(search_upper)]["platform_family"].mode()[0]
-
-    if filtered.empty:
+    if df.empty:
         return {
-            "found": True, "name": official_name, "total_obligations": 0.0,
+            "found": True, "name": name, "total_obligations": 0.0,
             "contractor_count": 0, "contract_count": 0, "top_vendors": [], "top_agencies": []
         }
 
-    # 4. Calculate Stats
-    total_obligations = float(filtered["total_spend"].sum())
-    contract_count = int(filtered["contract_count"].sum())
-    contractor_count = int(filtered["vendor_name"].nunique())
+    # Fiscal year filtering (your exact logic)
+    if years and len(years) > 0:
+        ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
+        if ys:
+            # We need month/year for FY; easiest is to re-query with month/year and filter in python
+            df2 = query_summary_df(
+                where_sql=where_sql,
+                params=params,
+                select_sql="""
+                    platform_family,
+                    vendor_name,
+                    cage_code,
+                    sub_agency,
+                    CAST(year AS INTEGER) AS year_num,
+                    CAST(COALESCE(month, 1) AS INTEGER) AS month_num,
+                    total_spend,
+                    contract_count
+                """,
+                # No GROUP BY needed here since we aren't summing yet
+                limit=0
+            )
+            if df2.empty:
+                return {
+                    "found": True, "name": name, "total_obligations": 0.0,
+                    "contractor_count": 0, "contract_count": 0, "top_vendors": [], "top_agencies": []
+                }
 
-    # 5. Top Vendors
-    cage_col = "cage_code" if "cage_code" in filtered.columns else "vendor_cage"
-    
-    if cage_col in filtered.columns:
-        top_vendors_df = (
-            filtered.groupby([cage_col, "vendor_name"], observed=True)["total_spend"]
-            .sum().reset_index().sort_values("total_spend", ascending=False).head(10)
-        )
-        top_vendors = [
-            {"name": r["vendor_name"], "cage": r[cage_col], "total": float(r["total_spend"])}
-            for _, r in top_vendors_df.iterrows()
-        ]
-    else:
-        top_vendors_df = filtered.groupby("vendor_name", observed=True)["total_spend"].sum().nlargest(10)
-        top_vendors = [{"name": n, "total": v} for n, v in top_vendors_df.items()]
+            df2["year_num"] = pd.to_numeric(df2["year_num"], errors="coerce").fillna(0).astype(int)
+            df2["month_num"] = pd.to_numeric(df2["month_num"], errors="coerce").fillna(1).astype(int)
+            df2["fy"] = df2["year_num"] + (df2["month_num"] >= 10).astype(int)
 
-    # 6. Top Agencies
-    top_agencies = filtered.groupby("sub_agency", observed=True)["total_spend"].sum().nlargest(5).index.tolist()
+            df2 = df2[df2["fy"].isin(ys)]
+            if df2.empty:
+                return {
+                    "found": True, "name": name, "total_obligations": 0.0,
+                    "contractor_count": 0, "contract_count": 0, "top_vendors": [], "top_agencies": []
+                }
+
+            # Now re-aggregate back to your expected stats universe
+            df = (
+                df2.groupby(["platform_family", "vendor_name", "cage_code", "sub_agency"], dropna=False)
+                .agg(total_spend=("total_spend", "sum"), contract_count=("contract_count", "sum"))
+                .reset_index()
+            )
+
+    official_name = name
+    try:
+        official_name = df["platform_family"].mode()[0]
+    except Exception:
+        official_name = name
+
+    total_obligations = float(pd.to_numeric(df["total_spend"], errors="coerce").fillna(0).sum())
+    contract_count = int(pd.to_numeric(df["contract_count"], errors="coerce").fillna(0).sum())
+    contractor_count = int(df["vendor_name"].nunique())
+
+    top_vendors_df = (
+        df.groupby(["cage_code", "vendor_name"], dropna=False)["total_spend"]
+        .sum().reset_index().sort_values("total_spend", ascending=False).head(10)
+    )
+    top_vendors = [
+        {"name": r["vendor_name"], "cage": r["cage_code"], "total": float(r["total_spend"])}
+        for _, r in top_vendors_df.iterrows()
+    ]
+
+    top_agencies = (
+        df.groupby("sub_agency", dropna=False)["total_spend"]
+        .sum().sort_values(ascending=False).head(5).index.astype(str).tolist()
+    )
 
     return {
         "found": True,
@@ -1667,60 +2116,6 @@ def get_platform_profile(
         "top_agencies": top_agencies,
     }
 
-@app.get("/api/platform/top")
-def get_top_platforms(
-    limit: int = 12,
-    years: Optional[List[int]] = Query(None),
-    vendor: Optional[str] = None,
-    agency: Optional[str] = None,
-    domain: Optional[str] = None,
-    platform: Optional[str] = None  # ✅ 1. Add Parameter
-):
-    df = GLOBAL_CACHE["df"]
-    if df.empty: return []
-
-    mask = df['platform_family'].notna() & (df['platform_family'] != '')
-
-    # Manual Strict Filtering
-    if agency:
-        safe_ag = sanitize(agency)
-        mask = mask & df["sub_agency"].astype(str).str.upper().str.strip().eq(safe_ag)
-
-    if vendor:
-        safe_v = sanitize(vendor)
-        mask = mask & df["vendor_name"].astype(str).str.upper().str.contains(safe_v, na=False, regex=False)
-
-    if years and len(years) > 0:
-        mask = mask & df["year"].isin(years)
-
-    if domain:
-        safe_d = sanitize(domain)
-        mask = mask & df["market_segment"].astype(str).str.upper().str.strip().eq(safe_d)
-
-    # ✅ 2. Add Platform Logic
-    if platform:
-        safe_p = sanitize(platform)
-        # We use strict equality here to ensure exact matches, 
-        # or you can use .contains() if you want fuzzy matching
-        mask = mask & df["platform_family"].astype(str).str.upper().str.strip().eq(safe_p)
-
-    filtered = df[mask]
-    
-    grouped = filtered.groupby('platform_family', observed=True).agg({
-        'total_spend': 'sum',
-        'contract_count': 'sum'
-    }).reset_index()
-
-    grouped = grouped.sort_values('total_spend', ascending=False).head(limit)
-
-    return [
-        {
-            "name": r['platform_family'],
-            "spend": float(r['total_spend']),
-            "contracts": int(r['contract_count'])
-        }
-        for _, r in grouped.iterrows()
-    ]
 
 @app.get("/api/platform/contractors")
 def get_platform_contractors(
@@ -1730,54 +2125,58 @@ def get_platform_contractors(
     years: Optional[List[int]] = Query(None),
     agency: Optional[str] = None
 ):
-    df = global_data.get("summary", pd.DataFrame())
-    if df.empty or not name: return []
+    if not name:
+        return []
 
     limit = max(1, min(int(limit), 500))
     offset = max(0, int(offset))
 
-    # Base Filter
-    search_upper = name.strip().upper()
-    mask = df["platform_family"].astype(str).str.upper().str.strip().eq(search_upper)
+    safe_plat = sanitize(name)
 
-    # Global Filters
-    if agency:
-        safe_ag = sanitize(agency)
-        # ✅ FIX: Check sub_agency ONLY
-        mask = mask & df["sub_agency"].astype(str).str.upper().str.strip().eq(safe_ag)
+    # Same strict platform filter, strict sub_agency filter
+    filters = {
+        "vendor": None,
+        "parent": None,
+        "cage": None,
+        "domain": None,
+        "agency": agency,
+        "platform": safe_plat,
+        "psc": None
+    }
 
-    if years and len(years) > 0:
-        mask = mask & df["year"].isin(years)
+    where_sql, params = build_summary_where(years, filters)
 
-    filtered = df[mask]
-    if filtered.empty: return []
+    df = query_summary_df(
+        where_sql=where_sql,
+        params=params,
+        select_sql="""
+            cage_code,
+            vendor_name,
+            SUM(total_spend) AS total_spend,
+            SUM(contract_count) AS contract_count
+        """,
+        group_by_sql="cage_code, vendor_name",  # ✅ ADDED
+        order_by_sql="total_spend DESC",
+        limit=0
+    )
 
-    # Aggregation
-    cage_col = "cage_code" if "cage_code" in filtered.columns else "vendor_cage"
+    if df.empty:
+        return []
 
-    if cage_col:
-        grouped = (
-            filtered
-            .groupby([cage_col, "vendor_name"], observed=True)
-            .agg(total_spend=("total_spend", "sum"), contract_count=("contract_count", "sum"))
-            .reset_index()
-            .sort_values("total_spend", ascending=False)
-        )
-        
-        page = grouped.iloc[offset: offset + limit]
-        
-        return [
-            {
-                "name": r["vendor_name"],
-                "cage": r[cage_col],
-                "total": float(r["total_spend"]),
-                "contracts": int(r["contract_count"]),
-                "role": "PRIME"
-            }
-            for _, r in page.iterrows()
-        ]
-    
-    return []
+    grouped = df.sort_values("total_spend", ascending=False, kind="mergesort")
+    page = grouped.iloc[offset: offset + limit]
+
+    return [
+        {
+            "name": r["vendor_name"],
+            "cage": r["cage_code"],
+            "total": float(r["total_spend"]),
+            "contracts": int(r["contract_count"]),
+            "role": "PRIME"
+        }
+        for _, r in page.iterrows()
+    ]
+
 
 
 @app.get("/api/platform/parts")
@@ -1856,14 +2255,15 @@ def get_platform_parts(
 
 @app.get("/api/platform/parts/count")
 def get_platform_parts_count(name: str):
-    safe_name = sanitize(name)
+    # ✅ FIX: Normalize then quote safely
+    safe_val = sql_literal((name or "").strip())
 
     # 1. Fast check to avoid wasting Athena costs if platform doesn't exist
     map_check = run_athena_query(f"""
         SELECT COUNT(*) AS n
         FROM "market_intel_silver"."ref_platform_map"
-        WHERE (platform_family = '{safe_name}'
-               OR UPPER(platform_family) LIKE '%' || UPPER('{safe_name}') || '%')
+        WHERE (platform_family = {safe_val}
+               OR UPPER(platform_family) LIKE {sql_like_contains((name or "").strip().upper())} ESCAPE '\\\\')
           AND wsdc_code_ref IS NOT NULL
           AND TRIM(CAST(wsdc_code_ref AS VARCHAR)) <> ''
     """)
@@ -1872,7 +2272,6 @@ def get_platform_parts_count(name: str):
         return {"count": 0}
 
     # 2. Count the Universe of Parts
-    # We mirror the logic of 'get_platform_parts' to ensure the numbers align
     query = f"""
     WITH platform_codes AS (
         SELECT DISTINCT TRIM(CAST(wsdc_code_ref AS VARCHAR)) AS wsdc_code_ref
@@ -1880,8 +2279,8 @@ def get_platform_parts_count(name: str):
         WHERE wsdc_code_ref IS NOT NULL
           AND TRIM(CAST(wsdc_code_ref AS VARCHAR)) <> ''
           AND (
-                platform_family = '{safe_name}'
-             OR UPPER(platform_family) LIKE '%' || UPPER('{safe_name}') || '%'
+                platform_family = {safe_val}
+             OR UPPER(platform_family) LIKE '%' || UPPER({safe_val}) || '%'
           )
     )
     SELECT COUNT(DISTINCT w.niin) as total
@@ -1893,7 +2292,6 @@ def get_platform_parts_count(name: str):
     results = cached_athena_query(query)
 
     if results and len(results) > 0:
-        # Athena returns numbers as strings sometimes depending on the driver, ensure int
         val = results[0].get('total', 0)
         return {"count": int(val)}
 
@@ -1986,7 +2384,8 @@ def get_company_opportunities_recommended(cage: Optional[str] = None, name: Opti
     if not clean_naics_list:
         return []
 
-    df_opps = global_data.get("opportunities", pd.DataFrame())
+    # ✅ FIX: Use GLOBAL_CACHE["df_opportunities"]
+    df_opps = GLOBAL_CACHE.get("df_opportunities", pd.DataFrame())
     if df_opps.empty:
         return []
 
@@ -2017,8 +2416,8 @@ def get_company_opportunities_recommended(cage: Optional[str] = None, name: Opti
 
 @app.get("/api/company/profile")
 def get_company_profile(cage: Optional[str] = None, name: Optional[str] = None):
-    profiles_df = global_data.get("profiles", pd.DataFrame())
-    loc_map = GLOBAL_CACHE["location_map"] # ✅ Use the new fast map
+    profiles_df = GLOBAL_CACHE.get("profiles_df", pd.DataFrame())
+    loc_map = GLOBAL_CACHE.get("location_map", {}) or {}
     
     # 1. SPECIFIC CAGE (Drill-down) -> CHILD LOGIC
     if cage:
@@ -2127,22 +2526,21 @@ def get_company_network(name: str, cage: Optional[str] = None):
     is_drill_down = (cage and len(cage) > 2 and cage != 'AGGREGATE')
     
     def run_duck_query(sql, params):
-        global DUCK_CONN
         try:
             with DUCK_LOCK:
-                if DUCK_CONN is None:
-                    DUCK_CONN = duckdb.connect(":memory:", read_only=False)
-                    DUCK_CONN.execute("INSTALL parquet; LOAD parquet;")
-                
-                net_path = LOCAL_CACHE_DIR / "network.parquet"
-                if not net_path.exists(): return []
-                
+                conn = ensure_duck_conn()
+
+                net_path = (LOCAL_CACHE_DIR / "network.parquet").resolve()
+                if not net_path.exists():
+                    return []
+
                 # Use read_parquet directly
                 final_sql = sql.replace("FROM network_source", f"FROM read_parquet('{str(net_path)}')")
-                return DUCK_CONN.execute(final_sql, params).fetchdf().to_dict(orient="records")
+                return conn.execute(final_sql, params).fetchdf().to_dict(orient="records")
         except Exception as e:
             logger.error(f"Network query failed: {e}")
             return []
+
 
     # SQL Template for Aggregation
     sql_template = """
@@ -2432,11 +2830,7 @@ def get_company_parts_count(cage: str, rollup: Optional[str] = None):
     try:
         with DUCK_LOCK:
             global DUCK_CONN
-            if DUCK_CONN is None:
-                DUCK_CONN = duckdb.connect(":memory:", read_only=False)
-                DUCK_CONN.execute("INSTALL parquet; LOAD parquet;")
-                DUCK_CONN.execute("PRAGMA threads=4;")
-                DUCK_CONN.execute("PRAGMA enable_object_cache=true;")
+            ensure_duck_conn()
 
             if rollup == "nsn":
                 sql = """
@@ -2553,45 +2947,46 @@ def get_company_awards(
 
 @app.get("/api/company/opportunities")
 def get_company_opportunities(cage: Optional[str] = None, name: Optional[str] = None):
-    # 1. Access Main Data Cache
-    df = global_data.get("summary", pd.DataFrame())
-    if df.empty: return []
-
     target_naics = set()
-    
-    # 2. MATCHING LOGIC (The Fix)
-    # We use 'str.contains' so "Lockheed" successfully matches "Lockheed Martin Corp"
-    # This ensures we actually find the NAICS codes attached to the profile.
+
+    # 1) Match parent name -> collect NAICS codes (contains, like your original)
     if name:
         clean_name = sanitize(name)
-        if 'clean_parent' in df.columns:
-            mask = df['clean_parent'].astype(str).str.contains(clean_name, case=False, regex=False)
-            found_naics = df.loc[mask, 'naics_code'].dropna().unique().tolist()
-            target_naics.update(found_naics)
+        naics_df = query_summary_df(
+            where_sql="upper(clean_parent) LIKE ? ESCAPE '\\\\'",
+            params=[_like_param_contains(clean_name)],
+            select_sql="DISTINCT naics_code",
+            limit=5000
+        )
+        if not naics_df.empty and "naics_code" in naics_df.columns:
+            for v in naics_df["naics_code"].dropna().tolist():
+                target_naics.add(v)
 
+    # 2) Match cage -> collect NAICS codes (exact)
     if cage and cage != "AGGREGATE":
         clean_cage = sanitize(cage)
-        cage_col = 'cage_code' if 'cage_code' in df.columns else 'vendor_cage'
-        if cage_col in df.columns:
-            mask = df[cage_col] == clean_cage
-            found_naics = df.loc[mask, 'naics_code'].dropna().unique().tolist()
-            target_naics.update(found_naics)
+        cage_df = query_summary_df(
+            where_sql="upper(cage_code) = ?",
+            params=[clean_cage],
+            select_sql="DISTINCT naics_code",
+            limit=5000
+        )
+        if not cage_df.empty and "naics_code" in cage_df.columns:
+            for v in cage_df["naics_code"].dropna().tolist():
+                target_naics.add(v)
 
-    # 3. CLEAN UP (Strip descriptions)
+    # 3) Clean up NAICS list (your logic)
     clean_naics_list = []
     for n in target_naics:
         s = str(n).split('.')[0].split(' - ')[0].strip()
-        if len(s) >= 5: clean_naics_list.append(s)
-            
-    # DEBUG: You should see ~5-10 codes here now (336411, 336413, 541715, etc.)
+        if len(s) >= 5:
+            clean_naics_list.append(s)
+
     print(f"🔍 OPPS DEBUG: Name='{name}' | Found {len(clean_naics_list)} codes", flush=True)
 
     if not clean_naics_list:
         return []
 
-    # 4. QUERY (Matches the Athena Simulation exactly)
-    # Use LIKE for partial matches ("336411" matches "336411 - Aircraft")
-        # NAICS values are digits; enforce digits-only and build safe LIKEs
     safe_codes: List[str] = []
     for code in clean_naics_list:
         c = "".join(ch for ch in str(code) if ch.isdigit())
@@ -2622,6 +3017,7 @@ def get_company_opportunities(cage: Optional[str] = None, name: Optional[str] = 
     return run_athena_query(query)
 
 
+
 # ==========================================
 #        NEWS INTELLIGENCE
 # ==========================================
@@ -2632,14 +3028,24 @@ def get_company_opportunities(cage: Optional[str] = None, name: Optional[str] = 
 
 @app.get("/api/company/news")
 def get_company_news(name: str, city: Optional[str] = None, state: Optional[str] = None):
-    # DEBUG: Check your terminal logs to confirm 'city' is actually being passed!
-    # If this prints 'City: None' or 'City: ', then your View/ETL update hasn't worked yet.
     logger.info("NEWS LOOKUP name=%s city=%s state=%s", name, city, state)
 
-    if not name: return []
-    
+    if not name:
+        return []
+
+    # Cache key includes local context
+    key_name = (name or "").strip().upper()
+    key_city = (city or "").strip().upper()
+    key_state = (state or "").strip().upper()
+    cache_key = f"{key_name}|{key_city}|{key_state}"
+
+    cached = NEWS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     # 1. Clean Company Name
     clean_name = name.upper()
+
     suffixes = [" CORPORATION", " COMPANY", " INC.", " INC", " LLC", " CORP.", " CORP", " LTD.", " LTD", ","]
     for suffix in suffixes:
         if clean_name.endswith(suffix):
@@ -2745,16 +3151,19 @@ def get_company_news(name: str, city: Optional[str] = None, state: Optional[str]
             seen_topics.update(current_topics)
 
     # ✅ FINAL CHANGE: NO FALLBACK FOR LOCAL
-    # If is_local_search is True, we return whatever strict matches we found (even if empty).
-    # We DO NOT fallback to raw_items or generic news.
     if is_local_search:
+        NEWS_CACHE.set(cache_key, final_items)
         return final_items
-        
+
     # Only use fallback for Corporate View (if everything got filtered by mistake)
     if not final_items and raw_items:
-        return raw_items[:5]
+        out = raw_items[:5]
+        NEWS_CACHE.set(cache_key, out)
+        return out
 
+    NEWS_CACHE.set(cache_key, final_items)
     return final_items
+
 
 # ==========================================
 #        NSN / PART INTELLIGENCE
@@ -2872,7 +3281,7 @@ def get_nsn_suppliers(nsn: str):
             MAX(action_date) as last_sold,
             SUM(spend_amount) as total_revenue
         FROM "market_intel_gold"."dashboard_master_view"
-        WHERE substr(regexp_replace(nsn, '[^0-9]', ''), 5, 9) = '{safe_niin}'
+        WHERE substr(regexp_replace(nsn, '[^0-9]', ''), 5, 9) = {sql_literal(safe_niin)}
         GROUP BY 1
     ),
     
@@ -2883,7 +3292,7 @@ def get_nsn_suppliers(nsn: str):
             -- ✅ Collect all part numbers for this CAGE into a single comma-separated string
             array_join(array_agg(DISTINCT part_number), ', ') as part_numbers
         FROM "market_intel_silver"."ref_approved_sources"
-        WHERE LPAD(CAST(niin AS VARCHAR), 9, '0') = '{safe_niin}'
+        WHERE LPAD(CAST(niin AS VARCHAR), 9, '0') = {sql_literal(safe_niin)}
         GROUP BY 1
     ),
 
@@ -3403,13 +3812,12 @@ def search_awards(
 
         # A. Get Total Count (Fast)
         # We need to manually construct the count query with the same params
-        # Note: We use DUCK_CONN directly here to keep it efficient
         with DUCK_LOCK:
-            if DUCK_CONN is None:
-                DUCK_CONN = duckdb.connect(str(DUCKDB_PATH), read_only=False)
-            
-            count_sql = f"SELECT COUNT(*) FROM read_parquet('{str(path)}') WHERE {where_sql}"
-            total_count = DUCK_CONN.execute(count_sql, tuple(params)).fetchone()[0]
+            conn = ensure_duck_conn()
+
+            count_sql = f"SELECT COUNT(*) FROM read_parquet(?) WHERE {where_sql}"
+            total_count = conn.execute(count_sql, (str(path),) + tuple(params)).fetchone()[0]
+
 
         # B. Get Page Data
         df = get_subset_from_disk(
@@ -3477,8 +3885,8 @@ def get_pipeline_live(
     limit: int = 50,
     offset: int = 0
 ):
-    # 1. Access RAM Cache
-    df = global_data.get("opportunities", pd.DataFrame())
+    # ✅ FIX: Use GLOBAL_CACHE["df_opportunities"]
+    df = GLOBAL_CACHE.get("df_opportunities", pd.DataFrame())
     if df.empty: return []
 
     mask = pd.Series(True, index=df.index)
@@ -3502,22 +3910,25 @@ def get_pipeline_live(
 
     # --- Global Bridge Filters ---
 
-    # 1. KEYWORD (Uses Pre-Computed 'search_text' for speed)
+    # 1. KEYWORD
     if keyword:
         safe_k = sanitize(keyword)
-        mask &= df['search_text'].str.contains(safe_k, regex=False, na=False)
+        # Search Title OR Description (check if search_text exists, else dynamic)
+        if 'search_text' in df.columns:
+            mask &= df['search_text'].str.contains(safe_k, regex=False, na=False)
+        else:
+            mask &= (df['title'].astype(str).str.upper().str.contains(safe_k, regex=False, na=False)) | \
+                    (df['description'].astype(str).str.upper().str.contains(safe_k, regex=False, na=False))
 
-    # 2. AGENCY (Robust DLA Logic restored)
+    # 2. AGENCY
     if agency:
         safe_ag = sanitize(agency)
         if "DLA" in safe_ag or "LOGISTICS" in safe_ag:
-             # Match DLA in agency OR sub_agency OR source_system
              ag_mask = (df['agency'].astype(str).str.upper().str.contains("LOGISTICS", regex=False, na=False)) | \
                        (df['sub_agency'].astype(str).str.upper().str.contains("LOGISTICS", regex=False, na=False)) | \
                        (df['source_system'] == 'DLA')
              mask &= ag_mask
         else:
-             # Match Agency OR Sub-Agency
              ag_mask = (df['agency'].astype(str).str.upper().str.contains(safe_ag, regex=False, na=False)) | \
                        (df['sub_agency'].astype(str).str.upper().str.contains(safe_ag, regex=False, na=False))
              mask &= ag_mask
@@ -3525,15 +3936,13 @@ def get_pipeline_live(
     # 3. PLATFORM
     if platform:
         safe_plat = sanitize(platform)
-        # Search Title OR Description
         p_mask = (df['title'].astype(str).str.upper().str.contains(safe_plat, regex=False, na=False)) | \
                  (df['description'].astype(str).str.upper().str.contains(safe_plat, regex=False, na=False))
         mask &= p_mask
 
-    # 4. DOMAIN (Heuristic Logic Restored)
+    # 4. DOMAIN
     if domain:
         safe_domain = sanitize(domain)
-        # Heuristic: If digit start, search codes. Else search text.
         if len(safe_domain) > 0 and (safe_domain[0].isdigit() or (len(safe_domain) == 4 and safe_domain[0].isalpha())):
             d_mask = (df['psc'].astype(str).str.startswith(safe_domain, na=False)) | \
                      (df['naics'].astype(str).str.startswith(safe_domain, na=False))
@@ -3543,26 +3952,22 @@ def get_pipeline_live(
                      (df['description'].astype(str).str.upper().str.contains(safe_domain, regex=False, na=False))
             mask &= d_mask
 
-    # 5. Apply & Sort
     filtered = df[mask]
     
-    # Sort by Deadline (Nearest First)
-    filtered = filtered.sort_values("deadline", ascending=True)
+    # Sort by Deadline
+    if "deadline" in filtered.columns:
+        filtered = filtered.sort_values("deadline", ascending=True)
 
-    # 6. Paginate
     start = int(offset)
     end = start + int(limit)
     page = filtered.iloc[start:end]
 
-    # 7. Format Output (Restoring 'days_left' calc)
     results = []
     today = date.today()
     
     for row in page.itertuples():
-        # Calculate days_left in Python
         days_left = 0
         try:
-            # Assumes deadline is ISO format YYYY-MM-DD...
             dt_str = str(row.deadline)[:10]
             dt_obj = datetime.strptime(dt_str, "%Y-%m-%d").date()
             delta = dt_obj - today
@@ -3576,17 +3981,17 @@ def get_pipeline_live(
             "agency": row.agency,
             "sub_agency": row.sub_agency,
             "sol_num": row.sol_num,
-            "due_date": row.deadline, # Frontend alias
+            "due_date": row.deadline,
             "deadline": row.deadline,
-            "set_aside": row.set_aside_type, # Frontend alias
+            "set_aside": row.set_aside_type,
             "set_aside_type": row.set_aside_type,
             "naics": row.naics,
             "psc": row.psc,
-            "description": str(row.description)[:2000] if row.description else "", # Limit desc length
+            "description": str(row.description)[:2000] if row.description else "",
             "primarycontactemail": row.poc_email,
             "source_system": row.source_system,
             "days_left": int(days_left),
-            "total_matches": len(filtered) # Replaces SQL Window Function
+            "total_matches": len(filtered)
         })
 
     return results
