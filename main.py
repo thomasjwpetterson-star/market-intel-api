@@ -564,7 +564,6 @@ def run_athena_query(query: str):
                 break
             time.sleep(poll_interval_s)
 
-        # ✅ TIMEOUT: stop query if still running
         if final_state not in ["SUCCEEDED", "FAILED", "CANCELLED"]:
             final_state = "TIMED_OUT"
             _cancel_athena_query(qid)
@@ -577,16 +576,25 @@ def run_athena_query(query: str):
                 reason = (status["QueryExecution"]["Status"] or {}).get("StateChangeReason", "") if status else ""
             except Exception:
                 reason = ""
-            # ✅ Failure: stop query just in case it is still burning resources
             _cancel_athena_query(qid)
             logger.error("Athena query failed state=%s qid=%s reason=%s", final_state, qid, reason)
             return []
 
+        # ✅ SUCCESS PATH
         outloc = status["QueryExecution"]["ResultConfiguration"]["OutputLocation"]
         key = outloc.replace(f"s3://{BUCKET_NAME}/", "")
-        obj = s3.get_object(Bucket=BUCKET_NAME, Key=key)
-        df = df.where(pd.notnull(df), None)
         
+        # 1. Get object from S3
+        obj = s3.get_object(Bucket=BUCKET_NAME, Key=key)
+        
+        # 2. Read into DataFrame (This line was likely missing/skipped causing your error)
+        df = pd.read_csv(BytesIO(obj["Body"].read()))
+        
+        # 3. Clean NaN values (The Fix)
+        # We replace NaN with None so JSON conversion works
+        df = df.astype(object).where(pd.notnull(df), None)
+        
+        # 4. Convert to Dict
         out = df.to_dict(orient="records")
 
         logger.info("Athena query ok qid=%s rows=%s dur_ms=%.1f",
@@ -594,7 +602,6 @@ def run_athena_query(query: str):
         return out
 
     except Exception:
-        # ✅ Exception: stop query best-effort
         _cancel_athena_query(qid)
         logger.exception("Athena query exception qid=%s", qid)
         return []
