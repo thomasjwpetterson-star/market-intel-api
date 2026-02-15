@@ -27,6 +27,7 @@ from pathlib import Path
 import logging
 import random
 import anyio 
+import math
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -320,12 +321,36 @@ NEWS_CACHE = TTLQueryCache(
 
 
 
-# ✅ Pass lifespan to FastAPI
 app = FastAPI(
     title="Mimir Hybrid Intelligence API - Instant Mode V5",
     default_response_class=JSONResponse,
     lifespan=lifespan 
 )
+
+# ✅ FIX: Add a middleware to catch NaNs in responses or handle it in your dataframes
+# The safest surgical fix without rewriting every endpoint is to enforce simplejson or handle it in the response class.
+# However, for FastAPI/Starlette, the easiest fix is to patch the dataframe conversion or use a custom JSON encoder.
+
+# Better yet, let's fix it at the source in `reload_all_data` and your query functions.
+# But since you asked for a SURGICAL fix for the error log, here is a patch you can add 
+# right after `app = FastAPI(...)`
+
+from fastapi.encoders import jsonable_encoder
+
+@app.middleware("http")
+async def sanitize_nan_responses(request: Request, call_next):
+    try:
+        response = await call_next(request)
+        return response
+    except ValueError as e:
+        if "nan" in str(e).lower():
+            logger.error(f"NaN Detection: {request.url.path} returned NaNs. Please fix data source.")
+            # We can't easily fix the stream here, but it prevents the hard crash log loop.
+            return JSONResponse(
+                status_code=500, 
+                content={"error": "Data formatting error (NaN values detected). Please reload."}
+            )
+        raise e
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -560,8 +585,9 @@ def run_athena_query(query: str):
         outloc = status["QueryExecution"]["ResultConfiguration"]["OutputLocation"]
         key = outloc.replace(f"s3://{BUCKET_NAME}/", "")
         obj = s3.get_object(Bucket=BUCKET_NAME, Key=key)
-        df = pd.read_csv(BytesIO(obj["Body"].read()))
-        out = df.where(pd.notnull(df), None).to_dict(orient="records")
+        df = df.where(pd.notnull(df), None)
+        
+        out = df.to_dict(orient="records")
 
         logger.info("Athena query ok qid=%s rows=%s dur_ms=%.1f",
                     qid, len(out), (time.time() - start_ts) * 1000.0)
@@ -981,16 +1007,18 @@ def reload_all_data():
              list(executor.map(fetch_file, files))
         
         # 3. REFRESH DUCKDB VIEWS (Using writer connection)
+        # 3. REFRESH DUCKDB VIEWS (Using writer connection)
         with DUCK_INIT_LOCK:
             conn = ensure_duck_conn()
-            
+    
             prod_path = str((LOCAL_CACHE_DIR / "products.parquet").resolve())
             trans_path = str((LOCAL_CACHE_DIR / "transactions.parquet").resolve())
             net_path = str((LOCAL_CACHE_DIR / "network.parquet").resolve())
 
-            conn.execute("CREATE OR REPLACE VIEW v_products AS SELECT * FROM read_parquet(?);", [prod_path])
-            conn.execute("CREATE OR REPLACE VIEW v_transactions AS SELECT * FROM read_parquet(?);", [trans_path])
-            conn.execute("CREATE OR REPLACE VIEW v_network AS SELECT * FROM read_parquet(?);", [net_path])
+            # ✅ FIX: Use f-strings instead of parameters for CREATE VIEW
+            conn.execute(f"CREATE OR REPLACE VIEW v_products AS SELECT * FROM read_parquet('{prod_path}');")
+            conn.execute(f"CREATE OR REPLACE VIEW v_transactions AS SELECT * FROM read_parquet('{trans_path}');")
+            conn.execute(f"CREATE OR REPLACE VIEW v_network AS SELECT * FROM read_parquet('{net_path}');")
 
         # 4. FETCH MAPPINGS (Athena)
         cage_map: Dict[str, str] = {}
@@ -1129,8 +1157,7 @@ def reload_all_data():
                     summary_temp_path.replace(summary_final_path) 
                 
                 conn.execute(
-                    "CREATE OR REPLACE VIEW v_summary AS SELECT * FROM read_parquet(?);",
-                    [str(summary_final_path)],
+                    f"CREATE OR REPLACE VIEW v_summary AS SELECT * FROM read_parquet('{str(summary_final_path)}');"
                 )
             
             logger.info("Summary updated safely via atomic swap.")
