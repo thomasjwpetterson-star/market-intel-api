@@ -629,7 +629,6 @@ def get_subset_from_disk(
                 raise HTTPException(status_code=400, detail="Invalid columns selection")
 
     # 2. Strict SQL Injection Check on WHERE clause
-    # We DO NOT allow semicolons or comments even if parameterized
     if ";" in where_clause or "--" in where_clause:
          logger.error(f"Security Alert: Injection attempt in WHERE: {where_clause}")
          raise HTTPException(status_code=400, detail="Invalid query format")
@@ -652,9 +651,7 @@ def get_subset_from_disk(
         if order_by_sql:
             parts = order_by_sql.strip().split()
             col = parts[0]
-            # Must be in allowed list
             if col not in ALLOWED_ORDER_BY:
-                 # Fallback to safe default rather than crashing
                  col = "action_date"
             
             direction = parts[1].upper() if len(parts) > 1 else "DESC"
@@ -664,7 +661,6 @@ def get_subset_from_disk(
             order_clause = f" ORDER BY {col} {direction}"
 
         # 3. Construct Query
-        # We parameterize the filename logic to avoid path traversal
         sql = f"SELECT {columns_sql} FROM read_parquet(?) WHERE {where_clause}{order_clause}"
         
         local_params = list(params)
@@ -679,7 +675,10 @@ def get_subset_from_disk(
         with DUCK_LOCK:
             ensure_duck_conn()
             all_params = (str(path),) + tuple(local_params)
-            return DUCK_CONN.execute(sql, all_params).fetchdf()
+            df = DUCK_CONN.execute(sql, all_params).fetchdf()
+            
+            # ✅ FIX: Sanitize NaN values to ensure valid JSON
+            return df.fillna(0).astype(object).where(pd.notnull(df), None)
 
     except Exception:
         logger.exception(f"DuckDB Query Failed: {filename}")
@@ -800,7 +799,9 @@ def query_summary_df(
     # ✅ FIX: Always use the lock and standard ensure_duck_conn
     with DUCK_LOCK:
         ensure_duck_conn() 
-        return DUCK_CONN.execute(sql, local_params).fetchdf()
+        df = DUCK_CONN.execute(sql, local_params).fetchdf()
+        # Sanitize NaNs -> 0 or None
+        return df.fillna(0).astype(object).where(pd.notnull(df), None)
 
 
 
@@ -1067,6 +1068,8 @@ def reload_all_data():
                         .str.replace(r",+$", "", regex=True)
                         .str.replace(r"^,+", "", regex=True)
                     )
+                
+                df = df.fillna(0).astype(object).where(pd.notnull(df), None)
 
                 if file == "geo.parquet": new_global_cache["geo_df"] = df
                 if file == "profiles.parquet": new_global_cache["profiles_df"] = df
