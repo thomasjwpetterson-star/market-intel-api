@@ -1069,7 +1069,21 @@ def reload_all_data():
                         .str.replace(r"^,+", "", regex=True)
                     )
                 
-                df = df.fillna(0).astype(object).where(pd.notnull(df), None)
+                # ✅ SAFE NULL HANDLING for pyarrow-backed frames
+                # 1) Convert to object first so we can safely place None
+                df = df.astype(object)
+
+                # 2) Set missing values to None across the board
+                df = df.where(pd.notnull(df), None)
+
+                # 3) Only fill numeric columns with 0 (do NOT touch strings)
+                num_cols = df.select_dtypes(include=["number"]).columns
+                if len(num_cols) > 0:
+                    df.loc[:, num_cols] = (
+                        pd.DataFrame(df[num_cols])
+                        .apply(pd.to_numeric, errors="coerce")
+                        .fillna(0)
+                    )
 
                 if file == "geo.parquet": new_global_cache["geo_df"] = df
                 if file == "profiles.parquet": new_global_cache["profiles_df"] = df
