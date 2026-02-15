@@ -916,22 +916,22 @@ def reload_all_data():
         logger.info("Reload already in progress, skipping.")
         return
 
-    # ✅ Immediately mark live cache as loading so /ready and /reload are truthful
-    global GLOBAL_CACHE
+    # ✅ SURGICAL FIX 1: Declare global immediately so we can read from it safely
+    global GLOBAL_CACHE 
+
     try:
+        # Update loading state immediately
         GLOBAL_CACHE = {**GLOBAL_CACHE, "is_loading": True}
     except Exception:
-        # If anything weird happens, we still proceed; reload lock prevents concurrent reloads
         pass
 
     try:
         logger.info("STARTING DATA LOAD (Chunked + RAM Optimized)...")
 
         # 1. PREPARE TEMPORARY STATE
-        # We build this completely isolated from the live API
         new_global_cache = {
-            "is_loading": True,              # ✅ stays True until the final swap
-            "last_loaded": GLOBAL_CACHE.get("last_loaded", 0),  # ✅ keep previous until success
+            "is_loading": True,
+            "last_loaded": GLOBAL_CACHE.get("last_loaded", 0),
             "options": {},
             "cage_name_map": {},
             "location_map": {},
@@ -943,7 +943,6 @@ def reload_all_data():
             "risk_df": pd.DataFrame(),
             "df_opportunities": pd.DataFrame()
         }
-
 
         # 2. DOWNLOAD FILES
         LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -959,7 +958,6 @@ def reload_all_data():
 
             logger.info("Downloading %s...", filename)
             try:
-                # Clean up old temp from prior crash
                 if tmp_path.exists():
                     try:
                         tmp_path.unlink()
@@ -968,38 +966,31 @@ def reload_all_data():
 
                 s3_local = boto3.client("s3", region_name=AWS_REGION, config=BOTO_CFG)
                 s3_local.download_file(BUCKET_NAME, f"{CACHE_PREFIX}{filename}", str(tmp_path))
-
-                # ✅ Atomic replace on same filesystem
                 tmp_path.replace(final_path)
 
             except Exception as e:
                 logger.error(f"Download failed for {filename}: {e}")
-                # Cleanup temp on failure
                 try:
                     if tmp_path.exists():
                         tmp_path.unlink()
                 except Exception:
                     pass
-
             return filename
-
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
              list(executor.map(fetch_file, files))
         
-        # 3. REFRESH DUCKDB VIEWS (Include Network here for disk access)
-        global DUCK_CONN
-        with DUCK_LOCK:
-            ensure_duck_conn()
-
-            # Re-create views using absolute paths
+        # 3. REFRESH DUCKDB VIEWS (Using writer connection)
+        with DUCK_INIT_LOCK:
+            conn = ensure_duck_conn()
+            
             prod_path = str((LOCAL_CACHE_DIR / "products.parquet").resolve())
             trans_path = str((LOCAL_CACHE_DIR / "transactions.parquet").resolve())
             net_path = str((LOCAL_CACHE_DIR / "network.parquet").resolve())
 
-            DUCK_CONN.execute("CREATE OR REPLACE VIEW v_products AS SELECT * FROM read_parquet(?);", [prod_path])
-            DUCK_CONN.execute("CREATE OR REPLACE VIEW v_transactions AS SELECT * FROM read_parquet(?);", [trans_path])
-            DUCK_CONN.execute("CREATE OR REPLACE VIEW v_network AS SELECT * FROM read_parquet(?);", [net_path])
+            conn.execute("CREATE OR REPLACE VIEW v_products AS SELECT * FROM read_parquet(?);", [prod_path])
+            conn.execute("CREATE OR REPLACE VIEW v_transactions AS SELECT * FROM read_parquet(?);", [trans_path])
+            conn.execute("CREATE OR REPLACE VIEW v_network AS SELECT * FROM read_parquet(?);", [net_path])
 
         # 4. FETCH MAPPINGS (Athena)
         cage_map: Dict[str, str] = {}
@@ -1018,7 +1009,7 @@ def reload_all_data():
         
         new_global_cache["naics_map"] = naics_map
 
-        # 5. LOAD SMALL FILES (Standard Load)
+        # 5. LOAD SMALL FILES
         ram_files = ["geo.parquet", "profiles.parquet", "risk.parquet", "opportunities.parquet"]
         
         for file in ram_files:
@@ -1033,7 +1024,7 @@ def reload_all_data():
                             df[col] = df[col].astype(str)
                         df[col] = df[col].astype(str).str.upper().str.strip()
 
-                # Specific fix for profiles
+                # Fix for profiles
                 if file == "profiles.parquet" and "top_platforms" in df.columns:
                     df["top_platforms"] = (
                         df["top_platforms"].astype(str)
@@ -1042,7 +1033,6 @@ def reload_all_data():
                         .str.replace(r"^,+", "", regex=True)
                     )
 
-                # ✅ DIRECT MAPPING TO CACHE (No global_data)
                 if file == "geo.parquet": new_global_cache["geo_df"] = df
                 if file == "profiles.parquet": new_global_cache["profiles_df"] = df
                 if file == "risk.parquet": new_global_cache["risk_df"] = df
@@ -1051,18 +1041,15 @@ def reload_all_data():
             except Exception:
                 logger.exception(f"Failed to load {file}")
 
-        # 6. LOAD SUMMARY (CHUNKED) -> CLEAN TO DISK (NO RAM CONCAT) ✅ ATOMIC SWAP FIX
+        # 6. LOAD SUMMARY (Atomic Swap Logic + Clean NaN)
         try:
             import pyarrow as pa
             import pyarrow.parquet as pq
 
             summary_in_path = (LOCAL_CACHE_DIR / "summary.parquet").resolve()
-            
-            # 1. Define Paths (Final vs Temp)
             summary_final_path = (LOCAL_CACHE_DIR / SUMMARY_PARQUET_CLEAN).resolve()
             summary_temp_path = (LOCAL_CACHE_DIR / f"{SUMMARY_PARQUET_CLEAN}.tmp").resolve()
 
-            # Remove old temp file if it exists (cleanup from failed runs)
             if summary_temp_path.exists():
                 try:
                     summary_temp_path.unlink()
@@ -1070,8 +1057,6 @@ def reload_all_data():
                     pass
 
             parquet_file = pq.ParquetFile(str(summary_in_path))
-
-            # Your exact name corrections logic
             name_corrections = {
                 "THE BOEING": "THE BOEING COMPANY",
                 "BOEING": "THE BOEING COMPANY",
@@ -1081,12 +1066,9 @@ def reload_all_data():
             writer = None
 
             for i in range(parquet_file.num_row_groups):
-                # Read 1 row group -> pandas (bounded)
                 chunk = parquet_file.read_row_group(i).to_pandas()
-
-                # --- YOUR ORIGINAL BUSINESS LOGIC STARTS HERE ---
                 
-                # 1) Cleanup Strings
+                # Cleanup Strings
                 string_cols = [
                     "vendor_name", "clean_parent", "ultimate_parent_name", "cage_code",
                     "platform_family", "sub_agency", "market_segment", "psc_description"
@@ -1097,7 +1079,7 @@ def reload_all_data():
                             chunk[col] = chunk[col].astype(str)
                         chunk[col] = chunk[col].astype(str).str.upper().str.strip()
 
-                # 2) Apply Parent Mapping
+                # Apply Parent Mapping
                 cage_col = "cage_code" if "cage_code" in chunk.columns else "vendor_cage"
                 if cage_col in chunk.columns and cage_map:
                     chunk["clean_parent"] = chunk[cage_col].map(cage_map)
@@ -1106,42 +1088,31 @@ def reload_all_data():
 
                 if "ultimate_parent_name" in chunk.columns:
                     chunk["clean_parent"] = chunk["clean_parent"].fillna(chunk["ultimate_parent_name"])
-
-                # Fallback to vendor name
                 if "vendor_name" in chunk.columns:
                     chunk["clean_parent"] = chunk["clean_parent"].fillna(chunk["vendor_name"])
 
                 chunk["clean_parent"] = chunk["clean_parent"].astype(str).str.upper().str.strip()
-
-                # 3) Apply Name Corrections
                 chunk["clean_parent"] = chunk["clean_parent"].replace(name_corrections)
                 if "vendor_name" in chunk.columns:
                     chunk["vendor_name"] = chunk["vendor_name"].replace(name_corrections)
 
-                # 4) Clean NANs
+                # ✅ YOUR CRITICAL LOGIC: Clean NANs
                 for col in ["platform_family", "market_segment", "sub_agency", "psc_description"]:
                     if col in chunk.columns:
                         m = chunk[col].astype(str).str.upper().isin(["NAN", "NAN.0", "NONE", "", "UNKNOWN"])
                         chunk.loc[m, col] = None
 
-                # OPTIONAL: Ensure CAGE stays normalized if present
                 if "cage_code" in chunk.columns:
                     chunk["cage_code"] = chunk["cage_code"].astype(str).str.upper().str.strip()
                     bad = chunk["cage_code"].isin(["NAN", "NONE", "NULL", ""])
                     chunk.loc[bad, "cage_code"] = None
                 
-                # --- YOUR ORIGINAL BUSINESS LOGIC ENDS HERE ---
-
-                # Write chunk to TEMP file (instead of final path)
                 table = pa.Table.from_pandas(chunk, preserve_index=False)
 
                 if writer is None:
-                    # Initialize writer with TEMP path
                     writer = pq.ParquetWriter(str(summary_temp_path), table.schema, compression="zstd")
                 
                 writer.write_table(table)
-
-                # Free chunk memory
                 del chunk
                 del table
                 if i % 5 == 0:
@@ -1150,30 +1121,27 @@ def reload_all_data():
             if writer:
                 writer.close()
 
-            # 4. ATOMIC SWAP (Safe Switch)
-            # This is the critical fix that prevents downtime during reload
-            with DUCK_LOCK:
-                ensure_duck_conn()
+            # Atomic Swap
+            with DUCK_INIT_LOCK:
+                conn = ensure_duck_conn()
                 
                 if summary_temp_path.exists():
                     summary_temp_path.replace(summary_final_path) 
                 
-                # 5. Refresh View to point to the new file
-                DUCK_CONN.execute(
+                conn.execute(
                     "CREATE OR REPLACE VIEW v_summary AS SELECT * FROM read_parquet(?);",
                     [str(summary_final_path)],
                 )
             
             logger.info("Summary updated safely via atomic swap.")
-
-            # ✅ IMPORTANT: Reset RAM references to empty to force DuckDB usage
             new_global_cache["df"] = pd.DataFrame()
 
-            # ✅ Re-compute options from the new View (DuckDB)
-            years_df = duck_fetch_df("SELECT DISTINCT year FROM v_summary WHERE year IS NOT NULL ORDER BY year ASC;")
-            agencies_df = duck_fetch_df("SELECT DISTINCT sub_agency FROM v_summary WHERE sub_agency IS NOT NULL AND TRIM(CAST(sub_agency AS VARCHAR)) <> '' ORDER BY sub_agency ASC LIMIT 5000;")
-            domains_df = duck_fetch_df("SELECT DISTINCT market_segment FROM v_summary WHERE market_segment IS NOT NULL AND TRIM(CAST(market_segment AS VARCHAR)) <> '' ORDER BY market_segment ASC LIMIT 5000;")
-            platforms_df = duck_fetch_df("SELECT DISTINCT platform_family FROM v_summary WHERE platform_family IS NOT NULL AND TRIM(CAST(platform_family AS VARCHAR)) <> '' ORDER BY platform_family ASC LIMIT 5000;")
+            # Re-compute options
+            # NOTE: We use use_writer=True here to query during the reload lock
+            years_df = duck_fetch_df("SELECT DISTINCT year FROM v_summary WHERE year IS NOT NULL ORDER BY year ASC;", use_writer=True)
+            agencies_df = duck_fetch_df("SELECT DISTINCT sub_agency FROM v_summary WHERE sub_agency IS NOT NULL AND TRIM(CAST(sub_agency AS VARCHAR)) <> '' ORDER BY sub_agency ASC LIMIT 5000;", use_writer=True)
+            domains_df = duck_fetch_df("SELECT DISTINCT market_segment FROM v_summary WHERE market_segment IS NOT NULL AND TRIM(CAST(market_segment AS VARCHAR)) <> '' ORDER BY market_segment ASC LIMIT 5000;", use_writer=True)
+            platforms_df = duck_fetch_df("SELECT DISTINCT platform_family FROM v_summary WHERE platform_family IS NOT NULL AND TRIM(CAST(platform_family AS VARCHAR)) <> '' ORDER BY platform_family ASC LIMIT 5000;", use_writer=True)
 
             new_global_cache["options"] = {
                 "years": years_df["year"].dropna().astype(int).tolist() if "year" in years_df.columns else [],
@@ -1196,12 +1164,12 @@ def reload_all_data():
              if "cage_code" in g_df.columns:
                 new_global_cache["location_map"] = g_df.set_index("cage_code")[["city", "state"]].to_dict(orient="index")
 
-        # 8. BUILD SEARCH INDEX ✅ same business logic, but from DuckDB (no RAM summary)
+        # 8. BUILD SEARCH INDEX
         search_list: List[Dict[str, Any]] = []
         try:
             loc_map = new_global_cache.get("location_map", {}) or {}
 
-            # A) PARENT: keep if spend > 0 AND (cage_count > 1 OR spend > 1e9)
+            # Use writer connection for these heavy queries during reload
             parent_df = duck_fetch_df("""
                 SELECT
                     clean_parent AS label,
@@ -1212,7 +1180,7 @@ def reload_all_data():
                 GROUP BY 1
                 ORDER BY total_spend DESC
                 LIMIT 5000;
-            """)
+            """, use_writer=True)
 
             if not parent_df.empty:
                 for r in parent_df.itertuples(index=False):
@@ -1228,7 +1196,6 @@ def reload_all_data():
                             "cage": "AGGREGATE"
                         })
 
-            # B) CHILD: group by vendor_name + cage_code, attach city/state
             child_df = duck_fetch_df("""
                 SELECT
                     vendor_name,
@@ -1240,7 +1207,7 @@ def reload_all_data():
                 GROUP BY 1,2
                 ORDER BY total_spend DESC
                 LIMIT 20000;
-            """)
+            """, use_writer=True)
 
             if not child_df.empty:
                 for r in child_df.itertuples(index=False):
@@ -1260,7 +1227,6 @@ def reload_all_data():
                         "state": loc.get("state", "")
                     })
 
-            # C) PLATFORM totals
             plat_df = duck_fetch_df("""
                 SELECT platform_family AS label, SUM(total_spend) AS total_spend
                 FROM v_summary
@@ -1268,7 +1234,7 @@ def reload_all_data():
                 GROUP BY 1
                 ORDER BY total_spend DESC
                 LIMIT 2000;
-            """)
+            """, use_writer=True)
             if not plat_df.empty:
                 for r in plat_df.itertuples(index=False):
                     if getattr(r, "label", None):
@@ -1279,7 +1245,6 @@ def reload_all_data():
                             "score": float(getattr(r, "total_spend", 0) or 0)
                         })
 
-            # D) AGENCY totals
             ag_df = duck_fetch_df("""
                 SELECT sub_agency AS label, SUM(total_spend) AS total_spend
                 FROM v_summary
@@ -1287,7 +1252,7 @@ def reload_all_data():
                 GROUP BY 1
                 ORDER BY total_spend DESC
                 LIMIT 2000;
-            """)
+            """, use_writer=True)
             if not ag_df.empty:
                 for r in ag_df.itertuples(index=False):
                     if getattr(r, "label", None):
@@ -1305,27 +1270,24 @@ def reload_all_data():
             logger.exception("Search index build failed")
             new_global_cache["search_index"] = []
 
-
         gc.collect()
 
-                # 9. ATOMIC POINTER SWAP (Thread-Safe replacement)
-        # We replace the reference to the dictionary instantly.
-
+        # 9. ATOMIC POINTER SWAP
         new_global_cache["is_loading"] = False
-        new_global_cache["last_loaded"] = time.time()  # ✅ only update last_loaded on success
+        new_global_cache["last_loaded"] = time.time()
 
-        global GLOBAL_CACHE
+        # ✅ SURGICAL FIX 2: Do NOT declare global here again. Just assign.
         GLOBAL_CACHE = new_global_cache
 
         logger.info("RELOAD COMPLETE (Atomic Swap). search_index=%d", len(search_list))
-
         
-        # Explicit cleanup
         new_global_cache = None
         gc.collect()
 
     except Exception:
         logger.exception("Reload crash")
+        # Restore safe state on crash so API doesn't hang
+        GLOBAL_CACHE = {**GLOBAL_CACHE, "is_loading": False}
     finally:
         RELOAD_LOCK.release()
 
