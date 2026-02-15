@@ -277,7 +277,7 @@ def safe_ident(s: Any) -> str:
 def safe_contains_upper(field_sql: str, user_value: Any) -> str:
     # Builds: upper(field) LIKE '%VALUE%' ESCAPE '\'
     v = "" if user_value is None else str(user_value)
-    return f"upper({field_sql}) LIKE {sql_like_contains(v.upper())} ESCAPE '\\\\'"
+    return f"upper({field_sql}) LIKE {sql_like_contains(v.upper())} ESCAPE '\\'"
 
 def safe_equals_upper(field_sql: str, user_value: Any) -> str:
     v = "" if user_value is None else str(user_value)
@@ -715,7 +715,7 @@ def build_summary_where(years: Optional[List[int]], filters: Dict[str, Optional[
         params.append(str(v).strip().upper())
 
     def contains(col: str, v: str):
-        where_parts.append(f"upper({col}) LIKE ? ESCAPE '\\\\'")
+        where_parts.append(f"upper({col}) LIKE ? ESCAPE '\\'")
         params.append(_like_param_contains(v))
 
     # Map your filter keys -> summary columns
@@ -751,7 +751,7 @@ def build_summary_where(years: Optional[List[int]], filters: Dict[str, Optional[
 
     if psc:
         # PSC filter checks both psc_code and psc_description (contains)
-        where_parts.append("(upper(psc_code) LIKE ? ESCAPE '\\\\' OR upper(psc_description) LIKE ? ESCAPE '\\\\')")
+        where_parts.append("(upper(psc_code) LIKE ? ESCAPE '\\' OR upper(psc_description) LIKE ? ESCAPE '\\\\')")
         p = _like_param_contains(psc)
         params.extend([p, p])
 
@@ -2954,7 +2954,7 @@ def get_company_opportunities(cage: Optional[str] = None, name: Optional[str] = 
     if name:
         clean_name = sanitize(name)
         naics_df = query_summary_df(
-            where_sql="upper(clean_parent) LIKE ? ESCAPE '\\\\'",
+            where_sql="upper(clean_parent) LIKE ? ESCAPE '\\'",
             params=[_like_param_contains(clean_name)],
             select_sql="DISTINCT naics_code",
             limit=5000
