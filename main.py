@@ -1389,6 +1389,8 @@ def get_filter_options(
             where_sql=where_sql,
             params=params,
             select_sql="clean_parent as label, sum(total_spend) as spend",
+            # ✅ FIX: Add this line below
+            group_by_sql="clean_parent", 
             order_by_sql="spend DESC",
             limit=50
         )
