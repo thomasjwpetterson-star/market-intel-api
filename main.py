@@ -260,17 +260,17 @@ def sql_literal(s: Any) -> str:
 def sql_like_contains(s: Any) -> str:
     """
     Sanitizes a string for use in a LIKE clause.
-    We escape the special characters % and _ using a backslash.
+    We escape the special characters % and _ using '#'.
     """
     if s is None:
         raw = ""
     else:
         raw = str(s)
     
-    # 1. Escape the escape char itself first
-    # 2. Then escape the wildcards
-    # 3. Finally escape single quotes for the SQL literal
-    safe_str = raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace("'", "''")
+    # 1. Escape the escape char itself first (# -> ##)
+    # 2. Then escape the wildcards (% -> #%, _ -> #_)
+    # 3. Finally escape single quotes for the SQL literal (' -> '')
+    safe_str = raw.replace("#", "##").replace("%", "#%").replace("_", "#_").replace("'", "''")
     
     return f" '%{safe_str}%' "
 
@@ -284,11 +284,11 @@ def safe_ident(s: Any) -> str:
 
 def safe_contains_upper(field_sql: str, user_value: Any) -> str:
     """
-    Generates: upper(field) LIKE '%VALUE%' ESCAPE '\'
+    Generates: upper(field) LIKE '%VALUE%' ESCAPE '#'
     """
     v = "" if user_value is None else str(user_value).upper()
-    # ✅ FIX: Explicitly valid Athena/Presto escape syntax
-    return f"upper({field_sql}) LIKE {sql_like_contains(v)} ESCAPE '\\'"
+    # ✅ FIX: Use '#' as escape char to avoid Python backslash issues
+    return f"upper({field_sql}) LIKE {sql_like_contains(v)} ESCAPE '#'"
 
 def safe_equals_upper(field_sql: str, user_value: Any) -> str:
     v = "" if user_value is None else str(user_value)
@@ -2287,56 +2287,89 @@ def get_platform_parts(
 ):
     safe_plat = sanitize(name)
     
-    # 1. Query Disk (Fast & RAM Efficient)
-    # ✅ FIX: ETL confirms 'platform_family' exists in products.parquet
+    # 1. Try Disk First (Fastest)
+    df = pd.DataFrame()
     try:
+        # Check if 'platform_family' exists by trying to query it.
+        # If the column is missing in Parquet, this throws an error -> goes to 'except' -> fallback.
+        # If the column exists but no matches found, returns empty df -> goes to 'if df.empty' -> fallback.
         df = get_subset_from_disk(
             "products.parquet",
             where_clause="upper(platform_family) = ?", 
             params=(safe_plat,),
-            limit=limit + offset + 200 # Fetch extra for Python-side filtering
+            limit=limit + offset + 200
         )
     except Exception:
-        return []
+        df = pd.DataFrame()
+
+    # 2. ✅ FALLBACK: If Disk failed OR returned 0 rows, use Athena (The "Historic" Logic)
+    if df.empty:
+        # Use safe SQL helpers
+        safe_val = sql_literal(safe_plat)
+        
+        query = f"""
+        WITH platform_codes AS (
+            SELECT DISTINCT TRIM(CAST(wsdc_code_ref AS VARCHAR)) AS wsdc_code_ref
+            FROM "market_intel_silver"."ref_platform_map"
+            WHERE upper(platform_family) = {safe_val}
+        )
+        SELECT 
+            nsn, 
+            LPAD(CAST(niin AS VARCHAR), 9, '0') as niin, 
+            item_name as description, 
+            fsc_code
+        FROM "market_intel_silver"."ref_wsdc"
+        WHERE wsdc_code IN (SELECT wsdc_code_ref FROM platform_codes)
+        LIMIT {limit}
+        """
+        raw_data = run_athena_query(query)
+        if raw_data:
+            df = pd.DataFrame(raw_data)
+            # Add dummy columns so the rest of the function works
+            df['total_revenue'] = 0 
+            df['total_units_sold'] = 0
+            df['annual_revenue_trend'] = ""
+            df['platform_family'] = name 
 
     if df.empty: return []
 
-    # 2. Python Filtering (On the small subset)
+    # 3. Standard Logic (Filtering & Formatting)
     mask = pd.Series(True, index=df.index)
     
-    # Handle revenue filtering
+    # Only apply revenue filter if we actually have revenue data
     if 'total_revenue' in df.columns:
-        # Ensure numeric safety
+        # Ensure numeric
         df['total_revenue'] = pd.to_numeric(df['total_revenue'], errors='coerce').fillna(0)
         if not include_zero:
             mask &= (df['total_revenue'] > 0)
         if min_spend > 0 and not years:
             mask &= (df['total_revenue'] >= min_spend)
-
+    
     filtered = df[mask].copy()
-
-    # 3. Handle Trend/Year Calculation
+    
+    # Apply Trend/Year Logic
     if years and 'annual_revenue_trend' in filtered.columns:
-        # Re-use your existing trend logic
         filtered['amount'] = filtered['annual_revenue_trend'].apply(
             lambda s: calculate_trend_sum(s or "", years)
         )
-        # Re-sort by the calculated amount
         filtered = filtered.sort_values("amount", ascending=False)
+    elif 'total_revenue' in filtered.columns:
+        filtered['amount'] = filtered['total_revenue']
+        filtered = filtered.sort_values("total_revenue", ascending=False)
     else:
-        filtered['amount'] = filtered['total_revenue'] if 'total_revenue' in filtered.columns else 0
-    
-    # 4. Paginate
+        filtered['amount'] = 0
+
+    # Paginate
     start = int(offset)
     end = start + int(limit)
     page = filtered.iloc[start:end]
 
-    # 5. Format
+    # Format
     results = []
     for row in page.itertuples():
-        # ETL confirms these columns exist
         niin_val = getattr(row, "niin", "")
         nsn_val = getattr(row, "nsn", "")
+        if not nsn_val and niin_val: nsn_val = niin_val
         
         results.append({
             "item_id": str(nsn_val),
@@ -2347,22 +2380,24 @@ def get_platform_parts(
             "total_units_sold": int(getattr(row, "total_units_sold", 0) or 0),
             "amount": float(getattr(row, "amount", 0) or 0),
             "annual_revenue_trend": getattr(row, "annual_revenue_trend", ""),
-            "top_vendor": getattr(row, "cage", ""), # ETL uses 'cage', not 'top_vendor'
+            "top_vendor": getattr(row, "cage", ""), 
             "last_sold": getattr(row, "last_sold_date", "")
         })
     return results
 
 @app.get("/api/platform/parts/count")
 def get_platform_parts_count(name: str):
-    # ✅ FIX: Normalize then quote safely
+    # ✅ FIX: Use safe SQL literal for exact match
     safe_val = sql_literal((name or "").strip())
+    # ✅ FIX: Use safe LIKE for fuzzy match with new '#' escape
+    like_val = sql_like_contains((name or "").strip().upper())
 
-    # 1. Fast check to avoid wasting Athena costs if platform doesn't exist
+    # 1. Fast check
     map_check = run_athena_query(f"""
         SELECT COUNT(*) AS n
         FROM "market_intel_silver"."ref_platform_map"
         WHERE (platform_family = {safe_val}
-               OR UPPER(platform_family) LIKE {sql_like_contains((name or "").strip().upper())} ESCAPE '\\\\')
+               OR UPPER(platform_family) LIKE {like_val} ESCAPE '#') 
           AND wsdc_code_ref IS NOT NULL
           AND TRIM(CAST(wsdc_code_ref AS VARCHAR)) <> ''
     """)
@@ -2370,7 +2405,7 @@ def get_platform_parts_count(name: str):
     if not map_check or int(map_check[0].get("n") or 0) == 0:
         return {"count": 0}
 
-    # 2. Count the Universe of Parts
+    # 2. Count Universe
     query = f"""
     WITH platform_codes AS (
         SELECT DISTINCT TRIM(CAST(wsdc_code_ref AS VARCHAR)) AS wsdc_code_ref
@@ -2379,7 +2414,7 @@ def get_platform_parts_count(name: str):
           AND TRIM(CAST(wsdc_code_ref AS VARCHAR)) <> ''
           AND (
                 platform_family = {safe_val}
-             OR UPPER(platform_family) LIKE '%' || UPPER({safe_val}) || '%'
+             OR UPPER(platform_family) LIKE {like_val} ESCAPE '#'
           )
     )
     SELECT COUNT(DISTINCT w.niin) as total
@@ -2463,44 +2498,77 @@ def get_platform_awards(
 
 
 
-@app.get("/api/company/opportunities/recommended")
-def get_company_opportunities_recommended(cage: Optional[str] = None, name: Optional[str] = None):
-    profile = get_company_profile(cage, name)
+# ✅ RESTORED ENDPOINT: Fixes 404 "Not Found" error
+# This aliases the old route to the new fast logic so the UI works without changes.
+@app.get("/api/company/opportunities")
+def get_company_opportunities(cage: Optional[str] = None, name: Optional[str] = None):
+    # 1. Reuse existing profile logic to find capabilities
+    # This works for both specific CAGEs (Drill-down) and Parents (Aggregate)
+    target_naics = set()
+    
+    # Try InMemory Profiles First (Fastest/Safest)
+    profiles_df = GLOBAL_CACHE.get("profiles_df", pd.DataFrame())
+    
+    if not profiles_df.empty:
+        # Match by CAGE
+        if cage and cage != "AGGREGATE":
+            matches = profiles_df[profiles_df['cage_code'] == cage]
+            for _, row in matches.iterrows():
+                if row.get('top_naics_codes'):
+                    codes = str(row['top_naics_codes']).split(',')
+                    target_naics.update([c.strip() for c in codes])
 
-    if not profile.get('found') or not profile.get('top_naics'):
-        return []
+        # Match by Name (Parent Logic)
+        if name:
+            clean_name = sanitize(name)
+            # Find ALL children matching this parent name to build a composite NAICS list
+            matches = profiles_df[profiles_df['vendor_name'].str.contains(clean_name, case=False, na=False)]
+            for _, row in matches.iterrows():
+                if row.get('top_naics_codes'):
+                    codes = str(row['top_naics_codes']).split(',')
+                    target_naics.update([c.strip() for c in codes])
 
-    raw_naics_list = profile['top_naics']
+    # 2. Clean & Format found codes
     clean_naics_list = []
-
-    for n in raw_naics_list:
-        code_part = str(n).split(' - ')[0].strip().split('.')[0]
-        if len(code_part) >= 3:
-            clean_naics_list.append(code_part)
+    for n in target_naics:
+        s = str(n).split('.')[0].split(' - ')[0].strip()
+        # Capture standard 5-6 digit codes (e.g. 336411)
+        if len(s) >= 3 and s.isdigit(): 
+            clean_naics_list.append(s)
 
     if not clean_naics_list:
         return []
 
-    # ✅ FIX: Use GLOBAL_CACHE["df_opportunities"]
+    # 3. Search the In-Memory Opportunities Cache (Fast & Safe)
     df_opps = GLOBAL_CACHE.get("df_opportunities", pd.DataFrame())
     if df_opps.empty:
         return []
 
+    # Create regex pattern for fast filtering
     pattern = "|".join([re.escape(c) for c in sorted(set(clean_naics_list))])
     mask = df_opps['naics'].astype(str).str.contains(pattern, regex=True, na=False)
 
+    # Sort by closest deadline first
     filtered = df_opps[mask].sort_values("deadline", ascending=True).head(50)
 
+    # 4. Format for UI (Including the critical alias)
     results = []
     for row in filtered.itertuples():
+        # Handle potential missing attributes safely
+        sol_val = getattr(row, 'sol_num', '') or getattr(row, 'sol#', '')
+        
         results.append({
-            "noticeid": row.id,
-            "title": row.title,
-            "sol_num": row.sol_num,
-            "department_indagency": row.agency,
-            "responsedeadline": row.deadline,
-            "setaside": row.set_aside_type,
-            "primarycontactemail": row.poc_email
+            "noticeid": getattr(row, 'id', ''),
+            "title": getattr(row, 'title', ''),
+            
+            # ✅ THE FIX: Send BOTH keys to ensure UI compatibility
+            "sol_num": sol_val, 
+            "sol#": sol_val,     
+            
+            "department_indagency": getattr(row, 'agency', ''),
+            "responsedeadline": getattr(row, 'deadline', ''),
+            "setaside": getattr(row, 'set_aside_type', ''),
+            "primarycontactemail": getattr(row, 'poc_email', '')
         })
     return results
 
@@ -3542,13 +3610,15 @@ def get_nsn_history(nsn: str):
 
 @app.get("/api/nsn/contracts")
 def get_nsn_contracts(nsn: str, limit: int = 50, offset: int = 0):
-    niin = get_niin(nsn)
+    niin = get_niin(nsn) # Helper ensures this is digits only, but let's be safe
 
+    # Guardrails
     limit_i = safe_int(limit, 50, 1, 200)
     offset_i = safe_int(offset, 0, 0, 2_000_000)
 
-    # only digits, safe for LIKE-contains with escaping
-    like_val = niin
+    # ✅ FIX: Use safe LIKE logic with '#' escape
+    # Even though NIIN is usually digits, this protects against weird input
+    safe_niin_pattern = sql_like_contains(niin)
 
     query = f"""
     SELECT
@@ -3561,12 +3631,9 @@ def get_nsn_contracts(nsn: str, limit: int = 50, offset: int = 0):
         psc,
         naics_code,
         spend_amount,
-        CASE 
-            WHEN strpos(description, '!') > 0 THEN split_part(description, '!', 2)
-            ELSE description 
-        END AS description
+        description
     FROM "market_intel_gold"."dashboard_master_view"
-    WHERE upper(coalesce(nsn,'')) LIKE {sql_like_contains(like_val)} ESCAPE '\\\\'
+    WHERE upper(coalesce(nsn,'')) LIKE {safe_niin_pattern} ESCAPE '#'
       AND spend_amount IS NOT NULL
     ORDER BY action_date DESC
     OFFSET {offset_i}
