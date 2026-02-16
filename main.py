@@ -390,6 +390,7 @@ default_origins = [
     "https://market-intel-ui.vercel.app",                                # Your production alias
     "https://market-intel-ui-git-main-tom-pettersons-projects.vercel.app", # Your git branch alias
     "https://mimiradvisors.org",                                         # Your main domain
+    "https://www.mimiradvisors.org",
     "http://localhost:3000",                                               # Local development
     "http://localhost:5173"                                                # Local development (Vite)
 ]
