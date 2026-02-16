@@ -2287,10 +2287,9 @@ def get_platform_parts(
 ):
     safe_plat = sanitize(name)
     
-    # 1. Try Disk First (Fastest)
+    # 1. Try Disk First (Fastest - Primary Platform Match)
     df = pd.DataFrame()
     try:
-        # Attempt to read from parquet. If platform_family is missing, this fails safely.
         df = get_subset_from_disk(
             "products.parquet",
             where_clause="upper(platform_family) = ?", 
@@ -2300,42 +2299,60 @@ def get_platform_parts(
     except Exception:
         df = pd.DataFrame()
 
-    # 2. ✅ FALLBACK: Use Athena if Disk failed OR returned 0 rows
+    # 2. ✅ RICH FALLBACK: If Disk returned nothing/little, use Athena to find Shared Parts
+    # This query JOINS the Platform Map -> NIINs -> Gold Data to get rich stats
     if df.empty:
-        # Use safe SQL helpers
         safe_val = sql_literal(safe_plat)
         
         query = f"""
         WITH platform_codes AS (
+            -- 1. Get WSDC Codes for this Platform (e.g. F-35)
             SELECT DISTINCT TRIM(CAST(wsdc_code_ref AS VARCHAR)) AS wsdc_code_ref
             FROM "market_intel_silver"."ref_platform_map"
             WHERE upper(platform_family) = {safe_val}
+        ),
+        target_niins AS (
+            -- 2. Expand WSDC to NIINs
+            SELECT DISTINCT LPAD(CAST(niin AS VARCHAR), 9, '0') as join_niin
+            FROM "market_intel_silver"."ref_wsdc"
+            WHERE wsdc_code IN (SELECT wsdc_code_ref FROM platform_codes)
+              AND niin IS NOT NULL
         )
+        -- 3. JOIN with GOLD DATA to get the Revenue/Trend/Supplier info
         SELECT 
-            nsn, 
-            LPAD(CAST(niin AS VARCHAR), 9, '0') as niin, 
-            item_name as description, 
-            -- ✅ FIX: Derive FSC Code from NSN string (ref_wsdc doesn't have fsc_code)
-            SUBSTR(nsn, 1, 4) as fsc_code
-        FROM "market_intel_silver"."ref_wsdc"
-        WHERE wsdc_code IN (SELECT wsdc_code_ref FROM platform_codes)
+            p.nsn,
+            p.niin,
+            p.description,
+            
+            -- ✅ FILL MISSING DATA
+            p.cage, 
+            COALESCE(p.total_revenue, 0) as total_revenue,
+            COALESCE(p.total_units_sold, 0) as total_units_sold,
+            p.annual_revenue_trend,
+            p.last_sold_date,
+            
+            -- Derive FSC
+            SUBSTR(p.nsn, 1, 4) as fsc_code,
+            
+            -- Context
+            '{safe_plat}' as platform_family
+            
+        FROM "market_intel_gold"."view_dashboard_products" p
+        INNER JOIN target_niins t ON LPAD(CAST(p.niin AS VARCHAR), 9, '0') = t.join_niin
+        
+        ORDER BY p.total_revenue DESC
         LIMIT {limit}
         """
+        
         raw_data = run_athena_query(query)
         if raw_data:
             df = pd.DataFrame(raw_data)
-            # Add dummy columns so the rest of the function works
-            df['total_revenue'] = 0 
-            df['total_units_sold'] = 0
-            df['annual_revenue_trend'] = ""
-            df['platform_family'] = name 
-
-    if df.empty: return []
+        else:
+            return []
 
     # 3. Standard Logic (Filtering & Formatting)
     mask = pd.Series(True, index=df.index)
     
-    # Only apply revenue filter if we actually have revenue data
     if 'total_revenue' in df.columns:
         df['total_revenue'] = pd.to_numeric(df['total_revenue'], errors='coerce').fillna(0)
         if not include_zero:
@@ -2345,7 +2362,7 @@ def get_platform_parts(
     
     filtered = df[mask].copy()
     
-    # Apply Trend/Year Logic
+    # Trend/Year Logic
     if years and 'annual_revenue_trend' in filtered.columns:
         filtered['amount'] = filtered['annual_revenue_trend'].apply(
             lambda s: calculate_trend_sum(s or "", years)
@@ -2378,6 +2395,7 @@ def get_platform_parts(
             "total_units_sold": int(getattr(row, "total_units_sold", 0) or 0),
             "amount": float(getattr(row, "amount", 0) or 0),
             "annual_revenue_trend": getattr(row, "annual_revenue_trend", ""),
+            # ✅ Map 'cage' to 'top_vendor' so the UI can display it
             "top_vendor": getattr(row, "cage", ""), 
             "last_sold": getattr(row, "last_sold_date", "")
         })
