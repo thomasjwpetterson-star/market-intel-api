@@ -791,6 +791,7 @@ def query_summary_df(
     order_by_sql: str = "",
     limit: int = 0,
     offset: int = 0,
+    ignore_cap: bool = False # ✅ NEW PARAMETER
 ) -> pd.DataFrame:
     """
     Runs a DuckDB query against summary.parquet without loading the full file into RAM.
@@ -802,7 +803,9 @@ def query_summary_df(
 
     limit = max(0, int(limit or 0))
     offset = max(0, int(offset or 0))
-    if limit > MAX_JSON_ROWS:
+    
+    # ✅ FIX: Only enforce the global cap if ignore_cap is False
+    if not ignore_cap and limit > MAX_JSON_ROWS:
         limit = MAX_JSON_ROWS
 
     sql = f"SELECT {select_sql} FROM read_parquet(?) WHERE {where_sql}"
@@ -822,11 +825,9 @@ def query_summary_df(
         sql += " OFFSET ?"
         local_params.append(offset)
 
-    # ✅ FIX: Always use the lock and standard ensure_duck_conn
     with DUCK_LOCK:
         ensure_duck_conn() 
         df = DUCK_CONN.execute(sql, local_params).fetchdf()
-        # Sanitize NaNs -> 0 or None
         return df.fillna(0).astype(object).where(pd.notnull(df), None)
 
 
@@ -1812,11 +1813,19 @@ def get_map_data(
     platform: Optional[str]=None,
     psc: Optional[str]=None
 ):
-    # ✅ FIX: Use GLOBAL_CACHE["geo_df"]
+    # 1. Load Geo Data
     geo_df = GLOBAL_CACHE.get("geo_df", pd.DataFrame())
     if geo_df.empty:
         return []
 
+    # Normalize Key
+    if "join_key" not in geo_df.columns:
+        if "cage_code" in geo_df.columns:
+             geo_df["join_key"] = geo_df["cage_code"].astype(str).str.strip().str.upper()
+        else:
+             return []
+
+    # 2. Get Spend Data
     filters = {
         "vendor": vendor,
         "parent": parent,
@@ -1829,28 +1838,27 @@ def get_map_data(
 
     where_sql, params = build_summary_where(years, filters)
 
-    # Aggregate spend by cage + vendor
+    # ✅ FIX: Request 150,000 rows and IGNORE the global 2,000 row limit
     active_vendors = query_summary_df(
         where_sql=where_sql,
         params=params,
-        select_sql="""
-            cage_code,
-            vendor_name,
-            SUM(total_spend) AS total_spend
-        """,
+        select_sql="cage_code, vendor_name, SUM(total_spend) AS total_spend",
         group_by_sql="cage_code, vendor_name",
         order_by_sql="total_spend DESC",
-        limit=50000
+        limit=150000,
+        ignore_cap=True 
     )
 
     if active_vendors.empty:
         return []
 
-    # Merge to geo
+    # 3. Normalize & Merge
+    active_vendors["join_key"] = active_vendors["cage_code"].astype(str).str.strip().str.upper()
+
     mapped_vendors = pd.merge(
         geo_df,
         active_vendors,
-        on="cage_code",
+        on="join_key",
         how="inner",
         suffixes=("_geo", "_act")
     )
@@ -1858,21 +1866,24 @@ def get_map_data(
     if mapped_vendors.empty:
         return []
 
+    # 4. Final Limit (Visual limit)
     mapped_vendors = mapped_vendors.sort_values("total_spend", ascending=False).head(50000)
 
-    vendor_col = "vendor_name_act" if "vendor_name_act" in mapped_vendors.columns else (
-        "vendor_name" if "vendor_name" in mapped_vendors.columns else None
-    )
+    vendor_col = "vendor_name_act" if "vendor_name_act" in mapped_vendors.columns else "vendor_name"
+    cage_col = "cage_code_act" if "cage_code_act" in mapped_vendors.columns else "cage_code"
 
     out = []
-    for i, r in mapped_vendors.iterrows():
+    for r in mapped_vendors.itertuples(index=False):
+        if pd.isna(r.latitude) or pd.isna(r.longitude):
+            continue
+
         out.append({
-            "id": i,
-            "vendor": (r[vendor_col] if vendor_col else ""),
-            "cage": str(r["cage_code"]).strip().upper(),
-            "lat": float(r["latitude"]),
-            "lon": float(r["longitude"]),
-            "spend": float(r["total_spend"]),
+            "id": getattr(r, cage_col, ""),
+            "vendor": getattr(r, vendor_col, ""),
+            "cage": str(getattr(r, cage_col, "")).strip().upper(),
+            "lat": float(r.latitude),
+            "lon": float(r.longitude),
+            "spend": float(getattr(r, "total_spend", 0)),
         })
     return out
 
@@ -4047,6 +4058,22 @@ def get_pipeline_live(
     if df.empty: return []
 
     mask = pd.Series(True, index=df.index)
+    today = date.today()
+    today_str = today.isoformat() # YYYY-MM-DD
+
+    # --- 🛡️ CRITICAL FIXES 🛡️ ---
+    
+    # 1. REMOVE EXPIRED (Fixes "Negative Days")
+    # Even if cache is stale, this forces us to ignore old dates
+    if 'deadline' in df.columns:
+        mask &= (df['deadline'] >= today_str)
+
+    # 2. REMOVE BAD DATA (Fixes "Missing Sol#" / "Unclickable")
+    # We insist that a valid row must have a Solicitation Number
+    if 'sol_num' in df.columns:
+        mask &= (df['sol_num'].notna()) & (df['sol_num'] != '')
+
+    # -----------------------------
 
     # --- Standard Filters ---
     if naics:
@@ -4070,7 +4097,6 @@ def get_pipeline_live(
     # 1. KEYWORD
     if keyword:
         safe_k = sanitize(keyword)
-        # Search Title OR Description (check if search_text exists, else dynamic)
         if 'search_text' in df.columns:
             mask &= df['search_text'].str.contains(safe_k, regex=False, na=False)
         else:
@@ -4120,7 +4146,6 @@ def get_pipeline_live(
     page = filtered.iloc[start:end]
 
     results = []
-    today = date.today()
     
     for row in page.itertuples():
         days_left = 0
@@ -4131,6 +4156,10 @@ def get_pipeline_live(
             days_left = delta.days
         except:
             days_left = 0
+
+        # Double check to prevent race conditions showing -1 days
+        if days_left < 0: 
+            continue
 
         results.append({
             "id": row.id,
