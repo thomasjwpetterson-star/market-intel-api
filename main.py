@@ -258,13 +258,21 @@ def sql_literal(s: Any) -> str:
     return "'" + t.replace("'", "''") + "'"
 
 def sql_like_contains(s: Any) -> str:
-    # For LIKE '%...%': escape %, _ and \ so user input cannot widen matches unexpectedly.
+    """
+    Sanitizes a string for use in a LIKE clause.
+    We escape the special characters % and _ using a backslash.
+    """
     if s is None:
         raw = ""
     else:
         raw = str(s)
-    raw = raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return "'%" + raw.replace("'", "''") + "%'"
+    
+    # 1. Escape the escape char itself first
+    # 2. Then escape the wildcards
+    # 3. Finally escape single quotes for the SQL literal
+    safe_str = raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace("'", "''")
+    
+    return f" '%{safe_str}%' "
 
 def safe_ident(s: Any) -> str:
     t = ("" if s is None else str(s)).strip().upper()
@@ -275,9 +283,12 @@ def safe_ident(s: Any) -> str:
     return t
 
 def safe_contains_upper(field_sql: str, user_value: Any) -> str:
-    # Builds: upper(field) LIKE '%VALUE%' ESCAPE '\'
-    v = "" if user_value is None else str(user_value)
-    return f"upper({field_sql}) LIKE {sql_like_contains(v.upper())} ESCAPE '\\'"
+    """
+    Generates: upper(field) LIKE '%VALUE%' ESCAPE '\'
+    """
+    v = "" if user_value is None else str(user_value).upper()
+    # ✅ FIX: Explicitly valid Athena/Presto escape syntax
+    return f"upper({field_sql}) LIKE {sql_like_contains(v)} ESCAPE '\\'"
 
 def safe_equals_upper(field_sql: str, user_value: Any) -> str:
     v = "" if user_value is None else str(user_value)
@@ -2276,65 +2287,68 @@ def get_platform_parts(
 ):
     safe_plat = sanitize(name)
     
-    # ✅ FIX: Query DISK instead of RAM
-    # We fetch only the rows for this platform
-    df = get_subset_from_disk(
-    "products.parquet",
-    where_clause="platform_family = ?",
-    params=(safe_plat,)
-)
+    # 1. Query Disk (Fast & RAM Efficient)
+    # ✅ FIX: ETL confirms 'platform_family' exists in products.parquet
+    try:
+        df = get_subset_from_disk(
+            "products.parquet",
+            where_clause="upper(platform_family) = ?", 
+            params=(safe_plat,),
+            limit=limit + offset + 200 # Fetch extra for Python-side filtering
+        )
+    except Exception:
+        return []
 
-    
     if df.empty: return []
 
-    # (Keep existing logic - it now runs on the small subset)
-    # 3. Apply Zero/Min Spend Logic
+    # 2. Python Filtering (On the small subset)
     mask = pd.Series(True, index=df.index)
-    if not include_zero:
-        mask &= (df['total_revenue'] > 0)
     
-    if min_spend > 0 and not years:
-        mask &= (df['total_revenue'] >= min_spend)
+    # Handle revenue filtering
+    if 'total_revenue' in df.columns:
+        # Ensure numeric safety
+        df['total_revenue'] = pd.to_numeric(df['total_revenue'], errors='coerce').fillna(0)
+        if not include_zero:
+            mask &= (df['total_revenue'] > 0)
+        if min_spend > 0 and not years:
+            mask &= (df['total_revenue'] >= min_spend)
 
     filtered = df[mask].copy()
-    if filtered.empty: return []
 
-    # 5. Dynamic Year Calculation
-    if years:
-        def apply_trend_calc(row):
-            return calculate_trend_sum(row.get('annual_revenue_trend', ''), years)
-        filtered['amount'] = filtered.apply(apply_trend_calc, axis=1)
-        if min_spend > 0:
-            filtered = filtered[filtered['amount'] >= min_spend]
+    # 3. Handle Trend/Year Calculation
+    if years and 'annual_revenue_trend' in filtered.columns:
+        # Re-use your existing trend logic
+        filtered['amount'] = filtered['annual_revenue_trend'].apply(
+            lambda s: calculate_trend_sum(s or "", years)
+        )
+        # Re-sort by the calculated amount
         filtered = filtered.sort_values("amount", ascending=False)
     else:
-        filtered['amount'] = filtered['total_revenue']
-        filtered = filtered.sort_values("total_revenue", ascending=False)
-
-    # 6. Paginate
+        filtered['amount'] = filtered['total_revenue'] if 'total_revenue' in filtered.columns else 0
+    
+    # 4. Paginate
     start = int(offset)
     end = start + int(limit)
     page = filtered.iloc[start:end]
 
-    # 7. Format Output
+    # 5. Format
     results = []
     for row in page.itertuples():
-        clean_niin = str(row.niin).strip().zfill(9)
-        raw_nsn = str(row.nsn).strip()
-        final_nsn = clean_niin if len(raw_nsn) < 9 else raw_nsn
-
+        # ETL confirms these columns exist
+        niin_val = getattr(row, "niin", "")
+        nsn_val = getattr(row, "nsn", "")
+        
         results.append({
-            "item_id": final_nsn,
-            "nsn": final_nsn,
-            "niin": clean_niin,
-            "description": row.description,
-            "fsc_code": row.fsc_code,
-            "top_vendor": row.cage,
-            "top_vendor_name": "See Details",
-            "total_units_sold": int(row.total_units_sold),
-            "amount": float(row.amount),
-            "last_sold": row.last_sold_date,
-            "annual_revenue_trend": row.annual_revenue_trend
+            "item_id": str(nsn_val),
+            "nsn": str(nsn_val),
+            "niin": str(niin_val).zfill(9),
+            "description": getattr(row, "description", ""),
+            "fsc_code": getattr(row, "fsc_code", ""),
+            "total_units_sold": int(getattr(row, "total_units_sold", 0) or 0),
+            "amount": float(getattr(row, "amount", 0) or 0),
+            "annual_revenue_trend": getattr(row, "annual_revenue_trend", ""),
+            "top_vendor": getattr(row, "cage", ""), # ETL uses 'cage', not 'top_vendor'
+            "last_sold": getattr(row, "last_sold_date", "")
         })
     return results
 
@@ -2445,8 +2459,6 @@ def get_platform_awards(
         }
         for r in page.itertuples()
     ]
-
-
 
 
 
@@ -2946,12 +2958,6 @@ def get_company_parts_count(cage: str, rollup: Optional[str] = None):
 
 
 
-
-
-
-
-
-
 @app.get("/api/company/awards")
 def get_company_awards(
     cage: Optional[str] = None, 
@@ -2965,59 +2971,61 @@ def get_company_awards(
     where_parts = []
     params = []
 
-    # 1. Base Filters (Parameterized)
+    # 1. Base Filters (Verified against ETL columns)
     if cage and cage != "AGGREGATE":
-        # Check both columns using parameters
-        where_parts.append("(vendor_cage = ? OR cage_code = ?)")
+        # ✅ FIX: ETL confirms column is 'vendor_cage'
+        where_parts.append("(vendor_cage = ?)")
         safe_cage = sanitize(cage)
-        params.extend([safe_cage, safe_cage])
+        params.append(safe_cage)
     elif name:
-        # Fuzzy match using parameters
+        # ✅ FIX: ETL confirms 'vendor_name' exists. 
+        # Removed 'ultimate_parent_name' as it is NOT in your transactions.parquet ETL list.
         where_parts.append("upper(vendor_name) LIKE ?")
         safe_name = f"%{sanitize(name)}%"
         params.append(safe_name)
     else:
         return []
 
-    # 2. Global Filters (Agency)
+    # 2. Global Filters
     if agency:
+        # ✅ FIX: ETL confirms 'sub_agency' and 'parent_agency' exist
         where_parts.append("(upper(sub_agency) = ? OR upper(parent_agency) = ?)")
         safe_ag = sanitize(agency)
         params.extend([safe_ag, safe_ag])
 
-    # 3. Years
     if years and len(years) > 0:
-        # DuckDB supports list parameters for IN clauses, but simpler to loop for robustness
         placeholders = ",".join(["?" for _ in years])
         where_parts.append(f"year IN ({placeholders})")
         params.extend(years)
 
-    # 4. Spend Threshold
     if threshold and threshold > 0:
         where_parts.append("spend_amount >= ?")
-        val = threshold * 1_000_000
-        params.append(val)
+        params.append(threshold * 1_000_000)
 
-    # 5. Execution
+    # 3. Execute via DuckDB (Disk-based, Low RAM)
     where_clause = " AND ".join(where_parts)
 
     try:
+        path = LOCAL_CACHE_DIR / "transactions.parquet"
+        if not path.exists():
+             return []
+
         df = get_subset_from_disk(
             "transactions.parquet",
             where_clause=where_clause,
-            params=tuple(params), # Pass the accumulated parameters
+            params=tuple(params),
+            # ✅ FIX: Only select columns guaranteed by your ETL
             columns_sql="contract_id, action_date, sub_agency, parent_agency, description, spend_amount, naics_code, psc",
             order_by_sql="action_date DESC",
             limit=limit,
             offset=offset
         )
         
-        # 6. Format Output
         return [
             {
                 "contract_id": r.contract_id,
                 "action_date": str(r.action_date),
-                "agency": r.sub_agency if pd.notna(r.sub_agency) else r.parent_agency,
+                "agency": r.sub_agency if hasattr(r, 'sub_agency') and pd.notna(r.sub_agency) else getattr(r, 'parent_agency', ''),
                 "description": r.description,
                 "spend_amount": float(r.spend_amount or 0),
                 "naics_code": r.naics_code,
@@ -3026,81 +3034,62 @@ def get_company_awards(
             for r in df.itertuples()
         ]
     except Exception as e:
-        print(f"Awards Query Error: {e}")
+        logger.error(f"Awards Query Error: {e}")
         return []
     
 
-@app.get("/api/company/opportunities")
-def get_company_opportunities(cage: Optional[str] = None, name: Optional[str] = None):
-    target_naics = set()
+@app.get("/api/company/opportunities/recommended")
+def get_company_opportunities_recommended(cage: Optional[str] = None, name: Optional[str] = None):
+    # 1. Reuse existing profile logic to find capabilities
+    profile = get_company_profile(cage, name)
 
-    # 1) Match parent name -> collect NAICS codes (contains, like your original)
-    if name:
-        clean_name = sanitize(name)
-        naics_df = query_summary_df(
-            where_sql="upper(clean_parent) LIKE ? ESCAPE '\\'",
-            params=[_like_param_contains(clean_name)],
-            select_sql="DISTINCT naics_code",
-            limit=5000
-        )
-        if not naics_df.empty and "naics_code" in naics_df.columns:
-            for v in naics_df["naics_code"].dropna().tolist():
-                target_naics.add(v)
+    if not profile.get('found') or not profile.get('top_naics'):
+        return []
 
-    # 2) Match cage -> collect NAICS codes (exact)
-    if cage and cage != "AGGREGATE":
-        clean_cage = sanitize(cage)
-        cage_df = query_summary_df(
-            where_sql="upper(cage_code) = ?",
-            params=[clean_cage],
-            select_sql="DISTINCT naics_code",
-            limit=5000
-        )
-        if not cage_df.empty and "naics_code" in cage_df.columns:
-            for v in cage_df["naics_code"].dropna().tolist():
-                target_naics.add(v)
-
-    # 3) Clean up NAICS list (your logic)
+    # 2. Extract and Clean NAICS codes
+    raw_naics_list = profile['top_naics']
     clean_naics_list = []
-    for n in target_naics:
-        s = str(n).split('.')[0].split(' - ')[0].strip()
-        if len(s) >= 5:
-            clean_naics_list.append(s)
 
-    print(f"🔍 OPPS DEBUG: Name='{name}' | Found {len(clean_naics_list)} codes", flush=True)
+    for n in raw_naics_list:
+        code_part = str(n).split(' - ')[0].strip().split('.')[0]
+        if len(code_part) >= 3:
+            clean_naics_list.append(code_part)
 
     if not clean_naics_list:
         return []
 
-    safe_codes: List[str] = []
-    for code in clean_naics_list:
-        c = "".join(ch for ch in str(code) if ch.isdigit())
-        if len(c) >= 3:
-            safe_codes.append(c)
-
-    if not safe_codes:
+    # 3. Search the In-Memory Opportunities Cache (Fast & Safe)
+    df_opps = GLOBAL_CACHE.get("df_opportunities", pd.DataFrame())
+    if df_opps.empty:
         return []
 
-    naics_conditions = [f"naics LIKE {sql_like_contains(c)} ESCAPE '\\\\'" for c in safe_codes]
-    where_clause = " OR ".join(naics_conditions)
+    # Create regex pattern for fast filtering
+    pattern = "|".join([re.escape(c) for c in sorted(set(clean_naics_list))])
+    mask = df_opps['naics'].astype(str).str.contains(pattern, regex=True, na=False)
 
-    query = f"""
-    SELECT 
-        id as noticeid, 
-        title, 
-        sol_num, 
-        agency as department_indagency, 
-        deadline as responsedeadline, 
-        set_aside_type as setaside, 
-        poc_email as primarycontactemail
-    FROM "market_intel_gold"."view_unified_opportunities_dod"
-    WHERE ({where_clause})
-      AND try(from_iso8601_timestamp(deadline)) > current_timestamp - INTERVAL '30' DAY
-    ORDER BY try(from_iso8601_timestamp(deadline)) DESC
-    LIMIT 50
-    """
-    return run_athena_query(query)
+    # Sort by deadline and take top 50
+    filtered = df_opps[mask].sort_values("deadline", ascending=True).head(50)
 
+    # 4. Format for UI (Including the critical alias)
+    results = []
+    for row in filtered.itertuples():
+        # Handle potential missing attributes safely
+        sol_val = getattr(row, 'sol_num', '') or getattr(row, 'sol#', '')
+        
+        results.append({
+            "noticeid": getattr(row, 'id', ''),
+            "title": getattr(row, 'title', ''),
+            
+            # ✅ THE FIX: Send BOTH keys to ensure UI compatibility
+            "sol_num": sol_val, 
+            "sol#": sol_val,     
+            
+            "department_indagency": getattr(row, 'agency', ''),
+            "responsedeadline": getattr(row, 'deadline', ''),
+            "setaside": getattr(row, 'set_aside_type', ''),
+            "primarycontactemail": getattr(row, 'poc_email', '')
+        })
+    return results
 
 
 # ==========================================
