@@ -2290,9 +2290,7 @@ def get_platform_parts(
     # 1. Try Disk First (Fastest)
     df = pd.DataFrame()
     try:
-        # Check if 'platform_family' exists by trying to query it.
-        # If the column is missing in Parquet, this throws an error -> goes to 'except' -> fallback.
-        # If the column exists but no matches found, returns empty df -> goes to 'if df.empty' -> fallback.
+        # Attempt to read from parquet. If platform_family is missing, this fails safely.
         df = get_subset_from_disk(
             "products.parquet",
             where_clause="upper(platform_family) = ?", 
@@ -2302,7 +2300,7 @@ def get_platform_parts(
     except Exception:
         df = pd.DataFrame()
 
-    # 2. ✅ FALLBACK: If Disk failed OR returned 0 rows, use Athena (The "Historic" Logic)
+    # 2. ✅ FALLBACK: Use Athena if Disk failed OR returned 0 rows
     if df.empty:
         # Use safe SQL helpers
         safe_val = sql_literal(safe_plat)
@@ -2317,7 +2315,8 @@ def get_platform_parts(
             nsn, 
             LPAD(CAST(niin AS VARCHAR), 9, '0') as niin, 
             item_name as description, 
-            fsc_code
+            -- ✅ FIX: Derive FSC Code from NSN string (ref_wsdc doesn't have fsc_code)
+            SUBSTR(nsn, 1, 4) as fsc_code
         FROM "market_intel_silver"."ref_wsdc"
         WHERE wsdc_code IN (SELECT wsdc_code_ref FROM platform_codes)
         LIMIT {limit}
@@ -2338,7 +2337,6 @@ def get_platform_parts(
     
     # Only apply revenue filter if we actually have revenue data
     if 'total_revenue' in df.columns:
-        # Ensure numeric
         df['total_revenue'] = pd.to_numeric(df['total_revenue'], errors='coerce').fillna(0)
         if not include_zero:
             mask &= (df['total_revenue'] > 0)
