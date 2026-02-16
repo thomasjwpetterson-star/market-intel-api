@@ -695,48 +695,40 @@ def _like_param_contains(val: str) -> str:
     raw = raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{raw.upper()}%"
 
-def build_summary_where(years: Optional[List[int]], filters: Dict[str, Optional[str]]) -> Tuple[str, List[Any]]:
+def build_summary_where(
+    years: Optional[List[int]], 
+    filters: Dict[str, Optional[str]], 
+    use_fy_logic: bool = False  # ✅ NEW: Toggle for FY calculation
+) -> Tuple[str, List[Any]]:
     """
     Returns (where_sql, params) for summary.parquet queries.
-    All comparisons are done in UPPER space (matching your sanitize approach).
+    All comparisons are done in UPPER space.
+    
+    If use_fy_logic is True:
+      Calculates FY dynamically: year + (month >= 10)
+    Else:
+      Uses the 'year' column directly.
     """
     where_parts: List[str] = ["1=1"]
     params: List[Any] = []
 
-    # Years: summary is already aggregated by year/month, keep it simple
+    # --- YEAR / FY FILTERING ---
     if years and len(years) > 0:
         ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
         if ys:
-            where_parts.append(f"year IN ({','.join(['?' for _ in ys])})")
+            placeholders = ','.join(['?' for _ in ys])
+            
+            if use_fy_logic:
+                # Complex FY Calculation
+                fy_expr = "CAST(year AS INTEGER) + CASE WHEN CAST(COALESCE(month, 1) AS INTEGER) >= 10 THEN 1 ELSE 0 END"
+                where_parts.append(f"{fy_expr} IN ({placeholders})")
+            else:
+                # Standard Column Match
+                where_parts.append(f"year IN ({placeholders})")
+                
             params.extend(ys)
 
-def build_summary_where_fy_all(
-    years: Optional[List[int]],
-    filters: Dict[str, Optional[str]]
-) -> Tuple[str, List[Any]]:
-    """
-    FY logic:
-      fy = CAST(year AS INT) + (CAST(COALESCE(month,1) AS INT) >= 10)
-
-    Filter semantics match build_summary_where():
-      - vendor: contains (vendor_name)
-      - parent: exact (clean_parent)
-      - cage: exact (cage_code)
-      - domain: exact (market_segment)
-      - agency: exact (sub_agency)
-      - platform: exact (platform_family)
-      - psc: contains on psc_code OR psc_description
-    """
-    where_parts: List[str] = ["1=1"]
-    params: List[Any] = []
-
-    # FY filter inside DuckDB
-    ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
-    if ys:
-        fy_expr = "CAST(year AS INTEGER) + CASE WHEN CAST(COALESCE(month, 1) AS INTEGER) >= 10 THEN 1 ELSE 0 END"
-        where_parts.append(f"{fy_expr} IN ({','.join(['?' for _ in ys])})")
-        params.extend(ys)
-
+    # --- HELPERS ---
     def eq(col: str, v: str):
         where_parts.append(f"upper({col}) = ?")
         params.append(str(v).strip().upper())
@@ -745,6 +737,7 @@ def build_summary_where_fy_all(
         where_parts.append(f"upper({col}) LIKE ? ESCAPE '\\'")
         params.append(_like_param_contains(v))
 
+    # --- STANDARD FILTERS ---
     vendor = filters.get("vendor")
     parent = filters.get("parent")
     cage = filters.get("cage")
@@ -757,7 +750,6 @@ def build_summary_where_fy_all(
         contains("vendor_name", vendor)
 
     if parent:
-        # exact match on clean_parent (your summary ETL creates this)
         eq("clean_parent", parent)
 
     if cage:
@@ -773,63 +765,12 @@ def build_summary_where_fy_all(
         eq("platform_family", platform)
 
     if psc:
-        # contains on BOTH fields
-        where_parts.append(
-            "(upper(psc_code) LIKE ? ESCAPE '\\' OR upper(psc_description) LIKE ? ESCAPE '\\')"
-        )
+        where_parts.append("(upper(psc_code) LIKE ? ESCAPE '\\' OR upper(psc_description) LIKE ? ESCAPE '\\')")
         p = _like_param_contains(psc)
         params.extend([p, p])
 
     return " AND ".join(where_parts), params
 
-
-
-    def eq(col: str, v: str):
-        where_parts.append(f"upper({col}) = ?")
-        params.append(str(v).strip().upper())
-
-    def contains(col: str, v: str):
-        where_parts.append(f"upper({col}) LIKE ? ESCAPE '\\'")
-        params.append(_like_param_contains(v))
-
-    # Map your filter keys -> summary columns
-    vendor = filters.get("vendor")
-    parent = filters.get("parent")
-    cage = filters.get("cage")
-    domain = filters.get("domain")
-    agency = filters.get("agency")
-    platform = filters.get("platform")
-    psc = filters.get("psc")
-
-    if vendor:
-        # contains search (vendor_name)
-        contains("vendor_name", vendor)
-
-    if parent:
-        # exact match on clean_parent if present, else ultimate_parent_name
-        # Your summary ETL creates clean_parent; use it as primary.
-        eq("clean_parent", parent)
-
-    if cage:
-        eq("cage_code", cage)
-
-    if domain:
-        # exact match to match your UI dropdown behavior
-        eq("market_segment", domain)
-
-    if agency:
-        eq("sub_agency", agency)
-
-    if platform:
-        eq("platform_family", platform)
-
-    if psc:
-        # PSC filter checks both psc_code and psc_description (contains)
-        where_parts.append("(upper(psc_code) LIKE ? ESCAPE '\\' OR upper(psc_description) LIKE ? ESCAPE '\\\\')")
-        p = _like_param_contains(psc)
-        params.extend([p, p])
-
-    return " AND ".join(where_parts), params
 
 def query_summary_df(
     where_sql: str,
@@ -2100,7 +2041,7 @@ def get_top_platforms(
         "psc": psc,
     }
 
-    where_sql, params = build_summary_where_fy_all(years, filters)
+    where_sql, params = build_summary_where(years, filters, use_fy_logic=True)
 
     # Low-RAM: aggregate inside DuckDB over summary_clean parquet
     df = query_summary_df(
