@@ -710,6 +710,80 @@ def build_summary_where(years: Optional[List[int]], filters: Dict[str, Optional[
             where_parts.append(f"year IN ({','.join(['?' for _ in ys])})")
             params.extend(ys)
 
+def build_summary_where_fy_all(
+    years: Optional[List[int]],
+    filters: Dict[str, Optional[str]]
+) -> Tuple[str, List[Any]]:
+    """
+    FY logic:
+      fy = CAST(year AS INT) + (CAST(COALESCE(month,1) AS INT) >= 10)
+
+    Filter semantics match build_summary_where():
+      - vendor: contains (vendor_name)
+      - parent: exact (clean_parent)
+      - cage: exact (cage_code)
+      - domain: exact (market_segment)
+      - agency: exact (sub_agency)
+      - platform: exact (platform_family)
+      - psc: contains on psc_code OR psc_description
+    """
+    where_parts: List[str] = ["1=1"]
+    params: List[Any] = []
+
+    # FY filter inside DuckDB
+    ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
+    if ys:
+        fy_expr = "CAST(year AS INTEGER) + CASE WHEN CAST(COALESCE(month, 1) AS INTEGER) >= 10 THEN 1 ELSE 0 END"
+        where_parts.append(f"{fy_expr} IN ({','.join(['?' for _ in ys])})")
+        params.extend(ys)
+
+    def eq(col: str, v: str):
+        where_parts.append(f"upper({col}) = ?")
+        params.append(str(v).strip().upper())
+
+    def contains(col: str, v: str):
+        where_parts.append(f"upper({col}) LIKE ? ESCAPE '\\'")
+        params.append(_like_param_contains(v))
+
+    vendor = filters.get("vendor")
+    parent = filters.get("parent")
+    cage = filters.get("cage")
+    domain = filters.get("domain")
+    agency = filters.get("agency")
+    platform = filters.get("platform")
+    psc = filters.get("psc")
+
+    if vendor:
+        contains("vendor_name", vendor)
+
+    if parent:
+        # exact match on clean_parent (your summary ETL creates this)
+        eq("clean_parent", parent)
+
+    if cage:
+        eq("cage_code", cage)
+
+    if domain:
+        eq("market_segment", domain)
+
+    if agency:
+        eq("sub_agency", agency)
+
+    if platform:
+        eq("platform_family", platform)
+
+    if psc:
+        # contains on BOTH fields
+        where_parts.append(
+            "(upper(psc_code) LIKE ? ESCAPE '\\' OR upper(psc_description) LIKE ? ESCAPE '\\')"
+        )
+        p = _like_param_contains(psc)
+        params.extend([p, p])
+
+    return " AND ".join(where_parts), params
+
+
+
     def eq(col: str, v: str):
         where_parts.append(f"upper({col}) = ?")
         params.append(str(v).strip().upper())
@@ -2001,6 +2075,61 @@ def search_global(q: str):
 # ==========================================
 #        PLATFORM INTELLIGENCE
 # ==========================================
+
+@app.get("/api/platform/top")
+def get_top_platforms(
+    limit: int = 12,
+    years: Optional[List[int]] = Query(None),   # FY years
+    vendor: Optional[str] = None,
+    parent: Optional[str] = None,
+    cage: Optional[str] = None,
+    agency: Optional[str] = None,
+    domain: Optional[str] = None,
+    platform: Optional[str] = None,            # still supported; narrows to one platform if provided
+    psc: Optional[str] = None
+):
+    limit_i = safe_int(limit, 12, 1, 100)
+
+    filters = {
+        "vendor": vendor,
+        "parent": parent,
+        "cage": cage,
+        "agency": agency,
+        "domain": domain,
+        "platform": platform,
+        "psc": psc,
+    }
+
+    where_sql, params = build_summary_where_fy_all(years, filters)
+
+    # Low-RAM: aggregate inside DuckDB over summary_clean parquet
+    df = query_summary_df(
+        where_sql=where_sql,
+        params=params,
+        select_sql="""
+            platform_family,
+            SUM(total_spend) AS total_spend,
+            SUM(contract_count) AS contract_count
+        """,
+        group_by_sql="platform_family",
+        order_by_sql="total_spend DESC",
+        limit=limit_i
+    )
+
+    if df.empty or "platform_family" not in df.columns:
+        return []
+
+    out = []
+    for r in df.itertuples(index=False):
+        name = getattr(r, "platform_family", None)
+        if not name or str(name).strip() == "":
+            continue
+        out.append({
+            "name": str(name),
+            "spend": float(getattr(r, "total_spend", 0) or 0),
+            "contracts": int(getattr(r, "contract_count", 0) or 0),
+        })
+    return out
 
 
 @app.get("/api/platform/profile")
