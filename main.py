@@ -4053,29 +4053,31 @@ def get_pipeline_live(
     limit: int = 50,
     offset: int = 0
 ):
-    # ✅ FIX: Use GLOBAL_CACHE["df_opportunities"]
+    # Use Global Cache (RAM)
     df = GLOBAL_CACHE.get("df_opportunities", pd.DataFrame())
     if df.empty: return []
 
     mask = pd.Series(True, index=df.index)
     today = date.today()
-    today_str = today.isoformat() # YYYY-MM-DD
+    today_str = today.isoformat() 
 
-    # --- 🛡️ CRITICAL FIXES 🛡️ ---
-    
-    # 1. REMOVE EXPIRED (Fixes "Negative Days")
-    # Even if cache is stale, this forces us to ignore old dates
+    # --- 1. FILTER: DEADLINE (Keep this, it's correct) ---
     if 'deadline' in df.columns:
+        # Only show future/active opportunities
         mask &= (df['deadline'] >= today_str)
 
-    # 2. REMOVE BAD DATA (Fixes "Missing Sol#" / "Unclickable")
-    # We insist that a valid row must have a Solicitation Number
-    if 'sol_num' in df.columns:
+    # --- 2. FILTER: DATA QUALITY (RELAXED) ---
+    # ✅ FIX: Accept rows with EITHER a Sol Num OR a Notice ID
+    # This restores the millions of records that are valid but lack a formal sol_num
+    if 'sol_num' in df.columns and 'id' in df.columns:
+        has_sol = (df['sol_num'].notna()) & (df['sol_num'] != '')
+        has_id = (df['id'].notna()) & (df['id'] != '')
+        mask &= (has_sol | has_id)
+    elif 'sol_num' in df.columns:
+        # Fallback if ID column missing (unlikely)
         mask &= (df['sol_num'].notna()) & (df['sol_num'] != '')
 
-    # -----------------------------
-
-    # --- Standard Filters ---
+    # --- 3. STANDARD FILTERS ---
     if naics:
         safe_naics = sanitize(naics)
         mask &= df['naics'].astype(str).str.contains(safe_naics, regex=False, na=False)
@@ -4092,9 +4094,7 @@ def get_pipeline_live(
         safe_source = sanitize(source)
         mask &= (df['source_system'] == safe_source)
 
-    # --- Global Bridge Filters ---
-
-    # 1. KEYWORD
+    # --- 4. GLOBAL BRIDGE FILTERS ---
     if keyword:
         safe_k = sanitize(keyword)
         if 'search_text' in df.columns:
@@ -4103,7 +4103,6 @@ def get_pipeline_live(
             mask &= (df['title'].astype(str).str.upper().str.contains(safe_k, regex=False, na=False)) | \
                     (df['description'].astype(str).str.upper().str.contains(safe_k, regex=False, na=False))
 
-    # 2. AGENCY
     if agency:
         safe_ag = sanitize(agency)
         if "DLA" in safe_ag or "LOGISTICS" in safe_ag:
@@ -4116,14 +4115,12 @@ def get_pipeline_live(
                        (df['sub_agency'].astype(str).str.upper().str.contains(safe_ag, regex=False, na=False))
              mask &= ag_mask
 
-    # 3. PLATFORM
     if platform:
         safe_plat = sanitize(platform)
         p_mask = (df['title'].astype(str).str.upper().str.contains(safe_plat, regex=False, na=False)) | \
                  (df['description'].astype(str).str.upper().str.contains(safe_plat, regex=False, na=False))
         mask &= p_mask
 
-    # 4. DOMAIN
     if domain:
         safe_domain = sanitize(domain)
         if len(safe_domain) > 0 and (safe_domain[0].isdigit() or (len(safe_domain) == 4 and safe_domain[0].isalpha())):
@@ -4137,7 +4134,6 @@ def get_pipeline_live(
 
     filtered = df[mask]
     
-    # Sort by Deadline
     if "deadline" in filtered.columns:
         filtered = filtered.sort_values("deadline", ascending=True)
 
@@ -4148,6 +4144,7 @@ def get_pipeline_live(
     results = []
     
     for row in page.itertuples():
+        # Date Logic
         days_left = 0
         try:
             dt_str = str(row.deadline)[:10]
@@ -4157,25 +4154,35 @@ def get_pipeline_live(
         except:
             days_left = 0
 
-        # Double check to prevent race conditions showing -1 days
+        # Race condition safety: Skip if it expired in the last few seconds
         if days_left < 0: 
             continue
 
+        # ✅ FIX: Smart Identifier
+        # If sol_num is missing, fallback to Notice ID.
+        # This guarantees the UI has something to display and link.
+        display_sol = getattr(row, 'sol_num', '')
+        if not display_sol or str(display_sol) == 'nan':
+            display_sol = getattr(row, 'id', '') # Fallback to Notice ID
+
         results.append({
-            "id": row.id,
-            "title": row.title,
-            "agency": row.agency,
-            "sub_agency": row.sub_agency,
-            "sol_num": row.sol_num,
-            "due_date": row.deadline,
-            "deadline": row.deadline,
-            "set_aside": row.set_aside_type,
-            "set_aside_type": row.set_aside_type,
-            "naics": row.naics,
-            "psc": row.psc,
-            "description": str(row.description)[:2000] if row.description else "",
-            "primarycontactemail": row.poc_email,
-            "source_system": row.source_system,
+            "id": getattr(row, 'id', ''),
+            "title": getattr(row, 'title', ''),
+            "agency": getattr(row, 'agency', ''),
+            "sub_agency": getattr(row, 'sub_agency', ''),
+            
+            # ✅ Return the computed valid ID here
+            "sol_num": display_sol,
+            
+            "due_date": getattr(row, 'deadline', ''),
+            "deadline": getattr(row, 'deadline', ''),
+            "set_aside": getattr(row, 'set_aside_type', ''),
+            "set_aside_type": getattr(row, 'set_aside_type', ''),
+            "naics": getattr(row, 'naics', ''),
+            "psc": getattr(row, 'psc', ''),
+            "description": str(getattr(row, 'description', ''))[:2000],
+            "primarycontactemail": getattr(row, 'poc_email', ''),
+            "source_system": getattr(row, 'source_system', ''),
             "days_left": int(days_left),
             "total_matches": len(filtered)
         })
