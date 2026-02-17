@@ -2417,11 +2417,18 @@ def get_platform_parts(
     page = filtered.iloc[start:end]
 
     # Format
+        # Format
+    name_map = GLOBAL_CACHE.get("cage_name_map", {}) or {}   # ✅ ADD THIS LINE
+
     results = []
     for row in page.itertuples():
         niin_val = getattr(row, "niin", "")
         nsn_val = getattr(row, "nsn", "")
-        if not nsn_val and niin_val: nsn_val = niin_val
+        if not nsn_val and niin_val:
+            nsn_val = niin_val
+
+        cage_val = str(getattr(row, "cage", "") or "").strip().upper()   # ✅ ADD THIS LINE
+        vendor_name = name_map.get(cage_val, "")                         # ✅ ADD THIS LINE
         
         results.append({
             "item_id": str(nsn_val),
@@ -2432,11 +2439,17 @@ def get_platform_parts(
             "total_units_sold": int(getattr(row, "total_units_sold", 0) or 0),
             "amount": float(getattr(row, "amount", 0) or 0),
             "annual_revenue_trend": getattr(row, "annual_revenue_trend", ""),
-            # ✅ Map 'cage' to 'top_vendor' so the UI can display it
-            "top_vendor": getattr(row, "cage", ""), 
+
+            # existing field (keep as-is)
+            "top_vendor": cage_val,
+
+            # ✅ NEW field (won’t break anything; UI can ignore it)
+            "top_vendor_name": vendor_name,
+
             "last_sold": getattr(row, "last_sold_date", "")
         })
     return results
+
 
 @app.get("/api/platform/parts/count")
 def get_platform_parts_count(name: str):
