@@ -28,6 +28,7 @@ import logging
 import random
 import anyio 
 import math
+import numpy as np
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -235,6 +236,28 @@ def safe_int(v: Any, default: int = 0, min_v: int = 0, max_v: int = 10_000_000) 
 
 MAX_JSON_ROWS = safe_int(os.getenv("MAX_JSON_ROWS", 2000), 2000, 100, 200_000)
 
+def df_sanitize_for_json(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Make a DataFrame safe for JSON serialization:
+    - NaN/NaT -> None
+    - +inf/-inf -> None
+    - keep types as object so None is preserved
+    """
+    if df is None or df.empty:
+        return df if df is not None else pd.DataFrame()
+
+    # Replace inf/-inf first
+    df = df.replace([np.inf, -np.inf], None)
+
+    # Convert to object so None can exist
+    df = df.astype(object)
+
+    # Replace NaN/NaT with None
+    df = df.where(pd.notnull(df), None)
+
+    return df
+
+
 
 def safe_years(years: Optional[List[int]], min_year: int = 1900, max_year: int = 2100, max_len: int = 50) -> List[int]:
     if not years:
@@ -354,7 +377,8 @@ async def sanitize_nan_responses(request: Request, call_next):
         response = await call_next(request)
         return response
     except ValueError as e:
-        if "nan" in str(e).lower():
+        msg = str(e).lower()
+        if ("nan" in msg) or ("out of range float values" in msg) or ("inf" in msg):
             logger.error(f"NaN Detection: {request.url.path} returned NaNs. Please fix data source.")
             # We can't easily fix the stream here, but it prevents the hard crash log loop.
             return JSONResponse(
@@ -604,6 +628,7 @@ def run_athena_query(query: str):
         
         # 3. Clean NaN values (The Fix)
         # We replace NaN with None so JSON conversion works
+        df = df.replace([np.inf, -np.inf], None)
         df = df.astype(object).where(pd.notnull(df), None)
         
         # 4. Convert to Dict
@@ -690,7 +715,7 @@ def get_subset_from_disk(
             df = DUCK_CONN.execute(sql, all_params).fetchdf()
             
             # ✅ FIX: Sanitize NaN values to ensure valid JSON
-            return df.fillna(0).astype(object).where(pd.notnull(df), None)
+            return df_sanitize_for_json(df)
 
     except Exception:
         logger.exception(f"DuckDB Query Failed: {filename}")
@@ -829,7 +854,7 @@ def query_summary_df(
     with DUCK_LOCK:
         ensure_duck_conn() 
         df = DUCK_CONN.execute(sql, local_params).fetchdf()
-        return df.fillna(0).astype(object).where(pd.notnull(df), None)
+        return df_sanitize_for_json(df)
 
 
 
