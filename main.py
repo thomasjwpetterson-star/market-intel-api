@@ -3947,9 +3947,6 @@ def get_award_history(id: str):
     return out
 
 
-from typing import Any, List, Optional
-from fastapi import Query
-
 @app.get("/api/award/search")
 def search_awards(
     q: Optional[str] = None,
@@ -3962,162 +3959,115 @@ def search_awards(
     psc: Optional[str] = None,
     domain: Optional[str] = None
 ):
-    where_parts: List[str] = ["1=1"]
-    params: List[Any] = []
+    # Guardrails
+    limit_i = safe_int(limit, 20, 1, 200)
+    offset_i = safe_int(offset, 0, 0, 2_000_000)
+
+    cond: List[str] = ["1=1"]
 
     # --- TEXT SEARCH ---
     if q and q.strip():
-        safe_q = f"%{sanitize(q)}%"
-        where_parts.append("""(
-            upper(coalesce(contract_id, '')) LIKE ? OR
-            upper(coalesce(vendor_name, '')) LIKE ? OR
-            upper(coalesce(description, '')) LIKE ? OR
-            upper(coalesce(vendor_cage, '')) LIKE ?
-        )""")
-        params.extend([safe_q, safe_q, safe_q, safe_q])
+        v = sanitize(q)
+        like_v = sql_like_contains(v)
+        cond.append(
+            "("
+            f" upper(coalesce(contract_id,'')) LIKE {like_v} ESCAPE '#' OR"
+            f" upper(coalesce(vendor_name,'')) LIKE {like_v} ESCAPE '#' OR"
+            f" upper(coalesce(description,'')) LIKE {like_v} ESCAPE '#' OR"
+            f" upper(coalesce(vendor_cage,'')) LIKE {like_v} ESCAPE '#'"
+            ")"
+        )
 
     # --- FILTERS ---
     if vendor and vendor.strip():
-        where_parts.append("upper(vendor_name) LIKE ?")
-        params.append(f"%{sanitize(vendor)}%")
+        cond.append(f"upper(vendor_name) LIKE {sql_like_contains(sanitize(vendor))} ESCAPE '#'")
 
     if platform and platform.strip():
-        # Make casing explicit for an uppercase column comparison
-        where_parts.append("upper(platform_family) = ?")
-        params.append(sanitize(platform).upper())
+        cond.append(f"upper(platform_family) = {sql_literal(sanitize(platform))}")
 
     if agency and agency.strip():
-        a = sanitize(agency).upper()
-        where_parts.append("(upper(sub_agency) = ? OR upper(parent_agency) = ?)")
-        params.extend([a, a])
+        a = sanitize(agency)
+        cond.append(f"(upper(sub_agency) = {sql_literal(a)} OR upper(parent_agency) = {sql_literal(a)})")
 
     if psc and psc.strip():
-        where_parts.append("upper(psc) LIKE ?")
-        params.append(f"%{sanitize(psc)}%")
+        cond.append(f"upper(psc) LIKE {sql_like_contains(sanitize(psc))} ESCAPE '#'")
 
     if domain and domain.strip():
-        d = f"%{sanitize(domain)}%"
-        where_parts.append("(upper(naics_code) LIKE ? OR upper(psc) LIKE ?)")
-        params.extend([d, d])
+        d = sanitize(domain)
+        like_d = sql_like_contains(d)
+        cond.append(f"(upper(naics_code) LIKE {like_d} ESCAPE '#' OR upper(psc) LIKE {like_d} ESCAPE '#')")
 
-    # Years: validate + cap to avoid giant IN clauses / weird input
-    if years and len(years) > 0:
-        ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
-        if ys:
-            placeholders = ",".join(["?" for _ in ys])
-            where_parts.append(f"year IN ({placeholders})")
-            params.extend(ys)
+    ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
+    if ys:
+        years_csv = ",".join([str(y) for y in ys])
+        cond.append(f"year IN ({years_csv})")
 
-    where_sql = " AND ".join(where_parts)
+    where_clause = " AND ".join(cond)
 
-    # --- "LEADERBOARD" LOGIC (major awards only when NO q and NO filters) ---
+    # “leaderboard” logic: only show major awards if no filters at all
     is_filtering = bool(
-        (q and q.strip()) or
-        (vendor and vendor.strip()) or
-        (agency and agency.strip()) or
-        (platform and platform.strip()) or
-        (psc and psc.strip()) or
-        (domain and domain.strip()) or
-        (years and len(years) > 0)
+        (q and q.strip()) or (vendor and vendor.strip()) or (agency and agency.strip()) or
+        (platform and platform.strip()) or (psc and psc.strip()) or (domain and domain.strip()) or ys
     )
-
     major_threshold = 1_000_000  # $1M+
 
-    having_sql = ""
-    having_params: List[Any] = []
+    having_clause = ""
     if not is_filtering:
-        having_sql = "HAVING SUM(COALESCE(spend_amount, 0)) >= ?"
-        having_params = [major_threshold]
+        having_clause = f"HAVING SUM(COALESCE(spend_amount, 0)) >= {major_threshold}"
 
-    # Guardrails
-    limit = max(1, min(int(limit), 200))
-    offset = max(0, int(offset))
+    # 1 query: grouped results + windowed total
+    query = f"""
+    WITH rollup AS (
+        SELECT
+            contract_id,
+            max(action_date) AS last_action_date,
+            SUM(COALESCE(spend_amount, 0)) AS total_spend,
 
-    # File exists?
-    path = LOCAL_CACHE_DIR / "transactions.parquet"
-    if not path.exists():
-        return {"data": [], "total": 0, "offset": offset, "limit": limit}
+            max_by(vendor_name, action_date) AS vendor_name,
+            max_by(vendor_cage, action_date) AS vendor_cage,
+            max_by(sub_agency, action_date) AS sub_agency,
+            max_by(parent_agency, action_date) AS parent_agency,
+            max_by(description, action_date) AS description
+        FROM "market_intel_gold"."dashboard_master_view"
+        WHERE {where_clause}
+        GROUP BY contract_id
+        {having_clause}
+    )
+    SELECT
+        *,
+        COUNT(*) OVER() AS total
+    FROM rollup
+    ORDER BY last_action_date DESC, total_spend DESC
+    OFFSET {offset_i}
+    LIMIT {limit_i}
+    """
 
-    try:
-        with DUCK_LOCK:
-            conn = ensure_duck_conn()
+    rows = cached_athena_query(query)  # your TTL cache
 
-            # --- COUNT DISTINCT CONTRACTS ---
-            count_sql = f"""
-            SELECT COUNT(*) FROM (
-                SELECT contract_id
-                FROM read_parquet(?)
-                WHERE {where_sql}
-                GROUP BY contract_id
-                {having_sql}
-            ) t
-            """
-            total_count = conn.execute(
-                count_sql,
-                [str(path)] + list(params) + list(having_params)
-            ).fetchone()[0]
+    total = 0
+    if rows:
+        try:
+            total = int(rows[0].get("total") or 0)
+        except Exception:
+            total = 0
 
-            # --- DATA QUERY: CONTRACT-LEVEL ROLLUP ---
-            data_sql = f"""
-            SELECT
-                contract_id,
-                MAX(action_date) AS last_action_date,
-                SUM(COALESCE(spend_amount, 0)) AS total_spend,
+    data = []
+    for r in rows:
+        final_ag = r.get("sub_agency") or r.get("parent_agency")
+        data.append({
+            "contract_id": r.get("contract_id"),
+            "vendor_name": r.get("vendor_name"),
+            "vendor_cage": r.get("vendor_cage"),
+            "last_action_date": str(r.get("last_action_date")) if r.get("last_action_date") else None,
+            "description": r.get("description"),
+            "total_spend": float(r.get("total_spend") or 0),
+            "agency": final_ag,
+            "sub_agency": r.get("sub_agency"),
+            "parent_agency": r.get("parent_agency"),
+        })
 
-                arg_max(vendor_name, action_date) AS vendor_name,
-                arg_max(vendor_cage, action_date) AS vendor_cage,
-                arg_max(sub_agency, action_date) AS sub_agency,
-                arg_max(parent_agency, action_date) AS parent_agency,
-                arg_max(description, action_date) AS description
-            FROM read_parquet(?)
-            WHERE {where_sql}
-            GROUP BY contract_id
-            {having_sql}
-            ORDER BY last_action_date DESC, total_spend DESC
-            LIMIT ? OFFSET ?
-            """
+    return {"data": data, "total": total, "offset": offset_i, "limit": limit_i}
 
-            rows = conn.execute(
-                data_sql,
-                [str(path)] + list(params) + list(having_params) + [limit, offset]
-            ).fetchall()
-            colnames = [d[0] for d in conn.description]
-
-        # --- FORMAT OUTPUT (frontend-compatible keys) ---
-        results: List[dict] = []
-        for r in rows:
-            row = dict(zip(colnames, r))
-            final_agency = row.get("sub_agency") or row.get("parent_agency")
-
-            results.append({
-                "contract_id": row.get("contract_id"),
-                "vendor_name": row.get("vendor_name"),
-                "vendor_cage": row.get("vendor_cage"),
-                "last_action_date": str(row.get("last_action_date")) if row.get("last_action_date") is not None else None,
-                "description": row.get("description"),
-                "total_spend": float(row.get("total_spend") or 0),
-                "agency": final_agency,
-                "sub_agency": row.get("sub_agency"),
-                # Optional but often useful elsewhere in the app:
-                "parent_agency": row.get("parent_agency"),
-            })
-
-        return {
-            "data": results,
-            "total": int(total_count or 0),
-            "offset": offset,
-            "limit": limit
-        }
-
-    except Exception as e:
-        logger.exception("award search query failed")
-        return {
-            "data": [],
-            "total": 0,
-            "offset": offset,
-            "limit": limit,
-            "error": str(e)
-        }
 
 
 
