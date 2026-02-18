@@ -3959,14 +3959,18 @@ def search_awards(
     psc: Optional[str] = None,
     domain: Optional[str] = None
 ):
-    # Guardrails
-    limit_i = safe_int(limit, 20, 1, 200)
-    offset_i = safe_int(offset, 0, 0, 2_000_000)
+    # NOTE:
+    # - Keeps "major awards only" ONLY when the user is NOT filtering at all.
+    # - Allows searching specific awards whenever any filter/q/years is present.
+    # - Avoids reserved word issues by NOT calling the CTE "rollup".
+
+    limit_i = int(limit or 20)
+    offset_i = int(offset or 0)
 
     cond: List[str] = ["1=1"]
 
     # --- TEXT SEARCH ---
-    if q and q.strip():
+    if q and str(q).strip():
         v = sanitize(q)
         like_v = sql_like_contains(v)
         cond.append(
@@ -3979,20 +3983,20 @@ def search_awards(
         )
 
     # --- FILTERS ---
-    if vendor and vendor.strip():
+    if vendor and str(vendor).strip():
         cond.append(f"upper(vendor_name) LIKE {sql_like_contains(sanitize(vendor))} ESCAPE '#'")
 
-    if platform and platform.strip():
+    if platform and str(platform).strip():
         cond.append(f"upper(platform_family) = {sql_literal(sanitize(platform))}")
 
-    if agency and agency.strip():
+    if agency and str(agency).strip():
         a = sanitize(agency)
         cond.append(f"(upper(sub_agency) = {sql_literal(a)} OR upper(parent_agency) = {sql_literal(a)})")
 
-    if psc and psc.strip():
+    if psc and str(psc).strip():
         cond.append(f"upper(psc) LIKE {sql_like_contains(sanitize(psc))} ESCAPE '#'")
 
-    if domain and domain.strip():
+    if domain and str(domain).strip():
         d = sanitize(domain)
         like_d = sql_like_contains(d)
         cond.append(f"(upper(naics_code) LIKE {like_d} ESCAPE '#' OR upper(psc) LIKE {like_d} ESCAPE '#')")
@@ -4004,20 +4008,26 @@ def search_awards(
 
     where_clause = " AND ".join(cond)
 
-    # “leaderboard” logic: only show major awards if no filters at all
+    # ✅ Major-awards-only default browse mode:
+    # Apply only when user is NOT filtering at all.
     is_filtering = bool(
-        (q and q.strip()) or (vendor and vendor.strip()) or (agency and agency.strip()) or
-        (platform and platform.strip()) or (psc and psc.strip()) or (domain and domain.strip()) or ys
+        (q and str(q).strip()) or
+        (vendor and str(vendor).strip()) or
+        (agency and str(agency).strip()) or
+        (platform and str(platform).strip()) or
+        (psc and str(psc).strip()) or
+        (domain and str(domain).strip()) or
+        bool(ys)
     )
+
     major_threshold = 1_000_000  # $1M+
 
     having_clause = ""
     if not is_filtering:
         having_clause = f"HAVING SUM(COALESCE(spend_amount, 0)) >= {major_threshold}"
 
-    # 1 query: grouped results + windowed total
     query = f"""
-    WITH rollup AS (
+    WITH award_rollup AS (
         SELECT
             contract_id,
             max(action_date) AS last_action_date,
@@ -4036,13 +4046,13 @@ def search_awards(
     SELECT
         *,
         COUNT(*) OVER() AS total
-    FROM rollup
+    FROM award_rollup
     ORDER BY last_action_date DESC, total_spend DESC
     OFFSET {offset_i}
     LIMIT {limit_i}
     """
 
-    rows = cached_athena_query(query)  # your TTL cache
+    rows = cached_athena_query(query)
 
     total = 0
     if rows:
@@ -4052,7 +4062,7 @@ def search_awards(
             total = 0
 
     data = []
-    for r in rows:
+    for r in (rows or []):
         final_ag = r.get("sub_agency") or r.get("parent_agency")
         data.append({
             "contract_id": r.get("contract_id"),
@@ -4067,6 +4077,7 @@ def search_awards(
         })
 
     return {"data": data, "total": total, "offset": offset_i, "limit": limit_i}
+
 
 
 
