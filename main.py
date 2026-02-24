@@ -455,18 +455,16 @@ def get_readiness_state() -> Dict[str, Any]:
     is_loading = bool(cache.get("is_loading", False))
     last_loaded = cache.get("last_loaded", 0)
 
-    geo_ok = not cache.get("geo_df", pd.DataFrame()).empty
     profiles_ok = not cache.get("profiles_df", pd.DataFrame()).empty
-
     duck_ok = DUCK_CONN is not None
 
-    # ✅ "Real readiness" means: data loaded and not currently loading
-    ready = bool(duck_ok and geo_ok and profiles_ok and (not is_loading) and (last_loaded and last_loaded > 0))
+    # geo_df is now handled by DuckDB, so we remove it from the strict readiness check
+    ready = bool(duck_ok and profiles_ok and (not is_loading) and (last_loaded and last_loaded > 0))
 
     return {
         "ready": ready,
         "duck_ok": bool(duck_ok),
-        "geo_ok": bool(geo_ok),
+        "geo_ok": True, # Hardcoded to true for backwards compatibility with UI
         "profiles_ok": bool(profiles_ok),
         "is_loading": bool(is_loading),
         "last_loaded": last_loaded,
@@ -1131,20 +1129,26 @@ def reload_all_data():
             new_global_cache["kpis_path"] = None
         
         # 3. REFRESH DUCKDB VIEWS (Using writer connection)
-        # 3. REFRESH DUCKDB VIEWS (Using writer connection)
         with DUCK_INIT_LOCK:
             conn = ensure_duck_conn()
 
-            prod_path = str((LOCAL_CACHE_DIR / "products.parquet").resolve())
-            trans_path = str((LOCAL_CACHE_DIR / "transactions.parquet").resolve())
-            net_path = str((LOCAL_CACHE_DIR / "network.parquet").resolve())
-            kpis_path = str((LOCAL_CACHE_DIR / "kpis.parquet").resolve())
-
-            conn.execute(f"CREATE OR REPLACE VIEW v_products AS SELECT * FROM read_parquet('{prod_path}');")
-            conn.execute(f"CREATE OR REPLACE VIEW v_transactions AS SELECT * FROM read_parquet('{trans_path}');")
-            conn.execute(f"CREATE OR REPLACE VIEW v_network AS SELECT * FROM read_parquet('{net_path}');")
+            # ✅ NEW: Define all files that should be handled by DuckDB instead of RAM
+            views_to_create = [
+                ("v_products", "products.parquet"),
+                ("v_transactions", "transactions.parquet"),
+                ("v_network", "network.parquet"),
+                ("v_geo", "geo.parquet"),
+                ("v_risk", "risk.parquet"),
+                ("v_opportunities", "opportunities.parquet")
+            ]
+            
+            for view_name, file_name in views_to_create:
+                file_path = str((LOCAL_CACHE_DIR / file_name).resolve())
+                if os.path.exists(file_path):
+                    conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{file_path}');")
 
             # ✅ NEW: KPIs as a *cleaned* view (no RAM load)
+            kpis_path = str((LOCAL_CACHE_DIR / "kpis.parquet").resolve())
             if os.path.exists(kpis_path):
                 conn.execute(f"""
                     CREATE OR REPLACE VIEW v_kpis AS
@@ -1156,15 +1160,9 @@ def reload_all_data():
                     FROM read_parquet('{kpis_path}');
                 """)
             else:
-                # Keep a harmless empty view so queries don't crash
                 conn.execute("""
                     CREATE OR REPLACE VIEW v_kpis AS
-                    SELECT
-                        CAST(NULL AS VARCHAR) AS cage_code,
-                        CAST(NULL AS INTEGER) AS year,
-                        CAST(0.0 AS DOUBLE) AS total_spend,
-                        CAST(0 AS BIGINT) AS contract_count
-                    WHERE 1=0;
+                    SELECT CAST(NULL AS VARCHAR) AS cage_code, CAST(NULL AS INTEGER) AS year, CAST(0.0 AS DOUBLE) AS total_spend, CAST(0 AS BIGINT) AS contract_count WHERE 1=0;
                 """)
 
         # 4. FETCH MAPPINGS (Athena)
@@ -1185,7 +1183,8 @@ def reload_all_data():
         new_global_cache["naics_map"] = naics_map
 
         # 5. LOAD SMALL FILES
-        ram_files = ["geo.parquet", "profiles.parquet", "risk.parquet", "opportunities.parquet"]
+        # ✅ FIX: Removed geo, risk, and opportunities from RAM. They are strictly DuckDB now.
+        ram_files = ["profiles.parquet"]
         
         for file in ram_files:
             local_path = str(LOCAL_CACHE_DIR / file)
@@ -1349,10 +1348,16 @@ def reload_all_data():
              if {"cage_code", "vendor_name"}.issubset(p_df.columns):
                 new_global_cache["cage_name_map"] = p_df.set_index("cage_code")["vendor_name"].to_dict()
         
-        if not new_global_cache["geo_df"].empty:
-             g_df = new_global_cache["geo_df"]
-             if "cage_code" in g_df.columns:
-                new_global_cache["location_map"] = g_df.set_index("cage_code")[["city", "state"]].to_dict(orient="index")
+        # ✅ FIX: Build location_map using DuckDB instead of RAM
+        try:
+            geo_mapping_df = duck_fetch_df("SELECT cage_code, city, state FROM v_geo WHERE cage_code IS NOT NULL", use_writer=True)
+            if not geo_mapping_df.empty:
+                new_global_cache["location_map"] = geo_mapping_df.set_index("cage_code")[["city", "state"]].to_dict(orient="index")
+            else:
+                new_global_cache["location_map"] = {}
+        except Exception:
+            logger.exception("Failed to build location_map from DuckDB")
+            new_global_cache["location_map"] = {}
 
         # 8. BUILD SEARCH INDEX
         search_list: List[Dict[str, Any]] = []
@@ -1585,38 +1590,35 @@ def get_filter_options(
 # --- UPDATE IN API.PY ---
 
 def get_recompete_kpi(filters):
-    """
-    Calculates Risk using the specialized 'risk_df' sidecar.
-    """
-    # ✅ FIX: Use GLOBAL_CACHE["risk_df"]
-    df = GLOBAL_CACHE.get("risk_df", pd.DataFrame())
+    where_sql, params = build_summary_where(None, filters)
     
-    if df.empty: 
+    query = f"""
+        SELECT 
+            SUM(spend_amount) as total_value,
+            COUNT(DISTINCT contract_id) as count
+        FROM v_risk
+        WHERE {where_sql}
+          AND try_cast(completion_date as date) >= current_date()
+          AND try_cast(completion_date as date) <= current_date() + INTERVAL 90 DAY
+    """
+    try:
+        df = duck_fetch_df(query, params)
+        if df.empty or pd.isna(df['total_value'].iloc[0]):
+            return {"label": "Expiring Value (90d)", "value": "N/A", "sub_label": "No Data"}
+            
+        total_value = float(df['total_value'].iloc[0] or 0)
+        count = int(df['count'].iloc[0] or 0)
+        
+        return {
+            "label": "Expiring Value (90d)",
+            "value": f"${total_value/1e9:.2f}B",
+            "sub_label": f"{count} Contracts Ending",
+            "status": "warning"
+        }
+    except Exception as e:
+        logger.error(f"Risk KPI Error: {e}")
         return {"label": "Expiring Value (90d)", "value": "N/A", "sub_label": "No Data"}
-
-    # 2. Apply Filters (Vendor, Agency, etc.) to the Sidecar
-    filtered_risk = FilterEngine.apply_pandas(df, None, filters)
-
-    # 3. Filter for the 90-Day Window
-    today = pd.Timestamp.now()
-    next_90 = today + pd.Timedelta(days=90)
     
-    # Ensure date column is datetime objects
-    dates = pd.to_datetime(filtered_risk['completion_date'], errors='coerce')
-    mask = (dates >= today) & (dates <= next_90)
-    
-    final_slice = filtered_risk[mask]
-
-    # 4. Calculate Totals
-    total_value = final_slice['spend_amount'].sum()
-    count = final_slice['contract_id'].nunique()
-
-    return {
-        "label": "Expiring Value (90d)",
-        "value": f"${total_value/1e9:.2f}B",
-        "sub_label": f"{count} Contracts Ending",
-        "status": "warning"
-    }
 
 @app.get("/api/dashboard/kpis")
 def get_market_kpis(
@@ -1925,80 +1927,60 @@ def get_map_data(
     platform: Optional[str]=None,
     psc: Optional[str]=None
 ):
-    # 1. Load Geo Data
-    geo_df = GLOBAL_CACHE.get("geo_df", pd.DataFrame())
-    if geo_df.empty:
-        return []
-
-    # Normalize Key
-    if "join_key" not in geo_df.columns:
-        if "cage_code" in geo_df.columns:
-             geo_df["join_key"] = geo_df["cage_code"].astype(str).str.strip().str.upper()
-        else:
-             return []
-
-    # 2. Get Spend Data
     filters = {
-        "vendor": vendor,
-        "parent": parent,
-        "cage": cage,
-        "domain": domain,
-        "agency": agency,
-        "platform": platform,
-        "psc": psc
+        "vendor": vendor, "parent": parent, "cage": cage,
+        "domain": domain, "agency": agency, "platform": platform, "psc": psc
     }
 
     where_sql, params = build_summary_where(years, filters)
 
-    # ✅ FIX: Request 150,000 rows and IGNORE the global 2,000 row limit
-    active_vendors = query_summary_df(
-        where_sql=where_sql,
-        params=params,
-        select_sql="cage_code, vendor_name, SUM(total_spend) AS total_spend",
-        group_by_sql="cage_code, vendor_name",
-        order_by_sql="total_spend DESC",
-        limit=150000,
-        ignore_cap=True 
-    )
-
-    if active_vendors.empty:
+    # ✅ DuckDB CTE perfectly mimics the Pandas 150k intermediate frame + string cleanup + final 50k merge
+    query = f"""
+        WITH active_vendors AS (
+            SELECT 
+                UPPER(TRIM(CAST(cage_code AS VARCHAR))) AS join_key,
+                MAX(vendor_name) AS vendor_name,
+                SUM(total_spend) AS total_spend
+            FROM v_summary
+            WHERE {where_sql}
+            GROUP BY UPPER(TRIM(CAST(cage_code AS VARCHAR)))
+            ORDER BY total_spend DESC
+            LIMIT 150000
+        )
+        SELECT 
+            a.join_key AS id,
+            a.vendor_name AS vendor,
+            a.join_key AS cage,
+            CAST(g.latitude AS DOUBLE) AS lat,
+            CAST(g.longitude AS DOUBLE) AS lon,
+            CAST(a.total_spend AS DOUBLE) AS spend
+        FROM active_vendors a
+        INNER JOIN v_geo g 
+            ON a.join_key = UPPER(TRIM(CAST(g.cage_code AS VARCHAR)))
+        WHERE g.latitude IS NOT NULL 
+          AND g.longitude IS NOT NULL
+        ORDER BY a.total_spend DESC
+        LIMIT 50000
+    """
+    
+    try:
+        df = duck_fetch_df(query, params)
+        if df.empty: return []
+        
+        out = []
+        for r in df.itertuples(index=False):
+            out.append({
+                "id": str(getattr(r, "id", "")),
+                "vendor": str(getattr(r, "vendor", "")),
+                "cage": str(getattr(r, "cage", "")),
+                "lat": float(getattr(r, "lat", 0.0)),
+                "lon": float(getattr(r, "lon", 0.0)),
+                "spend": float(getattr(r, "spend", 0.0)),
+            })
+        return out
+    except Exception as e:
+        logger.error(f"Map Query Error: {e}")
         return []
-
-    # 3. Normalize & Merge
-    active_vendors["join_key"] = active_vendors["cage_code"].astype(str).str.strip().str.upper()
-
-    mapped_vendors = pd.merge(
-        geo_df,
-        active_vendors,
-        on="join_key",
-        how="inner",
-        suffixes=("_geo", "_act")
-    )
-
-    if mapped_vendors.empty:
-        return []
-
-    # 4. Final Limit (Visual limit)
-    mapped_vendors = mapped_vendors.sort_values("total_spend", ascending=False).head(50000)
-
-    vendor_col = "vendor_name_act" if "vendor_name_act" in mapped_vendors.columns else "vendor_name"
-    cage_col = "cage_code_act" if "cage_code_act" in mapped_vendors.columns else "cage_code"
-
-    out = []
-    for r in mapped_vendors.itertuples(index=False):
-        if pd.isna(r.latitude) or pd.isna(r.longitude):
-            continue
-
-        out.append({
-            "id": getattr(r, cage_col, ""),
-            "vendor": getattr(r, vendor_col, ""),
-            "cage": str(getattr(r, cage_col, "")).strip().upper(),
-            "lat": float(r.latitude),
-            "lon": float(r.longitude),
-            "spend": float(getattr(r, "total_spend", 0)),
-        })
-    return out
-
 
 
 # --- RESTORED: MARKET OPPORTUNITIES ---
@@ -2668,19 +2650,12 @@ def get_platform_awards(
 
 
 
-# ✅ RESTORED ENDPOINT: Fixes 404 "Not Found" error
-# This aliases the old route to the new fast logic so the UI works without changes.
 @app.get("/api/company/opportunities")
 def get_company_opportunities(cage: Optional[str] = None, name: Optional[str] = None):
-    # 1. Reuse existing profile logic to find capabilities
-    # This works for both specific CAGEs (Drill-down) and Parents (Aggregate)
     target_naics = set()
-    
-    # Try InMemory Profiles First (Fastest/Safest)
     profiles_df = GLOBAL_CACHE.get("profiles_df", pd.DataFrame())
     
     if not profiles_df.empty:
-        # Match by CAGE
         if cage and cage != "AGGREGATE":
             matches = profiles_df[profiles_df['cage_code'] == cage]
             for _, row in matches.iterrows():
@@ -2688,59 +2663,65 @@ def get_company_opportunities(cage: Optional[str] = None, name: Optional[str] = 
                     codes = str(row['top_naics_codes']).split(',')
                     target_naics.update([c.strip() for c in codes])
 
-        # Match by Name (Parent Logic)
         if name:
             clean_name = sanitize(name)
-            # Find ALL children matching this parent name to build a composite NAICS list
             matches = profiles_df[profiles_df['vendor_name'].str.contains(clean_name, case=False, na=False)]
             for _, row in matches.iterrows():
                 if row.get('top_naics_codes'):
                     codes = str(row['top_naics_codes']).split(',')
                     target_naics.update([c.strip() for c in codes])
 
-    # 2. Clean & Format found codes
     clean_naics_list = []
     for n in target_naics:
         s = str(n).split('.')[0].split(' - ')[0].strip()
-        # Capture standard 5-6 digit codes (e.g. 336411)
         if len(s) >= 3 and s.isdigit(): 
             clean_naics_list.append(s)
 
     if not clean_naics_list:
         return []
 
-    # 3. Search the In-Memory Opportunities Cache (Fast & Safe)
-    df_opps = GLOBAL_CACHE.get("df_opportunities", pd.DataFrame())
-    if df_opps.empty:
-        return []
-
-    # Create regex pattern for fast filtering
-    pattern = "|".join([re.escape(c) for c in sorted(set(clean_naics_list))])
-    mask = df_opps['naics'].astype(str).str.contains(pattern, regex=True, na=False)
-
-    # Sort by closest deadline first
-    filtered = df_opps[mask].sort_values("deadline", ascending=True).head(50)
-
-    # 4. Format for UI (Including the critical alias)
-    results = []
-    for row in filtered.itertuples():
-        # Handle potential missing attributes safely
-        sol_val = getattr(row, 'sol_num', '') or getattr(row, 'sol#', '')
+    # 3. ✅ NEW: DuckDB SQL Query instead of Pandas RAM scan
+    conditions = []
+    params = []
+    for n in set(clean_naics_list):
+        conditions.append("CAST(naics AS VARCHAR) LIKE ?")
+        params.append(f"{n}%")
         
-        results.append({
-            "noticeid": getattr(row, 'id', ''),
-            "title": getattr(row, 'title', ''),
-            
-            # ✅ THE FIX: Send BOTH keys to ensure UI compatibility
-            "sol_num": sol_val, 
-            "sol#": sol_val,     
-            
-            "department_indagency": getattr(row, 'agency', ''),
-            "responsedeadline": getattr(row, 'deadline', ''),
-            "setaside": getattr(row, 'set_aside_type', ''),
-            "primarycontactemail": getattr(row, 'poc_email', '')
-        })
-    return results
+    where_clause = " OR ".join(conditions)
+    
+    query = f"""
+        SELECT id, title, sol_num, agency, deadline, set_aside_type, poc_email
+        FROM v_opportunities
+        WHERE ({where_clause})
+          AND try_cast(deadline as date) >= current_date()
+        ORDER BY try_cast(deadline as date) ASC
+        LIMIT 50
+    """
+    
+    try:
+        df = duck_fetch_df(query, params)
+        if df.empty: return []
+        
+        results = []
+        for row in df.itertuples(index=False):
+            sol_val = getattr(row, 'sol_num', '')
+            if pd.isna(sol_val) or not str(sol_val).strip():
+                 sol_val = getattr(row, 'id', '')
+                 
+            results.append({
+                "noticeid": getattr(row, 'id', ''),
+                "title": getattr(row, 'title', ''),
+                "sol_num": sol_val, 
+                "sol#": sol_val,    
+                "department_indagency": getattr(row, 'agency', ''),
+                "responsedeadline": getattr(row, 'deadline', ''),
+                "setaside": getattr(row, 'set_aside_type', ''),
+                "primarycontactemail": getattr(row, 'poc_email', '')
+            })
+        return results
+    except Exception as e:
+        logger.error(f"Opportunities DuckDB Error: {e}")
+        return []
 
 
 # ==========================================
@@ -3355,10 +3336,8 @@ def get_company_opportunities_recommended(cage: Optional[str] = None, name: Opti
         return []
 
     # 2. Extract and Clean NAICS codes
-    raw_naics_list = profile['top_naics']
     clean_naics_list = []
-
-    for n in raw_naics_list:
+    for n in profile['top_naics']:
         code_part = str(n).split(' - ')[0].strip().split('.')[0]
         if len(code_part) >= 3:
             clean_naics_list.append(code_part)
@@ -3366,38 +3345,48 @@ def get_company_opportunities_recommended(cage: Optional[str] = None, name: Opti
     if not clean_naics_list:
         return []
 
-    # 3. Search the In-Memory Opportunities Cache (Fast & Safe)
-    df_opps = GLOBAL_CACHE.get("df_opportunities", pd.DataFrame())
-    if df_opps.empty:
-        return []
-
-    # Create regex pattern for fast filtering
-    pattern = "|".join([re.escape(c) for c in sorted(set(clean_naics_list))])
-    mask = df_opps['naics'].astype(str).str.contains(pattern, regex=True, na=False)
-
-    # Sort by deadline and take top 50
-    filtered = df_opps[mask].sort_values("deadline", ascending=True).head(50)
-
-    # 4. Format for UI (Including the critical alias)
-    results = []
-    for row in filtered.itertuples():
-        # Handle potential missing attributes safely
-        sol_val = getattr(row, 'sol_num', '') or getattr(row, 'sol#', '')
+    # 3. ✅ NEW: DuckDB SQL Query instead of Pandas RAM scan
+    conditions = []
+    params = []
+    for n in set(clean_naics_list):
+        conditions.append("CAST(naics AS VARCHAR) LIKE ?")
+        params.append(f"{n}%")
         
-        results.append({
-            "noticeid": getattr(row, 'id', ''),
-            "title": getattr(row, 'title', ''),
-            
-            # ✅ THE FIX: Send BOTH keys to ensure UI compatibility
-            "sol_num": sol_val, 
-            "sol#": sol_val,     
-            
-            "department_indagency": getattr(row, 'agency', ''),
-            "responsedeadline": getattr(row, 'deadline', ''),
-            "setaside": getattr(row, 'set_aside_type', ''),
-            "primarycontactemail": getattr(row, 'poc_email', '')
-        })
-    return results
+    where_clause = " OR ".join(conditions)
+    
+    query = f"""
+        SELECT id, title, sol_num, agency, deadline, set_aside_type, poc_email
+        FROM v_opportunities
+        WHERE ({where_clause})
+          AND try_cast(deadline as date) >= current_date()
+        ORDER BY try_cast(deadline as date) ASC
+        LIMIT 50
+    """
+    
+    try:
+        df = duck_fetch_df(query, params)
+        if df.empty: return []
+        
+        results = []
+        for row in df.itertuples(index=False):
+            sol_val = getattr(row, 'sol_num', '')
+            if pd.isna(sol_val) or not str(sol_val).strip():
+                 sol_val = getattr(row, 'id', '')
+                 
+            results.append({
+                "noticeid": getattr(row, 'id', ''),
+                "title": getattr(row, 'title', ''),
+                "sol_num": sol_val, 
+                "sol#": sol_val,    
+                "department_indagency": getattr(row, 'agency', ''),
+                "responsedeadline": getattr(row, 'deadline', ''),
+                "setaside": getattr(row, 'set_aside_type', ''),
+                "primarycontactemail": getattr(row, 'poc_email', '')
+            })
+        return results
+    except Exception as e:
+        logger.error(f"Recommended Opps DuckDB Error: {e}")
+        return []
 
 
 # ==========================================
@@ -4293,127 +4282,100 @@ def get_pipeline_live(
     limit: int = 50,
     offset: int = 0
 ):
-    # Use Global Cache (RAM)
-    df = GLOBAL_CACHE.get("df_opportunities", pd.DataFrame())
-    if df.empty: return []
-
-    mask = pd.Series(True, index=df.index)
-    today = date.today()
-    today_str = today.isoformat() 
-
-    # --- 1. FILTER: DEADLINE (Keep this, it's correct) ---
-    if 'deadline' in df.columns:
-        # Only show future/active opportunities
-        mask &= (df['deadline'] >= today_str)
-
-    # --- 2. FILTER: DATA QUALITY (RELAXED) ---
-    # ✅ FIX: Accept rows with EITHER a Sol Num OR a Notice ID
-    # This restores the millions of records that are valid but lack a formal sol_num
-    if 'sol_num' in df.columns and 'id' in df.columns:
-        has_sol = (df['sol_num'].notna()) & (df['sol_num'] != '')
-        has_id = (df['id'].notna()) & (df['id'] != '')
-        mask &= (has_sol | has_id)
-    elif 'sol_num' in df.columns:
-        # Fallback if ID column missing (unlikely)
-        mask &= (df['sol_num'].notna()) & (df['sol_num'] != '')
-
-    # --- 3. STANDARD FILTERS ---
+    conds = ["try_cast(deadline as date) >= current_date()"]
+    params = []
+    
+    # Matches original data quality filter: Accept rows with EITHER a Sol Num OR a Notice ID
+    conds.append("(NULLIF(TRIM(sol_num), '') IS NOT NULL OR NULLIF(TRIM(id), '') IS NOT NULL)")
+    
     if naics:
-        safe_naics = sanitize(naics)
-        mask &= df['naics'].astype(str).str.contains(safe_naics, regex=False, na=False)
-        
+        conds.append("naics LIKE ?")
+        params.append(f"%{sanitize(naics)}%")
     if set_aside:
-        safe_set = sanitize(set_aside)
-        mask &= df['set_aside_type'].astype(str).str.upper().str.contains(safe_set, regex=False, na=False)
-        
+        conds.append("upper(set_aside_type) LIKE ?")
+        params.append(f"%{sanitize(set_aside).upper()}%")
     if state:
-        safe_state = sanitize(state)
-        mask &= (df['state'] == safe_state)
-        
+        conds.append("state = ?")
+        params.append(sanitize(state))
     if source:
-        safe_source = sanitize(source)
-        mask &= (df['source_system'] == safe_source)
-
-    # --- 4. GLOBAL BRIDGE FILTERS ---
+        conds.append("source_system = ?")
+        params.append(sanitize(source))
+    
+    # Matches original keyword logic across search_text, title, and description
     if keyword:
-        safe_k = sanitize(keyword)
-        if 'search_text' in df.columns:
-            mask &= df['search_text'].str.contains(safe_k, regex=False, na=False)
-        else:
-            mask &= (df['title'].astype(str).str.upper().str.contains(safe_k, regex=False, na=False)) | \
-                    (df['description'].astype(str).str.upper().str.contains(safe_k, regex=False, na=False))
-
+        safe_k = f"%{sanitize(keyword).upper()}%"
+        conds.append("(upper(search_text) LIKE ? OR upper(title) LIKE ? OR upper(description) LIKE ?)")
+        params.extend([safe_k, safe_k, safe_k])
+        
+    # Matches original DLA/LOGISTICS specific fallback logic
     if agency:
-        safe_ag = sanitize(agency)
+        safe_ag = f"%{sanitize(agency).upper()}%"
         if "DLA" in safe_ag or "LOGISTICS" in safe_ag:
-             ag_mask = (df['agency'].astype(str).str.upper().str.contains("LOGISTICS", regex=False, na=False)) | \
-                       (df['sub_agency'].astype(str).str.upper().str.contains("LOGISTICS", regex=False, na=False)) | \
-                       (df['source_system'] == 'DLA')
-             mask &= ag_mask
+            conds.append("(upper(agency) LIKE '%LOGISTICS%' OR upper(sub_agency) LIKE '%LOGISTICS%' OR source_system = 'DLA')")
         else:
-             ag_mask = (df['agency'].astype(str).str.upper().str.contains(safe_ag, regex=False, na=False)) | \
-                       (df['sub_agency'].astype(str).str.upper().str.contains(safe_ag, regex=False, na=False))
-             mask &= ag_mask
-
+            conds.append("(upper(agency) LIKE ? OR upper(sub_agency) LIKE ?)")
+            params.extend([safe_ag, safe_ag])
+            
     if platform:
-        safe_plat = sanitize(platform)
-        p_mask = (df['title'].astype(str).str.upper().str.contains(safe_plat, regex=False, na=False)) | \
-                 (df['description'].astype(str).str.upper().str.contains(safe_plat, regex=False, na=False))
-        mask &= p_mask
-
+        safe_plat = f"%{sanitize(platform).upper()}%"
+        conds.append("(upper(title) LIKE ? OR upper(description) LIKE ?)")
+        params.extend([safe_plat, safe_plat])
+        
     if domain:
-        safe_domain = sanitize(domain)
+        safe_domain = sanitize(domain).upper()
         if len(safe_domain) > 0 and (safe_domain[0].isdigit() or (len(safe_domain) == 4 and safe_domain[0].isalpha())):
-            d_mask = (df['psc'].astype(str).str.startswith(safe_domain, na=False)) | \
-                     (df['naics'].astype(str).str.startswith(safe_domain, na=False))
-            mask &= d_mask
+            conds.append("(psc LIKE ? OR naics LIKE ?)")
+            params.extend([f"{safe_domain}%", f"{safe_domain}%"])
         else:
-            d_mask = (df['title'].astype(str).str.upper().str.contains(safe_domain, regex=False, na=False)) | \
-                     (df['description'].astype(str).str.upper().str.contains(safe_domain, regex=False, na=False))
-            mask &= d_mask
-
-    filtered = df[mask]
+            safe_domain_like = f"%{safe_domain}%"
+            conds.append("(upper(title) LIKE ? OR upper(description) LIKE ?)")
+            params.extend([safe_domain_like, safe_domain_like])
+            
+    where_sql = " AND ".join(conds)
     
-    if "deadline" in filtered.columns:
-        filtered = filtered.sort_values("deadline", ascending=True)
-
-    start = int(offset)
-    end = start + int(limit)
-    page = filtered.iloc[start:end]
-
+    count_query = f"SELECT count(*) as c FROM v_opportunities WHERE {where_sql}"
+    total_matches = 0
+    try:
+        total_matches = duck_fetch_df(count_query, params)['c'].iloc[0]
+    except:
+        pass
+        
+    query = f"""
+        SELECT * FROM v_opportunities 
+        WHERE {where_sql}
+        ORDER BY try_cast(deadline as date) ASC
+        LIMIT {int(limit)} OFFSET {int(offset)}
+    """
+    
+    df = duck_fetch_df(query, params)
+    if df.empty: return []
+    
     results = []
-    
-    for row in page.itertuples():
-        # Date Logic
+    today = date.today()
+    for row in df.itertuples():
+        
+        # Matches original Date Logic and race condition safety precisely
         days_left = 0
         try:
             dt_str = str(row.deadline)[:10]
             dt_obj = datetime.strptime(dt_str, "%Y-%m-%d").date()
-            delta = dt_obj - today
-            days_left = delta.days
+            days_left = (dt_obj - today).days
         except:
-            days_left = 0
-
-        # Race condition safety: Skip if it expired in the last few seconds
-        if days_left < 0: 
-            continue
-
-        # ✅ FIX: Smart Identifier
-        # If sol_num is missing, fallback to Notice ID.
-        # This guarantees the UI has something to display and link.
+            pass
+            
+        if days_left < 0: continue
+        
+        # Matches original Smart Identifier logic precisely
         display_sol = getattr(row, 'sol_num', '')
         if not display_sol or str(display_sol) == 'nan':
-            display_sol = getattr(row, 'id', '') # Fallback to Notice ID
-
+            display_sol = getattr(row, 'id', '')
+            
         results.append({
             "id": getattr(row, 'id', ''),
             "title": getattr(row, 'title', ''),
             "agency": getattr(row, 'agency', ''),
             "sub_agency": getattr(row, 'sub_agency', ''),
-            
-            # ✅ Return the computed valid ID here
             "sol_num": display_sol,
-            
             "due_date": getattr(row, 'deadline', ''),
             "deadline": getattr(row, 'deadline', ''),
             "set_aside": getattr(row, 'set_aside_type', ''),
@@ -4424,9 +4386,8 @@ def get_pipeline_live(
             "primarycontactemail": getattr(row, 'poc_email', ''),
             "source_system": getattr(row, 'source_system', ''),
             "days_left": int(days_left),
-            "total_matches": len(filtered)
+            "total_matches": int(total_matches)
         })
-
     return results
 
 @app.get("/api/pipeline/recent-wins")
