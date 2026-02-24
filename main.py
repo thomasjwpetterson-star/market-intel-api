@@ -4148,17 +4148,11 @@ def search_awards(
     psc: Optional[str] = None,
     domain: Optional[str] = None
 ):
-    # NOTE:
-    # - Keeps "major awards only" ONLY when the user is NOT filtering at all.
-    # - Allows searching specific awards whenever any filter/q/years is present.
-    # - Avoids reserved word issues by NOT calling the CTE "rollup".
-
     limit_i = int(limit or 20)
     offset_i = int(offset or 0)
 
     cond: List[str] = ["1=1"]
 
-    # --- TEXT SEARCH ---
     if q and str(q).strip():
         v = sanitize(q)
         like_v = sql_like_contains(v)
@@ -4171,7 +4165,6 @@ def search_awards(
             ")"
         )
 
-    # --- FILTERS ---
     if vendor and str(vendor).strip():
         cond.append(f"upper(vendor_name) LIKE {sql_like_contains(sanitize(vendor))} ESCAPE '#'")
 
@@ -4195,10 +4188,6 @@ def search_awards(
         years_csv = ",".join([str(y) for y in ys])
         cond.append(f"year IN ({years_csv})")
 
-    where_clause = " AND ".join(cond)
-
-    # ✅ Major-awards-only default browse mode:
-    # Apply only when user is NOT filtering at all.
     is_filtering = bool(
         (q and str(q).strip()) or
         (vendor and str(vendor).strip()) or
@@ -4209,15 +4198,32 @@ def search_awards(
         bool(ys)
     )
 
-    major_threshold = 1_000_000  # $1M+
-
+    major_threshold = 1_000_000
     having_clause = ""
+
     if not is_filtering:
+        # Default view: Only scan the last 2 years for the homepage to keep it lightning fast
+        cond.append("try_cast(action_date as date) >= current_date() - INTERVAL 730 DAY")
         having_clause = f"HAVING SUM(COALESCE(spend_amount, 0)) >= {major_threshold}"
 
-    # ✅ FIX: Point to local v_transactions and use DuckDB's arg_max
-    query = f"""
-    WITH award_rollup AS (
+    where_clause = " AND ".join(cond)
+
+    # ✅ QUERY 1: Fast, low-memory exact count
+    if having_clause:
+        count_query = f"""
+            SELECT count(*) as c FROM (
+                SELECT contract_id 
+                FROM v_transactions 
+                WHERE {where_clause} 
+                GROUP BY contract_id 
+                {having_clause}
+            )
+        """
+    else:
+        count_query = f"SELECT count(distinct contract_id) as c FROM v_transactions WHERE {where_clause}"
+
+    # ✅ QUERY 2: Top-N data fetch (low memory because of the LIMIT)
+    data_query = f"""
         SELECT
             contract_id,
             max(action_date) AS last_action_date,
@@ -4232,48 +4238,41 @@ def search_awards(
         WHERE {where_clause}
         GROUP BY contract_id
         {having_clause}
-    )
-    SELECT
-        *,
-        CAST(COUNT(*) OVER() AS INTEGER) AS total
-    FROM award_rollup
-    ORDER BY last_action_date DESC, total_spend DESC
-    OFFSET {offset_i}
-    LIMIT {limit_i}
+        ORDER BY last_action_date DESC, total_spend DESC
+        OFFSET {offset_i}
+        LIMIT {limit_i}
     """
 
     try:
-        # Execute locally instead of waiting for AWS
-        df = duck_fetch_df(query)
+        # Execute count
+        total_df = duck_fetch_df(count_query)
+        exact_total = int(total_df['c'].iloc[0]) if not total_df.empty else 0
+
+        # Execute data fetch
+        df = duck_fetch_df(data_query)
         df = df_sanitize_for_json(df)
         rows = df.to_dict(orient="records")
+        
+        data = []
+        for r in rows:
+            final_ag = r.get("sub_agency") or r.get("parent_agency")
+            data.append({
+                "contract_id": r.get("contract_id"),
+                "vendor_name": r.get("vendor_name"),
+                "vendor_cage": r.get("vendor_cage"),
+                "last_action_date": str(r.get("last_action_date")) if r.get("last_action_date") else None,
+                "description": r.get("description"),
+                "total_spend": float(r.get("total_spend") or 0),
+                "agency": final_ag,
+                "sub_agency": r.get("sub_agency"),
+                "parent_agency": r.get("parent_agency"),
+            })
+
+        return {"data": data, "total": exact_total, "offset": offset_i, "limit": limit_i}
+
     except Exception as e:
         logger.error(f"Award Search DuckDB Error: {e}")
-        rows = []
-
-    total = 0
-    if rows:
-        try:
-            total = int(rows[0].get("total") or 0)
-        except Exception:
-            total = 0
-
-    data = []
-    for r in (rows or []):
-        final_ag = r.get("sub_agency") or r.get("parent_agency")
-        data.append({
-            "contract_id": r.get("contract_id"),
-            "vendor_name": r.get("vendor_name"),
-            "vendor_cage": r.get("vendor_cage"),
-            "last_action_date": str(r.get("last_action_date")) if r.get("last_action_date") else None,
-            "description": r.get("description"),
-            "total_spend": float(r.get("total_spend") or 0),
-            "agency": final_ag,
-            "sub_agency": r.get("sub_agency"),
-            "parent_agency": r.get("parent_agency"),
-        })
-
-    return {"data": data, "total": total, "offset": offset_i, "limit": limit_i}
+        return {"data": [], "total": 0, "offset": offset_i, "limit": limit_i}
 
 
 
@@ -4282,11 +4281,19 @@ def search_awards(
 @app.get("/api/award/stats")
 def get_database_stats():
     """
-    Returns the total row count of the database for the 'Searching X Records' badge.
+    Returns the total row count of the local 7-year transactions database 
+    for the 'Searching X Records' badge.
     """
-    query = 'SELECT count(*) as total FROM "market_intel_gold"."dashboard_master_view"'
-    # This queries metadata and is usually very fast
-    return cached_athena_query(query)
+    try:
+        # ✅ FIX: Point directly to DuckDB's v_transactions view for instant local counting
+        df = duck_fetch_df("SELECT count(*) as total FROM v_transactions")
+        total = int(df['total'].iloc[0]) if not df.empty else 0
+        
+        # Returned as a list containing a dict to match the old Athena return format
+        return [{"total": total}]
+    except Exception as e:
+        logger.error(f"Stats DuckDB Error: {e}")
+        return [{"total": 0}]
 
 
 # ==========================================
