@@ -1145,18 +1145,18 @@ def reload_all_data():
             for view_name, file_name in views_to_create:
                 file_path = str((LOCAL_CACHE_DIR / file_name).resolve())
                 if os.path.exists(file_path):
-                    # ✅ FIX: Create Native Tables instead of Views for 10x query speed
-                    conn.execute(f"DROP VIEW IF EXISTS {view_name};")
+                    # Drop the heavy tables we accidentally created
                     conn.execute(f"DROP TABLE IF EXISTS {view_name};")
-                    conn.execute(f"CREATE TABLE {view_name} AS SELECT * FROM read_parquet('{file_path}');")
+                    # Restore the lightweight pointers
+                    conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{file_path}');")
 
             # ✅ NEW: KPIs as a Native Table
+            # Restore KPIs as a View
             kpis_path = str((LOCAL_CACHE_DIR / "kpis.parquet").resolve())
-            conn.execute("DROP VIEW IF EXISTS v_kpis;")
             conn.execute("DROP TABLE IF EXISTS v_kpis;")
             if os.path.exists(kpis_path):
                 conn.execute(f"""
-                    CREATE TABLE v_kpis AS
+                    CREATE OR REPLACE VIEW v_kpis AS
                     SELECT
                         upper(trim(CAST(cage_code AS VARCHAR))) AS cage_code,
                         try_cast(year AS INTEGER) AS year,
@@ -1317,21 +1317,19 @@ def reload_all_data():
                 writer.close()
 
             # Atomic Swap
-            # Atomic Swap
             with DUCK_INIT_LOCK:
                 conn = ensure_duck_conn()
                 
                 if summary_temp_path.exists():
                     summary_temp_path.replace(summary_final_path) 
                 
-                # ✅ FIX: Create Native Table instead of View for 10x faster queries
-                conn.execute("DROP VIEW IF EXISTS v_summary;")
+                # Drop the table to clear RAM and restore the lightweight View
                 conn.execute("DROP TABLE IF EXISTS v_summary;")
                 conn.execute(
-                    f"CREATE TABLE v_summary AS SELECT * FROM read_parquet('{str(summary_final_path)}');"
+                    f"CREATE OR REPLACE VIEW v_summary AS SELECT * FROM read_parquet('{str(summary_final_path)}');"
                 )
             
-            logger.info("Summary updated safely via atomic swap (Native Table).")
+            logger.info("Summary updated safely via atomic swap (View).")
             new_global_cache["df"] = pd.DataFrame()
 
             # Re-compute options
