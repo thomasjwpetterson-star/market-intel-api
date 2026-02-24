@@ -45,6 +45,7 @@ GLOBAL_CACHE = {
     "profiles_df": pd.DataFrame(),
     "risk_df": pd.DataFrame(),
     "df_opportunities": pd.DataFrame(),
+    "kpis_path": None,
     "options": {},
     "search_index": [],
     "is_loading": True, # Start as loading
@@ -937,15 +938,15 @@ class FilterEngine:
 
 # [Find and Replace in api.py]
 
-def get_parent_aggregate_stats(parent_name: str):
+def get_parent_aggregate_stats(parent_name: str, years: Optional[List[int]] = None):
     if not parent_name:
         return None
 
     clean = parent_name.strip().upper().replace("'", "")
-    where_sql = "upper(clean_parent) = ?"
-    params = [clean]
 
-    # totals
+    filters = {"parent": clean}
+    where_sql, params = build_summary_where(years, filters)
+
     totals = query_summary_df(
         where_sql, params,
         select_sql="sum(total_spend) as total_spend, sum(contract_count) as contract_count, max(year) as last_active",
@@ -958,11 +959,10 @@ def get_parent_aggregate_stats(parent_name: str):
     total_contracts = int(totals["contract_count"].iloc[0]) if "contract_count" in totals.columns else 0
     last_active = int(totals["last_active"].iloc[0]) if "last_active" in totals.columns and pd.notna(totals["last_active"].iloc[0]) else 0
 
-    # top NAICS (code + description if present)
     naics = query_summary_df(
         where_sql, params,
         select_sql="naics_code, naics_description, count(*) as n",
-        group_by_sql="naics_code, naics_description",  # ✅ ADDED
+        group_by_sql="naics_code, naics_description",
         order_by_sql="n DESC",
         limit=5
     )
@@ -979,7 +979,7 @@ def get_parent_aggregate_stats(parent_name: str):
     plats = query_summary_df(
         where_sql, params,
         select_sql="platform_family, sum(total_spend) as spend",
-        group_by_sql="platform_family",  # ✅ ADDED
+        group_by_sql="platform_family",
         order_by_sql="spend DESC",
         limit=5
     )
@@ -995,6 +995,62 @@ def get_parent_aggregate_stats(parent_name: str):
         "top_naics": top_naics,
         "top_platforms": top_platforms
     }
+
+def _calc_child_kpis_from_kpis_disk(cage_code: str, years: Optional[List[int]] = None) -> Dict[str, Any]:
+    cage_code = (cage_code or "").strip().upper()
+    ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
+
+    kpis_path = (GLOBAL_CACHE.get("kpis_path") or "").strip()
+    if not cage_code or not kpis_path or not os.path.exists(kpis_path):
+        return {"has_kpis": False}
+
+    # Prefer querying v_kpis if you created it; otherwise read_parquet(kpis_path).
+    # This query never loads the full parquet into RAM.
+    where_year_sql = ""
+    params: List[Any] = [cage_code]
+
+    if ys:
+        placeholders = ",".join(["?"] * len(ys))
+        where_year_sql = f" AND year IN ({placeholders})"
+        params.extend(ys)
+
+    try:
+        df = duck_fetch_df(
+            f"""
+            SELECT
+                SUM(total_spend) AS total_obligations,
+                SUM(contract_count) AS total_contracts,
+                MAX(year) AS last_active
+            FROM v_kpis
+            WHERE cage_code = ? {where_year_sql}
+            """,
+            params=params,
+        )
+
+        if df.empty:
+            # view exists but no rows
+            return {"has_kpis": True, "total_obligations": 0.0, "total_contracts": 0, "last_active": 0}
+
+        total_ob = float(df["total_obligations"].iloc[0] or 0.0) if "total_obligations" in df.columns else 0.0
+        total_ct = int(df["total_contracts"].iloc[0] or 0) if "total_contracts" in df.columns else 0
+
+        last_active = 0
+        if "last_active" in df.columns and pd.notna(df["last_active"].iloc[0]):
+            try:
+                last_active = int(df["last_active"].iloc[0])
+            except Exception:
+                last_active = 0
+
+        return {
+            "has_kpis": True,
+            "total_obligations": total_ob,
+            "total_contracts": total_ct,
+            "last_active": last_active,
+        }
+
+    except Exception:
+        logger.exception("kpis disk calc failed cage=%s", cage_code)
+        return {"has_kpis": False}
 
 
 def reload_all_data():
@@ -1028,6 +1084,7 @@ def reload_all_data():
             "geo_df": pd.DataFrame(),
             "profiles_df": pd.DataFrame(),
             "risk_df": pd.DataFrame(),
+            "kpis_path": None,
             "df_opportunities": pd.DataFrame()
         }
 
@@ -1036,7 +1093,7 @@ def reload_all_data():
         files = [
             "products.parquet", "summary.parquet", "geo.parquet", 
             "profiles.parquet", "risk.parquet", "network.parquet", 
-            "transactions.parquet", "opportunities.parquet"
+            "transactions.parquet", "opportunities.parquet", "kpis.parquet"
         ]
 
         def fetch_file(filename: str) -> str:
@@ -1066,20 +1123,49 @@ def reload_all_data():
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
              list(executor.map(fetch_file, files))
+
+        kpis_local = (LOCAL_CACHE_DIR / "kpis.parquet").resolve()
+        if kpis_local.exists():
+            new_global_cache["kpis_path"] = str(kpis_local)
+        else:
+            new_global_cache["kpis_path"] = None
         
         # 3. REFRESH DUCKDB VIEWS (Using writer connection)
         # 3. REFRESH DUCKDB VIEWS (Using writer connection)
         with DUCK_INIT_LOCK:
             conn = ensure_duck_conn()
-    
+
             prod_path = str((LOCAL_CACHE_DIR / "products.parquet").resolve())
             trans_path = str((LOCAL_CACHE_DIR / "transactions.parquet").resolve())
             net_path = str((LOCAL_CACHE_DIR / "network.parquet").resolve())
+            kpis_path = str((LOCAL_CACHE_DIR / "kpis.parquet").resolve())
 
-            # ✅ FIX: Use f-strings instead of parameters for CREATE VIEW
             conn.execute(f"CREATE OR REPLACE VIEW v_products AS SELECT * FROM read_parquet('{prod_path}');")
             conn.execute(f"CREATE OR REPLACE VIEW v_transactions AS SELECT * FROM read_parquet('{trans_path}');")
             conn.execute(f"CREATE OR REPLACE VIEW v_network AS SELECT * FROM read_parquet('{net_path}');")
+
+            # ✅ NEW: KPIs as a *cleaned* view (no RAM load)
+            if os.path.exists(kpis_path):
+                conn.execute(f"""
+                    CREATE OR REPLACE VIEW v_kpis AS
+                    SELECT
+                        upper(trim(CAST(cage_code AS VARCHAR))) AS cage_code,
+                        try_cast(year AS INTEGER) AS year,
+                        coalesce(try_cast(total_spend AS DOUBLE), 0.0) AS total_spend,
+                        coalesce(try_cast(contract_count AS BIGINT), 0) AS contract_count
+                    FROM read_parquet('{kpis_path}');
+                """)
+            else:
+                # Keep a harmless empty view so queries don't crash
+                conn.execute("""
+                    CREATE OR REPLACE VIEW v_kpis AS
+                    SELECT
+                        CAST(NULL AS VARCHAR) AS cage_code,
+                        CAST(NULL AS INTEGER) AS year,
+                        CAST(0.0 AS DOUBLE) AS total_spend,
+                        CAST(0 AS BIGINT) AS contract_count
+                    WHERE 1=0;
+                """)
 
         # 4. FETCH MAPPINGS (Athena)
         cage_map: Dict[str, str] = {}
@@ -2411,10 +2497,28 @@ def get_platform_parts(
     else:
         filtered['amount'] = 0
 
-    # Paginate
+    # Roll up the part-level rows back to the NSN level for the Platform UI
+    agg_df = (
+        filtered.groupby("niin", observed=True, dropna=False)
+        .agg(
+            nsn=("nsn", "first"),
+            description=("description", "first"),
+            fsc_code=("fsc_code", "first"),
+            total_units_sold=("total_units_sold", "sum"),
+            amount=("amount", "sum"),
+            annual_revenue_trend=("annual_revenue_trend", lambda s: _sum_trend_dicts(s.apply(_parse_trend_to_dict).tolist())),
+            last_sold_date=("last_sold_date", "max"),
+            cage=("cage", "first") # Takes the top vendor's CAGE based on previous sort
+        )
+        .reset_index()
+    )
+    
+    agg_df = agg_df.sort_values("amount", ascending=False, kind="mergesort")
+
+    # Paginate the rolled-up data
     start = int(offset)
     end = start + int(limit)
-    page = filtered.iloc[start:end]
+    page = agg_df.iloc[start:end]
 
     # Format
         # Format
@@ -2646,7 +2750,11 @@ def get_company_opportunities(cage: Optional[str] = None, name: Optional[str] = 
 # [Find and replace get_company_profile in api.py]
 
 @app.get("/api/company/profile")
-def get_company_profile(cage: Optional[str] = None, name: Optional[str] = None):
+def get_company_profile(
+    cage: Optional[str] = None,
+    name: Optional[str] = None,
+    years: Optional[List[int]] = Query(None)  # ✅ ADD THIS
+):
     profiles_df = GLOBAL_CACHE.get("profiles_df", pd.DataFrame())
     loc_map = GLOBAL_CACHE.get("location_map", {}) or {}
     
@@ -2654,20 +2762,34 @@ def get_company_profile(cage: Optional[str] = None, name: Optional[str] = None):
     if cage:
         clean_cage = cage.strip().upper()
         match = profiles_df[profiles_df['cage_code'] == clean_cage]
-        
+
         if not match.empty:
             row = match.iloc[0]
-            # Lookup Location
-            loc = loc_map.get(clean_cage, {})
-            # Return with City/State (Enables Local News)
-            return format_profile_response_with_loc(row, loc.get('city'), loc.get('state'), type="CHILD")
+            loc = loc_map.get(clean_cage, {}) or {}
+
+            k = _calc_child_kpis_from_kpis_disk(clean_cage, years)
+            over = {}
+            if k.get("has_kpis"):
+                over = {
+                    "total_obligations": k.get("total_obligations", 0.0),
+                    "total_contracts": k.get("total_contracts", 0),
+                    "last_active": k.get("last_active", 0),
+                }
+
+            return format_profile_response_with_loc(
+                row,
+                loc.get('city'),
+                loc.get('state'),
+                type="CHILD",
+                overrides=over
+            )
 
     # 2. NAME MATCH
     if name:
         clean_name = name.strip().upper().replace("'", "")
 
         # A. PARENT LOGIC (Aggregate)
-        stats = get_parent_aggregate_stats(name)
+        stats = get_parent_aggregate_stats(name, years)
         if stats:
             return {
                 "found": True,
@@ -2689,56 +2811,63 @@ def get_company_profile(cage: Optional[str] = None, name: Optional[str] = None):
         child_match = profiles_df[profiles_df['vendor_name'] == clean_name]
         if not child_match.empty:
             row = child_match.iloc[0]
-            # Use CAGE to find location
-            c_code = row.get('cage_code')
-            loc = loc_map.get(c_code, {})
-            # Return with City/State (Enables Local News)
-            return format_profile_response_with_loc(row, loc.get('city'), loc.get('state'), type="CHILD")
+            c_code = str(row.get('cage_code') or "").strip().upper()
+            loc = loc_map.get(c_code, {}) or {}
+
+            k = _calc_child_kpis_from_kpis_disk(c_code, years)
+            over = {}
+            if k.get("has_kpis"):
+                over = {
+                    "total_obligations": k.get("total_obligations", 0.0),
+                    "total_contracts": k.get("total_contracts", 0),
+                    "last_active": k.get("last_active", 0),
+                }
+
+            return format_profile_response_with_loc(
+                row,
+                loc.get('city'),
+                loc.get('state'),
+                type="CHILD",
+                overrides=over
+            )
 
     return {"found": False}
 
 # ✅ Helper function (Updated to use Master NAICS List)
-def format_profile_response_with_loc(row, city, state, type="CHILD"):
+def format_profile_response_with_loc(row, city, state, type="CHILD", overrides: Optional[Dict[str, Any]] = None):
     raw_codes = row.get('top_naics_codes', '').split(',') if row.get('top_naics_codes') else []
     hydrated_naics = []
     naics_map = GLOBAL_CACHE.get("naics_map", {})
-    
+
     for code in raw_codes:
-        # --- FIX 1: Sanitize the Code ---
-        # Remove "unknown" (case insensitive) and whitespace
         clean_c = code.lower().replace('unknown', '').strip()
-        # Regex: Keep only the leading digits (removes any trailing junk)
         match = re.match(r'^(\d+)', clean_c)
-        
-        if not match: 
-            continue # Skip if no digits found
-            
-        c = match.group(1) 
-        
-        # --- Lookup Logic ---
+        if not match:
+            continue
+        c = match.group(1)
+
         desc = naics_map.get(c)
-        
-        # Fallback for old codes (e.g. 811219 -> 8112)
         if not desc and len(c) > 2:
             desc = naics_map.get(c[:5])
         if not desc and len(c) > 2:
             desc = naics_map.get(c[:4])
-            
-        if desc:
-            # We send the FULL string here so the UI has it for the tooltip
-            hydrated_naics.append(f"{c} - {desc}")
-        else:
-            hydrated_naics.append(c)
+
+        hydrated_naics.append(f"{c} - {desc}" if desc else c)
+
+    overrides = overrides or {}
 
     return {
         "found": True,
         "type": type,
         "name": row.get('vendor_name'),
         "cage": row.get('cage_code'),
-        "total_obligations": float(row.get('total_lifetime_spend', 0)),
-        "total_contracts": int(row.get('total_contracts', 0)),
-        "last_active": int(row.get('last_active_year', 0)),
-        "top_naics": hydrated_naics, 
+
+        # ✅ NEW: prefer overrides (disk KPIs) but fallback to profiles.parquet columns
+        "total_obligations": float(overrides.get("total_obligations", row.get("total_lifetime_spend", 0) or 0)),
+        "total_contracts": int(overrides.get("total_contracts", row.get("total_contracts", 0) or 0)),
+        "last_active": int(overrides.get("last_active", row.get("last_active_year", 0) or 0)),
+
+        "top_naics": hydrated_naics,
         "top_platforms": row.get('top_platforms', '').split(',') if row.get('top_platforms') else [],
         "city": str(city) if city else "",
         "state": str(state) if state else ""
@@ -2749,14 +2878,27 @@ def format_profile_response_with_loc(row, city, state, type="CHILD"):
 
 # --- REPLACE get_company_network IN api.py ---
 
+from typing import Optional, List
+from fastapi import Query
+
 @app.get("/api/company/network")
-def get_company_network(name: str, cage: Optional[str] = None):
-    # This endpoint now uses DuckDB to query 'network.parquet' from disk.
-    
+def get_company_network(
+    name: str,
+    cage: Optional[str] = None,
+    years: Optional[List[int]] = Query(default=None),
+    limit: int = 50
+):
+    """
+    Returns top upstream (primes) and downstream (subs) network relationships for a company.
+
+    Supports optional FY filtering via `years` (e.g. years=2018&years=2019...).
+    Requires `network.parquet` to include a `year` INT column (best added in Athena and materialized in ETL).
+    """
+
     safe_name = sanitize(name).replace("'", "")
-    is_drill_down = (cage and len(cage) > 2 and cage != 'AGGREGATE')
-    
-    def run_duck_query(sql, params):
+    is_drill_down = (cage and len(cage) > 2 and cage != "AGGREGATE")
+
+    def run_duck_query(sql: str, params: tuple):
         try:
             with DUCK_LOCK:
                 conn = ensure_duck_conn()
@@ -2765,53 +2907,85 @@ def get_company_network(name: str, cage: Optional[str] = None):
                 if not net_path.exists():
                     return []
 
-                # Use read_parquet directly
-                final_sql = sql.replace("FROM network_source", f"FROM read_parquet('{str(net_path)}')")
+                final_sql = sql.replace(
+                    "FROM network_source",
+                    f"FROM read_parquet('{str(net_path)}')"
+                )
                 return conn.execute(final_sql, params).fetchdf().to_dict(orient="records")
         except Exception as e:
             logger.error(f"Network query failed: {e}")
             return []
 
+    # --- Year filter builder (FY) ---
+    year_filter_sql = ""
+    year_params: List[int] = []
+    if years:
+        yrs = [int(y) for y in years if y is not None]
+        if len(yrs) > 0:
+            placeholders = ",".join(["?"] * len(yrs))
+            year_filter_sql = f" AND year IN ({placeholders})"
+            year_params = yrs
 
-    # SQL Template for Aggregation
+    # --- SQL Template (Parameterized) ---
     sql_template = """
-        SELECT 
-            {group_col} as name, 
-            {cage_col} as cage, 
-            arbitrary(subaward_description) as platform, 
-            sum(flow_amount_capped) as total, 
-            sum(flow_amount_raw) as total_raw, 
+        SELECT
+            {group_col} as name,
+            {cage_col} as cage,
+            arbitrary(subaward_description) as platform,
+            sum(flow_amount_capped) as total,
+            sum(flow_amount_raw) as total_raw,
             count(contract_id) as transactions
         FROM network_source
-        WHERE {where_clause}
+        WHERE {where_clause}{year_filter}
         GROUP BY {group_col}, {cage_col}
         ORDER BY total DESC
-        LIMIT 50
+        LIMIT ?
     """
 
     if is_drill_down:
         safe_cage = sanitize(cage)
-        # Downstream
+
+        # Downstream: this facility is the prime; show top subs
         subs = run_duck_query(
-            sql_template.format(group_col="sub_name", cage_col="sub_cage", where_clause="prime_cage = ?"), 
-            (safe_cage,)
+            sql_template.format(
+                group_col="sub_name",
+                cage_col="sub_cage",
+                where_clause="prime_cage = ?",
+                year_filter=year_filter_sql
+            ),
+            tuple([safe_cage, *year_params, int(limit)])
         )
-        # Upstream
+
+        # Upstream: this facility is the sub; show top primes
         primes = run_duck_query(
-            sql_template.format(group_col="prime_name", cage_col="prime_cage", where_clause="sub_cage = ?"), 
-            (safe_cage,)
+            sql_template.format(
+                group_col="prime_name",
+                cage_col="prime_cage",
+                where_clause="sub_cage = ?",
+                year_filter=year_filter_sql
+            ),
+            tuple([safe_cage, *year_params, int(limit)])
         )
     else:
-        # Parent Mode
-        # Downstream
+        # Parent Mode (aggregate by gold parent)
         subs = run_duck_query(
-            sql_template.format(group_col="sub_name", cage_col="sub_cage", where_clause="upper(prime_gold_parent) = ?"), 
-            (safe_name,)
+            sql_template.format(
+                group_col="sub_name",
+                cage_col="sub_cage",
+                where_clause="upper(prime_gold_parent) = ?",
+                year_filter=year_filter_sql
+            ),
+            tuple([safe_name, *year_params, int(limit)])
         )
-        # Upstream
+
         primes = run_duck_query(
-            sql_template.format(group_col="prime_name", cage_col="prime_cage", where_clause="upper(sub_gold_parent) = ?"), 
-            (safe_name,)
+            sql_template.format(
+                group_col="prime_name",
+                cage_col="prime_cage",
+                where_clause="upper(sub_gold_parent) = ?",
+                year_filter=year_filter_sql
+            ),
+            tuple([safe_name, *year_params, int(limit)])
         )
 
     return {"subs": subs, "primes": primes}
@@ -3443,9 +3617,18 @@ def get_nsn_profile(nsn: str):
     fsc_code = g(best_row, "fsc_code", "") or g(best_row, "fsc", "")
     desc = g(best_row, "description", None) or g(best_row, "item_name", None) or "Unknown"
 
-    avg_unit_price = g(best_row, "avg_unit_price", 0) or 0
-    last_sold_date = g(best_row, "last_sold_date", None)
-    trend = g(best_row, "annual_revenue_trend", "") or ""
+    # Calculate weighted average price across all part numbers for this NSN
+    match["avg_unit_price"] = pd.to_numeric(match.get("avg_unit_price", 0), errors="coerce").fillna(0)
+    if total_units > 0:
+        avg_unit_price = float((match["avg_unit_price"] * match["total_units_sold"]).sum() / total_units)
+    else:
+        avg_unit_price = float(match["avg_unit_price"].mean() if not match.empty else 0.0)
+
+    last_sold_date = str(match["last_sold_date"].max()) if "last_sold_date" in match.columns else None
+    
+    # Combine the trend lines from all part numbers
+    trend_dicts = match["annual_revenue_trend"].apply(_parse_trend_to_dict).tolist()
+    trend = _sum_trend_dicts(trend_dicts)
 
     return {
         "found": True,
@@ -3597,7 +3780,8 @@ def get_nsn_platforms(nsn: str):
 
     grouped = (
         df.groupby("platform_family", observed=True)
-        .agg(total_revenue=("total_revenue", "sum"), contracts=("cage", "count"))
+        # Use 'nunique' to count unique vendors instead of raw part rows
+        .agg(total_revenue=("total_revenue", "sum"), contracts=("cage", "nunique")) 
         .reset_index()
         .sort_values("total_revenue", ascending=False)
         .head(10)

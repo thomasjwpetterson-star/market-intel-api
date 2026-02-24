@@ -131,6 +131,17 @@ def optimize_and_upload():
             contract_count
         FROM dashboard_summary_v2
     """)
+
+    print("📥 Fetching KPI by CAGE-Year (for dynamic year filters)...")
+    df_kpis = run_query("""
+        SELECT
+            cage_code,
+            year,
+            SUM(total_spend) AS total_spend,
+            SUM(contract_count) AS contract_count
+        FROM dashboard_summary_v2
+        GROUP BY cage_code, year
+    """)
     
     print("📥 Fetching Geo Data...")
     df_geo = run_query("""
@@ -208,6 +219,21 @@ def optimize_and_upload():
     if 'cage_code' in df_sum.columns: df_sum['cage_code'] = df_sum['cage_code'].apply(clean_cage)
     if 'cage_code' in df_geo.columns: df_geo['cage_code'] = df_geo['cage_code'].apply(clean_cage)
     if 'cage_code' in df_profiles.columns: df_profiles['cage_code'] = df_profiles['cage_code'].apply(clean_cage)
+
+    # ✅ Clean KPI frame keys + downcast types (small + fast)
+    if 'cage_code' in df_kpis.columns:
+        df_kpis['cage_code'] = df_kpis['cage_code'].apply(clean_cage)
+
+    if 'year' in df_kpis.columns:
+        df_kpis['year'] = pd.to_numeric(df_kpis['year'], errors='coerce')
+        df_kpis = df_kpis.dropna(subset=['year'])
+        df_kpis['year'] = df_kpis['year'].astype('int16')
+
+    if 'total_spend' in df_kpis.columns:
+        df_kpis['total_spend'] = pd.to_numeric(df_kpis['total_spend'], errors='coerce').fillna(0).astype('float32')
+
+    if 'contract_count' in df_kpis.columns:
+        df_kpis['contract_count'] = pd.to_numeric(df_kpis['contract_count'], errors='coerce').fillna(0).astype('int32')
 
     # ---------------------------------------------------------
     # ### [NEW 2/3] CLEAN NETWORK DATA ###
@@ -291,6 +317,7 @@ def optimize_and_upload():
     upload_df(df_geo, "geo.parquet")
     upload_df(df_profiles, "profiles.parquet")
     upload_df(df_risk, "risk.parquet")
+    upload_df(df_kpis, "kpis.parquet")
     
     # ---------------------------------------------------------
     # ### [NEW 3/3] UPLOAD NETWORK ###
@@ -298,16 +325,16 @@ def optimize_and_upload():
     # ---------------------------------------------------------
 
     # ---------------------------------------------------------
-    # ### [NEW] FETCH & UPLOAD TRANSACTIONS (Last 3 Years) ###
+    # ### [NEW] FETCH & UPLOAD TRANSACTIONS (Last 7 Years) ###
     # This powers the instant "Awards" tab without hitting Athena
-    print("📥 Fetching Transaction History (Last 3 Years)...")
+    print("📥 Fetching Transaction History (Last 7 Years)...")
     df_transactions = run_query("""
         SELECT 
             contract_id, action_date, vendor_name, vendor_cage, 
             sub_agency, parent_agency, description, spend_amount, 
             naics_code, psc, platform_family, year
         FROM dashboard_master_view
-        WHERE year >= 2022
+        WHERE year >= 2018
     """)
     
     # Basic optimization before upload
