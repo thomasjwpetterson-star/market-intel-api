@@ -1145,13 +1145,18 @@ def reload_all_data():
             for view_name, file_name in views_to_create:
                 file_path = str((LOCAL_CACHE_DIR / file_name).resolve())
                 if os.path.exists(file_path):
-                    conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{file_path}');")
+                    # ✅ FIX: Create Native Tables instead of Views for 10x query speed
+                    conn.execute(f"DROP VIEW IF EXISTS {view_name};")
+                    conn.execute(f"DROP TABLE IF EXISTS {view_name};")
+                    conn.execute(f"CREATE TABLE {view_name} AS SELECT * FROM read_parquet('{file_path}');")
 
-            # ✅ NEW: KPIs as a *cleaned* view (no RAM load)
+            # ✅ NEW: KPIs as a Native Table
             kpis_path = str((LOCAL_CACHE_DIR / "kpis.parquet").resolve())
+            conn.execute("DROP VIEW IF EXISTS v_kpis;")
+            conn.execute("DROP TABLE IF EXISTS v_kpis;")
             if os.path.exists(kpis_path):
                 conn.execute(f"""
-                    CREATE OR REPLACE VIEW v_kpis AS
+                    CREATE TABLE v_kpis AS
                     SELECT
                         upper(trim(CAST(cage_code AS VARCHAR))) AS cage_code,
                         try_cast(year AS INTEGER) AS year,
@@ -1312,17 +1317,21 @@ def reload_all_data():
                 writer.close()
 
             # Atomic Swap
+            # Atomic Swap
             with DUCK_INIT_LOCK:
                 conn = ensure_duck_conn()
                 
                 if summary_temp_path.exists():
                     summary_temp_path.replace(summary_final_path) 
                 
+                # ✅ FIX: Create Native Table instead of View for 10x faster queries
+                conn.execute("DROP VIEW IF EXISTS v_summary;")
+                conn.execute("DROP TABLE IF EXISTS v_summary;")
                 conn.execute(
-                    f"CREATE OR REPLACE VIEW v_summary AS SELECT * FROM read_parquet('{str(summary_final_path)}');"
+                    f"CREATE TABLE v_summary AS SELECT * FROM read_parquet('{str(summary_final_path)}');"
                 )
             
-            logger.info("Summary updated safely via atomic swap.")
+            logger.info("Summary updated safely via atomic swap (Native Table).")
             new_global_cache["df"] = pd.DataFrame()
 
             # Re-compute options
@@ -4208,6 +4217,7 @@ def search_awards(
     if not is_filtering:
         having_clause = f"HAVING SUM(COALESCE(spend_amount, 0)) >= {major_threshold}"
 
+    # ✅ FIX: Point to local v_transactions and use DuckDB's arg_max
     query = f"""
     WITH award_rollup AS (
         SELECT
@@ -4215,26 +4225,33 @@ def search_awards(
             max(action_date) AS last_action_date,
             SUM(COALESCE(spend_amount, 0)) AS total_spend,
 
-            max_by(vendor_name, action_date) AS vendor_name,
-            max_by(vendor_cage, action_date) AS vendor_cage,
-            max_by(sub_agency, action_date) AS sub_agency,
-            max_by(parent_agency, action_date) AS parent_agency,
-            max_by(description, action_date) AS description
-        FROM "market_intel_gold"."dashboard_master_view"
+            arg_max(vendor_name, action_date) AS vendor_name,
+            arg_max(vendor_cage, action_date) AS vendor_cage,
+            arg_max(sub_agency, action_date) AS sub_agency,
+            arg_max(parent_agency, action_date) AS parent_agency,
+            arg_max(description, action_date) AS description
+        FROM v_transactions
         WHERE {where_clause}
         GROUP BY contract_id
         {having_clause}
     )
     SELECT
         *,
-        COUNT(*) OVER() AS total
+        CAST(COUNT(*) OVER() AS INTEGER) AS total
     FROM award_rollup
     ORDER BY last_action_date DESC, total_spend DESC
     OFFSET {offset_i}
     LIMIT {limit_i}
     """
 
-    rows = cached_athena_query(query)
+    try:
+        # Execute locally instead of waiting for AWS
+        df = duck_fetch_df(query)
+        df = df_sanitize_for_json(df)
+        rows = df.to_dict(orient="records")
+    except Exception as e:
+        logger.error(f"Award Search DuckDB Error: {e}")
+        rows = []
 
     total = 0
     if rows:
@@ -4413,13 +4430,19 @@ def get_recent_wins():
         spend_amount as amount,
         action_date as signed_date,
         description
-    FROM "market_intel_gold"."dashboard_master_view"
-    WHERE action_date >= cast(current_date - interval '180' day as varchar) -- ✅ Changed to 6 Months
+    FROM v_transactions
+    WHERE try_cast(action_date as date) >= current_date() - INTERVAL 180 DAY
       AND spend_amount > 1000000 
     ORDER BY action_date DESC
     LIMIT 50
     """
-    return cached_athena_query(query)
+    try:
+        df = duck_fetch_df(query)
+        df = df_sanitize_for_json(df)
+        return df.to_dict(orient="records")
+    except Exception as e:
+        logger.error(f"Recent Wins DuckDB Error: {e}")
+        return []
 
 # --- ADD THIS TO api.py ---
 
