@@ -4202,13 +4202,13 @@ def search_awards(
     having_clause = ""
 
     if not is_filtering:
-        # Default view: Only scan the last 2 years for the homepage to keep it lightning fast
+        # Keep the default view lightning fast
         cond.append("try_cast(action_date as date) >= current_date() - INTERVAL 730 DAY")
         having_clause = f"HAVING SUM(COALESCE(spend_amount, 0)) >= {major_threshold}"
 
     where_clause = " AND ".join(cond)
 
-    # ✅ QUERY 1: Fast, low-memory exact count
+    # ✅ QUERY 1: Ultra-low RAM counting
     if having_clause:
         count_query = f"""
             SELECT count(*) as c FROM (
@@ -4220,35 +4220,43 @@ def search_awards(
             )
         """
     else:
-        count_query = f"SELECT count(distinct contract_id) as c FROM v_transactions WHERE {where_clause}"
+        # approx_count_distinct uses HLL and is extremely RAM efficient for massive sets
+        count_query = f"SELECT approx_count_distinct(contract_id) as c FROM v_transactions WHERE {where_clause}"
 
-    # ✅ QUERY 2: Top-N data fetch (low memory because of the LIMIT)
+    # ✅ QUERY 2: Late Materialization for zero-OOM grouping
     data_query = f"""
+        WITH top_contracts AS (
+            SELECT
+                contract_id,
+                MAX(action_date) AS last_action_date,
+                SUM(COALESCE(spend_amount, 0)) AS total_spend
+            FROM v_transactions
+            WHERE {where_clause}
+            GROUP BY contract_id
+            {having_clause}
+            ORDER BY last_action_date DESC, total_spend DESC
+            OFFSET {offset_i}
+            LIMIT {limit_i}
+        )
         SELECT
-            contract_id,
-            max(action_date) AS last_action_date,
-            SUM(COALESCE(spend_amount, 0)) AS total_spend,
-
-            arg_max(vendor_name, action_date) AS vendor_name,
-            arg_max(vendor_cage, action_date) AS vendor_cage,
-            arg_max(sub_agency, action_date) AS sub_agency,
-            arg_max(parent_agency, action_date) AS parent_agency,
-            arg_max(description, action_date) AS description
-        FROM v_transactions
-        WHERE {where_clause}
-        GROUP BY contract_id
-        {having_clause}
-        ORDER BY last_action_date DESC, total_spend DESC
-        OFFSET {offset_i}
-        LIMIT {limit_i}
+            t.contract_id,
+            t.last_action_date,
+            t.total_spend,
+            arg_max(v.vendor_name, v.action_date) AS vendor_name,
+            arg_max(v.vendor_cage, v.action_date) AS vendor_cage,
+            arg_max(v.sub_agency, v.action_date) AS sub_agency,
+            arg_max(v.parent_agency, v.action_date) AS parent_agency,
+            arg_max(v.description, v.action_date) AS description
+        FROM top_contracts t
+        JOIN v_transactions v ON t.contract_id = v.contract_id
+        GROUP BY t.contract_id, t.last_action_date, t.total_spend
+        ORDER BY t.last_action_date DESC, t.total_spend DESC
     """
 
     try:
-        # Execute count
         total_df = duck_fetch_df(count_query)
         exact_total = int(total_df['c'].iloc[0]) if not total_df.empty else 0
 
-        # Execute data fetch
         df = duck_fetch_df(data_query)
         df = df_sanitize_for_json(df)
         rows = df.to_dict(orient="records")
@@ -4273,7 +4281,6 @@ def search_awards(
     except Exception as e:
         logger.error(f"Award Search DuckDB Error: {e}")
         return {"data": [], "total": 0, "offset": offset_i, "limit": limit_i}
-
 
 
 
