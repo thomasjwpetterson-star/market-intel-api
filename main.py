@@ -1967,6 +1967,9 @@ def get_map_data(
         df = duck_fetch_df(query, params)
         if df.empty: return []
         
+        # ✅ FIX 4: Sanitize NaNs
+        df = df_sanitize_for_json(df)
+        
         out = []
         for r in df.itertuples(index=False):
             out.append({
@@ -2702,6 +2705,9 @@ def get_company_opportunities(cage: Optional[str] = None, name: Optional[str] = 
         df = duck_fetch_df(query, params)
         if df.empty: return []
         
+        # ✅ FIX 2: Sanitize NaNs
+        df = df_sanitize_for_json(df)
+        
         results = []
         for row in df.itertuples(index=False):
             sol_val = getattr(row, 'sol_num', '')
@@ -3366,6 +3372,9 @@ def get_company_opportunities_recommended(cage: Optional[str] = None, name: Opti
     try:
         df = duck_fetch_df(query, params)
         if df.empty: return []
+        
+        # ✅ FIX 3: Sanitize NaNs
+        df = df_sanitize_for_json(df)
         
         results = []
         for row in df.itertuples(index=False):
@@ -4350,6 +4359,9 @@ def get_pipeline_live(
     df = duck_fetch_df(query, params)
     if df.empty: return []
     
+    # ✅ FIX 1: Clean DuckDB NaNs into JSON-safe Nones
+    df = df_sanitize_for_json(df)
+    
     results = []
     today = date.today()
     for row in df.itertuples():
@@ -4382,7 +4394,7 @@ def get_pipeline_live(
             "set_aside_type": getattr(row, 'set_aside_type', ''),
             "naics": getattr(row, 'naics', ''),
             "psc": getattr(row, 'psc', ''),
-            "description": str(getattr(row, 'description', ''))[:2000],
+            "description": str(getattr(row, 'description', '') or '')[:2000],
             "primarycontactemail": getattr(row, 'poc_email', ''),
             "source_system": getattr(row, 'source_system', ''),
             "days_left": int(days_left),
