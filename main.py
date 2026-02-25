@@ -1089,8 +1089,8 @@ def reload_all_data():
         # 2. DOWNLOAD FILES
         LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         files = [
-            "products.parquet", "summary.parquet", "geo.parquet", 
-            "profiles.parquet", "risk.parquet", "network.parquet", 
+            "products.parquet", "summary.parquet", "geo.parquet",
+            "profiles.parquet", "risk.parquet", "network.parquet",
             "transactions.parquet", "opportunities.parquet", "kpis.parquet"
         ]
 
@@ -1119,8 +1119,74 @@ def reload_all_data():
                     pass
             return filename
 
+        def fetch_prefix(prefix: str, local_dir: Path) -> str:
+            """
+            Downloads all parquet parts under a prefix into a local folder.
+            Used for contracts_rolled dataset.
+            """
+            logger.info("Downloading prefix %s -> %s ...", prefix, str(local_dir))
+            local_dir.mkdir(parents=True, exist_ok=True)
+
+            # ✅ Clear old parts so we don't mix stale/new parquet files
+            try:
+                for p in local_dir.glob("*.parquet"):
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            s3_local = boto3.client("s3", region_name=AWS_REGION, config=BOTO_CFG)
+            paginator = s3_local.get_paginator("list_objects_v2")
+            pages = paginator.paginate(Bucket=BUCKET_NAME, Prefix=prefix)
+
+            downloaded = 0
+            for page in pages:
+                for obj in page.get("Contents", []):
+                    key = obj.get("Key")
+                    if not key or not key.endswith(".parquet"):
+                        continue
+
+                    basename = os.path.basename(key)
+                    final_path = (local_dir / basename).resolve()
+                    tmp_path = (local_dir / f"{basename}.tmp").resolve()
+
+                    try:
+                        if tmp_path.exists():
+                            try:
+                                tmp_path.unlink()
+                            except Exception:
+                                pass
+
+                        s3_local.download_file(BUCKET_NAME, key, str(tmp_path))
+                        tmp_path.replace(final_path)
+                        downloaded += 1
+                    except Exception as e:
+                        logger.error("Prefix download failed for %s: %s", key, e)
+
+            logger.info("Downloaded %d parquet parts from %s", downloaded, prefix)
+            return prefix
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-             list(executor.map(fetch_file, files))
+            # Download all the single-file cache artifacts
+            list(executor.map(fetch_file, files))
+
+        # contracts_rolled can be either:
+        #  A) single file: app_cache/contracts_rolled.parquet
+        #  B) dataset folder: app_cache/contracts_rolled/*.parquet
+        #
+        # Try A first; if missing, download B.
+        try:
+            fetch_file("contracts_rolled.parquet")
+        except Exception:
+            pass
+
+        local_single = (LOCAL_CACHE_DIR / "contracts_rolled.parquet").resolve()
+        local_folder = (LOCAL_CACHE_DIR / "contracts_rolled").resolve()
+
+        if not local_single.exists():
+            fetch_prefix(f"{CACHE_PREFIX}contracts_rolled/", local_folder)
 
         kpis_local = (LOCAL_CACHE_DIR / "kpis.parquet").resolve()
         if kpis_local.exists():
@@ -1133,9 +1199,11 @@ def reload_all_data():
             conn = ensure_duck_conn()
 
             # ✅ NEW: Define all files that should be handled by DuckDB instead of RAM
+            # ✅ NEW: Define all files that should be handled by DuckDB instead of RAM
             views_to_create = [
                 ("v_products", "products.parquet"),
                 ("v_transactions", "transactions.parquet"),
+                # v_contracts_rolled handled specially below (file OR folder)
                 ("v_network", "network.parquet"),
                 ("v_geo", "geo.parquet"),
                 ("v_risk", "risk.parquet"),
@@ -1145,10 +1213,48 @@ def reload_all_data():
             for view_name, file_name in views_to_create:
                 file_path = str((LOCAL_CACHE_DIR / file_name).resolve())
                 if os.path.exists(file_path):
-                    # Drop the heavy tables we accidentally created
                     conn.execute(f"DROP TABLE IF EXISTS {view_name};")
-                    # Restore the lightweight pointers
                     conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{file_path}');")
+
+            # ✅ Special handling: contracts_rolled can be a single parquet OR a folder dataset
+            conn.execute("DROP VIEW IF EXISTS v_contracts_rolled;")
+            conn.execute("DROP TABLE IF EXISTS v_contracts_rolled;")
+
+            contracts_single = (LOCAL_CACHE_DIR / "contracts_rolled.parquet").resolve()
+            contracts_folder = (LOCAL_CACHE_DIR / "contracts_rolled").resolve()
+
+            if contracts_single.exists():
+                conn.execute(
+                    f"CREATE OR REPLACE VIEW v_contracts_rolled AS "
+                    f"SELECT * FROM read_parquet('{str(contracts_single)}');"
+                )
+            else:
+                # Folder dataset: read all parts
+                glob_path = str(contracts_folder / "*.parquet")
+                if os.path.exists(str(contracts_folder)) and len(list(contracts_folder.glob("*.parquet"))) > 0:
+                    conn.execute(
+                        f"CREATE OR REPLACE VIEW v_contracts_rolled AS "
+                        f"SELECT * FROM read_parquet('{glob_path}');"
+                    )
+                else:
+                    # Empty view fallback (prevents errors if cache missing)
+                    conn.execute("""
+                        CREATE OR REPLACE VIEW v_contracts_rolled AS
+                        SELECT
+                            CAST(NULL AS VARCHAR) AS contract_id,
+                            CAST(NULL AS DATE) AS last_action_date,
+                            CAST(0.0 AS DOUBLE) AS total_spend,
+                            CAST(NULL AS VARCHAR) AS vendor_name,
+                            CAST(NULL AS VARCHAR) AS vendor_cage,
+                            CAST(NULL AS VARCHAR) AS sub_agency,
+                            CAST(NULL AS VARCHAR) AS parent_agency,
+                            CAST(NULL AS VARCHAR) AS description,
+                            CAST(NULL AS VARCHAR) AS platform_family,
+                            CAST(NULL AS VARCHAR) AS naics_code,
+                            CAST(NULL AS VARCHAR) AS psc,
+                            CAST(NULL AS INTEGER) AS year
+                        WHERE 1=0;
+                    """)
 
             # ✅ NEW: KPIs as a Native Table
             # Restore KPIs as a View
@@ -4006,66 +4112,51 @@ def get_award_profile(id: str):
 
     safe_id = sanitize(id)
 
-    # Guard: file must exist
-    path = str(LOCAL_CACHE_DIR / "transactions.parquet")
-    if not os.path.exists(path):
+    try:
+        # ✅ FIX: Instantly grab the complete 7-year profile from the rolled view
+        df = duck_fetch_df("SELECT * FROM v_contracts_rolled WHERE contract_id = ?", [safe_id])
+        if df.empty:
+            return None
+        
+        # Convert safely, handling potential NaNs
+        df = df_sanitize_for_json(df)
+        r = df.to_dict(orient="records")[0]
+
+        sub_ag = r.get("sub_agency")
+        parent_ag = r.get("parent_agency")
+        agency = sub_ag if pd.notna(sub_ag) and str(sub_ag).strip() else parent_ag
+
+        # Exact match to your original business logic return
+        return {
+            "contract_id": r.get("contract_id"),
+            "vendor_name": r.get("vendor_name"),
+            "vendor_cage": r.get("vendor_cage"),
+            "agency": agency,
+            "sub_agency": sub_ag,
+            "description": r.get("description"),
+
+            "platform_family": r.get("platform_family"),
+            "city": r.get("city"),
+            "state": r.get("state"),
+            "country": r.get("country"),
+
+            "naics_code": r.get("naics_code"),
+            "psc": r.get("psc"),
+
+            "pricing_type": r.get("pricing_type"),
+            "competition_type": r.get("competition_type"),
+            "offers_count": r.get("offers_count"),
+            "set_aside_type": r.get("set_aside_type"),
+            "solicitation_id": r.get("solicitation_id"),
+
+            "total_spend": float(r.get("total_spend") or 0),
+            "start_date": str(r.get("start_date")) if pd.notna(r.get("start_date")) else None,
+            "last_action_date": str(r.get("last_action_date")) if pd.notna(r.get("last_action_date")) else None
+        }
+
+    except Exception as e:
+        logger.error(f"Profile API Error: {e}")
         return None
-
-    # Pull a bounded set for this contract_id (contracts can have multiple actions)
-    df = get_subset_from_disk(
-        "transactions.parquet",
-        where_clause="contract_id = ?",
-        params=(safe_id,),
-        order_by_sql="action_date DESC",
-        limit=5000
-    )
-
-    if df.empty:
-        return None
-
-    # Ensure types
-    if "spend_amount" in df.columns:
-        df["spend_amount"] = pd.to_numeric(df["spend_amount"], errors="coerce").fillna(0)
-    else:
-        df["spend_amount"] = 0
-
-    # Latest/earliest
-    df_sorted = df.sort_values("action_date", ascending=False, kind="mergesort")
-    latest = df_sorted.iloc[0]
-    earliest = df_sorted.iloc[-1]
-    total_spend = float(df_sorted["spend_amount"].sum())
-
-    # Agency fallback
-    sub_ag = latest.get("sub_agency") if "sub_agency" in df_sorted.columns else None
-    parent_ag = latest.get("parent_agency") if "parent_agency" in df_sorted.columns else None
-    agency = sub_ag if pd.notna(sub_ag) and str(sub_ag).strip() else parent_ag
-
-    return {
-        "contract_id": latest.get("contract_id"),
-        "vendor_name": latest.get("vendor_name"),
-        "vendor_cage": latest.get("vendor_cage"),
-        "agency": agency,
-        "sub_agency": sub_ag,
-        "description": latest.get("description"),
-
-        "platform_family": latest.get("platform_family"),
-        "city": latest.get("city") if "city" in df_sorted.columns else None,
-        "state": latest.get("state") if "state" in df_sorted.columns else None,
-        "country": latest.get("country") if "country" in df_sorted.columns else None,
-
-        "naics_code": latest.get("naics_code"),
-        "psc": latest.get("psc"),
-
-        "pricing_type": latest.get("pricing_type") if "pricing_type" in df_sorted.columns else None,
-        "competition_type": latest.get("competition_type") if "competition_type" in df_sorted.columns else None,
-        "offers_count": latest.get("offers_count") if "offers_count" in df_sorted.columns else None,
-        "set_aside_type": latest.get("set_aside_type") if "set_aside_type" in df_sorted.columns else None,
-        "solicitation_id": latest.get("solicitation_identifier") if "solicitation_identifier" in df_sorted.columns else None,
-
-        "total_spend": total_spend,
-        "start_date": earliest.get("action_date"),
-        "last_action_date": latest.get("action_date")
-    }
 
 
 # --- ADD THIS NEW FUNCTION ---
@@ -4198,59 +4289,32 @@ def search_awards(
         bool(ys)
     )
 
-    major_threshold = 1_000_000
-    having_clause = ""
-
     if not is_filtering:
-        # Keep the default view lightning fast
-        cond.append("try_cast(action_date as date) >= current_date() - INTERVAL 730 DAY")
-        having_clause = f"HAVING SUM(COALESCE(spend_amount, 0)) >= {major_threshold}"
+        # Default view: Only scan the last 2 years and enforce $1M threshold
+        cond.append("try_cast(last_action_date as date) >= current_date() - INTERVAL 730 DAY")
+        cond.append("total_spend >= 1000000")
 
     where_clause = " AND ".join(cond)
 
-    # ✅ QUERY 1: Ultra-low RAM counting
-    if having_clause:
-        count_query = f"""
-            SELECT count(*) as c FROM (
-                SELECT contract_id 
-                FROM v_transactions 
-                WHERE {where_clause} 
-                GROUP BY contract_id 
-                {having_clause}
-            )
-        """
-    else:
-        # approx_count_distinct uses HLL and is extremely RAM efficient for massive sets
-        count_query = f"SELECT approx_count_distinct(contract_id) as c FROM v_transactions WHERE {where_clause}"
+    # ✅ SPEED FIX: Instant streaming count from the pre-rolled table
+    count_query = f"SELECT count(*) as c FROM v_contracts_rolled WHERE {where_clause}"
 
-    # ✅ QUERY 2: Late Materialization for zero-OOM grouping
+    # ✅ SPEED FIX: Stream the data directly from the pre-rolled table. No GROUP BY needed!
     data_query = f"""
-        WITH top_contracts AS (
-            SELECT
-                contract_id,
-                MAX(action_date) AS last_action_date,
-                SUM(COALESCE(spend_amount, 0)) AS total_spend
-            FROM v_transactions
-            WHERE {where_clause}
-            GROUP BY contract_id
-            {having_clause}
-            ORDER BY last_action_date DESC, total_spend DESC
-            OFFSET {offset_i}
-            LIMIT {limit_i}
-        )
         SELECT
-            t.contract_id,
-            t.last_action_date,
-            t.total_spend,
-            arg_max(v.vendor_name, v.action_date) AS vendor_name,
-            arg_max(v.vendor_cage, v.action_date) AS vendor_cage,
-            arg_max(v.sub_agency, v.action_date) AS sub_agency,
-            arg_max(v.parent_agency, v.action_date) AS parent_agency,
-            arg_max(v.description, v.action_date) AS description
-        FROM top_contracts t
-        JOIN v_transactions v ON t.contract_id = v.contract_id
-        GROUP BY t.contract_id, t.last_action_date, t.total_spend
-        ORDER BY t.last_action_date DESC, t.total_spend DESC
+            contract_id,
+            last_action_date,
+            total_spend,
+            vendor_name,
+            vendor_cage,
+            sub_agency,
+            parent_agency,
+            description
+        FROM v_contracts_rolled
+        WHERE {where_clause}
+        ORDER BY last_action_date DESC, total_spend DESC
+        OFFSET {offset_i}
+        LIMIT {limit_i}
     """
 
     try:
@@ -4283,20 +4347,16 @@ def search_awards(
         return {"data": [], "total": 0, "offset": offset_i, "limit": limit_i}
 
 
-
-
 @app.get("/api/award/stats")
 def get_database_stats():
     """
-    Returns the total row count of the local 7-year transactions database 
-    for the 'Searching X Records' badge.
+    Returns the total number of unique, rolled-up contracts in the 7-year database.
     """
     try:
-        # ✅ FIX: Point directly to DuckDB's v_transactions view for instant local counting
-        df = duck_fetch_df("SELECT count(*) as total FROM v_transactions")
+        # ✅ FIX: Point directly to the new pre-rolled view so counts match exactly
+        df = duck_fetch_df("SELECT count(*) as total FROM v_contracts_rolled")
         total = int(df['total'].iloc[0]) if not df.empty else 0
         
-        # Returned as a list containing a dict to match the old Athena return format
         return [{"total": total}]
     except Exception as e:
         logger.error(f"Stats DuckDB Error: {e}")

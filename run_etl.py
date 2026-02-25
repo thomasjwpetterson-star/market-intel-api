@@ -4,8 +4,10 @@ import os
 from io import BytesIO
 import time
 import shutil
+import uuid
 from botocore.config import Config
 import warnings
+from datetime import datetime, timezone
 
 # Suppress pandas warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -13,13 +15,156 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- CONFIGURATION ---
 raw_bucket_input = os.getenv('ATHENA_OUTPUT_BUCKET', 'a-and-d-intel-lake-newaccount')
 BUCKET_NAME = raw_bucket_input.replace('s3://', '').split('/')[0]
-CACHE_PREFIX = "app_cache/" 
+CACHE_PREFIX = "app_cache/"
 DATABASE = 'market_intel_gold'
 
-# ✅ ADD THIS:
-TEMP_DIR = "./temp_etl_downloads" 
+# Temp locations
+TEMP_DIR = "./temp_etl_downloads"
 if not os.path.exists(TEMP_DIR):
     os.makedirs(TEMP_DIR)
+
+ATHENA_OUTPUT_PREFIX = "temp_etl/"         # where Athena puts normal query CSV outputs
+UNLOAD_OUTPUT_PREFIX = "temp_etl_unload/"  # where Athena UNLOAD writes parquet parts
+
+# AWS Clients
+session = boto3.Session(region_name='us-east-1')
+athena = session.client('athena')
+
+# Robust Retry Policy for Network Stability
+s3_config = Config(
+    read_timeout=900,
+    connect_timeout=300,
+    retries={'max_attempts': 10, 'mode': 'adaptive'}
+)
+s3 = session.client('s3', config=s3_config)
+
+# -------------------------
+# Checkpointing helpers
+# -------------------------
+
+# -------------------------
+# Checkpointing helpers
+# -------------------------
+def is_cache_fresh(cache_name: str, max_age_hours: float = 12.0) -> bool:
+    """
+    Checks if a file exists in the S3 cache AND was modified within the last `max_age_hours`.
+    """
+    keys_to_check = [f"{CACHE_PREFIX}{cache_name}", f"{CACHE_PREFIX}{cache_name}.DONE"]
+    
+    for key in keys_to_check:
+        try:
+            meta = s3.head_object(Bucket=BUCKET_NAME, Key=key)
+            # ✅ FIX: Use raw Unix timestamps to avoid any Python timezone math crashes
+            last_mod_ts = meta['LastModified'].timestamp()
+            now_ts = datetime.now(timezone.utc).timestamp()
+            
+            age_hours = (now_ts - last_mod_ts) / 3600.0
+            
+            if age_hours <= max_age_hours:
+                return True
+            else:
+                print(f"   ⏱️ {cache_name} is {age_hours:.1f} hours old (Expired). Rebuilding...")
+                
+        except s3.exceptions.ClientError as e:
+            # 404 just means the file isn't there yet, which is normal on the first run.
+            if e.response['Error']['Code'] != '404':
+                print(f"   ⚠️ S3 Access Error checking {cache_name}: {e}")
+        except Exception as e:
+            print(f"   ⚠️ Unexpected error checking {cache_name}: {e}")
+            
+    return False
+
+# -------------------------
+# Athena UNLOAD helpers
+# -------------------------
+def start_query_raw(query: str) -> str:
+    resp = athena.start_query_execution(
+        QueryString=query,
+        QueryExecutionContext={'Database': DATABASE},
+        ResultConfiguration={'OutputLocation': f's3://{BUCKET_NAME}/{ATHENA_OUTPUT_PREFIX}'}
+    )
+    return resp['QueryExecutionId']
+
+def wait_for_query(qid: str):
+    while True:
+        status = athena.get_query_execution(QueryExecutionId=qid)
+        state = status['QueryExecution']['Status']['State']
+        if state in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
+            break
+        time.sleep(1)
+
+    if state != 'SUCCEEDED':
+        reason = status['QueryExecution']['Status'].get('StateChangeReason', 'Unknown Error')
+        print(f"❌ ATHENA ERROR: {reason}")
+        raise Exception(f"Query Failed: {state} - {reason}")
+
+def unload_to_s3(select_sql: str, unload_prefix: str) -> str:
+    """
+    Runs Athena UNLOAD to Parquet -> s3://BUCKET/<unload_prefix>/
+    Returns unload_prefix (normalized with trailing slash).
+    """
+    if not unload_prefix.endswith("/"):
+        unload_prefix += "/"
+
+    full_dest = f"s3://{BUCKET_NAME}/{unload_prefix}"
+
+    unload_query = f"""
+    UNLOAD (
+        {select_sql.strip().rstrip(';')}
+    )
+    TO '{full_dest}'
+    WITH (
+        format = 'PARQUET',
+        compression = 'SNAPPY'
+    )
+    """
+
+    qid = start_query_raw(unload_query)
+    wait_for_query(qid)
+    return unload_prefix
+
+def list_s3_keys(prefix: str):
+    paginator = s3.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix=prefix):
+        for obj in page.get('Contents', []):
+            yield obj['Key']
+
+def upload_unload_parts_to_cache(unload_prefix: str, cache_name: str):
+    """
+    Upload UNLOAD parquet parts as a dataset folder:
+      app_cache/<cache_name without .parquet>/part-....parquet
+    """
+    cache_folder = f"{CACHE_PREFIX}{cache_name.replace('.parquet','')}/"
+    print(f"💾 Uploading UNLOAD parts to s3://{BUCKET_NAME}/{cache_folder}")
+
+    # ✅ FIX: Do not enforce .parquet extension. Athena often names compressed files 
+    # with just `.snappy` or a raw UUID depending on the engine version.
+    all_keys = list(list_s3_keys(unload_prefix))
+    
+    # Filter out S3 folder markers (keys ending in '/')
+    part_keys = [k for k in all_keys if not k.endswith("/")]
+
+    if not part_keys:
+        print(f"🔍 DEBUG S3: Searched prefix: {unload_prefix}")
+        print(f"🔍 DEBUG S3: Found keys: {all_keys}")
+        raise Exception(f"No data files found under s3://{BUCKET_NAME}/{unload_prefix}")
+
+    for k in part_keys:
+        local_part = os.path.join(TEMP_DIR, os.path.basename(k))
+        s3.download_file(BUCKET_NAME, k, local_part)
+        
+        # ✅ FIX: Force the .parquet extension locally so DuckDB can read it flawlessly
+        dest_filename = os.path.basename(k)
+        if not dest_filename.endswith(".parquet"):
+            dest_filename += ".parquet"
+            
+        s3.upload_file(local_part, BUCKET_NAME, cache_folder + dest_filename)
+        os.remove(local_part)
+
+    # Optional marker
+    s3.put_object(Bucket=BUCKET_NAME, Key=f"{CACHE_PREFIX}{cache_name}.DONE", Body=b"ok")
+
+    print(f"   ✅ Uploaded {len(part_keys)} parquet parts to {cache_folder}")
 
 # AWS Clients
 session = boto3.Session(region_name='us-east-1')
@@ -38,7 +183,7 @@ def run_query(query):
     resp = athena.start_query_execution(
         QueryString=query,
         QueryExecutionContext={'Database': DATABASE},
-        ResultConfiguration={'OutputLocation': f's3://{BUCKET_NAME}/temp_etl/'}
+        ResultConfiguration={'OutputLocation': f's3://{BUCKET_NAME}/{ATHENA_OUTPUT_PREFIX}'}
     )
     qid = resp['QueryExecutionId']
     
@@ -77,118 +222,106 @@ def optimize_and_upload():
 
     # =========================================================
     # [NEW] STEP 0: PRE-CALCULATE THE VIEW (MATERIALIZATION)
-    # Fix: Removed "market_intel_gold". prefix to prevent Athena Parser Error
     # =========================================================
     print("🏗️ PRE-CALCULATION: Materializing Network Graph...")
     
-    # FIX 1: Drop table using simple name (Context handles the DB)
-    run_query('DROP TABLE IF EXISTS cache_network_materialized')
+    if is_cache_fresh("network.parquet"):
+        print("   ↩️ Skipping Network Materialization (network.parquet is already fresh)")
+    else:
+        # FIX 1: Drop table using simple name (Context handles the DB)
+        run_query('DROP TABLE IF EXISTS cache_network_materialized')
 
-    # FIX 2: Manually clean S3 to prevent HIVE_PATH_ALREADY_EXISTS error
-    s3_folder = "market_intel_gold/cache_network_materialized/"
-    try:
-        paginator = s3.get_paginator('list_objects_v2')
-        pages = paginator.paginate(Bucket=BUCKET_NAME, Prefix=s3_folder)
-        for page in pages:
-            if 'Contents' in page:
-                delete_keys = [{'Key': obj['Key']} for obj in page['Contents']]
-                s3.delete_objects(Bucket=BUCKET_NAME, Delete={'Objects': delete_keys})
-    except Exception:
-        pass # Ignore if folder is already empty
-    
-    # FIX 3: Create table using simple name
-    run_query(f"""
-        CREATE TABLE cache_network_materialized
-        WITH (
-            format = 'PARQUET',
-            parquet_compression = 'SNAPPY',
-            external_location = 's3://{BUCKET_NAME}/market_intel_gold/cache_network_materialized/'
-        ) AS
-        SELECT * FROM ref_company_network
-    """)
-    print("   ✅ Network Graph Materialized successfully.")
+        # FIX 2: Manually clean S3 to prevent HIVE_PATH_ALREADY_EXISTS error
+        s3_folder = "market_intel_gold/cache_network_materialized/"
+        try:
+            paginator = s3.get_paginator('list_objects_v2')
+            pages = paginator.paginate(Bucket=BUCKET_NAME, Prefix=s3_folder)
+            for page in pages:
+                if 'Contents' in page:
+                    delete_keys = [{'Key': obj['Key']} for obj in page['Contents']]
+                    s3.delete_objects(Bucket=BUCKET_NAME, Delete={'Objects': delete_keys})
+        except Exception:
+            pass # Ignore if folder is already empty
+        
+        # FIX 3: Create table using simple name
+        run_query(f"""
+            CREATE TABLE cache_network_materialized
+            WITH (
+                format = 'PARQUET',
+                parquet_compression = 'SNAPPY',
+                external_location = 's3://{BUCKET_NAME}/market_intel_gold/cache_network_materialized/'
+            ) AS
+            SELECT * FROM ref_company_network
+        """)
+        print("   ✅ Network Graph Materialized successfully.")
+    # =========================================================
     # =========================================================
 
     # --- 1. Load Raw Data ---
     print("📥 Fetching Summary Data...")
-    
-    df_sum = run_query("""
-        SELECT 
-            vendor_name,
-            cage_code, 
-            sub_agency,
-            market_segment,
-            platform_family,
-            psc_code,
-            psc_description,
-            CAST(naics_code AS VARCHAR) as naics_code,
-            naics_description,
-            city,
-            state,
-            month,
-            year,
-            total_spend,
-            contract_count
-        FROM dashboard_summary_v2
-    """)
+    if is_cache_fresh("summary.parquet"):
+        print("   ↩️ Skipping summary.parquet (Fresh file already in S3)")
+        df_sum = pd.DataFrame()
+    else:
+        df_sum = run_query("""
+            SELECT 
+                vendor_name, cage_code, sub_agency, market_segment, platform_family,
+                psc_code, psc_description, CAST(naics_code AS VARCHAR) as naics_code,
+                naics_description, city, state, month, year, total_spend, contract_count
+            FROM dashboard_summary_v2
+        """)
 
-    print("📥 Fetching KPI by CAGE-Year (for dynamic year filters)...")
-    df_kpis = run_query("""
-        SELECT
-            cage_code,
-            year,
-            SUM(total_spend) AS total_spend,
-            SUM(contract_count) AS contract_count
-        FROM dashboard_summary_v2
-        GROUP BY cage_code, year
-    """)
+    print("📥 Fetching KPI by CAGE-Year...")
+    if is_cache_fresh("kpis.parquet"):
+        print("   ↩️ Skipping kpis.parquet")
+        df_kpis = pd.DataFrame()
+    else:
+        df_kpis = run_query("""
+            SELECT cage_code, year, SUM(total_spend) AS total_spend, SUM(contract_count) AS contract_count
+            FROM dashboard_summary_v2 GROUP BY cage_code, year
+        """)
     
     print("📥 Fetching Geo Data...")
-    df_geo = run_query("""
-        SELECT 
-            cage_code, 
-            vendor_name, 
-            latitude, 
-            longitude,
-            city,
-            state
-        FROM view_vendor_sites_hybrid
-    """)
+    if is_cache_fresh("geo.parquet"):
+        print("   ↩️ Skipping geo.parquet")
+        df_geo = pd.DataFrame()
+    else:
+        df_geo = run_query("""
+            SELECT cage_code, vendor_name, latitude, longitude, city, state
+            FROM view_vendor_sites_hybrid
+        """)
     
-    print("📥 Generating Full Profile Universe (Dynamic)...")
-    
-    df_profiles = run_query("""
-        SELECT 
-            cage_code,
-            MAX(vendor_name) as vendor_name,
-            SUM(total_spend) as total_lifetime_spend,
-            SUM(contract_count) as total_contracts,
-            MAX(year) as last_active_year,
-            
-            array_join(
-                slice(
-                    array_agg(distinct 
-                        CAST(naics_code AS VARCHAR) || ' - ' || COALESCE(naics_description, 'Unknown')
-                    ), 1, 5
-                ), 
-            ',') as top_naics_codes,
-            
-            array_join(slice(array_agg(distinct platform_family), 1, 5), ',') as top_platforms
-            
-        FROM dashboard_summary_v2
-        GROUP BY cage_code
-    """)
+    print("📥 Generating Full Profile Universe...")
+    if is_cache_fresh("profiles.parquet"):
+        print("   ↩️ Skipping profiles.parquet")
+        df_profiles = pd.DataFrame()
+    else:
+        df_profiles = run_query("""
+            SELECT 
+                cage_code, MAX(vendor_name) as vendor_name, SUM(total_spend) as total_lifetime_spend,
+                SUM(contract_count) as total_contracts, MAX(year) as last_active_year,
+                array_join(slice(array_agg(distinct CAST(naics_code AS VARCHAR) || ' - ' || COALESCE(naics_description, 'Unknown')), 1, 5), ',') as top_naics_codes,
+                array_join(slice(array_agg(distinct platform_family), 1, 5), ',') as top_platforms
+            FROM dashboard_summary_v2 GROUP BY cage_code
+        """)
 
     print("📥 Fetching Risk Sidecar...")
-    df_risk = run_query('SELECT * FROM view_dashboard_risk_sidecar')
+    if is_cache_fresh("risk.parquet"):
+        print("   ↩️ Skipping risk.parquet")
+        df_risk = pd.DataFrame()
+    else:
+        df_risk = run_query('SELECT * FROM view_dashboard_risk_sidecar')
 
     # ---------------------------------------------------------
     # ### [UPDATED] FETCH NETWORK GRAPH FROM CACHE ###
     print("📥 Fetching Network Graph (Fast Cache)...")
-    # UPDATED: Pointing to the table we created in Step 0
-    # FIX 3: Removed database prefix here too for consistency
-    df_network = run_query('SELECT * FROM cache_network_materialized')
-    print(f"   ✅ Network Graph Loaded: {len(df_network):,} edges")
+    if is_cache_fresh("network.parquet"):
+        print("   ↩️ Skipping network.parquet")
+        df_network = pd.DataFrame()
+    else:
+        df_network = run_query('SELECT * FROM cache_network_materialized')
+        print(f"   ✅ Network Graph Loaded: {len(df_network):,} edges")
+    # ---------------------------------------------------------
     # ---------------------------------------------------------
 
     # --- 2. OPTIMIZE & NORMALIZE ---
@@ -255,44 +388,45 @@ def optimize_and_upload():
 
     print("⚡ Pre-computing Search Indices for Dashboard...")
     
-    # 1. Force critical columns to be clean uppercase strings (Not categories yet)
-    # This prevents the API from having to run .astype(str).str.upper() on 4M rows
-    text_cols = ['vendor_name', 'platform_family', 'sub_agency', 'market_segment', 'psc_description']
-    for col in text_cols:
-        if col in df_sum.columns:
-            df_sum[col] = df_sum[col].astype(str).str.upper().str.strip().replace('NAN', '')
+    if not df_sum.empty:
+        # 1. Force critical columns to be clean uppercase strings (Not categories yet)
+        text_cols = ['vendor_name', 'platform_family', 'sub_agency', 'market_segment', 'psc_description']
+        for col in text_cols:
+            if col in df_sum.columns:
+                df_sum[col] = df_sum[col].astype(str).str.upper().str.strip().replace('NAN', '')
 
-    # 2. Create a SINGLE "Fast Filter" column for global text search
-    # Instead of searching 5 columns separately, the API will search just this one.
-    df_sum['fast_search'] = (
-        df_sum['vendor_name'] + " " + 
-        df_sum['platform_family'] + " " + 
-        df_sum['cage_code'].fillna('')
-    ).astype(str)
+        # 2. Create a SINGLE "Fast Filter" column for global text search
+        df_sum['fast_search'] = (
+            df_sum['vendor_name'] + " " + 
+            df_sum['platform_family'] + " " + 
+            df_sum['cage_code'].fillna('')
+        ).astype(str)
 
-    # 3. NOW convert to categories to save RAM
-    cat_cols = ['sub_agency', 'market_segment', 'platform_family', 'psc_code', 'psc_description', 'month', 'naics_code', 'city', 'state']
-    for col in df_sum.columns:
-        if col in cat_cols:
-            df_sum[col] = df_sum[col].astype('category')
+        # 3. NOW convert to categories to save RAM
+        cat_cols = ['sub_agency', 'market_segment', 'platform_family', 'psc_code', 'psc_description', 'month', 'naics_code', 'city', 'state']
+        for col in df_sum.columns:
+            if col in cat_cols:
+                df_sum[col] = df_sum[col].astype('category')
 
-    df_sum['total_spend'] = pd.to_numeric(df_sum['total_spend'], errors='coerce').fillna(0).astype('float32')
-    df_sum['year'] = pd.to_numeric(df_sum['year'], errors='coerce').fillna(0).astype('int16')
+        df_sum['total_spend'] = pd.to_numeric(df_sum['total_spend'], errors='coerce').fillna(0).astype('float32')
+        df_sum['year'] = pd.to_numeric(df_sum['year'], errors='coerce').fillna(0).astype('int16')
 
-    df_geo['latitude'] = pd.to_numeric(df_geo['latitude'], errors='coerce')
-    df_geo['longitude'] = pd.to_numeric(df_geo['longitude'], errors='coerce')
-    for col in ['city', 'state']:
-        if col in df_geo.columns:
-            df_geo[col] = df_geo[col].fillna("").astype(str).str.upper().str.strip()
-    df_geo = df_geo.dropna(subset=['latitude', 'longitude'])
+    if not df_geo.empty:
+        df_geo['latitude'] = pd.to_numeric(df_geo['latitude'], errors='coerce')
+        df_geo['longitude'] = pd.to_numeric(df_geo['longitude'], errors='coerce')
+        for col in ['city', 'state']:
+            if col in df_geo.columns:
+                df_geo[col] = df_geo[col].fillna("").astype(str).str.upper().str.strip()
+        df_geo = df_geo.dropna(subset=['latitude', 'longitude'])
 
-    risk_text_cols = ['vendor_name', 'sub_agency', 'platform_family', 'market_segment']
-    for col in risk_text_cols:
-        if col in df_risk.columns:
-            df_risk[col] = df_risk[col].fillna("").astype(str).str.upper().str.strip()
-    
-    if 'spend_amount' in df_risk.columns:
-        df_risk['spend_amount'] = pd.to_numeric(df_risk['spend_amount'], errors='coerce').fillna(0)
+    if not df_risk.empty:
+        risk_text_cols = ['vendor_name', 'sub_agency', 'platform_family', 'market_segment']
+        for col in risk_text_cols:
+            if col in df_risk.columns:
+                df_risk[col] = df_risk[col].fillna("").astype(str).str.upper().str.strip()
+        
+        if 'spend_amount' in df_risk.columns:
+            df_risk['spend_amount'] = pd.to_numeric(df_risk['spend_amount'], errors='coerce').fillna(0)
 
     # --- 3. Upload Parquet Files ---
     print("💾 Uploading Optimized Parquet Files to S3...")
@@ -327,27 +461,83 @@ def optimize_and_upload():
     # ---------------------------------------------------------
     # ### [NEW] FETCH & UPLOAD TRANSACTIONS (Last 7 Years) ###
     # This powers the instant "Awards" tab without hitting Athena
-    print("📥 Fetching Transaction History (Last 7 Years)...")
-    df_transactions = run_query("""
-        SELECT 
-            contract_id, action_date, vendor_name, vendor_cage, 
-            sub_agency, parent_agency, description, spend_amount, 
-            naics_code, psc, platform_family, year
-        FROM dashboard_master_view
-        WHERE year >= 2018
-    """)
+    # ---------------------------------------------------------
+    # ### [UPDATED] FETCH & UPLOAD TRANSACTIONS (5 Years) ###
+    # ---------------------------------------------------------
+    # ### [UPDATED] FETCH & UPLOAD TRANSACTIONS (5 Years) ###
+    print("📥 Fetching Transaction History (Last 5 Years)...")
+    if is_cache_fresh("transactions.parquet", max_age_hours=12):
+        print("   ↩️ Skipping transactions.parquet (Fresh file already in S3)")
+        df_transactions = pd.DataFrame()
+    else:
+        df_transactions = run_query("""
+            SELECT 
+                contract_id, action_date, vendor_name, vendor_cage, 
+                sub_agency, parent_agency, description, spend_amount, 
+                naics_code, psc, platform_family, year
+            FROM dashboard_master_view
+            WHERE year >= 2021
+        """)
     
-    # Basic optimization before upload
     if not df_transactions.empty:
         df_transactions['spend_amount'] = pd.to_numeric(df_transactions['spend_amount'], errors='coerce').fillna(0).astype('float32')
         df_transactions['year'] = pd.to_numeric(df_transactions['year'], errors='coerce').fillna(0).astype('int16')
-        # Uppercase strings to match your new API logic
         for col in ['vendor_name', 'vendor_cage', 'sub_agency', 'parent_agency', 'platform_family']:
             if col in df_transactions.columns:
                 df_transactions[col] = df_transactions[col].astype(str).str.upper().str.strip()
 
     upload_df(df_transactions, "transactions.parquet")
 
+    # ---------------------------------------------------------
+    # ### [UPDATED] FETCH ROLLED-UP CONTRACTS (Preserves ALL Business Logic) ###
+    # ---------------------------------------------------------
+    # ---------------------------------------------------------
+    # ### [UPDATED] FETCH ROLLED-UP CONTRACTS (Preserves ALL Business Logic) ###
+    # ---------------------------------------------------------
+    print("📥 Fetching Rolled-up Contracts (Full 7-Year Intelligence)...")
+
+    if is_cache_fresh("contracts_rolled.parquet", max_age_hours=12):
+        print("   ↩️ Skipping contracts_rolled.parquet (Fresh file already in S3)")
+    else:
+        print("📦 Athena UNLOAD -> Parquet (avoids local RAM blowup)...")
+
+        # ✅ FIX: Added MIN(action_date) and all missing metadata columns
+        select_sql = """
+            SELECT 
+                contract_id,
+                MAX(action_date) AS last_action_date,
+                MIN(action_date) AS start_date,
+                SUM(COALESCE(spend_amount, 0)) AS total_spend,
+                MAX_BY(vendor_name, action_date) AS vendor_name,
+                MAX_BY(vendor_cage, action_date) AS vendor_cage,
+                MAX_BY(sub_agency, action_date) AS sub_agency,
+                MAX_BY(parent_agency, action_date) AS parent_agency,
+                MAX_BY(description, action_date) AS description,
+                MAX_BY(platform_family, action_date) AS platform_family,
+                MAX_BY(naics_code, action_date) AS naics_code,
+                MAX_BY(psc, action_date) AS psc,
+                MAX_BY(city, action_date) AS city,
+                MAX_BY(state, action_date) AS state,
+                MAX_BY(country, action_date) AS country,
+                MAX_BY(pricing_type, action_date) AS pricing_type,
+                MAX_BY(competition_type, action_date) AS competition_type,
+                MAX_BY(CAST(offers_count AS VARCHAR), action_date) AS offers_count,
+                MAX_BY(set_aside_type, action_date) AS set_aside_type,
+                MAX_BY(solicitation_identifier, action_date) AS solicitation_id,
+                CAST(MAX(year) AS INTEGER) AS year
+            FROM dashboard_master_view
+            WHERE year >= 2018
+            GROUP BY contract_id
+        """
+
+        unload_prefix = f"{UNLOAD_OUTPUT_PREFIX}contracts_rolled/{uuid.uuid4().hex}/"
+        out_prefix = unload_to_s3(select_sql, unload_prefix)
+
+        upload_unload_parts_to_cache(out_prefix, "contracts_rolled.parquet")
+
+    # ---------------------------------------------------------
+    # ### [NEW] FETCH PRODUCTS (With Logistics Data) ###
+    # ---------------------------------------------------------
     # ---------------------------------------------------------
     # ### [NEW] FETCH PRODUCTS (Powers Vendor/Platform Details instantly) ###
     # ---------------------------------------------------------
@@ -357,15 +547,22 @@ def optimize_and_upload():
     # -------------------------------------------------------
     # 8. Product Catalog (Aggregated)
     # -------------------------------------------------------
+    # -------------------------------------------------------
+    # 8. Product Catalog (Aggregated)
+    # -------------------------------------------------------
     print("📥 Fetching Product Catalog (Aggregated with Platform Context)...")
     
-    # LOGIC EXPLAINED:
-    # 1. 'part_platforms' (CTE): Scans the Master View to find which Platform buys this Part the most.
-    # 2. 'view_dashboard_products': Provides the clean pre-calculated trends and revenue.
-    # 3. 'ref_flis_mgmt': Provides the Logistics/Demil codes (which are not in the Master View).
-    
-    df_products = run_query("""
-        WITH part_platforms AS (
+    if is_cache_fresh("products.parquet", max_age_hours=12):
+        print("   ↩️ Skipping products.parquet (Fresh file already in S3)")
+        df_products = pd.DataFrame()
+    else:
+        # LOGIC EXPLAINED:
+        # 1. 'part_platforms' (CTE): Scans the Master View to find which Platform buys this Part the most.
+        # 2. 'view_dashboard_products': Provides the clean pre-calculated trends and revenue.
+        # 3. 'ref_flis_mgmt': Provides the Logistics/Demil codes (which are not in the Master View).
+        
+        df_products = run_query("""
+            WITH part_platforms AS (
             SELECT 
                 substr(regexp_replace(nsn, '[^0-9]', ''), -9) as join_niin,
                 MAX_BY(platform_family, spend_amount) as derived_platform
@@ -441,15 +638,19 @@ def optimize_and_upload():
     # ### [NEW] FETCH OPPORTUNITIES (Powers Pipeline Instantly) ###
     # ---------------------------------------------------------
     print("📥 Fetching Active Opportunities...")
-    df_opportunities = run_query("""
-        SELECT 
-            id, sol_num, title, agency, sub_agency, 
-            deadline, set_aside_type, naics, psc, 
-            description, poc_email, source_system, state
-        FROM "market_intel_gold"."view_unified_opportunities_dod"
-        WHERE try(from_iso8601_timestamp(deadline)) >= current_date
-    """)
-    
+    if is_cache_fresh("opportunities.parquet"):
+        print("   ↩️ Skipping opportunities.parquet")
+        df_opportunities = pd.DataFrame()
+    else:
+        df_opportunities = run_query("""
+            SELECT 
+                id, sol_num, title, agency, sub_agency, 
+                deadline, set_aside_type, naics, psc, 
+                description, poc_email, source_system, state
+            FROM "market_intel_gold"."view_unified_opportunities_dod"
+            WHERE try(from_iso8601_timestamp(deadline)) >= current_date
+        """)
+        
     if not df_opportunities.empty:
         # Create a "Search Text" column for super-fast text filtering
         df_opportunities['search_text'] = (
