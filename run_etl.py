@@ -306,12 +306,68 @@ def optimize_and_upload():
         df_profiles = pd.DataFrame()
     else:
         df_profiles = run_query("""
-            SELECT 
-                cage_code, MAX(vendor_name) as vendor_name, SUM(total_spend) as total_lifetime_spend,
-                SUM(contract_count) as total_contracts, MAX(year) as last_active_year,
-                array_join(slice(array_agg(distinct CAST(naics_code AS VARCHAR) || ' - ' || COALESCE(naics_description, 'Unknown')), 1, 5), ',') as top_naics_codes,
-                array_join(slice(array_agg(distinct platform_family), 1, 5), ',') as top_platforms
-            FROM dashboard_summary_v2 GROUP BY cage_code
+            WITH base AS (
+            SELECT
+                cage_code,
+                vendor_name,
+                total_spend,
+                contract_count,
+                year,
+                naics_code,
+                naics_description,
+                platform_family
+            FROM dashboard_summary_v2
+            WHERE cage_code IS NOT NULL
+            ),
+            agg AS (
+            SELECT
+                cage_code,
+                SUM(total_spend) AS total_lifetime_spend,
+                SUM(contract_count) AS total_contracts,
+                MAX(year) AS last_active_year,
+                array_join(
+                slice(
+                    array_agg(DISTINCT CAST(naics_code AS VARCHAR) || ' - ' || COALESCE(naics_description, 'Unknown')),
+                    1, 5
+                ),
+                ','
+                ) AS top_naics_codes,
+                array_join(
+                slice(array_agg(DISTINCT platform_family), 1, 5),
+                ','
+                ) AS top_platforms
+            FROM base
+            GROUP BY cage_code
+            ),
+            pick_name AS (
+            SELECT cage_code, vendor_name
+            FROM (
+                SELECT
+                cage_code,
+                -- ✅ safety: strip trailing "(0975)"-style site codes if they exist
+                regexp_replace(vendor_name, '\\s*\\(\\d{4}\\)\\s*$', '') AS vendor_name,
+                year,
+                total_spend,
+                ROW_NUMBER() OVER (
+                    PARTITION BY cage_code
+                    ORDER BY year DESC, total_spend DESC, vendor_name DESC
+                ) AS rn
+                FROM base
+                WHERE vendor_name IS NOT NULL AND trim(vendor_name) <> ''
+            )
+            WHERE rn = 1
+            )
+            SELECT
+            a.cage_code,
+            p.vendor_name,
+            a.total_lifetime_spend,
+            a.total_contracts,
+            a.last_active_year,
+            a.top_naics_codes,
+            a.top_platforms
+            FROM agg a
+            LEFT JOIN pick_name p
+            ON a.cage_code = p.cage_code
         """)
 
     print("📥 Fetching Risk Sidecar...")

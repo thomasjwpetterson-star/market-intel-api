@@ -3011,7 +3011,7 @@ def get_company_network(
     Requires `network.parquet` to include a `year` INT column (best added in Athena and materialized in ETL).
     """
 
-    safe_name = sanitize(name).replace("'", "")
+    safe_name = sanitize(name).replace("'", "").upper().strip()
     is_drill_down = (cage and len(cage) > 2 and cage != "AGGREGATE")
 
     def run_duck_query(sql: str, params: tuple):
@@ -3035,12 +3035,29 @@ def get_company_network(
     # --- Year filter builder (FY) ---
     year_filter_sql = ""
     year_params: List[int] = []
-    if years:
+
+    has_fiscal_year = False
+    try:
+        with DUCK_LOCK:
+            conn = ensure_duck_conn()
+            net_path = (LOCAL_CACHE_DIR / "network.parquet").resolve()
+            if net_path.exists():
+                cols = conn.execute(
+                    f"SELECT * FROM read_parquet('{str(net_path)}') LIMIT 0"
+                ).df().columns
+                has_fiscal_year = ("fiscal_year" in cols)
+    except Exception:
+        has_fiscal_year = False
+
+    if years and has_fiscal_year:
         yrs = [int(y) for y in years if y is not None]
-        if len(yrs) > 0:
+        if yrs:
             placeholders = ",".join(["?"] * len(yrs))
             year_filter_sql = f" AND fiscal_year IN ({placeholders})"
             year_params = yrs
+    elif years and not has_fiscal_year:
+        logger.warning("network.parquet missing fiscal_year; skipping year filter for network.")
+        year_params = yrs
 
     # --- SQL Template (Parameterized) ---
     sql_template = """
