@@ -3033,8 +3033,12 @@ def get_company_network(
             return []
 
     # --- Year filter builder (FY) ---
+# --- Year filter builder (FY) ---
     year_filter_sql = ""
     year_params: List[int] = []
+
+    # ALWAYS define yrs
+    yrs: List[int] = [int(y) for y in (years or []) if y is not None]
 
     has_fiscal_year = False
     try:
@@ -3049,14 +3053,13 @@ def get_company_network(
     except Exception:
         has_fiscal_year = False
 
-    if years and has_fiscal_year:
-        yrs = [int(y) for y in years if y is not None]
-        if yrs:
-            placeholders = ",".join(["?"] * len(yrs))
-            year_filter_sql = f" AND fiscal_year IN ({placeholders})"
-            year_params = yrs
-    elif years and not has_fiscal_year:
+    if yrs and has_fiscal_year:
+        placeholders = ",".join(["?"] * len(yrs))
+        year_filter_sql = f" AND fiscal_year IN ({placeholders})"
+        year_params = yrs
+    elif yrs and not has_fiscal_year:
         logger.warning("network.parquet missing fiscal_year; skipping year filter for network.")
+    # keep year_params empty and year_filter_sql empty
         year_params = yrs
 
     # --- SQL Template (Parameterized) ---
