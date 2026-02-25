@@ -4279,27 +4279,29 @@ def search_awards(
         years_csv = ",".join([str(y) for y in ys])
         cond.append(f"year IN ({years_csv})")
 
-    is_filtering = bool(
+    # ✅ FIX 1: Differentiate between a "Global Filter" (like years) and a "Specific Search"
+    is_specific_search = bool(
         (q and str(q).strip()) or
         (vendor and str(vendor).strip()) or
         (agency and str(agency).strip()) or
         (platform and str(platform).strip()) or
         (psc and str(psc).strip()) or
-        (domain and str(domain).strip()) or
-        bool(ys)
+        (domain and str(domain).strip())
     )
 
-    if not is_filtering:
-        # Default view: Only scan the last 2 years and enforce $1M threshold
-        cond.append("try_cast(last_action_date as date) >= current_date() - INTERVAL 730 DAY")
+    # If they are just browsing (even if they have a year selected), enforce the $1M threshold!
+    if not is_specific_search:
         cond.append("total_spend >= 1000000")
+        
+        # If they didn't pick a specific year, enforce the 2-year recency rule for the default homepage
+        if not ys:
+            cond.append("try_cast(last_action_date as date) >= current_date() - INTERVAL 730 DAY")
 
     where_clause = " AND ".join(cond)
 
-    # ✅ SPEED FIX: Instant streaming count from the pre-rolled table
     count_query = f"SELECT count(*) as c FROM v_contracts_rolled WHERE {where_clause}"
 
-    # ✅ SPEED FIX: Stream the data directly from the pre-rolled table. No GROUP BY needed!
+    # ✅ FIX 2: Sort by Value FIRST, then date. This guarantees the mega-contracts stay at the top.
     data_query = f"""
         SELECT
             contract_id,
@@ -4312,7 +4314,7 @@ def search_awards(
             description
         FROM v_contracts_rolled
         WHERE {where_clause}
-        ORDER BY last_action_date DESC, total_spend DESC
+        ORDER BY total_spend DESC, last_action_date DESC
         OFFSET {offset_i}
         LIMIT {limit_i}
     """
