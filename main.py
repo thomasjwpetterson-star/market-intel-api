@@ -3039,7 +3039,7 @@ def get_company_network(
         yrs = [int(y) for y in years if y is not None]
         if len(yrs) > 0:
             placeholders = ",".join(["?"] * len(yrs))
-            year_filter_sql = f" AND year IN ({placeholders})"
+            year_filter_sql = f" AND fiscal_year IN ({placeholders})"
             year_params = yrs
 
     # --- SQL Template (Parameterized) ---
@@ -3983,19 +3983,92 @@ def get_nsn_history(nsn: str):
     return results
 
 
-
-
 @app.get("/api/nsn/contracts")
-def get_nsn_contracts(nsn: str, limit: int = 50, offset: int = 0):
-    niin = get_niin(nsn) # Helper ensures this is digits only, but let's be safe
+def get_nsn_contracts(
+    nsn: str,
+    limit: int = 50,
+    offset: int = 0,
 
-    # Guardrails
+    # ✅ Global filters
+    years: Optional[List[int]] = Query(None),
+    vendor: Optional[str] = None,
+    parent: Optional[str] = None,
+    cage: Optional[str] = None,
+    domain: Optional[str] = None,
+    agency: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None,
+):
+    niin = get_niin(nsn)
+
     limit_i = safe_int(limit, 50, 1, 200)
     offset_i = safe_int(offset, 0, 0, 2_000_000)
 
-    # ✅ FIX: Use safe LIKE logic with '#' escape
-    # Even though NIIN is usually digits, this protects against weird input
-    safe_niin_pattern = sql_like_contains(niin)
+    cond: List[str] = ["1=1"]
+
+    # ✅ SAME NIIN MATCH AS SUPPLIERS (critical for consistency)
+    cond.append(
+        f"substr(regexp_replace(coalesce(nsn,''), '[^0-9]', ''), 5, 9) = {sql_literal(niin)}"
+    )
+
+    # ✅ Fiscal year filter (same as /api/nsn/top)
+    ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
+    if ys:
+        years_csv = ",".join(str(y) for y in ys)
+        cond.append(
+            "("
+            " (year(try_cast(substr(action_date, 1, 10) as date))"
+            "  + if(month(try_cast(substr(action_date, 1, 10) as date)) >= 10, 1, 0))"
+            f" IN ({years_csv})"
+            ")"
+        )
+
+    # ✅ Vendor filter
+    if vendor:
+        cond.append(
+            f"lower(coalesce(vendor_name,'')) LIKE lower({sql_like_contains(vendor)}) ESCAPE '#'"
+        )
+
+    # ✅ Parent filter
+    if parent:
+        cond.append(
+            f"lower(coalesce(ultimate_parent_name,'')) LIKE lower({sql_like_contains(parent)}) ESCAPE '#'"
+        )
+
+    # ✅ CAGE filter (exact match)
+    if cage:
+        cond.append(
+            f"trim(upper(coalesce(vendor_cage,''))) = trim(upper({sql_literal(cage)}))"
+        )
+
+    # ✅ Domain filter
+    if domain:
+        cond.append(
+            f"lower(coalesce(market_segment,'')) LIKE lower({sql_like_contains(domain)}) ESCAPE '#'"
+        )
+
+    # ✅ Agency filter (checks both parent + sub)
+    if agency:
+        cond.append(
+            "("
+            f" lower(coalesce(parent_agency,'')) LIKE lower({sql_like_contains(agency)}) ESCAPE '#'"
+            f" OR lower(coalesce(sub_agency,'')) LIKE lower({sql_like_contains(agency)}) ESCAPE '#'"
+            ")"
+        )
+
+    # ✅ Platform filter
+    if platform:
+        cond.append(
+            f"lower(coalesce(platform_family,'')) LIKE lower({sql_like_contains(platform)}) ESCAPE '#'"
+        )
+
+    # ✅ PSC filter
+    if psc:
+        cond.append(
+            f"trim(upper(coalesce(psc,''))) = trim(upper({sql_literal(psc)}))"
+        )
+
+    where_sql = " AND ".join(cond)
 
     query = f"""
     SELECT
@@ -4010,12 +4083,13 @@ def get_nsn_contracts(nsn: str, limit: int = 50, offset: int = 0):
         spend_amount,
         description
     FROM "market_intel_gold"."dashboard_master_view"
-    WHERE upper(coalesce(nsn,'')) LIKE {safe_niin_pattern} ESCAPE '#'
+    WHERE {where_sql}
       AND spend_amount IS NOT NULL
     ORDER BY action_date DESC
     OFFSET {offset_i}
     LIMIT {limit_i}
     """
+
     return cached_athena_query(query)
 
 

@@ -18,6 +18,9 @@ BUCKET_NAME = raw_bucket_input.replace('s3://', '').split('/')[0]
 CACHE_PREFIX = "app_cache/"
 DATABASE = 'market_intel_gold'
 
+# ✅ FORCE REBUILD SWITCH (temporary override)
+FORCE_REBUILD = os.getenv("FORCE_REBUILD", "0").strip().lower() in ("1", "true", "yes")
+
 # Temp locations
 TEMP_DIR = "./temp_etl_downloads"
 if not os.path.exists(TEMP_DIR):
@@ -49,6 +52,12 @@ def is_cache_fresh(cache_name: str, max_age_hours: float = 12.0) -> bool:
     """
     Checks if a file exists in the S3 cache AND was modified within the last `max_age_hours`.
     """
+
+    # 🧨 Global override — forces rebuild regardless of age
+    if FORCE_REBUILD:
+        print(f"🧨 FORCE_REBUILD=1 -> treating {cache_name} as stale")
+        return False
+
     keys_to_check = [f"{CACHE_PREFIX}{cache_name}", f"{CACHE_PREFIX}{cache_name}.DONE"]
     
     for key in keys_to_check:
