@@ -153,14 +153,16 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
     # Writer mode: serialize through init lock (DDL during reload)
     if use_writer:
         with DUCK_INIT_LOCK:
-            return DUCK_CONN.execute(sql, params).fetchdf()
+            df = DUCK_CONN.execute(sql, params).fetchdf()
+            return df_sanitize_for_json(df)
 
     # Read mode: use pool
     c = None
     try:
         c = _DUCK_POOL.get(timeout=float(os.getenv("DUCK_POOL_TIMEOUT", "5")))
         # Use a cursor for isolation of statement state
-        return c.cursor().execute(sql, params).fetchdf()
+        df = c.cursor().execute(sql, params).fetchdf()
+        return df_sanitize_for_json(df)
     finally:
         if c is not None:
             try:
@@ -953,8 +955,12 @@ def get_parent_aggregate_stats(parent_name: str, years: Optional[List[int]] = No
     if totals.empty:
         return None
 
-    total_spend = float(totals["total_spend"].iloc[0]) if "total_spend" in totals.columns else 0.0
-    total_contracts = int(totals["contract_count"].iloc[0]) if "contract_count" in totals.columns else 0
+    # Safely extract and check for NaN before casting
+    ts_val = totals["total_spend"].iloc[0] if "total_spend" in totals.columns else 0.0
+    total_spend = 0.0 if pd.isna(ts_val) else float(ts_val)
+
+    tc_val = totals["contract_count"].iloc[0] if "contract_count" in totals.columns else 0
+    total_contracts = 0 if pd.isna(tc_val) else int(tc_val)
     last_active = int(totals["last_active"].iloc[0]) if "last_active" in totals.columns and pd.notna(totals["last_active"].iloc[0]) else 0
 
     naics = query_summary_df(
@@ -1029,8 +1035,12 @@ def _calc_child_kpis_from_kpis_disk(cage_code: str, years: Optional[List[int]] =
             # view exists but no rows
             return {"has_kpis": True, "total_obligations": 0.0, "total_contracts": 0, "last_active": 0}
 
-        total_ob = float(df["total_obligations"].iloc[0] or 0.0) if "total_obligations" in df.columns else 0.0
-        total_ct = int(df["total_contracts"].iloc[0] or 0) if "total_contracts" in df.columns else 0
+        # Safely extract and check for NaN before casting
+        ob_val = df["total_obligations"].iloc[0] if "total_obligations" in df.columns else 0.0
+        total_ob = 0.0 if pd.isna(ob_val) else float(ob_val)
+
+        ct_val = df["total_contracts"].iloc[0] if "total_contracts" in df.columns else 0
+        total_ct = 0 if pd.isna(ct_val) else int(ct_val)
 
         last_active = 0
         if "last_active" in df.columns and pd.notna(df["last_active"].iloc[0]):
@@ -1763,8 +1773,12 @@ def get_market_kpis(
         limit=1
     )
 
-    total_spend = float(kpi_df["total_spend"].iloc[0]) if (not kpi_df.empty and "total_spend" in kpi_df.columns) else 0.0
-    total_contracts = int(kpi_df["total_contracts"].iloc[0]) if (not kpi_df.empty and "total_contracts" in kpi_df.columns) else 0
+    # Safely extract and check for NaN before casting
+    ts_val = kpi_df["total_spend"].iloc[0] if (not kpi_df.empty and "total_spend" in kpi_df.columns) else 0.0
+    total_spend = 0.0 if pd.isna(ts_val) else float(ts_val)
+
+    tc_val = kpi_df["total_contracts"].iloc[0] if (not kpi_df.empty and "total_contracts" in kpi_df.columns) else 0
+    total_contracts = 0 if pd.isna(tc_val) else int(tc_val)
 
     recompete_data = get_recompete_kpi(filters)
 
@@ -1991,7 +2005,9 @@ def get_market_distributions(
     where_sql, params = build_summary_where(years, filters)
 
     total_df = query_summary_df(where_sql, params, "sum(total_spend) as total_spend", limit=1)
-    total = float(total_df["total_spend"].iloc[0]) if (not total_df.empty and "total_spend" in total_df.columns) else 0.0
+    # Safely extract and check for NaN before casting
+    ts_val = total_df["total_spend"].iloc[0] if (not total_df.empty and "total_spend" in total_df.columns) else 0.0
+    total = 0.0 if pd.isna(ts_val) else float(ts_val)
     if total <= 0:
         return {"platform_dist": [], "domain_dist": []}
 
