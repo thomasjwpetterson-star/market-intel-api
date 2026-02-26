@@ -4373,6 +4373,9 @@ def get_award_history(id: str):
 # Place this right above your endpoint
 DEFAULT_AWARD_PAGE_CACHE = None
 
+# Place this right above your endpoint
+DEFAULT_AWARD_PAGE_CACHE = None
+
 @app.get("/api/award/search")
 def search_awards(
     q: Optional[str] = None,
@@ -4384,7 +4387,6 @@ def search_awards(
     platform: Optional[str] = None,
     psc: Optional[str] = None,
     domain: Optional[str] = None,
-    # ✅ NEW: Accept Keyset Pagination Params
     after_spend: Optional[float] = None,
     after_date: Optional[str] = None,
     after_id: Optional[str] = None
@@ -4394,25 +4396,25 @@ def search_awards(
     limit_i = int(limit or 20)
     offset_i = int(offset or 0)
 
-    # ✅ QUICK EXIT: Is this the default dashboard load?
-    # Ensure after_spend is None so we don't accidentally cache a "Load More" page
+    # ✅ QUICK EXIT: Instant cache load
     is_default_load = (
         not q and not vendor and not agency and 
         not platform and not psc and not domain and 
-        not years and offset_i == 0 and limit_i == 20 and
+        (not years or len(years) >= 7) and
+        offset_i == 0 and limit_i == 20 and
         after_spend is None 
     )
 
     if is_default_load and DEFAULT_AWARD_PAGE_CACHE is not None:
         return DEFAULT_AWARD_PAGE_CACHE
 
-    cond: List[str] = ["1=1"]
-
-    # --- 1. APPLY SEARCH & FILTERS ---
+    # --- 1. PRE-GROUPING FILTERS (Filters applied to the raw 90 files) ---
+    cond_pre: List[str] = ["1=1"]
+    
     if q and str(q).strip():
         v = sanitize(q)
         like_v = sql_like_contains(v)
-        cond.append(
+        cond_pre.append(
             "("
             f" upper(coalesce(contract_id,'')) LIKE {like_v} ESCAPE '#' OR"
             f" upper(coalesce(vendor_name,'')) LIKE {like_v} ESCAPE '#' OR"
@@ -4422,36 +4424,52 @@ def search_awards(
         )
 
     if vendor and str(vendor).strip():
-        cond.append(f"upper(vendor_name) LIKE {sql_like_contains(sanitize(vendor))} ESCAPE '#'")
+        cond_pre.append(f"upper(vendor_name) LIKE {sql_like_contains(sanitize(vendor))} ESCAPE '#'")
 
     if platform and str(platform).strip():
-        cond.append(f"upper(platform_family) = {sql_literal(sanitize(platform))}")
+        cond_pre.append(f"upper(platform_family) = {sql_literal(sanitize(platform))}")
 
     if agency and str(agency).strip():
         a = sanitize(agency)
-        cond.append(f"(upper(sub_agency) = {sql_literal(a)} OR upper(parent_agency) = {sql_literal(a)})")
+        cond_pre.append(f"(upper(sub_agency) = {sql_literal(a)} OR upper(parent_agency) = {sql_literal(a)})")
 
     if psc and str(psc).strip():
-        cond.append(f"upper(psc) LIKE {sql_like_contains(sanitize(psc))} ESCAPE '#'")
+        cond_pre.append(f"upper(psc) LIKE {sql_like_contains(sanitize(psc))} ESCAPE '#'")
 
     if domain and str(domain).strip():
         d = sanitize(domain)
         like_d = sql_like_contains(d)
-        cond.append(f"(upper(naics_code) LIKE {like_d} ESCAPE '#' OR upper(psc) LIKE {like_d} ESCAPE '#')")
+        cond_pre.append(f"(upper(naics_code) LIKE {like_d} ESCAPE '#' OR upper(psc) LIKE {like_d} ESCAPE '#')")
 
     ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
     if ys:
         years_csv = ",".join([str(y) for y in ys])
-        cond.append(f"year IN ({years_csv})")
+        cond_pre.append(f"year IN ({years_csv})")
 
-    # --- 2. APPLY KEYSET PAGINATION ---
-    # ✅ This replaces OFFSET for subsequent pages, saving massive RAM and CPU
+    is_specific_search = bool(
+        (q and str(q).strip()) or (vendor and str(vendor).strip()) or
+        (agency and str(agency).strip()) or (platform and str(platform).strip()) or
+        (psc and str(psc).strip()) or (domain and str(domain).strip())
+    )
+
+    if not is_specific_search and not ys:
+        cond_pre.append("try_cast(last_action_date as date) >= current_date() - INTERVAL 730 DAY")
+
+    pre_where_clause = " AND ".join(cond_pre)
+
+    # --- 2. POST-GROUPING FILTERS (Pagination & Spend Thresholds) ---
+    cond_post: List[str] = ["1=1"]
+    
+    if not is_specific_search:
+        # Enforce the $1M threshold on the COMBINED spend, not the individual chunks
+        cond_post.append("total_spend >= 1000000")
+
     if after_spend is not None and after_date and after_id:
         s_val = float(after_spend)
         d_val = sql_literal(after_date)
         i_val = sql_literal(after_id)
         
-        cond.append(f"""
+        cond_post.append(f"""
             (
                 total_spend < {s_val}
                 OR (total_spend = {s_val} AND last_action_date < {d_val})
@@ -4459,36 +4477,27 @@ def search_awards(
             )
         """)
 
-    # --- 3. APPLY DEFAULT HOMEPAGE RULES ---
-    is_specific_search = bool(
-        (q and str(q).strip()) or (vendor and str(vendor).strip()) or
-        (agency and str(agency).strip()) or (platform and str(platform).strip()) or
-        (psc and str(psc).strip()) or (domain and str(domain).strip())
-    )
-
-    if not is_specific_search:
-        cond.append("total_spend >= 1000000")
-        if not ys:
-            cond.append("try_cast(last_action_date as date) >= current_date() - INTERVAL 730 DAY")
-
-    where_clause = " AND ".join(cond)
-
-    # If we have keyset parameters, we explicitly omit the OFFSET clause in SQL
+    post_where_clause = " AND ".join(cond_post)
     offset_sql = f"OFFSET {offset_i}" if after_spend is None else ""
 
-    # ✅ UPDATED: Added contract_id DESC to guarantee deterministic sorting
+    # ✅ THE FIX: A Common Table Expression (CTE) to recombine split ETL chunks
     data_query = f"""
-        SELECT
-            contract_id,
-            last_action_date,
-            total_spend,
-            vendor_name,
-            vendor_cage,
-            sub_agency,
-            parent_agency,
-            description
-        FROM v_contracts_rolled
-        WHERE {where_clause}
+        WITH recombined_contracts AS (
+            SELECT
+                contract_id,
+                MAX(last_action_date) AS last_action_date,
+                SUM(total_spend) AS total_spend,
+                ANY_VALUE(vendor_name) AS vendor_name,
+                ANY_VALUE(vendor_cage) AS vendor_cage,
+                ANY_VALUE(sub_agency) AS sub_agency,
+                ANY_VALUE(parent_agency) AS parent_agency,
+                ANY_VALUE(description) AS description
+            FROM v_contracts_rolled
+            WHERE {pre_where_clause}
+            GROUP BY contract_id
+        )
+        SELECT * FROM recombined_contracts
+        WHERE {post_where_clause}
         ORDER BY total_spend DESC, last_action_date DESC, contract_id DESC
         {offset_sql}
         LIMIT {limit_i + 1}
@@ -4519,7 +4528,6 @@ def search_awards(
 
         final_response = {"data": data, "total": None, "offset": offset_i, "limit": limit_i, "has_more": has_more}
 
-        # Save to cache if this is the initial 18-second dashboard load
         if is_default_load:
             DEFAULT_AWARD_PAGE_CACHE = final_response
 

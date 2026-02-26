@@ -5,6 +5,7 @@ from io import BytesIO
 import time
 import shutil
 import uuid
+import duckdb
 from botocore.config import Config
 import warnings
 from datetime import datetime, timezone
@@ -174,6 +175,72 @@ def upload_unload_parts_to_cache(unload_prefix: str, cache_name: str):
     s3.put_object(Bucket=BUCKET_NAME, Key=f"{CACHE_PREFIX}{cache_name}.DONE", Body=b"ok")
 
     print(f"   ✅ Uploaded {len(part_keys)} parquet parts to {cache_folder}")
+
+# ✅ NEW HELPER ADDED HERE:
+def merge_unload_parts_with_duckdb(unload_prefix: str, output_filename: str):
+    """
+    Downloads Athena's UNLOAD parts, uses DuckDB to safely deduplicate 
+    and merge them into ONE file, and uploads it to S3.
+    """
+    print(f"🦆 Merging {unload_prefix} into ONE file using DuckDB...")
+    
+    parts_dir = os.path.join(TEMP_DIR, "duckdb_parts_" + uuid.uuid4().hex)
+    os.makedirs(parts_dir, exist_ok=True)
+
+    all_keys = list(list_s3_keys(unload_prefix))
+    part_keys = [k for k in all_keys if not k.endswith("/")]
+
+    print(f"   ⬇️ Downloading {len(part_keys)} parts locally...")
+    for k in part_keys:
+        dest_filename = os.path.basename(k)
+        if not dest_filename.endswith(".parquet"):
+            dest_filename += ".parquet"
+        local_part = os.path.join(parts_dir, dest_filename)
+        s3.download_file(BUCKET_NAME, k, local_part)
+
+    print("   🔨 DuckDB is combining and deduplicating into a single Parquet file...")
+    local_output = os.path.join(TEMP_DIR, output_filename)
+    
+    con = duckdb.connect('etl_temp.db')
+    con.execute("PRAGMA temp_directory='./ducktmp';")
+    con.execute("PRAGMA memory_limit='2GB';") 
+    
+    con.execute(f"""
+        COPY (
+            SELECT
+                contract_id,
+                MAX(last_action_date) AS last_action_date,
+                MIN(start_date) AS start_date,
+                SUM(total_spend) AS total_spend,
+                ANY_VALUE(vendor_name) AS vendor_name,
+                ANY_VALUE(vendor_cage) AS vendor_cage,
+                ANY_VALUE(sub_agency) AS sub_agency,
+                ANY_VALUE(parent_agency) AS parent_agency,
+                ANY_VALUE(description) AS description,
+                ANY_VALUE(platform_family) AS platform_family,
+                ANY_VALUE(naics_code) AS naics_code,
+                ANY_VALUE(psc) AS psc,
+                ANY_VALUE(city) AS city,
+                ANY_VALUE(state) AS state,
+                ANY_VALUE(country) AS country,
+                ANY_VALUE(pricing_type) AS pricing_type,
+                ANY_VALUE(competition_type) AS competition_type,
+                ANY_VALUE(offers_count) AS offers_count,
+                ANY_VALUE(set_aside_type) AS set_aside_type,
+                ANY_VALUE(solicitation_id) AS solicitation_id,
+                MAX(year) AS year
+            FROM read_parquet('{parts_dir}/*.parquet')
+            GROUP BY contract_id
+        ) TO '{local_output}' (FORMAT PARQUET, COMPRESSION ZSTD);
+    """)
+    con.close()
+
+    print(f"   ⬆️ Uploading consolidated {output_filename} to S3...")
+    s3.upload_file(local_output, BUCKET_NAME, f"{CACHE_PREFIX}{output_filename}")
+
+    os.remove(local_output)
+    shutil.rmtree(parts_dir)
+    print(f"   ✅ Successfully published consolidated {output_filename}!")
 
 # AWS Clients
 session = boto3.Session(region_name='us-east-1')
@@ -598,7 +665,7 @@ def optimize_and_upload():
         unload_prefix = f"{UNLOAD_OUTPUT_PREFIX}contracts_rolled/{uuid.uuid4().hex}/"
         out_prefix = unload_to_s3(select_sql, unload_prefix)
 
-        upload_unload_parts_to_cache(out_prefix, "contracts_rolled.parquet")
+        merge_unload_parts_with_duckdb(out_prefix, "contracts_rolled.parquet")
 
     # ---------------------------------------------------------
     # ### [NEW] FETCH PRODUCTS (With Logistics Data) ###
