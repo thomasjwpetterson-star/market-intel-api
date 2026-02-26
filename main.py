@@ -736,16 +736,11 @@ def _like_param_contains(val: str) -> str:
 def build_summary_where(
     years: Optional[List[int]], 
     filters: Dict[str, Optional[str]], 
-    use_fy_logic: bool = False  # ✅ NEW: Toggle for FY calculation
+    use_fy_logic: bool = False  # Kept for compatibility, but no longer needed
 ) -> Tuple[str, List[Any]]:
     """
     Returns (where_sql, params) for summary.parquet queries.
     All comparisons are done in UPPER space.
-    
-    If use_fy_logic is True:
-      Calculates FY dynamically: year + (month >= 10)
-    Else:
-      Uses the 'year' column directly.
     """
     where_parts: List[str] = ["1=1"]
     params: List[Any] = []
@@ -755,15 +750,8 @@ def build_summary_where(
         ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
         if ys:
             placeholders = ','.join(['?' for _ in ys])
-            
-            if use_fy_logic:
-                # Complex FY Calculation
-                fy_expr = "CAST(year AS INTEGER) + CASE WHEN CAST(COALESCE(month, 1) AS INTEGER) >= 10 THEN 1 ELSE 0 END"
-                where_parts.append(f"{fy_expr} IN ({placeholders})")
-            else:
-                # Standard Column Match
-                where_parts.append(f"year IN ({placeholders})")
-                
+            # ✅ The 'year' column is now permanently Fiscal Year in the data!
+            where_parts.append(f"year IN ({placeholders})")
             params.extend(ys)
 
     # --- HELPERS ---
@@ -1811,53 +1799,25 @@ def get_spend_trend(
         "domain": domain, "agency": agency, "platform": platform, "psc": psc,
     }
 
-    where_sql, params = build_summary_where(None, filters)
-
-    # We reproduce your FY logic:
-    # FY = year + (month>=10)
-    # month_num = month (or 1 default)
-    base_df = query_summary_df(
-        where_sql=where_sql,
-        params=params,
-        select_sql="""
-            CAST(year AS INTEGER) AS year_num,
-            CAST(COALESCE(month, 1) AS INTEGER) AS month_num,
-            SUM(total_spend) AS spend
-        """,
-        group_by_sql="CAST(year AS INTEGER), CAST(COALESCE(month, 1) AS INTEGER)",  # ✅ ADDED
-        order_by_sql="year_num ASC, month_num ASC",
-        limit=0
-    )
-
-    if base_df.empty:
-        return []
-
-    base_df["year_num"] = pd.to_numeric(base_df["year_num"], errors="coerce").fillna(0).astype(int)
-    base_df["month_num"] = pd.to_numeric(base_df["month_num"], errors="coerce").fillna(1).astype(int)
-    base_df["spend"] = pd.to_numeric(base_df["spend"], errors="coerce").fillna(0.0).astype(float)
-
-    # ✅ FIX: dashboard_summary_v2.year is already FY (USAspending action_date_fiscal_year)
-    base_df["fy"] = base_df["year_num"]
-
-    # Apply FY filter (your step 4)
-    if years and len(years) > 0:
-        ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
-        if ys:
-            base_df = base_df[base_df["fy"].isin(ys)]
-            if base_df.empty:
-                return []
+    # ✅ Let DuckDB handle the year filtering instantly
+    where_sql, params = build_summary_where(years, filters)
 
     if mode == "yearly":
-        grouped = base_df.groupby("fy", dropna=False)["spend"].sum().reset_index()
+        df = query_summary_df(
+            where_sql=where_sql,
+            params=params,
+            select_sql="CAST(year AS INTEGER) AS fy, SUM(total_spend) AS spend",
+            group_by_sql="CAST(year AS INTEGER)",
+            order_by_sql="fy ASC",
+            limit=0
+        )
 
-        active = grouped[grouped["spend"] > 0]
-        if active.empty:
+        if df.empty:
             return []
 
-        min_year = int(active["fy"].min())
-        max_year = int(active["fy"].max())
-
-        data_map = {int(r["fy"]): float(r["spend"]) for _, r in grouped.iterrows()}
+        min_year = int(df["fy"].min())
+        max_year = int(df["fy"].max())
+        data_map = {int(r["fy"]): float(r["spend"]) for _, r in df.iterrows()}
 
         final_data = []
         for y in range(min_year, max_year + 1):
@@ -1865,9 +1825,21 @@ def get_spend_trend(
         return final_data
 
     if mode == "monthly":
-        grouped = base_df.groupby("month_num", dropna=False)["spend"].sum().reset_index()
-        grouped.columns = ["label", "spend"]
+        # ✅ Let DuckDB group the months
+        df = query_summary_df(
+            where_sql=where_sql,
+            params=params,
+            select_sql="CAST(COALESCE(month, 1) AS INTEGER) AS month_num, SUM(total_spend) AS spend",
+            group_by_sql="CAST(COALESCE(month, 1) AS INTEGER)",
+            limit=0
+        )
 
+        if df.empty:
+            return []
+
+        df.columns = ["label", "spend"]
+
+        # ✅ Retained your exact fiscal sorting logic
         def get_fiscal_sort(m):
             try:
                 m = int(m)
@@ -1875,11 +1847,11 @@ def get_spend_trend(
             except:
                 return 0
 
-        grouped["sort_index"] = grouped["label"].apply(get_fiscal_sort)
-        grouped = grouped.sort_values("sort_index", ascending=True)
-        grouped["spend"] = grouped["spend"].astype(float)
+        df["sort_index"] = df["label"].apply(get_fiscal_sort)
+        df = df.sort_values("sort_index", ascending=True)
+        df["spend"] = df["spend"].astype(float)
 
-        return grouped[["label", "spend"]].to_dict(orient="records")
+        return df[["label", "spend"]].to_dict(orient="records")
 
     return []
 
@@ -2338,8 +2310,6 @@ def get_platform_profile(
 
     search_upper = name.strip().upper()
 
-    # Build filters using the SAME semantics as your original:
-    # platform is strict equality; agency/domain strict equality
     filters = {
         "vendor": None,
         "parent": None,
@@ -2350,9 +2320,10 @@ def get_platform_profile(
         "psc": None
     }
 
-    where_sql, params = build_summary_where(None, filters)
+    # ✅ 1. Let DuckDB handle the exact years filter instantly
+    where_sql, params = build_summary_where(years, filters)
 
-    # Pull minimal rows needed for stats
+    # ✅ 2. Single optimized DuckDB query handles everything
     df = query_summary_df(
         where_sql=where_sql,
         params=params,
@@ -2364,7 +2335,7 @@ def get_platform_profile(
             SUM(total_spend) AS total_spend,
             SUM(contract_count) AS contract_count
         """,
-        group_by_sql="platform_family, vendor_name, cage_code, sub_agency",  # ✅ ADDED
+        group_by_sql="platform_family, vendor_name, cage_code, sub_agency",
         order_by_sql="total_spend DESC",
         limit=0
     )
@@ -2375,51 +2346,7 @@ def get_platform_profile(
             "contractor_count": 0, "contract_count": 0, "top_vendors": [], "top_agencies": []
         }
 
-    # Fiscal year filtering (your exact logic)
-    if years and len(years) > 0:
-        ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
-        if ys:
-            # We need month/year for FY; easiest is to re-query with month/year and filter in python
-            df2 = query_summary_df(
-                where_sql=where_sql,
-                params=params,
-                select_sql="""
-                    platform_family,
-                    vendor_name,
-                    cage_code,
-                    sub_agency,
-                    CAST(year AS INTEGER) AS year_num,
-                    CAST(COALESCE(month, 1) AS INTEGER) AS month_num,
-                    total_spend,
-                    contract_count
-                """,
-                # No GROUP BY needed here since we aren't summing yet
-                limit=0
-            )
-            if df2.empty:
-                return {
-                    "found": True, "name": name, "total_obligations": 0.0,
-                    "contractor_count": 0, "contract_count": 0, "top_vendors": [], "top_agencies": []
-                }
-
-            df2["year_num"] = pd.to_numeric(df2["year_num"], errors="coerce").fillna(0).astype(int)
-            df2["month_num"] = pd.to_numeric(df2["month_num"], errors="coerce").fillna(1).astype(int)
-            df2["fy"] = df2["year_num"] + (df2["month_num"] >= 10).astype(int)
-
-            df2 = df2[df2["fy"].isin(ys)]
-            if df2.empty:
-                return {
-                    "found": True, "name": name, "total_obligations": 0.0,
-                    "contractor_count": 0, "contract_count": 0, "top_vendors": [], "top_agencies": []
-                }
-
-            # Now re-aggregate back to your expected stats universe
-            df = (
-                df2.groupby(["platform_family", "vendor_name", "cage_code", "sub_agency"], dropna=False)
-                .agg(total_spend=("total_spend", "sum"), contract_count=("contract_count", "sum"))
-                .reset_index()
-            )
-
+    # ✅ 3. Native Pandas aggregations remain identical
     official_name = name
     try:
         official_name = df["platform_family"].mode()[0]
@@ -3832,11 +3759,10 @@ def get_nsn_suppliers(nsn: str):
         GROUP BY 1
     ),
     
-    -- 2. Identify Approved Sources & AGGREGATE Part Numbers [Image of SQL Array Aggregation]
+    -- 2. Identify Approved Sources & AGGREGATE Part Numbers
     approved_list AS (
         SELECT 
             TRIM(UPPER(cage_code)) as cage_code,
-            -- ✅ Collect all part numbers for this CAGE into a single comma-separated string
             array_join(array_agg(DISTINCT part_number), ', ') as part_numbers
         FROM "market_intel_silver"."ref_approved_sources"
         WHERE LPAD(CAST(niin AS VARCHAR), 9, '0') = {sql_literal(safe_niin)}
@@ -3859,18 +3785,8 @@ def get_nsn_suppliers(nsn: str):
         WHERE TRIM(UPPER(cage_code)) IN (SELECT cage FROM all_cages)
         GROUP BY 1
     ),
-
-    -- 5. Global Gold History
-    gold_global_lookup AS (
-        SELECT 
-            TRIM(UPPER(vendor_cage)) as vendor_cage, 
-            MAX(vendor_name) as history_name
-        FROM "market_intel_gold"."dashboard_master_view"
-        WHERE TRIM(UPPER(vendor_cage)) IN (SELECT cage FROM all_cages)
-        GROUP BY 1
-    ),
     
-    -- 6. Gov Dictionary
+    -- 5. Gov Dictionary
     gov_dictionary AS (
         SELECT * FROM (VALUES
             ('19207', 'US ARMY TACOM - DESIGN ACTIVITY'),
@@ -3889,14 +3805,14 @@ def get_nsn_suppliers(nsn: str):
     )
 
     SELECT
+        -- ✅ Removed redundant g.history_name
         COALESCE(
-            i.vendor_name, s.legal_name, g.history_name, gov.name,
+            i.vendor_name, s.legal_name, gov.name,
             'Unknown Manufacturer (CAGE: ' || c.cage || ')'
         ) as vendor,
         
         c.cage,
         
-        -- ✅ Return the Part Numbers
         COALESCE(a.part_numbers, '—') as part_numbers,
         
         COALESCE(i.contracts, 0) as contracts,
@@ -3909,8 +3825,8 @@ def get_nsn_suppliers(nsn: str):
     LEFT JOIN item_sales i ON c.cage = i.vendor_cage
     LEFT JOIN approved_list a ON c.cage = a.cage_code
     LEFT JOIN sam_lookup s ON c.cage = s.cage_code
-    LEFT JOIN gold_global_lookup g ON c.cage = g.vendor_cage
     LEFT JOIN gov_dictionary gov ON c.cage = gov.cage
+    -- ✅ Removed the expensive LEFT JOIN gold_global_lookup
     
     ORDER BY total_revenue DESC NULLS LAST, is_approved_source DESC
     """
@@ -3920,42 +3836,39 @@ def get_nsn_suppliers(nsn: str):
 def get_nsn_platforms(nsn: str):
     safe_niin = get_niin(nsn)
 
-    df = get_subset_from_disk(
-        "products.parquet",
-        where_clause="niin = ?",
-        params=(safe_niin,),
-        limit=50000
-    )
-    if df.empty:
+    # ✅ Let DuckDB do the heavy aggregation in milliseconds, return ONLY the top 10 rows
+    query = f"""
+        SELECT 
+            platform_family AS platform,
+            SUM(TRY_CAST(total_revenue AS DOUBLE)) AS spend,
+            COUNT(DISTINCT cage) AS contracts
+        FROM read_parquet('app_cache/products.parquet')
+        WHERE niin = {sql_literal(safe_niin)}
+          AND platform_family IS NOT NULL 
+          AND UPPER(TRIM(platform_family)) != 'UNKNOWN'
+        GROUP BY platform_family
+        ORDER BY spend DESC
+        LIMIT 10
+    """
+    
+    try:
+        # Use the existing duckdb execution helper
+        df = duck_fetch_df(query) 
+        if df.empty:
+            return []
+            
+        out = []
+        for r in df.to_dict(orient="records"):
+            out.append({
+                "platform": str(r.get("platform")),
+                "spend": float(r.get("spend") or 0.0),
+                "contracts": int(r.get("contracts") or 0)
+            })
+        return out
+        
+    except Exception as e:
+        logger.error(f"Error in NSN platforms: {e}")
         return []
-
-    if "platform_family" not in df.columns:
-        return []
-
-    df["total_revenue"] = pd.to_numeric(df.get("total_revenue", 0), errors="coerce").fillna(0)
-
-    grouped = (
-        df.groupby("platform_family", observed=True)
-        # Use 'nunique' to count unique vendors instead of raw part rows
-        .agg(total_revenue=("total_revenue", "sum"), contracts=("cage", "nunique")) 
-        .reset_index()
-        .sort_values("total_revenue", ascending=False)
-        .head(10)
-    )
-
-    out = []
-    for r in grouped.itertuples(index=False):
-        plat = getattr(r, "platform_family", None)
-        if not plat:
-            continue
-        if str(plat).strip().upper() == "UNKNOWN":
-            continue
-        out.append({
-            "platform": str(plat),
-            "spend": float(getattr(r, "total_revenue", 0) or 0),
-            "contracts": int(getattr(r, "contracts", 0) or 0)
-        })
-    return out
 
 
 @app.get("/api/nsn/history")
@@ -4040,17 +3953,11 @@ def get_nsn_contracts(
         f"SUBSTR(nsn, 5, 9) = {sql_literal(niin)}"  
     )
 
-    # ✅ Fiscal year filter (same as /api/nsn/top)
     ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
     if ys:
-        years_csv = ",".join(str(y) for y in ys)
-        cond.append(
-            "("
-            " (year(try_cast(substr(action_date, 1, 10) as date))"
-            "  + if(month(try_cast(substr(action_date, 1, 10) as date)) >= 10, 1, 0))"
-            f" IN ({years_csv})"
-            ")"
-        )
+        years_csv = ",".join([str(y) for y in ys])
+        # ✅ Super-fast integer lookup using the corrected view column
+        cond.append(f"year IN ({years_csv})")
 
     # ✅ Vendor filter
     if vendor:
@@ -4158,13 +4065,8 @@ def get_top_nsns(
     ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
     if ys:
         years_csv = ",".join([str(y) for y in ys])
-        cond.append(
-            "("
-            " (year(try_cast(substr(action_date, 1, 10) as date))"
-            "  + if(month(try_cast(substr(action_date, 1, 10) as date)) >= 10, 1, 0))"
-            f" IN ({years_csv})"
-            ")"
-        )
+        # ✅ Super-fast integer lookup using the corrected view column
+        cond.append(f"year IN ({years_csv})")
 
     if vendor:
         cond.append(safe_contains_upper("vendor_name", vendor))
