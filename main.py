@@ -1269,7 +1269,11 @@ def reload_all_data():
                         year
                     FROM read_parquet('{contracts_source}');
                 """)
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_contracts_rolled_id ON contracts_rolled(contract_id);")
+                # ✅ Render-safe: skip index build on low-memory instances (prevents reload crash)
+                if os.getenv("ON_RENDER", "").strip().lower() in ("1", "true", "yes"):
+                    logger.info("Skipping idx_contracts_rolled_id on Render to avoid OOM.")
+                else:
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_contracts_rolled_id ON contracts_rolled(contract_id);")
 
                 # Preserve existing endpoint compatibility (you still query v_contracts_rolled if you want)
                 conn.execute("CREATE OR REPLACE VIEW v_contracts_rolled AS SELECT * FROM contracts_rolled;")
