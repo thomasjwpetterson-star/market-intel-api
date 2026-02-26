@@ -1227,85 +1227,44 @@ def reload_all_data():
                     conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{file_path}');")
 
             # ✅ Special handling: contracts_rolled -> MATERIALIZED TABLE + INDEX (award speed win)
+            # ✅ Revert: contracts_rolled back to a VIEW (no table build, no index build)
             conn.execute("DROP VIEW IF EXISTS v_contracts_rolled;")
-            conn.execute("DROP TABLE IF EXISTS contracts_rolled;")
+            conn.execute("DROP TABLE IF EXISTS contracts_rolled;")  # cleanup from experiment (safe if absent)
 
             contracts_single = (LOCAL_CACHE_DIR / "contracts_rolled.parquet").resolve()
             contracts_folder = (LOCAL_CACHE_DIR / "contracts_rolled").resolve()
 
-            contracts_source = None
             if contracts_single.exists():
-                contracts_source = str(contracts_single)
+                conn.execute(
+                    f"CREATE OR REPLACE VIEW v_contracts_rolled AS "
+                    f"SELECT * FROM read_parquet('{str(contracts_single)}');"
+                )
             else:
                 glob_path = str(contracts_folder / "*.parquet")
                 if os.path.exists(str(contracts_folder)) and len(list(contracts_folder.glob("*.parquet"))) > 0:
-                    contracts_source = glob_path
-
-            if contracts_source:
-                # Keep columns needed by award endpoints (smaller + faster than SELECT *)
-                conn.execute(f"""
-                    CREATE TABLE contracts_rolled AS
-                    SELECT
-                        contract_id,
-                        last_action_date,
-                        total_spend,
-                        vendor_name,
-                        vendor_cage,
-                        sub_agency,
-                        parent_agency,
-                        description,
-                        platform_family,
-                        city,
-                        state,
-                        country,
-                        naics_code,
-                        psc,
-                        pricing_type,
-                        competition_type,
-                        offers_count,
-                        set_aside_type,
-                        solicitation_id,
-                        start_date,
-                        year
-                    FROM read_parquet('{contracts_source}');
-                """)
-                # ✅ Render-safe: skip index build on low-memory instances (prevents reload crash)
-                if os.getenv("ON_RENDER", "").strip().lower() in ("1", "true", "yes"):
-                    logger.info("Skipping idx_contracts_rolled_id on Render to avoid OOM.")
+                    conn.execute(
+                        f"CREATE OR REPLACE VIEW v_contracts_rolled AS "
+                        f"SELECT * FROM read_parquet('{glob_path}');"
+                    )
                 else:
-                    conn.execute("CREATE INDEX IF NOT EXISTS idx_contracts_rolled_id ON contracts_rolled(contract_id);")
-
-                # Preserve existing endpoint compatibility (you still query v_contracts_rolled if you want)
-                conn.execute("CREATE OR REPLACE VIEW v_contracts_rolled AS SELECT * FROM contracts_rolled;")
-            else:
-                # Empty fallback (prevents errors if cache missing)
-                conn.execute("""
-                    CREATE TABLE contracts_rolled AS
-                    SELECT
-                        CAST(NULL AS VARCHAR) AS contract_id,
-                        CAST(NULL AS DATE) AS last_action_date,
-                        CAST(0.0 AS DOUBLE) AS total_spend,
-                        CAST(NULL AS VARCHAR) AS vendor_name,
-                        CAST(NULL AS VARCHAR) AS vendor_cage,
-                        CAST(NULL AS VARCHAR) AS sub_agency,
-                        CAST(NULL AS VARCHAR) AS parent_agency,
-                        CAST(NULL AS VARCHAR) AS description,
-                        CAST(NULL AS VARCHAR) AS platform_family,
-                        CAST(NULL AS VARCHAR) AS city,
-                        CAST(NULL AS VARCHAR) AS state,
-                        CAST(NULL AS VARCHAR) AS country,
-                        CAST(NULL AS VARCHAR) AS naics_code,
-                        CAST(NULL AS VARCHAR) AS psc,
-                        CAST(NULL AS VARCHAR) AS pricing_type,
-                        CAST(NULL AS VARCHAR) AS competition_type,
-                        CAST(NULL AS VARCHAR) AS offers_count,
-                        CAST(NULL AS VARCHAR) AS set_aside_type,
-                        CAST(NULL AS VARCHAR) AS solicitation_id,
-                        CAST(NULL AS DATE) AS start_date,
-                        CAST(NULL AS INTEGER) AS year
-                    WHERE 1=0;
-                """)
-                conn.execute("CREATE OR REPLACE VIEW v_contracts_rolled AS SELECT * FROM contracts_rolled;")
+                    # Empty view fallback
+                    conn.execute("""
+                        CREATE OR REPLACE VIEW v_contracts_rolled AS
+                        SELECT
+                            CAST(NULL AS VARCHAR) AS contract_id,
+                            CAST(NULL AS DATE) AS last_action_date,
+                            CAST(0.0 AS DOUBLE) AS total_spend,
+                            CAST(NULL AS VARCHAR) AS vendor_name,
+                            CAST(NULL AS VARCHAR) AS vendor_cage,
+                            CAST(NULL AS VARCHAR) AS sub_agency,
+                            CAST(NULL AS VARCHAR) AS parent_agency,
+                            CAST(NULL AS VARCHAR) AS description,
+                            CAST(NULL AS VARCHAR) AS platform_family,
+                            CAST(NULL AS VARCHAR) AS naics_code,
+                            CAST(NULL AS VARCHAR) AS psc,
+                            CAST(NULL AS INTEGER) AS year
+                        WHERE 1=0;
+                    """)
 
             # ✅ NEW: KPIs as a Native Table
             # Restore KPIs as a View
