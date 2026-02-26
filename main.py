@@ -3037,10 +3037,11 @@ def get_company_network(
     year_filter_sql = ""
     year_params: List[int] = []
 
-    # ALWAYS define yrs
+    # Normalize incoming years once
     yrs: List[int] = [int(y) for y in (years or []) if y is not None]
 
-    has_fiscal_year = False
+    # Detect which FY column exists in network.parquet: prefer fiscal_year, fallback to year
+    year_col: Optional[str] = None
     try:
         with DUCK_LOCK:
             conn = ensure_duck_conn()
@@ -3049,18 +3050,21 @@ def get_company_network(
                 cols = conn.execute(
                     f"SELECT * FROM read_parquet('{str(net_path)}') LIMIT 0"
                 ).df().columns
-                has_fiscal_year = ("fiscal_year" in cols)
+                if "fiscal_year" in cols:
+                    year_col = "fiscal_year"
+                elif "year" in cols:
+                    year_col = "year"
     except Exception:
-        has_fiscal_year = False
+        year_col = None
 
-    if yrs and has_fiscal_year:
+    if yrs and year_col:
         placeholders = ",".join(["?"] * len(yrs))
-        year_filter_sql = f" AND fiscal_year IN ({placeholders})"
+        year_filter_sql = f" AND {year_col} IN ({placeholders})"
         year_params = yrs
-    elif yrs and not has_fiscal_year:
-        logger.warning("network.parquet missing fiscal_year; skipping year filter for network.")
-    # keep year_params empty and year_filter_sql empty
-        year_params = yrs
+    elif yrs and not year_col:
+        logger.warning("network.parquet missing year/fiscal_year; skipping year filter for network.")
+        year_filter_sql = ""
+        year_params = []
 
     # --- SQL Template (Parameterized) ---
     sql_template = """
