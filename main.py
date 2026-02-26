@@ -1482,107 +1482,95 @@ def reload_all_data():
             logger.exception("Failed to build location_map from DuckDB")
             new_global_cache["location_map"] = {}
 
-        # 8. BUILD SEARCH INDEX
-        search_list: List[Dict[str, Any]] = []
+        # 8. BUILD SEARCH INDEX (Native DuckDB - RAM Safe)
         try:
-            loc_map = new_global_cache.get("location_map", {}) or {}
-
-            # Use writer connection for these heavy queries during reload
-            parent_df = duck_fetch_df("""
-                SELECT
-                    clean_parent AS label,
-                    SUM(total_spend) AS total_spend,
-                    COUNT(DISTINCT cage_code) AS cage_count
-                FROM v_summary
-                WHERE clean_parent IS NOT NULL AND TRIM(CAST(clean_parent AS VARCHAR)) <> ''
-                GROUP BY 1
-                ORDER BY total_spend DESC
-                LIMIT 5000;
-            """, use_writer=True)
-
-            if not parent_df.empty:
-                for r in parent_df.itertuples(index=False):
-                    val = getattr(r, "label", None)
-                    spend = float(getattr(r, "total_spend", 0) or 0)
-                    cages = int(getattr(r, "cage_count", 0) or 0)
-                    if val and spend > 0 and (cages > 1 or spend > 1e9):
-                        search_list.append({
-                            "label": str(val),
-                            "value": str(val),
-                            "type": "PARENT",
-                            "score": float(spend),
-                            "cage": "AGGREGATE"
-                        })
-
-            child_df = duck_fetch_df("""
-                SELECT
-                    vendor_name,
-                    cage_code,
-                    SUM(total_spend) AS total_spend
-                FROM v_summary
-                WHERE vendor_name IS NOT NULL AND TRIM(CAST(vendor_name AS VARCHAR)) <> ''
-                  AND cage_code IS NOT NULL AND TRIM(CAST(cage_code AS VARCHAR)) <> ''
-                GROUP BY 1,2
-                ORDER BY total_spend DESC
-                LIMIT 20000;
-            """, use_writer=True)
-
-            if not child_df.empty:
-                for r in child_df.itertuples(index=False):
-                    if float(getattr(r, "total_spend", 0) or 0) <= 0:
-                        continue
-                    raw_cage = str(getattr(r, "cage_code", "")).strip().upper()
-                    if raw_cage in ["NAN", "NONE", "NULL", ""]:
-                        continue
-                    loc = loc_map.get(raw_cage, {}) or {}
-                    search_list.append({
-                        "label": str(getattr(r, "vendor_name", "")),
-                        "value": str(getattr(r, "vendor_name", "")),
-                        "type": "CHILD",
-                        "score": float(getattr(r, "total_spend", 0) or 0),
-                        "cage": raw_cage,
-                        "city": loc.get("city", ""),
-                        "state": loc.get("state", "")
-                    })
-
-            plat_df = duck_fetch_df("""
-                SELECT platform_family AS label, SUM(total_spend) AS total_spend
-                FROM v_summary
-                WHERE platform_family IS NOT NULL AND TRIM(CAST(platform_family AS VARCHAR)) <> ''
-                GROUP BY 1
-                ORDER BY total_spend DESC
-                LIMIT 2000;
-            """, use_writer=True)
-            if not plat_df.empty:
-                for r in plat_df.itertuples(index=False):
-                    if getattr(r, "label", None):
-                        search_list.append({
-                            "label": str(getattr(r, "label")),
-                            "value": str(getattr(r, "label")),
-                            "type": "PLATFORM",
-                            "score": float(getattr(r, "total_spend", 0) or 0)
-                        })
-
-            ag_df = duck_fetch_df("""
-                SELECT sub_agency AS label, SUM(total_spend) AS total_spend
-                FROM v_summary
-                WHERE sub_agency IS NOT NULL AND TRIM(CAST(sub_agency AS VARCHAR)) <> ''
-                GROUP BY 1
-                ORDER BY total_spend DESC
-                LIMIT 2000;
-            """, use_writer=True)
-            if not ag_df.empty:
-                for r in ag_df.itertuples(index=False):
-                    if getattr(r, "label", None):
-                        search_list.append({
-                            "label": str(getattr(r, "label")),
-                            "value": str(getattr(r, "label")),
-                            "type": "AGENCY",
-                            "score": float(getattr(r, "total_spend", 0) or 0)
-                        })
-
-            search_list.sort(key=lambda x: x.get("score", 0), reverse=True)
-            new_global_cache["search_index"] = search_list
+            logger.info("Building native search index in DuckDB...")
+            conn.execute("DROP TABLE IF EXISTS search_index;")
+            
+            # This perfectly mirrors your 4 DataFrames, their limits, and the final sort
+            conn.execute("""
+                CREATE TABLE search_index AS 
+                SELECT * FROM (
+                    -- 1. PARENTS (Preserves >1 cage or >1B spend, Limit 5000)
+                    SELECT 
+                        clean_parent AS label, 
+                        clean_parent AS value, 
+                        'PARENT' AS type, 
+                        SUM(total_spend) AS score, 
+                        'AGGREGATE' AS cage,
+                        '' AS city,
+                        '' AS state
+                    FROM v_summary 
+                    WHERE clean_parent IS NOT NULL AND TRIM(CAST(clean_parent AS VARCHAR)) <> '' 
+                    GROUP BY clean_parent 
+                    HAVING SUM(total_spend) > 0 
+                       AND (COUNT(DISTINCT cage_code) > 1 OR SUM(total_spend) > 1e9)
+                    ORDER BY score DESC
+                    LIMIT 5000
+                )
+                UNION ALL
+                SELECT * FROM (
+                    -- 2. CHILDREN (Preserves NAN filter, location join, Limit 20000)
+                    SELECT 
+                        s.vendor_name AS label, 
+                        s.vendor_name AS value, 
+                        'CHILD' AS type, 
+                        SUM(s.total_spend) AS score, 
+                        s.cage_code AS cage,
+                        COALESCE(ANY_VALUE(g.city), '') AS city,
+                        COALESCE(ANY_VALUE(g.state), '') AS state
+                    FROM v_summary s
+                    LEFT JOIN v_geo g ON s.cage_code = g.cage_code
+                    WHERE s.vendor_name IS NOT NULL AND TRIM(CAST(s.vendor_name AS VARCHAR)) <> '' 
+                      AND s.cage_code IS NOT NULL AND TRIM(CAST(s.cage_code AS VARCHAR)) NOT IN ('NAN', 'NONE', 'NULL', '')
+                    GROUP BY s.vendor_name, s.cage_code
+                    HAVING SUM(s.total_spend) > 0
+                    ORDER BY score DESC
+                    LIMIT 20000
+                )
+                UNION ALL
+                SELECT * FROM (
+                    -- 3. PLATFORMS (Limit 2000)
+                    SELECT 
+                        platform_family AS label, 
+                        platform_family AS value, 
+                        'PLATFORM' AS type, 
+                        SUM(total_spend) AS score, 
+                        '' AS cage, 
+                        '' AS city, 
+                        '' AS state
+                    FROM v_summary 
+                    WHERE platform_family IS NOT NULL AND TRIM(CAST(platform_family AS VARCHAR)) <> '' 
+                    GROUP BY platform_family
+                    HAVING SUM(total_spend) > 0
+                    ORDER BY score DESC
+                    LIMIT 2000
+                )
+                UNION ALL
+                SELECT * FROM (
+                    -- 4. AGENCIES (Limit 2000)
+                    SELECT 
+                        sub_agency AS label, 
+                        sub_agency AS value, 
+                        'AGENCY' AS type, 
+                        SUM(total_spend) AS score, 
+                        '' AS cage, 
+                        '' AS city, 
+                        '' AS state
+                    FROM v_summary 
+                    WHERE sub_agency IS NOT NULL AND TRIM(CAST(sub_agency AS VARCHAR)) <> '' 
+                    GROUP BY sub_agency
+                    HAVING SUM(total_spend) > 0
+                    ORDER BY score DESC
+                    LIMIT 2000
+                )
+                -- 5. FINAL COMBINED SORT (Mirrors your python: search_list.sort(...))
+                ORDER BY score DESC;
+            """)
+            
+            # Leave the Python list empty to save RAM
+            new_global_cache["search_index"] = []
+            logger.info("Native search index built successfully.")
 
         except Exception:
             logger.exception("Search index build failed")
@@ -1597,7 +1585,14 @@ def reload_all_data():
         # ✅ SURGICAL FIX 2: Do NOT declare global here again. Just assign.
         GLOBAL_CACHE = new_global_cache
 
-        logger.info("RELOAD COMPLETE (Atomic Swap). search_index=%d", len(search_list))
+        # Get the new native count for the log
+        idx_count = 0
+        try:
+            idx_count = conn.execute("SELECT COUNT(*) FROM search_index;").fetchone()[0]
+        except Exception:
+            pass
+
+        logger.info("RELOAD COMPLETE (Atomic Swap). search_index=%d (Native)", idx_count)
         
         new_global_cache = None
         gc.collect()
@@ -2173,58 +2168,67 @@ def get_market_opportunities(
 def search_global(q: str):
     """
     Unified search: Checks Name, CAGE, and now displays Location.
+    (Upgraded to Native DuckDB for zero-RAM overhead)
     """
     if not q or len(q) < 2: return []
     clean_q = sanitize(q)
     results = []
 
-    # 1. FAST CACHE SEARCH
-    index = GLOBAL_CACHE.get("search_index", [])
-    
-    count = 0
-    for item in index:
-        # A. Check Name
-        match_name = clean_q in item['label'].upper()
+    # 1. FAST NATIVE DUCKDB SEARCH
+    try:
+        # Parameterized query protects against SQL injection and wildcards
+        search_val = f"%{clean_q}%"
         
-        # B. Check CAGE
-        match_cage = False
-        item_cage = item.get('cage')
-        if item_cage and item_cage != 'AGGREGATE':
-            match_cage = clean_q in str(item_cage).upper()
+        query = """
+            SELECT type, label, value, score, cage, city, state
+            FROM search_index
+            WHERE label ILIKE ? OR cage ILIKE ?
+            ORDER BY score DESC
+            LIMIT 8
+        """
+        
+        # duck_fetch_df safely grabs a pooled connection
+        df_search = duck_fetch_df(query, [search_val, search_val])
+        
+        # Fast iteration over the max 8 rows returned
+        for r in df_search.itertuples(index=False):
+            item_type = getattr(r, "type", "")
+            item_label = getattr(r, "label", "")
+            item_value = getattr(r, "value", "")
+            item_score = float(getattr(r, "score", 0) or 0)
+            item_cage = getattr(r, "cage", "")
+            item_city = getattr(r, "city", "")
+            item_state = getattr(r, "state", "")
 
-        if match_name or match_cage:
-            spend_str = f"${item['score']/1_000_000:,.1f}M" if item.get('score') else ""
+            spend_str = f"${item_score/1_000_000:,.1f}M" if item_score else ""
             
             # --- SMART LABELING WITH LOCATION ---
-            if item.get('type') == 'CHILD' and item_cage:
-                # ✅ NEW: Check for location data
-                city = item.get('city')
-                state = item.get('state')
-                
-                if city and state:
-                    loc_str = f" • {city}, {state}"
-                elif city:
-                    loc_str = f" • {city}"
+            if item_type == 'CHILD' and item_cage and item_cage != 'AGGREGATE':
+                # ✅ Checks for location data seamlessly
+                if item_city and item_state:
+                    loc_str = f" • {item_city}, {item_state}"
+                elif item_city:
+                    loc_str = f" • {item_city}"
                 else:
                     loc_str = ""
 
                 sub_label = f"{spend_str}{loc_str} • CAGE: {item_cage}"
 
-            elif item.get('type') == 'PARENT':
+            elif item_type == 'PARENT':
                 sub_label = f"{spend_str} • Corporate Group"
             else:
                 sub_label = f"{spend_str} Obligations"
 
             results.append({
-                "type": item['type'],
-                "label": item['label'],
-                "value": item['value'],
+                "type": item_type,
+                "label": item_label,
+                "value": item_value,
                 "sub_label": sub_label,
-                "cage": item.get('cage')
+                "cage": item_cage
             })
             
-            count += 1
-            if count >= 8: break 
+    except Exception as e:
+        logger.error(f"Native search query failed: {e}")
 
     # 2. NSN / NIIN Detection (Regex)
     # Matches 9-digit NIINs or 13-digit NSNs
