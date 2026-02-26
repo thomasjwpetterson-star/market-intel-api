@@ -1841,7 +1841,8 @@ def get_spend_trend(
     base_df["month_num"] = pd.to_numeric(base_df["month_num"], errors="coerce").fillna(1).astype(int)
     base_df["spend"] = pd.to_numeric(base_df["spend"], errors="coerce").fillna(0.0).astype(float)
 
-    base_df["fy"] = base_df["year_num"] + (base_df["month_num"] >= 10).astype(int)
+    # ✅ FIX: dashboard_summary_v2.year is already FY (USAspending action_date_fiscal_year)
+    base_df["fy"] = base_df["year_num"]
 
     # Apply FY filter (your step 4)
     if years and len(years) > 0:
