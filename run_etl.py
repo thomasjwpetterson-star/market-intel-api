@@ -203,7 +203,8 @@ def merge_unload_parts_with_duckdb(unload_prefix: str, output_filename: str):
     
     con = duckdb.connect('etl_temp.db')
     con.execute("PRAGMA temp_directory='./ducktmp';")
-    con.execute("PRAGMA memory_limit='2GB';") 
+    con.execute("PRAGMA memory_limit='6GB';")
+    con.execute("PRAGMA preserve_insertion_order=false;") 
     
     con.execute(f"""
         COPY (

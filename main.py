@@ -3828,7 +3828,7 @@ def get_nsn_suppliers(nsn: str):
             MAX(action_date) as last_sold,
             SUM(spend_amount) as total_revenue
         FROM "market_intel_gold"."dashboard_master_view"
-        WHERE substr(regexp_replace(nsn, '[^0-9]', ''), 5, 9) = {sql_literal(safe_niin)}
+        WHERE SUBSTR(nsn, 5, 9) = {sql_literal(safe_niin)}
         GROUP BY 1
     ),
     
@@ -4037,7 +4037,7 @@ def get_nsn_contracts(
 
     # ✅ SAME NIIN MATCH AS SUPPLIERS (critical for consistency)
     cond.append(
-        f"substr(regexp_replace(coalesce(nsn,''), '[^0-9]', ''), 5, 9) = {sql_literal(niin)}"
+        f"SUBSTR(nsn, 5, 9) = {sql_literal(niin)}"  
     )
 
     # ✅ Fiscal year filter (same as /api/nsn/top)
@@ -4121,6 +4121,9 @@ def get_nsn_contracts(
 
     return cached_athena_query(query)
 
+DEFAULT_TOP_NSN_CACHE = None  # Put this at the top of your file
+# ✅ NEW: Cache to store the default dashboard state in memory
+DEFAULT_TOP_NSN_CACHE = None
 
 # ✅ NEW: Top NSNs by Spend (respects global filters)
 # NOTE: This is *not* "related parts for this NSN". It's a global leaderboard of NSNs under the current filter context.
@@ -4136,7 +4139,20 @@ def get_top_nsns(
     psc: Optional[str] = None,
     limit: int = 12,
 ):
+    global DEFAULT_TOP_NSN_CACHE
     limit_i = safe_int(limit, 12, 4, 50)
+    
+    # ✅ QUICK EXIT: Instant cache load for the default dashboard
+    is_default_load = (
+        not vendor and not parent and not cage and 
+        not domain and not agency and not platform and not psc and
+        (not years or len(years) >= 7) and 
+        limit_i in (12, 16)
+    )
+
+    if is_default_load and DEFAULT_TOP_NSN_CACHE is not None:
+        return DEFAULT_TOP_NSN_CACHE
+
     cond: List[str] = ["1=1"]
 
     ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
@@ -4169,7 +4185,8 @@ def get_top_nsns(
 
     where_clause = " AND ".join(cond)
 
-    niin_expr = "substr(regexp_replace(nsn, '[^0-9]', ''), -9)"
+    # ✅ FAST STRING SLICING
+    niin_expr = "SUBSTR(nsn, 5, 9)"
 
     query = f"""
     WITH top_spending AS (
@@ -4181,7 +4198,7 @@ def get_top_nsns(
         FROM "market_intel_gold"."dashboard_master_view"
         WHERE {where_clause}
           AND nsn IS NOT NULL
-          AND length(regexp_replace(nsn, '[^0-9]', '')) >= 8
+          AND LENGTH(nsn) = 13
         GROUP BY 1
         ORDER BY spend DESC
         LIMIT {limit_i}
@@ -4213,7 +4230,14 @@ def get_top_nsns(
     LEFT JOIN catalog_match c ON t.join_niin = c.niin
     ORDER BY t.spend DESC
     """
-    return cached_athena_query(query)
+    
+    result = cached_athena_query(query)
+    
+    # ✅ SAVE TO CACHE IF DEFAULT LOAD
+    if is_default_load and result:
+        DEFAULT_TOP_NSN_CACHE = result
+        
+    return result
 
 
 
@@ -4373,9 +4397,6 @@ def get_award_history(id: str):
 # Place this right above your endpoint
 DEFAULT_AWARD_PAGE_CACHE = None
 
-# Place this right above your endpoint
-DEFAULT_AWARD_PAGE_CACHE = None
-
 @app.get("/api/award/search")
 def search_awards(
     q: Optional[str] = None,
@@ -4387,6 +4408,7 @@ def search_awards(
     platform: Optional[str] = None,
     psc: Optional[str] = None,
     domain: Optional[str] = None,
+    # ✅ NEW: Accept Keyset Pagination Params
     after_spend: Optional[float] = None,
     after_date: Optional[str] = None,
     after_id: Optional[str] = None
@@ -4396,11 +4418,12 @@ def search_awards(
     limit_i = int(limit or 20)
     offset_i = int(offset or 0)
 
-    # ✅ QUICK EXIT: Instant cache load
+    # ✅ QUICK EXIT: Is this the default dashboard load?
+    # Ensure after_spend is None so we don't accidentally cache a "Load More" page
     is_default_load = (
         not q and not vendor and not agency and 
         not platform and not psc and not domain and 
-        (not years or len(years) >= 7) and
+        (not years or len(years) >= 7) and   # <--- THIS IS THE FIX
         offset_i == 0 and limit_i == 20 and
         after_spend is None 
     )
@@ -4408,13 +4431,13 @@ def search_awards(
     if is_default_load and DEFAULT_AWARD_PAGE_CACHE is not None:
         return DEFAULT_AWARD_PAGE_CACHE
 
-    # --- 1. PRE-GROUPING FILTERS (Filters applied to the raw 90 files) ---
-    cond_pre: List[str] = ["1=1"]
-    
+    cond: List[str] = ["1=1"]
+
+    # --- 1. APPLY SEARCH & FILTERS ---
     if q and str(q).strip():
         v = sanitize(q)
         like_v = sql_like_contains(v)
-        cond_pre.append(
+        cond.append(
             "("
             f" upper(coalesce(contract_id,'')) LIKE {like_v} ESCAPE '#' OR"
             f" upper(coalesce(vendor_name,'')) LIKE {like_v} ESCAPE '#' OR"
@@ -4424,52 +4447,36 @@ def search_awards(
         )
 
     if vendor and str(vendor).strip():
-        cond_pre.append(f"upper(vendor_name) LIKE {sql_like_contains(sanitize(vendor))} ESCAPE '#'")
+        cond.append(f"upper(vendor_name) LIKE {sql_like_contains(sanitize(vendor))} ESCAPE '#'")
 
     if platform and str(platform).strip():
-        cond_pre.append(f"upper(platform_family) = {sql_literal(sanitize(platform))}")
+        cond.append(f"upper(platform_family) = {sql_literal(sanitize(platform))}")
 
     if agency and str(agency).strip():
         a = sanitize(agency)
-        cond_pre.append(f"(upper(sub_agency) = {sql_literal(a)} OR upper(parent_agency) = {sql_literal(a)})")
+        cond.append(f"(upper(sub_agency) = {sql_literal(a)} OR upper(parent_agency) = {sql_literal(a)})")
 
     if psc and str(psc).strip():
-        cond_pre.append(f"upper(psc) LIKE {sql_like_contains(sanitize(psc))} ESCAPE '#'")
+        cond.append(f"upper(psc) LIKE {sql_like_contains(sanitize(psc))} ESCAPE '#'")
 
     if domain and str(domain).strip():
         d = sanitize(domain)
         like_d = sql_like_contains(d)
-        cond_pre.append(f"(upper(naics_code) LIKE {like_d} ESCAPE '#' OR upper(psc) LIKE {like_d} ESCAPE '#')")
+        cond.append(f"(upper(naics_code) LIKE {like_d} ESCAPE '#' OR upper(psc) LIKE {like_d} ESCAPE '#')")
 
     ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
     if ys:
         years_csv = ",".join([str(y) for y in ys])
-        cond_pre.append(f"year IN ({years_csv})")
+        cond.append(f"year IN ({years_csv})")
 
-    is_specific_search = bool(
-        (q and str(q).strip()) or (vendor and str(vendor).strip()) or
-        (agency and str(agency).strip()) or (platform and str(platform).strip()) or
-        (psc and str(psc).strip()) or (domain and str(domain).strip())
-    )
-
-    if not is_specific_search and not ys:
-        cond_pre.append("try_cast(last_action_date as date) >= current_date() - INTERVAL 730 DAY")
-
-    pre_where_clause = " AND ".join(cond_pre)
-
-    # --- 2. POST-GROUPING FILTERS (Pagination & Spend Thresholds) ---
-    cond_post: List[str] = ["1=1"]
-    
-    if not is_specific_search:
-        # Enforce the $1M threshold on the COMBINED spend, not the individual chunks
-        cond_post.append("total_spend >= 1000000")
-
+    # --- 2. APPLY KEYSET PAGINATION ---
+    # ✅ This replaces OFFSET for subsequent pages, saving massive RAM and CPU
     if after_spend is not None and after_date and after_id:
         s_val = float(after_spend)
         d_val = sql_literal(after_date)
         i_val = sql_literal(after_id)
         
-        cond_post.append(f"""
+        cond.append(f"""
             (
                 total_spend < {s_val}
                 OR (total_spend = {s_val} AND last_action_date < {d_val})
@@ -4477,27 +4484,36 @@ def search_awards(
             )
         """)
 
-    post_where_clause = " AND ".join(cond_post)
+    # --- 3. APPLY DEFAULT HOMEPAGE RULES ---
+    is_specific_search = bool(
+        (q and str(q).strip()) or (vendor and str(vendor).strip()) or
+        (agency and str(agency).strip()) or (platform and str(platform).strip()) or
+        (psc and str(psc).strip()) or (domain and str(domain).strip())
+    )
+
+    if not is_specific_search:
+        cond.append("total_spend >= 1000000")
+        if not ys:
+            cond.append("try_cast(last_action_date as date) >= current_date() - INTERVAL 730 DAY")
+
+    where_clause = " AND ".join(cond)
+
+    # If we have keyset parameters, we explicitly omit the OFFSET clause in SQL
     offset_sql = f"OFFSET {offset_i}" if after_spend is None else ""
 
-    # ✅ THE FIX: A Common Table Expression (CTE) to recombine split ETL chunks
+    # ✅ UPDATED: Added contract_id DESC to guarantee deterministic sorting
     data_query = f"""
-        WITH recombined_contracts AS (
-            SELECT
-                contract_id,
-                MAX(last_action_date) AS last_action_date,
-                SUM(total_spend) AS total_spend,
-                ANY_VALUE(vendor_name) AS vendor_name,
-                ANY_VALUE(vendor_cage) AS vendor_cage,
-                ANY_VALUE(sub_agency) AS sub_agency,
-                ANY_VALUE(parent_agency) AS parent_agency,
-                ANY_VALUE(description) AS description
-            FROM v_contracts_rolled
-            WHERE {pre_where_clause}
-            GROUP BY contract_id
-        )
-        SELECT * FROM recombined_contracts
-        WHERE {post_where_clause}
+        SELECT
+            contract_id,
+            last_action_date,
+            total_spend,
+            vendor_name,
+            vendor_cage,
+            sub_agency,
+            parent_agency,
+            description
+        FROM v_contracts_rolled
+        WHERE {where_clause}
         ORDER BY total_spend DESC, last_action_date DESC, contract_id DESC
         {offset_sql}
         LIMIT {limit_i + 1}
@@ -4528,6 +4544,7 @@ def search_awards(
 
         final_response = {"data": data, "total": None, "offset": offset_i, "limit": limit_i, "has_more": has_more}
 
+        # Save to cache if this is the initial 18-second dashboard load
         if is_default_load:
             DEFAULT_AWARD_PAGE_CACHE = final_response
 
