@@ -4370,6 +4370,9 @@ def get_award_history(id: str):
     return out
 
 
+# Place this right above your endpoint
+DEFAULT_AWARD_PAGE_CACHE = None
+
 @app.get("/api/award/search")
 def search_awards(
     q: Optional[str] = None,
@@ -4380,13 +4383,32 @@ def search_awards(
     agency: Optional[str] = None,
     platform: Optional[str] = None,
     psc: Optional[str] = None,
-    domain: Optional[str] = None
+    domain: Optional[str] = None,
+    # ✅ NEW: Accept Keyset Pagination Params
+    after_spend: Optional[float] = None,
+    after_date: Optional[str] = None,
+    after_id: Optional[str] = None
 ):
+    global DEFAULT_AWARD_PAGE_CACHE
+    
     limit_i = int(limit or 20)
     offset_i = int(offset or 0)
 
+    # ✅ QUICK EXIT: Is this the default dashboard load?
+    # Ensure after_spend is None so we don't accidentally cache a "Load More" page
+    is_default_load = (
+        not q and not vendor and not agency and 
+        not platform and not psc and not domain and 
+        not years and offset_i == 0 and limit_i == 20 and
+        after_spend is None 
+    )
+
+    if is_default_load and DEFAULT_AWARD_PAGE_CACHE is not None:
+        return DEFAULT_AWARD_PAGE_CACHE
+
     cond: List[str] = ["1=1"]
 
+    # --- 1. APPLY SEARCH & FILTERS ---
     if q and str(q).strip():
         v = sanitize(q)
         like_v = sql_like_contains(v)
@@ -4422,29 +4444,39 @@ def search_awards(
         years_csv = ",".join([str(y) for y in ys])
         cond.append(f"year IN ({years_csv})")
 
-    # ✅ FIX 1: Differentiate between a "Global Filter" (like years) and a "Specific Search"
+    # --- 2. APPLY KEYSET PAGINATION ---
+    # ✅ This replaces OFFSET for subsequent pages, saving massive RAM and CPU
+    if after_spend is not None and after_date and after_id:
+        s_val = float(after_spend)
+        d_val = sql_literal(after_date)
+        i_val = sql_literal(after_id)
+        
+        cond.append(f"""
+            (
+                total_spend < {s_val}
+                OR (total_spend = {s_val} AND last_action_date < {d_val})
+                OR (total_spend = {s_val} AND last_action_date = {d_val} AND contract_id < {i_val})
+            )
+        """)
+
+    # --- 3. APPLY DEFAULT HOMEPAGE RULES ---
     is_specific_search = bool(
-        (q and str(q).strip()) or
-        (vendor and str(vendor).strip()) or
-        (agency and str(agency).strip()) or
-        (platform and str(platform).strip()) or
-        (psc and str(psc).strip()) or
-        (domain and str(domain).strip())
+        (q and str(q).strip()) or (vendor and str(vendor).strip()) or
+        (agency and str(agency).strip()) or (platform and str(platform).strip()) or
+        (psc and str(psc).strip()) or (domain and str(domain).strip())
     )
 
-    # If they are just browsing (even if they have a year selected), enforce the $1M threshold!
     if not is_specific_search:
         cond.append("total_spend >= 1000000")
-        
-        # If they didn't pick a specific year, enforce the 2-year recency rule for the default homepage
         if not ys:
             cond.append("try_cast(last_action_date as date) >= current_date() - INTERVAL 730 DAY")
 
     where_clause = " AND ".join(cond)
 
-    count_query = f"SELECT count(*) as c FROM v_contracts_rolled WHERE {where_clause}"
+    # If we have keyset parameters, we explicitly omit the OFFSET clause in SQL
+    offset_sql = f"OFFSET {offset_i}" if after_spend is None else ""
 
-    # ✅ FIX 2: Sort by Value FIRST, then date. This guarantees the mega-contracts stay at the top.
+    # ✅ UPDATED: Added contract_id DESC to guarantee deterministic sorting
     data_query = f"""
         SELECT
             contract_id,
@@ -4457,8 +4489,8 @@ def search_awards(
             description
         FROM v_contracts_rolled
         WHERE {where_clause}
-        ORDER BY total_spend DESC, last_action_date DESC
-        OFFSET {offset_i}
+        ORDER BY total_spend DESC, last_action_date DESC, contract_id DESC
+        {offset_sql}
         LIMIT {limit_i + 1}
     """
 
@@ -4485,7 +4517,13 @@ def search_awards(
                 "parent_agency": r.get("parent_agency"),
             })
 
-        return {"data": data, "total": None, "offset": offset_i, "limit": limit_i, "has_more": has_more}
+        final_response = {"data": data, "total": None, "offset": offset_i, "limit": limit_i, "has_more": has_more}
+
+        # Save to cache if this is the initial 18-second dashboard load
+        if is_default_load:
+            DEFAULT_AWARD_PAGE_CACHE = final_response
+
+        return final_response
 
     except Exception as e:
         logger.error(f"Award Search DuckDB Error: {e}")
