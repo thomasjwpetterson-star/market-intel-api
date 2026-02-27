@@ -4392,7 +4392,13 @@ def search_awards(
     if domain and str(domain).strip():
         d = sanitize(domain)
         like_d = sql_like_contains(d)
-        cond.append(f"(upper(naics_code) LIKE {like_d} ESCAPE '#' OR upper(psc) LIKE {like_d} ESCAPE '#')")
+        cond.append(
+            "("
+            f" upper(coalesce(market_segment,'')) LIKE {like_d} ESCAPE '#' OR"
+            f" upper(coalesce(tech_type,'')) LIKE {like_d} ESCAPE '#' OR"
+            f" upper(coalesce(capability_name,'')) LIKE {like_d} ESCAPE '#'"
+            ")"
+        )
 
     ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
     if ys:
