@@ -735,7 +735,7 @@ def _like_param_contains(val: str) -> str:
 
 def build_summary_where(
     years: Optional[List[int]], 
-    filters: Dict[str, Optional[str]], 
+    filters: Dict[str, Optional[Any]],
     use_fy_logic: bool = False  # Kept for compatibility, but no longer needed
 ) -> Tuple[str, List[Any]]:
     """
@@ -753,6 +753,16 @@ def build_summary_where(
             # ✅ The 'year' column is now permanently Fiscal Year in the data!
             where_parts.append(f"year IN ({placeholders})")
             params.extend(ys)
+
+    threshold_m = filters.get("threshold_m")
+    if threshold_m is not None:
+        try:
+            thresh_val = float(threshold_m) * 1_000_000
+            if thresh_val > 1_000_000: # Only filter if they moved the slider up
+                where_parts.append("total_spend >= ?")
+                params.append(thresh_val)
+        except (ValueError, TypeError):
+            pass
 
     # --- HELPERS ---
     def eq(col: str, v: str):
@@ -1958,7 +1968,9 @@ def get_market_distributions(
     domain: Optional[str] = None,
     agency: Optional[str] = None,
     platform: Optional[str] = None,
-    psc: Optional[str] = None
+    psc: Optional[str] = None,
+    threshold_m: Optional[str] = None, # ✅ ADDED
+    mode: Optional[str] = None
 ):
     filters = {
         "vendor": vendor,
@@ -1967,7 +1979,8 @@ def get_market_distributions(
         "domain": domain,
         "agency": agency,
         "platform": platform,
-        "psc": psc
+        "psc": psc,
+        "threshold_m": threshold_m
     }
 
     where_sql, params = build_summary_where(years, filters)
