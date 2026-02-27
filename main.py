@@ -3755,7 +3755,7 @@ def get_nsn_suppliers(nsn: str):
             MAX(action_date) as last_sold,
             SUM(spend_amount) as total_revenue
         FROM "market_intel_gold"."dashboard_master_view"
-        WHERE SUBSTR(nsn, 5, 9) = {sql_literal(safe_niin)}
+        WHERE niin = {sql_literal(safe_niin)}
         GROUP BY 1
     ),
     
@@ -3949,9 +3949,7 @@ def get_nsn_contracts(
     cond: List[str] = ["1=1"]
 
     # ✅ SAME NIIN MATCH AS SUPPLIERS (critical for consistency)
-    cond.append(
-        f"SUBSTR(nsn, 5, 9) = {sql_literal(niin)}"  
-    )
+    cond.append(f"niin = {sql_literal(niin)}")
 
     ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
     if ys:

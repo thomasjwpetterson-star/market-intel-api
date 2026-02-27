@@ -297,42 +297,6 @@ def run_query(query):
 def optimize_and_upload():
     print("🚀 STARTING ETL PROCESS...")
 
-    # =========================================================
-    # [NEW] STEP 0: PRE-CALCULATE THE VIEW (MATERIALIZATION)
-    # =========================================================
-    print("🏗️ PRE-CALCULATION: Materializing Network Graph...")
-    
-    if is_cache_fresh("network.parquet"):
-        print("   ↩️ Skipping Network Materialization (network.parquet is already fresh)")
-    else:
-        # FIX 1: Drop table using simple name (Context handles the DB)
-        run_query('DROP TABLE IF EXISTS cache_network_materialized')
-
-        # FIX 2: Manually clean S3 to prevent HIVE_PATH_ALREADY_EXISTS error
-        s3_folder = "market_intel_gold/cache_network_materialized/"
-        try:
-            paginator = s3.get_paginator('list_objects_v2')
-            pages = paginator.paginate(Bucket=BUCKET_NAME, Prefix=s3_folder)
-            for page in pages:
-                if 'Contents' in page:
-                    delete_keys = [{'Key': obj['Key']} for obj in page['Contents']]
-                    s3.delete_objects(Bucket=BUCKET_NAME, Delete={'Objects': delete_keys})
-        except Exception:
-            pass # Ignore if folder is already empty
-        
-        # FIX 3: Create table using simple name
-        run_query(f"""
-            CREATE TABLE cache_network_materialized
-            WITH (
-                format = 'PARQUET',
-                parquet_compression = 'SNAPPY',
-                external_location = 's3://{BUCKET_NAME}/market_intel_gold/cache_network_materialized/'
-            ) AS
-            SELECT * FROM ref_company_network
-        """)
-        print("   ✅ Network Graph Materialized successfully.")
-    # =========================================================
-    # =========================================================
 
     # --- 1. Load Raw Data ---
     print("📥 Fetching Summary Data...")
@@ -446,13 +410,14 @@ def optimize_and_upload():
         df_risk = run_query('SELECT * FROM view_dashboard_risk_sidecar')
 
     # ---------------------------------------------------------
-    # ### [UPDATED] FETCH NETWORK GRAPH FROM CACHE ###
-    print("📥 Fetching Network Graph (Fast Cache)...")
+    # ### [UPDATED] FETCH NETWORK GRAPH DIRECTLY ###
+    print("📥 Fetching Network Graph...")
     if is_cache_fresh("network.parquet"):
         print("   ↩️ Skipping network.parquet")
         df_network = pd.DataFrame()
     else:
-        df_network = run_query('SELECT * FROM cache_network_materialized')
+        # ✅ Query the view directly, bypassing AWS Glue catalog race conditions
+        df_network = run_query('SELECT * FROM ref_company_network')
         print(f"   ✅ Network Graph Loaded: {len(df_network):,} edges")
     # ---------------------------------------------------------
     # ---------------------------------------------------------
