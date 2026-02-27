@@ -4317,10 +4317,12 @@ def search_awards(
     offset: int = 0,
     years: Optional[List[int]] = Query(None),
     vendor: Optional[str] = None,
+    cage: Optional[str] = None,  
     agency: Optional[str] = None,
     platform: Optional[str] = None,
     psc: Optional[str] = None,
     domain: Optional[str] = None,
+    min_spend: Optional[float] = None, 
     # ✅ NEW: Accept Keyset Pagination Params
     after_spend: Optional[float] = None,
     after_date: Optional[str] = None,
@@ -4334,8 +4336,9 @@ def search_awards(
     # ✅ QUICK EXIT: Is this the default dashboard load?
     # Ensure after_spend is None so we don't accidentally cache a "Load More" page
     is_default_load = (
-        not q and not vendor and not agency and 
-        not platform and not psc and not domain and 
+        not q and not vendor and not cage and not agency and
+        not platform and not psc and not domain and
+        min_spend is None and
         (not years or len(years) >= 7) and   # <--- THIS IS THE FIX
         offset_i == 0 and limit_i == 20 and
         after_spend is None 
@@ -4361,6 +4364,20 @@ def search_awards(
 
     if vendor and str(vendor).strip():
         cond.append(f"upper(vendor_name) LIKE {sql_like_contains(sanitize(vendor))} ESCAPE '#'")
+
+    # ✅ NEW — CAGE FILTER (PUT IT HERE)
+    if cage and str(cage).strip():
+        c = sanitize(cage)
+        cond.append(f"upper(coalesce(vendor_cage,'')) = {sql_literal(c)}")
+
+    # ✅ NEW — MIN SPEND FILTER (PUT IT HERE)
+    if min_spend is not None:
+        try:
+            ms = float(min_spend)
+            if ms >= 0:
+                cond.append(f"total_spend >= {ms}")
+        except Exception:
+            pass
 
     if platform and str(platform).strip():
         cond.append(f"upper(platform_family) = {sql_literal(sanitize(platform))}")
@@ -4399,9 +4416,14 @@ def search_awards(
 
     # --- 3. APPLY DEFAULT HOMEPAGE RULES ---
     is_specific_search = bool(
-        (q and str(q).strip()) or (vendor and str(vendor).strip()) or
-        (agency and str(agency).strip()) or (platform and str(platform).strip()) or
-        (psc and str(psc).strip()) or (domain and str(domain).strip())
+        (q and str(q).strip()) or
+        (vendor and str(vendor).strip()) or
+        (cage and str(cage).strip()) or
+        (agency and str(agency).strip()) or
+        (platform and str(platform).strip()) or
+        (psc and str(psc).strip()) or
+        (domain and str(domain).strip()) or
+        (min_spend is not None)
     )
 
     if not is_specific_search:
