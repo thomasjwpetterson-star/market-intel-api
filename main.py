@@ -1867,25 +1867,59 @@ def get_spend_trend(
 
 
 # ✅ NEW: Drill-down endpoint
+from typing import Optional, List
+from fastapi import Query
+
 @app.get("/api/dashboard/subsidiaries")
-def get_dashboard_subsidiaries(parent: str):
+def get_dashboard_subsidiaries(
+    parent: str,
+    years: Optional[List[int]] = Query(None),
+    agency: Optional[str] = None,
+    domain: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None
+):
     if not parent:
         return []
 
     clean_parent = sanitize(parent)
     loc_map = GLOBAL_CACHE.get("location_map", {}) or {}
 
+    # 1. Base Filter
+    where_parts = ["upper(clean_parent) = ?"]
+    params = [clean_parent]
+
+    # 2. Append Global Filters
+    if agency:
+        where_parts.append("upper(sub_agency) = ?")
+        params.append(sanitize(agency))
+    if domain:
+        where_parts.append("upper(market_segment) = ?")
+        params.append(sanitize(domain))
+    if platform:
+        where_parts.append("upper(platform_family) = ?")
+        params.append(sanitize(platform))
+    if psc:
+        where_parts.append("upper(psc_code) = ?")
+        params.append(sanitize(psc))
+    if years and len(years) > 0:
+        placeholders = ",".join(["?"] for _ in years)
+        where_parts.append(f"year IN ({placeholders})")
+        params.extend([int(y) for y in years])
+
+    where_clause = " AND ".join(where_parts)
+
     # Filter by clean_parent and aggregate by cage + vendor_name
     df = query_summary_df(
-        where_sql="upper(clean_parent) = ?",
-        params=[clean_parent],
+        where_sql=where_clause,
+        params=params,
         select_sql="""
             cage_code,
             vendor_name,
             SUM(total_spend) AS total_spend,
             SUM(contract_count) AS contract_count
         """,
-        group_by_sql="cage_code, vendor_name",  # ✅ ADDED
+        group_by_sql="cage_code, vendor_name",
         order_by_sql="total_spend DESC",
         limit=200
     )
@@ -3123,15 +3157,15 @@ def get_company_parts(
     offset: int = 0,
     years: Optional[List[int]] = Query(default=None),
     rollup: Optional[str] = None,
+    domain: Optional[str] = None,
+    agency: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None
 ):
     if not cage: return []
     safe_cage = sanitize(cage)
 
-    # ✅ HYBRID FIX: Fetch ONLY this company's parts from Disk (DuckDB)
-    # This prevents loading the 300MB file, but gives us a DataFrame to run your exact logic on.
     try:
-        # ✅ FIX: Use the shared global connection + Parameters
-        # Pass "cage = ?" and the tuple (safe_cage,)
         filtered = get_subset_from_disk(
             "products.parquet",
             where_clause="cage = ?",
@@ -3141,6 +3175,19 @@ def get_company_parts(
         print(f"DuckDB Error in get_company_parts: {e}")
         return []
     
+    if filtered.empty: return []
+
+    # ✅ Apply Platform and PSC filters locally
+    if platform:
+        safe_plat = sanitize(platform)
+        filtered = filtered[filtered['platform_family'].fillna('').astype(str).str.upper() == safe_plat]
+    if psc:
+        safe_psc = sanitize(psc)
+        # FSC maps neatly to PSC groups
+        filtered = filtered[filtered['fsc_code'].fillna('').astype(str).str.upper() == safe_psc]
+
+    # Purposely ignoring agency and domain, as NSNs don't neatly map to them without Cartesian explosion.
+
     if filtered.empty: return []
 
     # --- LOGIC RESTORED: Amount Calculation ---
@@ -3359,20 +3406,20 @@ def get_company_awards(
     offset: int = 0,
     years: Optional[List[int]] = Query(None),
     agency: Optional[str] = None,
-    threshold: Optional[float] = 0
+    threshold_m: Optional[float] = 0,
+    domain: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None
 ):
     where_parts = []
     params = []
 
-    # 1. Base Filters (Verified against ETL columns)
+    # 1. Base Filters
     if cage and cage != "AGGREGATE":
-        # ✅ FIX: ETL confirms column is 'vendor_cage'
         where_parts.append("(vendor_cage = ?)")
         safe_cage = sanitize(cage)
         params.append(safe_cage)
     elif name:
-        # ✅ FIX: ETL confirms 'vendor_name' exists. 
-        # Removed 'ultimate_parent_name' as it is NOT in your transactions.parquet ETL list.
         where_parts.append("upper(vendor_name) LIKE ?")
         safe_name = f"%{sanitize(name)}%"
         params.append(safe_name)
@@ -3381,21 +3428,32 @@ def get_company_awards(
 
     # 2. Global Filters
     if agency:
-        # ✅ FIX: ETL confirms 'sub_agency' and 'parent_agency' exist
         where_parts.append("(upper(sub_agency) = ? OR upper(parent_agency) = ?)")
         safe_ag = sanitize(agency)
         params.extend([safe_ag, safe_ag])
+
+    if domain:
+        where_parts.append("upper(market_segment) = ?")
+        params.append(sanitize(domain))
+
+    if platform:
+        where_parts.append("upper(platform_family) = ?")
+        params.append(sanitize(platform))
+
+    if psc:
+        where_parts.append("upper(psc) = ?")
+        params.append(sanitize(psc))
 
     if years and len(years) > 0:
         placeholders = ",".join(["?" for _ in years])
         where_parts.append(f"year IN ({placeholders})")
         params.extend(years)
 
-    if threshold and threshold > 0:
+    if threshold_m and threshold_m > 0:
         where_parts.append("spend_amount >= ?")
-        params.append(threshold * 1_000_000)
+        params.append(float(threshold_m) * 1_000_000)
 
-    # 3. Execute via DuckDB (Disk-based, Low RAM)
+    # 3. Execute via DuckDB
     where_clause = " AND ".join(where_parts)
 
     try:
@@ -3407,8 +3465,7 @@ def get_company_awards(
             "transactions.parquet",
             where_clause=where_clause,
             params=tuple(params),
-            # ✅ FIX: Only select columns guaranteed by your ETL
-            columns_sql="contract_id, action_date, sub_agency, parent_agency, description, spend_amount, naics_code, psc",
+            columns_sql="contract_id, action_date, sub_agency, parent_agency, description, spend_amount, naics_code, psc, platform_family",
             order_by_sql="action_date DESC",
             limit=limit,
             offset=offset
@@ -3432,7 +3489,14 @@ def get_company_awards(
     
 
 @app.get("/api/company/opportunities/recommended")
-def get_company_opportunities_recommended(cage: Optional[str] = None, name: Optional[str] = None):
+def get_company_opportunities_recommended(
+    cage: Optional[str] = None, 
+    name: Optional[str] = None,
+    agency: Optional[str] = None,
+    domain: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None
+):
     # 1. Reuse existing profile logic to find capabilities
     profile = get_company_profile(cage, name)
 
@@ -3449,19 +3513,29 @@ def get_company_opportunities_recommended(cage: Optional[str] = None, name: Opti
     if not clean_naics_list:
         return []
 
-    # 3. ✅ NEW: DuckDB SQL Query instead of Pandas RAM scan
-    conditions = []
+    # 3. DuckDB SQL Query construction
+    naics_conditions = []
     params = []
     for n in set(clean_naics_list):
-        conditions.append("CAST(naics AS VARCHAR) LIKE ?")
+        naics_conditions.append("CAST(naics AS VARCHAR) LIKE ?")
         params.append(f"{n}%")
         
-    where_clause = " OR ".join(conditions)
-    
+    where_clause = f"({' OR '.join(naics_conditions)})"
+
+    # ✅ ADD GLOBAL FILTERS
+    if agency:
+        # Match your opportunities parquet schema
+        where_clause += " AND (upper(agency) = ? OR upper(sub_agency) = ?)"
+        safe_ag = sanitize(agency)
+        params.extend([safe_ag, safe_ag])
+    if psc:
+        where_clause += " AND upper(psc) = ?"
+        params.append(sanitize(psc))
+
     query = f"""
         SELECT id, title, sol_num, agency, deadline, set_aside_type, poc_email
         FROM v_opportunities
-        WHERE ({where_clause})
+        WHERE {where_clause}
           AND try_cast(deadline as date) >= current_date()
         ORDER BY try_cast(deadline as date) ASC
         LIMIT 50
@@ -3661,32 +3735,60 @@ def get_niin(input_str: str) -> str:
         return clean.zfill(9)
     return clean[-9:]
 
+from fastapi import Query
+from typing import Optional, List
+
 @app.get("/api/nsn/profile")
-def get_nsn_profile(nsn: str):
+def get_nsn_profile(
+    nsn: str,
+    years: Optional[List[int]] = Query(None),
+    agency: Optional[str] = None,
+    domain: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None
+):
     # 1) Clean Input (Standard 9-digit NIIN logic)
     clean = ''.join(filter(str.isdigit, str(nsn)))
     safe_niin = clean.zfill(9) if len(clean) < 9 else clean[-9:]
 
-    # 2) Query from Disk (Hybrid mode: products are NOT in RAM)
+    # 2) Build Safe DuckDB Filters
+    where_parts = ["niin = ?"]
+    params = [safe_niin]
+
+    if platform:
+        where_parts.append("upper(platform_family) = ?")
+        params.append(sanitize(platform).upper())
+    if psc:
+        where_parts.append("upper(fsc_code) = ?")
+        params.append(sanitize(psc).upper())
+
+    where_clause = " AND ".join(where_parts)
+
+    # 3) Query from Disk (Hybrid mode: products are NOT in RAM)
     df = get_subset_from_disk(
         "products.parquet",
-        where_clause="niin = ?",
-        params=(safe_niin,),
+        where_clause=where_clause,
+        params=tuple(params),
         limit=50000
     )
-
 
     if df.empty:
         return {"found": False}
 
-    # 3) Treat the subset as the match
     match = df.copy()
 
     match["total_revenue"] = pd.to_numeric(match.get("total_revenue", 0), errors="coerce").fillna(0)
     match["total_units_sold"] = pd.to_numeric(match.get("total_units_sold", 0), errors="coerce").fillna(0)
 
-
-    total_rev = float(match["total_revenue"].sum())
+    # 4) Calculate Dynamic Revenue based on Years
+    if years:
+        match["dynamic_amount"] = match["annual_revenue_trend"].apply(
+            lambda s: calculate_trend_sum(s or "", years)
+        )
+        total_rev = float(match["dynamic_amount"].sum())
+    else:
+        total_rev = float(match["total_revenue"].sum())
+        
     total_units = int(match["total_units_sold"].sum())
 
     # 5) Best Row Logic (prefer a real description)
@@ -3754,8 +3856,33 @@ def get_nsn_profile(nsn: str):
 
 
 @app.get("/api/nsn/suppliers")
-def get_nsn_suppliers(nsn: str):
+def get_nsn_suppliers(
+    nsn: str,
+    years: Optional[List[int]] = Query(None),
+    agency: Optional[str] = None,
+    domain: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None
+):
     safe_niin = get_niin(nsn).zfill(9)
+
+    # Build Global Filters for Athena
+    cond = [f"niin = {sql_literal(safe_niin)}"]
+
+    ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
+    if ys:
+        years_csv = ",".join([str(y) for y in ys])
+        cond.append(f"year IN ({years_csv})")
+    if agency:
+        cond.append(f"(lower(coalesce(parent_agency,'')) LIKE lower({sql_like_contains(agency)}) ESCAPE '#' OR lower(coalesce(sub_agency,'')) LIKE lower({sql_like_contains(agency)}) ESCAPE '#')")
+    if domain:
+        cond.append(f"lower(coalesce(market_segment,'')) LIKE lower({sql_like_contains(domain)}) ESCAPE '#'")
+    if platform:
+        cond.append(f"lower(coalesce(platform_family,'')) LIKE lower({sql_like_contains(platform)}) ESCAPE '#'")
+    if psc:
+        cond.append(f"trim(upper(coalesce(psc,''))) = trim(upper({sql_literal(psc)}))")
+
+    where_sql = " AND ".join(cond)
 
     query = f"""
     WITH 
@@ -3768,7 +3895,7 @@ def get_nsn_suppliers(nsn: str):
             MAX(action_date) as last_sold,
             SUM(spend_amount) as total_revenue
         FROM "market_intel_gold"."dashboard_master_view"
-        WHERE niin = {sql_literal(safe_niin)}
+        WHERE {where_sql}
         GROUP BY 1
     ),
     
@@ -3846,17 +3973,34 @@ def get_nsn_suppliers(nsn: str):
     return run_athena_query(query)
 
 @app.get("/api/nsn/platforms")
-def get_nsn_platforms(nsn: str):
+def get_nsn_platforms(
+    nsn: str,
+    years: Optional[List[int]] = Query(None),
+    agency: Optional[str] = None,
+    domain: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None
+):
     safe_niin = get_niin(nsn)
 
-    # ✅ Let DuckDB do the heavy aggregation in milliseconds, return ONLY the top 10 rows
+    # Build Safe DuckDB Filters
+    where_parts = [f"niin = {sql_literal(safe_niin)}"]
+
+    if platform:
+        where_parts.append(f"upper(platform_family) = upper({sql_literal(sanitize(platform))})")
+    if psc:
+        where_parts.append(f"upper(fsc_code) = upper({sql_literal(sanitize(psc))})")
+
+    where_clause = " AND ".join(where_parts)
+
+    # ✅ Let DuckDB do the heavy aggregation in milliseconds
     query = f"""
         SELECT 
             platform_family AS platform,
             SUM(TRY_CAST(total_revenue AS DOUBLE)) AS spend,
             COUNT(DISTINCT cage) AS contracts
         FROM read_parquet('app_cache/products.parquet')
-        WHERE niin = {sql_literal(safe_niin)}
+        WHERE {where_clause}
           AND platform_family IS NOT NULL 
           AND UPPER(TRIM(platform_family)) != 'UNKNOWN'
         GROUP BY platform_family
@@ -3885,15 +4029,35 @@ def get_nsn_platforms(nsn: str):
 
 
 @app.get("/api/nsn/history")
-def get_nsn_history(nsn: str):
+def get_nsn_history(
+    nsn: str,
+    years: Optional[List[int]] = Query(None),
+    agency: Optional[str] = None,
+    domain: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None
+):
     # 1) Clean Input (always 9-digit NIIN)
     safe_niin = get_niin(nsn)
 
-    # 2) Query from Disk (only this NIIN)
+    # 2) Build Safe DuckDB Filters
+    where_parts = ["niin = ?"]
+    params = [safe_niin]
+
+    if platform:
+        where_parts.append("upper(platform_family) = ?")
+        params.append(sanitize(platform).upper())
+    if psc:
+        where_parts.append("upper(fsc_code) = ?")
+        params.append(sanitize(psc).upper())
+
+    where_clause = " AND ".join(where_parts)
+
+    # 3) Query from Disk
     df = get_subset_from_disk(
         "products.parquet",
-        where_clause="niin = ?",
-        params=(safe_niin,),
+        where_clause=where_clause,
+        params=tuple(params),
         limit=50000
     )
 

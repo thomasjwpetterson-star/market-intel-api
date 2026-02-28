@@ -219,6 +219,9 @@ def merge_unload_parts_with_duckdb(unload_prefix: str, output_filename: str):
                 ANY_VALUE(parent_agency) AS parent_agency,
                 ANY_VALUE(description) AS description,
                 ANY_VALUE(platform_family) AS platform_family,
+                ANY_VALUE(market_segment) AS market_segment,
+                ANY_VALUE(tech_type) AS tech_type,
+                ANY_VALUE(capability_name) AS capability_name,
                 ANY_VALUE(naics_code) AS naics_code,
                 ANY_VALUE(psc) AS psc,
                 ANY_VALUE(city) AS city,
@@ -572,7 +575,7 @@ def optimize_and_upload():
             SELECT 
                 contract_id, action_date, vendor_name, vendor_cage, 
                 sub_agency, parent_agency, description, spend_amount, 
-                naics_code, psc, platform_family, year
+                naics_code, psc, platform_family, market_segment, year
             FROM dashboard_master_view
             WHERE year >= 2021
         """)
