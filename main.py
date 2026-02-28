@@ -1099,7 +1099,8 @@ def reload_all_data():
         files = [
             "products.parquet", "summary.parquet", "geo.parquet",
             "profiles.parquet", "risk.parquet", "network.parquet",
-            "transactions.parquet", "opportunities.parquet", "kpis.parquet"
+            "transactions.parquet", "opportunities.parquet", "kpis.parquet",
+            "nsn_summary.parquet" # ✅ Added here
         ]
 
         def fetch_file(filename: str) -> str:
@@ -1215,7 +1216,8 @@ def reload_all_data():
                 ("v_network", "network.parquet"),
                 ("v_geo", "geo.parquet"),
                 ("v_risk", "risk.parquet"),
-                ("v_opportunities", "opportunities.parquet")
+                ("v_opportunities", "opportunities.parquet"),
+                ("v_nsn_summary", "nsn_summary.parquet") # ✅ Added here
             ]
             
             for view_name, file_name in views_to_create:
@@ -2761,8 +2763,23 @@ def get_platform_awards(
 
 
 
+from typing import Optional, List
+from fastapi import Query
+
+from typing import Optional, List
+from fastapi import Query
+
 @app.get("/api/company/opportunities")
-def get_company_opportunities(cage: Optional[str] = None, name: Optional[str] = None):
+def get_company_opportunities(
+    cage: Optional[str] = None, 
+    name: Optional[str] = None,
+    # ✅ Global Filter Parameters
+    agency: Optional[str] = None,
+    domain: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None,
+    years: Optional[List[int]] = Query(None) # Added to prevent FastAPI 422 crash
+):
     target_naics = set()
     profiles_df = GLOBAL_CACHE.get("profiles_df", pd.DataFrame())
     
@@ -2791,19 +2808,49 @@ def get_company_opportunities(cage: Optional[str] = None, name: Optional[str] = 
     if not clean_naics_list:
         return []
 
-    # 3. ✅ NEW: DuckDB SQL Query instead of Pandas RAM scan
-    conditions = []
+    # 3. DuckDB SQL Query construction
+    naics_conditions = []
     params = []
     for n in set(clean_naics_list):
-        conditions.append("CAST(naics AS VARCHAR) LIKE ?")
+        naics_conditions.append("CAST(naics AS VARCHAR) LIKE ?")
         params.append(f"{n}%")
         
-    where_clause = " OR ".join(conditions)
+    where_parts = [f"({' OR '.join(naics_conditions)})"]
+    
+    # ✅ Apply Agency & PSC natively
+    if agency:
+        where_parts.append("(upper(agency) LIKE ? OR upper(sub_agency) LIKE ?)")
+        safe_ag = f"%{sanitize(agency).upper()}%"
+        params.extend([safe_ag, safe_ag])
+        
+    if psc:
+        where_parts.append("upper(psc) = ?")
+        params.append(sanitize(psc).upper())
+
+    # ✅ THE TRICK: Apply Platform & Domain heuristically via text search
+    if platform:
+        where_parts.append("(upper(title) LIKE ? OR upper(description) LIKE ?)")
+        safe_plat = f"%{sanitize(platform).upper()}%"
+        params.extend([safe_plat, safe_plat])
+        
+    if domain:
+        safe_domain = sanitize(domain).upper()
+        # If domain looks like a code (e.g. "334" or "R425"), search naics/psc
+        if len(safe_domain) > 0 and (safe_domain[0].isdigit() or (len(safe_domain) == 4 and safe_domain[0].isalpha())):
+            where_parts.append("(psc LIKE ? OR naics LIKE ?)")
+            params.extend([f"{safe_domain}%", f"{safe_domain}%"])
+        else:
+            # Otherwise, text search the title and description
+            where_parts.append("(upper(title) LIKE ? OR upper(description) LIKE ?)")
+            safe_domain_like = f"%{safe_domain}%"
+            params.extend([safe_domain_like, safe_domain_like])
+
+    where_clause = " AND ".join(where_parts)
     
     query = f"""
         SELECT id, title, sol_num, agency, deadline, set_aside_type, poc_email
         FROM v_opportunities
-        WHERE ({where_clause})
+        WHERE {where_clause}
           AND try_cast(deadline as date) >= current_date()
         ORDER BY try_cast(deadline as date) ASC
         LIMIT 50
@@ -2813,7 +2860,7 @@ def get_company_opportunities(cage: Optional[str] = None, name: Optional[str] = 
         df = duck_fetch_df(query, params)
         if df.empty: return []
         
-        # ✅ FIX 2: Sanitize NaNs
+        # Sanitize NaNs
         df = df_sanitize_for_json(df)
         
         results = []
@@ -3738,9 +3785,15 @@ def get_niin(input_str: str) -> str:
 from fastapi import Query
 from typing import Optional, List
 
+from fastapi import Query
+from typing import Optional, List
+import pandas as pd
+
 @app.get("/api/nsn/profile")
 def get_nsn_profile(
     nsn: str,
+    # ✅ Keep parameters to prevent 422 errors, but IGNORE them for DuckDB 
+    # because Logistics data is universal and doesn't change based on F-35/Navy filters
     years: Optional[List[int]] = Query(None),
     agency: Optional[str] = None,
     domain: Optional[str] = None,
@@ -3751,24 +3804,11 @@ def get_nsn_profile(
     clean = ''.join(filter(str.isdigit, str(nsn)))
     safe_niin = clean.zfill(9) if len(clean) < 9 else clean[-9:]
 
-    # 2) Build Safe DuckDB Filters
-    where_parts = ["niin = ?"]
-    params = [safe_niin]
-
-    if platform:
-        where_parts.append("upper(platform_family) = ?")
-        params.append(sanitize(platform).upper())
-    if psc:
-        where_parts.append("upper(fsc_code) = ?")
-        params.append(sanitize(psc).upper())
-
-    where_clause = " AND ".join(where_parts)
-
-    # 3) Query from Disk (Hybrid mode: products are NOT in RAM)
+    # 2) Query Universal Data from Disk (No global filters applied here)
     df = get_subset_from_disk(
         "products.parquet",
-        where_clause=where_clause,
-        params=tuple(params),
+        where_clause="niin = ?",
+        params=(safe_niin,),
         limit=50000
     )
 
@@ -3780,7 +3820,7 @@ def get_nsn_profile(
     match["total_revenue"] = pd.to_numeric(match.get("total_revenue", 0), errors="coerce").fillna(0)
     match["total_units_sold"] = pd.to_numeric(match.get("total_units_sold", 0), errors="coerce").fillna(0)
 
-    # 4) Calculate Dynamic Revenue based on Years
+    # 3) Calculate Dynamic Revenue based on Years (Since revenue *is* temporal)
     if years:
         match["dynamic_amount"] = match["annual_revenue_trend"].apply(
             lambda s: calculate_trend_sum(s or "", years)
@@ -3791,7 +3831,7 @@ def get_nsn_profile(
         
     total_units = int(match["total_units_sold"].sum())
 
-    # 5) Best Row Logic (prefer a real description)
+    # 4) Best Row Logic (prefer a real description)
     best_row = match.iloc[0]
     if "description" in match.columns:
         for r in match.itertuples(index=False):
@@ -3802,20 +3842,17 @@ def get_nsn_profile(
     else:
         best_row = match.iloc[0]
 
-    # Helper getters (works whether best_row is Series or namedtuple)
+    # Helper getters 
     def g(obj, key, default=None):
-        try:
-            return getattr(obj, key)
-        except:
-            try:
-                return obj.get(key, default)
-            except:
-                return default
+        try: return getattr(obj, key)
+        except: 
+            try: return obj.get(key, default)
+            except: return default
 
     fsc_code = g(best_row, "fsc_code", "") or g(best_row, "fsc", "")
     desc = g(best_row, "description", None) or g(best_row, "item_name", None) or "Unknown"
 
-    # Calculate weighted average price across all part numbers for this NSN
+    # Calculate weighted average price
     match["avg_unit_price"] = pd.to_numeric(match.get("avg_unit_price", 0), errors="coerce").fillna(0)
     if total_units > 0:
         avg_unit_price = float((match["avg_unit_price"] * match["total_units_sold"]).sum() / total_units)
@@ -3824,7 +3861,7 @@ def get_nsn_profile(
 
     last_sold_date = str(match["last_sold_date"].max()) if "last_sold_date" in match.columns else None
     
-    # Combine the trend lines from all part numbers
+    # Trend
     trend_dicts = match["annual_revenue_trend"].apply(_parse_trend_to_dict).tolist()
     trend = _sum_trend_dicts(trend_dicts)
 
@@ -3983,33 +4020,43 @@ def get_nsn_platforms(
 ):
     safe_niin = get_niin(nsn)
 
-    # Build Safe DuckDB Filters
-    where_parts = [f"niin = {sql_literal(safe_niin)}"]
+    # ✅ Hit the fast DuckDB summary view!
+    where_parts = [
+        f"niin = {sql_literal(safe_niin)}", 
+        "platform_family IS NOT NULL", 
+        "trim(CAST(platform_family AS VARCHAR)) <> ''",
+        "upper(platform_family) <> 'UNKNOWN'"
+    ]
 
+    ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
+    if ys:
+        years_csv = ",".join([str(y) for y in ys])
+        where_parts.append(f"year IN ({years_csv})")
+        
+    if agency:
+        where_parts.append(f"(upper(sub_agency) = {sql_literal(sanitize(agency).upper())} OR upper(parent_agency) = {sql_literal(sanitize(agency).upper())})")
+    if domain:
+        where_parts.append(f"upper(market_segment) = {sql_literal(sanitize(domain).upper())}")
     if platform:
-        where_parts.append(f"upper(platform_family) = upper({sql_literal(sanitize(platform))})")
+        where_parts.append(f"upper(platform_family) = {sql_literal(sanitize(platform).upper())}")
     if psc:
-        where_parts.append(f"upper(fsc_code) = upper({sql_literal(sanitize(psc))})")
+        where_parts.append(f"upper(psc) = {sql_literal(sanitize(psc).upper())}")
 
     where_clause = " AND ".join(where_parts)
 
-    # ✅ Let DuckDB do the heavy aggregation in milliseconds
     query = f"""
         SELECT 
             platform_family AS platform,
-            SUM(TRY_CAST(total_revenue AS DOUBLE)) AS spend,
-            COUNT(DISTINCT cage) AS contracts
-        FROM read_parquet('app_cache/products.parquet')
+            SUM(spend_amount) AS spend,
+            SUM(contracts) AS contracts
+        FROM v_nsn_summary
         WHERE {where_clause}
-          AND platform_family IS NOT NULL 
-          AND UPPER(TRIM(platform_family)) != 'UNKNOWN'
-        GROUP BY platform_family
+        GROUP BY 1
         ORDER BY spend DESC
         LIMIT 10
     """
     
     try:
-        # Use the existing duckdb execution helper
         df = duck_fetch_df(query) 
         if df.empty:
             return []
@@ -4024,7 +4071,7 @@ def get_nsn_platforms(
         return out
         
     except Exception as e:
-        logger.error(f"Error in NSN platforms: {e}")
+        logger.error(f"Error in NSN platforms DuckDB: {e}")
         return []
 
 
@@ -4037,69 +4084,61 @@ def get_nsn_history(
     platform: Optional[str] = None,
     psc: Optional[str] = None
 ):
-    # 1) Clean Input (always 9-digit NIIN)
     safe_niin = get_niin(nsn)
 
-    # 2) Build Safe DuckDB Filters
-    where_parts = ["niin = ?"]
-    params = [safe_niin]
+    # ✅ Hit the fast DuckDB summary view!
+    where_parts = [f"niin = {sql_literal(safe_niin)}", "year IS NOT NULL"]
 
+    ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
+    if ys:
+        years_csv = ",".join([str(y) for y in ys])
+        where_parts.append(f"year IN ({years_csv})")
+        
+    if agency:
+        where_parts.append(f"(upper(sub_agency) = {sql_literal(sanitize(agency).upper())} OR upper(parent_agency) = {sql_literal(sanitize(agency).upper())})")
+    if domain:
+        where_parts.append(f"upper(market_segment) = {sql_literal(sanitize(domain).upper())}")
     if platform:
-        where_parts.append("upper(platform_family) = ?")
-        params.append(sanitize(platform).upper())
+        where_parts.append(f"upper(platform_family) = {sql_literal(sanitize(platform).upper())}")
     if psc:
-        where_parts.append("upper(fsc_code) = ?")
-        params.append(sanitize(psc).upper())
+        where_parts.append(f"upper(psc) = {sql_literal(sanitize(psc).upper())}")
 
     where_clause = " AND ".join(where_parts)
 
-    # 3) Query from Disk
-    df = get_subset_from_disk(
-        "products.parquet",
-        where_clause=where_clause,
-        params=tuple(params),
-        limit=50000
-    )
+    query = f"""
+        SELECT 
+            cast(year as varchar) as label,
+            SUM(spend_amount) as spend
+        FROM v_nsn_summary
+        WHERE {where_clause}
+        GROUP BY 1
+        ORDER BY label ASC
+    """
+    
+    try:
+        df = duck_fetch_df(query)
+        if df.empty:
+            return []
 
-    if df.empty:
+        results = df.to_dict(orient="records")
+        
+        # Chart formatting: gap-fill missing fiscal years
+        fy_map = {int(r["label"]): float(r["spend"]) for r in results}
+        min_fy = min(fy_map.keys())
+        max_fy = max(fy_map.keys())
+
+        out = []
+        for fy in range(min_fy, max_fy + 1):
+            out.append({
+                "label": f"{fy}",
+                "spend": float(fy_map.get(fy, 0.0))
+            })
+
+        return out
+
+    except Exception as e:
+        logger.error(f"Error in NSN history DuckDB: {e}")
         return []
-
-    if "annual_revenue_trend" not in df.columns:
-        return []
-
-    # 3) Aggregate all vendor rows into a single FY->spend map
-    fy_map: Dict[int, float] = {}
-
-    for trend_str in df["annual_revenue_trend"]:
-        if not trend_str or pd.isna(trend_str):
-            continue
-
-        for seg in str(trend_str).split("|"):
-            if ":" not in seg:
-                continue
-            try:
-                y_str, amt_str = seg.split(":", 1)
-                fy = int(str(y_str).strip())          # treat trend year as fiscal year
-                amt = float(str(amt_str).strip())
-                fy_map[fy] = fy_map.get(fy, 0.0) + amt
-            except:
-                continue
-
-    if not fy_map:
-        return []
-
-    # 4) Chart formatting: gap-fill missing fiscal years so the chart is continuous
-    min_fy = int(min(fy_map.keys()))
-    max_fy = int(max(fy_map.keys()))
-
-    results = []
-    for fy in range(min_fy, max_fy + 1):
-        results.append({
-            "label": f"FY{fy}",
-            "spend": float(fy_map.get(fy, 0.0))
-        })
-
-    return results
 
 
 @app.get("/api/nsn/contracts")
@@ -4710,6 +4749,9 @@ def get_pipeline_live(
     agency: Optional[str] = None,
     domain: Optional[str] = None,
     keyword: Optional[str] = None,
+    # ✅ Add missing global parameters to prevent FastAPI 422 Errors
+    years: Optional[List[int]] = Query(None), 
+    psc: Optional[str] = None,
     limit: int = 50,
     offset: int = 0
 ):
@@ -4825,8 +4867,38 @@ def get_pipeline_live(
     return results
 
 @app.get("/api/pipeline/recent-wins")
-def get_recent_wins():
-    query = """
+def get_recent_wins(
+    # ✅ Add global parameters to prevent FastAPI 422 Validation Errors
+    agency: Optional[str] = None,
+    domain: Optional[str] = None,
+    platform: Optional[str] = None,
+    psc: Optional[str] = None,
+    years: Optional[List[int]] = Query(None) # Accepted to prevent crash, but safely ignored below
+):
+    conds = [
+        "try_cast(action_date as date) >= current_date() - INTERVAL 180 DAY",
+        "spend_amount > 1000000"
+    ]
+    params = []
+
+    # ✅ Apply real filters to transactions
+    if agency:
+        conds.append("(upper(parent_agency) = ? OR upper(sub_agency) = ?)")
+        safe_ag = sanitize(agency).upper()
+        params.extend([safe_ag, safe_ag])
+    if platform:
+        conds.append("upper(platform_family) = ?")
+        params.append(sanitize(platform).upper())
+    if domain:
+        conds.append("upper(market_segment) = ?")
+        params.append(sanitize(domain).upper())
+    if psc:
+        conds.append("upper(psc) = ?")
+        params.append(sanitize(psc).upper())
+
+    where_sql = " AND ".join(conds)
+
+    query = f"""
     SELECT 
         vendor_name,
         vendor_cage,
@@ -4836,13 +4908,12 @@ def get_recent_wins():
         action_date as signed_date,
         description
     FROM v_transactions
-    WHERE try_cast(action_date as date) >= current_date() - INTERVAL 180 DAY
-      AND spend_amount > 1000000 
+    WHERE {where_sql}
     ORDER BY action_date DESC
     LIMIT 50
     """
     try:
-        df = duck_fetch_df(query)
+        df = duck_fetch_df(query, params)
         df = df_sanitize_for_json(df)
         return df.to_dict(orient="records")
     except Exception as e:

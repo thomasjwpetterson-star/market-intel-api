@@ -648,6 +648,82 @@ def optimize_and_upload():
     # ---------------------------------------------------------
     # ### [NEW] FETCH PRODUCTS (With Logistics Data) ###
     # ---------------------------------------------------------
+    # ---------------------------------------------------------
+    # ### [NEW] FETCH NSN DIMENSIONAL SUMMARY (OOM-SAFE UNLOAD) ###
+    # ---------------------------------------------------------
+    print("📥 Fetching NSN Filter Summary (OOM Safe)...")
+    if is_cache_fresh("nsn_summary.parquet", max_age_hours=12):
+        print("   ↩️ Skipping nsn_summary.parquet")
+    else:
+        print("📦 Athena UNLOAD -> Parquet (avoids local RAM blowup)...")
+        
+        nsn_summary_sql = """
+            SELECT 
+                SUBSTR(REGEXP_REPLACE(nsn, '[^0-9]', ''), -9) as niin,
+                CAST(year AS INTEGER) as year,
+                UPPER(TRIM(platform_family)) as platform_family,
+                UPPER(TRIM(market_segment)) as market_segment,
+                UPPER(TRIM(sub_agency)) as sub_agency,
+                UPPER(TRIM(parent_agency)) as parent_agency,
+                UPPER(TRIM(psc)) as psc,
+                CAST(SUM(spend_amount) AS REAL) as spend_amount,
+                CAST(COUNT(DISTINCT contract_id) AS INTEGER) as contracts
+            FROM "market_intel_gold"."dashboard_master_view"
+            WHERE nsn IS NOT NULL AND spend_amount IS NOT NULL
+            GROUP BY 1, 2, 3, 4, 5, 6, 7
+        """
+
+        nsn_unload_prefix = f"{UNLOAD_OUTPUT_PREFIX}nsn_summary/{uuid.uuid4().hex}/"
+        nsn_out_prefix = unload_to_s3(nsn_summary_sql, nsn_unload_prefix)
+
+        # --- DuckDB Stitching (Zero Pandas = Zero OOM) ---
+        print("   🦆 Merging NSN Summary using DuckDB...")
+        nsn_parts_dir = os.path.join(TEMP_DIR, "duckdb_nsn_parts_" + uuid.uuid4().hex)
+        os.makedirs(nsn_parts_dir, exist_ok=True)
+
+        all_keys = list(list_s3_keys(nsn_out_prefix))
+        part_keys = [k for k in all_keys if not k.endswith("/")]
+
+        print(f"   ⬇️ Downloading {len(part_keys)} parts locally...")
+        for k in part_keys:
+            dest_filename = os.path.basename(k)
+            if not dest_filename.endswith(".parquet"):
+                dest_filename += ".parquet"
+            s3.download_file(BUCKET_NAME, k, os.path.join(nsn_parts_dir, dest_filename))
+
+        nsn_local_output = os.path.join(TEMP_DIR, "nsn_summary.parquet")
+        
+        con = duckdb.connect('etl_temp.db')
+        con.execute("PRAGMA temp_directory='./ducktmp';")
+        con.execute("PRAGMA memory_limit='6GB';")
+        
+        # We clean the null strings inside DuckDB during the COPY to replicate Pandas behavior safely
+        con.execute(f"""
+            COPY (
+                SELECT 
+                    niin,
+                    year,
+                    CASE WHEN platform_family IN ('NAN', 'NONE', 'UNKNOWN', '') THEN NULL ELSE platform_family END as platform_family,
+                    CASE WHEN market_segment IN ('NAN', 'NONE', 'UNKNOWN', '') THEN NULL ELSE market_segment END as market_segment,
+                    CASE WHEN sub_agency IN ('NAN', 'NONE', 'UNKNOWN', '') THEN NULL ELSE sub_agency END as sub_agency,
+                    CASE WHEN parent_agency IN ('NAN', 'NONE', 'UNKNOWN', '') THEN NULL ELSE parent_agency END as parent_agency,
+                    CASE WHEN psc IN ('NAN', 'NONE', 'UNKNOWN', '') THEN NULL ELSE psc END as psc,
+                    spend_amount,
+                    contracts
+                FROM read_parquet('{nsn_parts_dir}/*.parquet')
+            ) TO '{nsn_local_output}' (FORMAT PARQUET, COMPRESSION ZSTD);
+        """)
+        con.close()
+
+        print(f"   ⬆️ Uploading nsn_summary.parquet to S3...")
+        s3.upload_file(nsn_local_output, BUCKET_NAME, f"{CACHE_PREFIX}nsn_summary.parquet")
+
+        os.remove(nsn_local_output)
+        shutil.rmtree(nsn_parts_dir)
+        print("   ✅ Successfully published nsn_summary.parquet!")
+
+
+
     # -------------------------------------------------------
     # 8. Product Catalog (Aggregated)
     # -------------------------------------------------------
