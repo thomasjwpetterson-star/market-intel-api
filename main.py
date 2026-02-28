@@ -4209,14 +4209,14 @@ def get_nsn_contracts(
     SELECT
         contract_id,
         action_date,
-        CASE WHEN COALESCE(sub_agency, parent_agency) IN ('NAN', 'NONE', '') THEN NULL ELSE COALESCE(sub_agency, parent_agency) END AS agency,
-        CASE WHEN vendor_name IN ('NAN', 'NONE', '') THEN NULL ELSE vendor_name END AS vendor_name,
-        CASE WHEN vendor_cage IN ('NAN', 'NONE', '') THEN NULL ELSE vendor_cage END AS vendor_cage,
-        CASE WHEN platform_family IN ('NAN', 'NONE', 'UNKNOWN', '') THEN NULL ELSE platform_family END AS platform_family,
-        CASE WHEN psc IN ('NAN', 'NONE', '') THEN NULL ELSE psc END AS psc,
-        CASE WHEN naics_code IN ('NAN', 'NONE', '') THEN NULL ELSE naics_code END AS naics_code,
+        CASE WHEN CAST(COALESCE(sub_agency, parent_agency) AS VARCHAR) IN ('NAN', 'NONE', '') THEN NULL ELSE COALESCE(sub_agency, parent_agency) END AS agency,
+        CASE WHEN CAST(vendor_name AS VARCHAR) IN ('NAN', 'NONE', '') THEN NULL ELSE vendor_name END AS vendor_name,
+        CASE WHEN CAST(vendor_cage AS VARCHAR) IN ('NAN', 'NONE', '') THEN NULL ELSE vendor_cage END AS vendor_cage,
+        CASE WHEN CAST(platform_family AS VARCHAR) IN ('NAN', 'NONE', 'UNKNOWN', '') THEN NULL ELSE platform_family END AS platform_family,
+        CASE WHEN CAST(psc AS VARCHAR) IN ('NAN', 'NONE', '') THEN NULL ELSE psc END AS psc,
+        CASE WHEN CAST(naics_code AS VARCHAR) IN ('NAN', 'NONE', '') THEN NULL ELSE CAST(naics_code AS VARCHAR) END AS naics_code,
         spend_amount,
-        CASE WHEN description IN ('NAN', 'NONE', '') THEN NULL ELSE description END AS description
+        CASE WHEN CAST(description AS VARCHAR) IN ('NAN', 'NONE', '') THEN NULL ELSE description END AS description
     FROM v_transactions
     WHERE {where_sql}
       AND spend_amount IS NOT NULL
