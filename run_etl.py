@@ -575,7 +575,8 @@ def optimize_and_upload():
             SELECT 
                 contract_id, action_date, vendor_name, vendor_cage, 
                 sub_agency, parent_agency, description, spend_amount, 
-                naics_code, psc, platform_family, market_segment, year
+                naics_code, psc, platform_family, market_segment, year,
+                SUBSTR(REGEXP_REPLACE(nsn, '[^0-9]', ''), -9) AS niin
             FROM dashboard_master_view
             WHERE year >= 2021
         """)

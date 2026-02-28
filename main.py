@@ -3903,111 +3903,126 @@ def get_nsn_suppliers(
 ):
     safe_niin = get_niin(nsn).zfill(9)
 
-    # Build Global Filters for Athena
-    cond = [f"niin = {sql_literal(safe_niin)}"]
+    # 1. DUCKDB: Instant math for revenue and contract counts
+    where_parts = ["niin = ?"]
+    params = [safe_niin]
 
     ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
     if ys:
         years_csv = ",".join([str(y) for y in ys])
-        cond.append(f"year IN ({years_csv})")
+        where_parts.append(f"year IN ({years_csv})")
     if agency:
-        cond.append(f"(lower(coalesce(parent_agency,'')) LIKE lower({sql_like_contains(agency)}) ESCAPE '#' OR lower(coalesce(sub_agency,'')) LIKE lower({sql_like_contains(agency)}) ESCAPE '#')")
+        where_parts.append("(upper(coalesce(parent_agency,'')) LIKE ? OR upper(coalesce(sub_agency,'')) LIKE ?)")
+        safe_ag = f"%{sanitize(agency).upper()}%"
+        params.extend([safe_ag, safe_ag])
     if domain:
-        cond.append(f"lower(coalesce(market_segment,'')) LIKE lower({sql_like_contains(domain)}) ESCAPE '#'")
+        where_parts.append("upper(coalesce(market_segment,'')) LIKE ?")
+        params.append(f"%{sanitize(domain).upper()}%")
     if platform:
-        cond.append(f"lower(coalesce(platform_family,'')) LIKE lower({sql_like_contains(platform)}) ESCAPE '#'")
+        where_parts.append("upper(coalesce(platform_family,'')) LIKE ?")
+        params.append(f"%{sanitize(platform).upper()}%")
     if psc:
-        cond.append(f"trim(upper(coalesce(psc,''))) = trim(upper({sql_literal(psc)}))")
+        where_parts.append("trim(upper(coalesce(psc,''))) = ?")
+        params.append(sanitize(psc).upper())
 
-    where_sql = " AND ".join(cond)
+    where_sql = " AND ".join(where_parts)
 
-    query = f"""
-    WITH 
-    -- 1. Identify Sales (Sanitized)
-    item_sales AS (
+    duck_query = f"""
         SELECT 
-            TRIM(UPPER(vendor_cage)) as vendor_cage,
-            MAX(vendor_name) as vendor_name,
+            TRIM(UPPER(vendor_cage)) as cage,
+            MAX(vendor_name) as vendor,
             COUNT(DISTINCT contract_id) as contracts,
             MAX(action_date) as last_sold,
             SUM(spend_amount) as total_revenue
-        FROM "market_intel_gold"."dashboard_master_view"
+        FROM v_transactions
         WHERE {where_sql}
         GROUP BY 1
-    ),
+    """
     
-    -- 2. Identify Approved Sources & AGGREGATE Part Numbers
-    approved_list AS (
+    try:
+        sales_df = duck_fetch_df(duck_query, params)
+        sales_records = sales_df.to_dict('records') if not sales_df.empty else []
+    except Exception as e:
+        logger.error(f"NSN Suppliers DuckDB Error: {e}")
+        sales_records = []
+
+    # 2. ATHENA: Tiny, 1-second lookup for authorized part numbers
+    athena_query = f"""
         SELECT 
             TRIM(UPPER(cage_code)) as cage_code,
             array_join(array_agg(DISTINCT part_number), ', ') as part_numbers
         FROM "market_intel_silver"."ref_approved_sources"
-        WHERE LPAD(CAST(niin AS VARCHAR), 9, '0') = {sql_literal(safe_niin)}
+        WHERE LPAD(CAST(niin AS VARCHAR), 9, '0') = '{safe_niin}'
         GROUP BY 1
-    ),
-
-    -- 3. Master List of CAGEs
-    all_cages AS (
-        SELECT vendor_cage as cage FROM item_sales WHERE vendor_cage IS NOT NULL
-        UNION
-        SELECT cage_code as cage FROM approved_list WHERE cage_code IS NOT NULL
-    ),
-
-    -- 4. SAM Registry
-    sam_lookup AS (
-        SELECT 
-            TRIM(UPPER(cage_code)) as cage_code, 
-            MAX(legal_business_name) as legal_name
-        FROM "market_intel_silver"."ref_sam_entities"
-        WHERE TRIM(UPPER(cage_code)) IN (SELECT cage FROM all_cages)
-        GROUP BY 1
-    ),
-    
-    -- 5. Gov Dictionary
-    gov_dictionary AS (
-        SELECT * FROM (VALUES
-            ('19207', 'US ARMY TACOM - DESIGN ACTIVITY'),
-            ('81349', 'MILITARY STANDARDS / PROMULGATING ACTIVITY'),
-            ('80205', 'NATIONAL AEROSPACE STANDARDS (NAS)'),
-            ('96906', 'MILITARY STANDARDS (MS)'),
-            ('57685', 'NAVAL AIR SYSTEMS COMMAND'),
-            ('81348', 'FEDERAL SPECIFICATIONS'),
-            ('88044', 'AERONAUTICAL STANDARDS GROUP'),
-            ('9009H', 'WSK PZL-KALISZ S.A. (POLAND)'),
-            ('100CB', 'ARITEX CADING S.A. (SPAIN)'),
-            ('A486G', 'PATRIA AVIATION OY (FINLAND)'),
-            ('K1037', 'HANWHA AEROSPACE (SOUTH KOREA)'),
-            ('D0019', 'RHEINMETALL LANDSYSTEME (GERMANY)')
-        ) AS t(cage, name)
-    )
-
-    SELECT
-        -- ✅ Removed redundant g.history_name
-        COALESCE(
-            i.vendor_name, s.legal_name, gov.name,
-            'Unknown Manufacturer (CAGE: ' || c.cage || ')'
-        ) as vendor,
-        
-        c.cage,
-        
-        COALESCE(a.part_numbers, '—') as part_numbers,
-        
-        COALESCE(i.contracts, 0) as contracts,
-        i.last_sold,
-        COALESCE(i.total_revenue, 0) as total_revenue,
-        
-        CASE WHEN a.cage_code IS NOT NULL THEN true ELSE false END as is_approved_source
-
-    FROM all_cages c
-    LEFT JOIN item_sales i ON c.cage = i.vendor_cage
-    LEFT JOIN approved_list a ON c.cage = a.cage_code
-    LEFT JOIN sam_lookup s ON c.cage = s.cage_code
-    LEFT JOIN gov_dictionary gov ON c.cage = gov.cage
-    -- ✅ Removed the expensive LEFT JOIN gold_global_lookup
-    
-    ORDER BY total_revenue DESC NULLS LAST, is_approved_source DESC
     """
-    return run_athena_query(query)
+    try:
+        approved_data = run_athena_query(athena_query)
+        approved_map = {r['cage_code']: r['part_numbers'] for r in (approved_data or [])}
+    except Exception:
+        approved_map = {}
+
+    # ✅ RESTORED BUSINESS LOGIC: Government & Standards Dictionary
+    gov_dict = {
+        '19207': 'US ARMY TACOM - DESIGN ACTIVITY',
+        '81349': 'MILITARY STANDARDS / PROMULGATING ACTIVITY',
+        '80205': 'NATIONAL AEROSPACE STANDARDS (NAS)',
+        '96906': 'MILITARY STANDARDS (MS)',
+        '57685': 'NAVAL AIR SYSTEMS COMMAND',
+        '81348': 'FEDERAL SPECIFICATIONS',
+        '88044': 'AERONAUTICAL STANDARDS GROUP',
+        '9009H': 'WSK PZL-KALISZ S.A. (POLAND)',
+        '100CB': 'ARITEX CADING S.A. (SPAIN)',
+        'A486G': 'PATRIA AVIATION OY (FINLAND)',
+        'K1037': 'HANWHA AEROSPACE (SOUTH KOREA)',
+        'D0019': 'RHEINMETALL LANDSYSTEME (GERMANY)'
+    }
+
+    def resolve_vendor_name(cage_code, tx_name):
+        # 1. Prefer the transaction name if valid
+        if tx_name and str(tx_name).strip() and str(tx_name).upper() not in ["NAN", "NONE"]:
+            return tx_name
+        # 2. Fallback to Military/Gov Dictionary
+        if cage_code in gov_dict:
+            return gov_dict[cage_code]
+        # 3. Fallback to Global Cache (which contains SAM data from profiles_df)
+        cached_name = GLOBAL_CACHE.get("cage_name_map", {}).get(cage_code)
+        if cached_name:
+            return cached_name
+        # 4. Final Fallback
+        return f"Unknown Manufacturer (CAGE: {cage_code})"
+
+    # 3. MERGE Results
+    out = []
+    sales_cages = set()
+    
+    for r in sales_records:
+        c = str(r.get('cage', '')).strip().upper()
+        if not c or c == 'NAN': continue
+        
+        sales_cages.add(c)
+        r['vendor'] = resolve_vendor_name(c, r.get('vendor'))
+        r['is_approved_source'] = c in approved_map
+        r['part_numbers'] = approved_map.get(c, '—')
+        r['total_revenue'] = float(r.get('total_revenue') or 0.0)
+        r['contracts'] = int(r.get('contracts') or 0)
+        out.append(r)
+
+    # Append authorized sources that have 0 sales in the filtered time window
+    for c, pn in approved_map.items():
+        if c not in sales_cages:
+            out.append({
+                "cage": c,
+                "vendor": resolve_vendor_name(c, None),
+                "contracts": 0,
+                "last_sold": None,
+                "total_revenue": 0.0,
+                "is_approved_source": True,
+                "part_numbers": pn
+            })
+
+    # Sort by Revenue, then Authorization status
+    out.sort(key=lambda x: (x['total_revenue'], x['is_approved_source']), reverse=True)
+    return out
 
 @app.get("/api/nsn/platforms")
 def get_nsn_platforms(
@@ -4146,8 +4161,6 @@ def get_nsn_contracts(
     nsn: str,
     limit: int = 50,
     offset: int = 0,
-
-    # ✅ Global filters
     years: Optional[List[int]] = Query(None),
     vendor: Optional[str] = None,
     parent: Optional[str] = None,
@@ -4157,68 +4170,40 @@ def get_nsn_contracts(
     platform: Optional[str] = None,
     psc: Optional[str] = None,
 ):
-    niin = get_niin(nsn)
-
+    safe_niin = get_niin(nsn)
     limit_i = safe_int(limit, 50, 1, 200)
     offset_i = safe_int(offset, 0, 0, 2_000_000)
 
-    cond: List[str] = ["1=1"]
-
-    # ✅ SAME NIIN MATCH AS SUPPLIERS (critical for consistency)
-    cond.append(f"niin = {sql_literal(niin)}")
+    # ✅ ROUTED TO DUCKDB
+    where_parts = ["niin = ?"]
+    params = [safe_niin]
 
     ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
     if ys:
         years_csv = ",".join([str(y) for y in ys])
-        # ✅ Super-fast integer lookup using the corrected view column
-        cond.append(f"year IN ({years_csv})")
+        where_parts.append(f"year IN ({years_csv})")
 
-    # ✅ Vendor filter
     if vendor:
-        cond.append(
-            f"lower(coalesce(vendor_name,'')) LIKE lower({sql_like_contains(vendor)}) ESCAPE '#'"
-        )
-
-    # ✅ Parent filter
-    if parent:
-        cond.append(
-            f"lower(coalesce(ultimate_parent_name,'')) LIKE lower({sql_like_contains(parent)}) ESCAPE '#'"
-        )
-
-    # ✅ CAGE filter (exact match)
+        where_parts.append("upper(coalesce(vendor_name,'')) LIKE ?")
+        params.append(f"%{sanitize(vendor).upper()}%")
     if cage:
-        cond.append(
-            f"trim(upper(coalesce(vendor_cage,''))) = trim(upper({sql_literal(cage)}))"
-        )
-
-    # ✅ Domain filter
+        where_parts.append("trim(upper(coalesce(vendor_cage,''))) = ?")
+        params.append(sanitize(cage).upper())
     if domain:
-        cond.append(
-            f"lower(coalesce(market_segment,'')) LIKE lower({sql_like_contains(domain)}) ESCAPE '#'"
-        )
-
-    # ✅ Agency filter (checks both parent + sub)
-    if agency:
-        cond.append(
-            "("
-            f" lower(coalesce(parent_agency,'')) LIKE lower({sql_like_contains(agency)}) ESCAPE '#'"
-            f" OR lower(coalesce(sub_agency,'')) LIKE lower({sql_like_contains(agency)}) ESCAPE '#'"
-            ")"
-        )
-
-    # ✅ Platform filter
+        where_parts.append("upper(coalesce(market_segment,'')) LIKE ?")
+        params.append(f"%{sanitize(domain).upper()}%")
     if platform:
-        cond.append(
-            f"lower(coalesce(platform_family,'')) LIKE lower({sql_like_contains(platform)}) ESCAPE '#'"
-        )
-
-    # ✅ PSC filter
+        where_parts.append("upper(coalesce(platform_family,'')) LIKE ?")
+        params.append(f"%{sanitize(platform).upper()}%")
     if psc:
-        cond.append(
-            f"trim(upper(coalesce(psc,''))) = trim(upper({sql_literal(psc)}))"
-        )
+        where_parts.append("trim(upper(coalesce(psc,''))) = ?")
+        params.append(sanitize(psc).upper())
+    if agency:
+        where_parts.append("(upper(coalesce(parent_agency,'')) LIKE ? OR upper(coalesce(sub_agency,'')) LIKE ?)")
+        safe_ag = f"%{sanitize(agency).upper()}%"
+        params.extend([safe_ag, safe_ag])
 
-    where_sql = " AND ".join(cond)
+    where_sql = " AND ".join(where_parts)
 
     query = f"""
     SELECT
@@ -4232,15 +4217,21 @@ def get_nsn_contracts(
         naics_code,
         spend_amount,
         description
-    FROM "market_intel_gold"."dashboard_master_view"
+    FROM v_transactions
     WHERE {where_sql}
       AND spend_amount IS NOT NULL
     ORDER BY action_date DESC
     OFFSET {offset_i}
     LIMIT {limit_i}
     """
-
-    return cached_athena_query(query)
+    
+    try:
+        df = duck_fetch_df(query, params)
+        df = df_sanitize_for_json(df)
+        return df.to_dict(orient="records")
+    except Exception as e:
+        logger.error(f"NSN Contracts DuckDB Error: {e}")
+        return []
 
 DEFAULT_TOP_NSN_CACHE = None  # Put this at the top of your file
 # ✅ NEW: Cache to store the default dashboard state in memory
