@@ -4209,14 +4209,14 @@ def get_nsn_contracts(
     SELECT
         contract_id,
         action_date,
-        COALESCE(sub_agency, parent_agency) AS agency,
-        vendor_name,
-        vendor_cage,
-        platform_family,
-        psc,
-        naics_code,
+        CASE WHEN COALESCE(sub_agency, parent_agency) IN ('NAN', 'NONE', '') THEN NULL ELSE COALESCE(sub_agency, parent_agency) END AS agency,
+        CASE WHEN vendor_name IN ('NAN', 'NONE', '') THEN NULL ELSE vendor_name END AS vendor_name,
+        CASE WHEN vendor_cage IN ('NAN', 'NONE', '') THEN NULL ELSE vendor_cage END AS vendor_cage,
+        CASE WHEN platform_family IN ('NAN', 'NONE', 'UNKNOWN', '') THEN NULL ELSE platform_family END AS platform_family,
+        CASE WHEN psc IN ('NAN', 'NONE', '') THEN NULL ELSE psc END AS psc,
+        CASE WHEN naics_code IN ('NAN', 'NONE', '') THEN NULL ELSE naics_code END AS naics_code,
         spend_amount,
-        description
+        CASE WHEN description IN ('NAN', 'NONE', '') THEN NULL ELSE description END AS description
     FROM v_transactions
     WHERE {where_sql}
       AND spend_amount IS NOT NULL
