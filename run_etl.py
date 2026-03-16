@@ -179,8 +179,8 @@ def upload_unload_parts_to_cache(unload_prefix: str, cache_name: str):
 # ✅ NEW HELPER ADDED HERE:
 def merge_unload_parts_with_duckdb(unload_prefix: str, output_filename: str):
     """
-    Downloads Athena's UNLOAD parts, uses DuckDB to safely deduplicate 
-    and merge them into ONE file, and uploads it to S3.
+    Downloads Athena's UNLOAD parts, uses DuckDB to safely 
+    merge them into ONE file, and uploads it to S3.
     """
     print(f"🦆 Merging {unload_prefix} into ONE file using DuckDB...")
     
@@ -198,53 +198,37 @@ def merge_unload_parts_with_duckdb(unload_prefix: str, output_filename: str):
         local_part = os.path.join(parts_dir, dest_filename)
         s3.download_file(BUCKET_NAME, k, local_part)
 
-    print("   🔨 DuckDB is combining and deduplicating into a single Parquet file...")
+    print("   🔨 DuckDB is combining parts into a single Parquet file...")
     local_output = os.path.join(TEMP_DIR, output_filename)
     
+    # ✅ FORCE CLEANUP OF ZOMBIE TEMP FILES
+    if os.path.exists('./ducktmp'):
+        shutil.rmtree('./ducktmp', ignore_errors=True)
+    os.makedirs('./ducktmp', exist_ok=True)
+
     con = duckdb.connect('etl_temp.db')
     con.execute("PRAGMA temp_directory='./ducktmp';")
     con.execute("PRAGMA memory_limit='6GB';")
-    con.execute("PRAGMA preserve_insertion_order=false;") 
+    con.execute("PRAGMA threads=4;") 
     
+    # ✅ FIX: Removed the massive GROUP BY. Athena already did the math!
+    # DuckDB now streams the data incredibly fast with almost 0 RAM/Disk bloat.
     con.execute(f"""
         COPY (
-            SELECT
-                contract_id,
-                MAX(last_action_date) AS last_action_date,
-                MIN(start_date) AS start_date,
-                SUM(total_spend) AS total_spend,
-                ANY_VALUE(vendor_name) AS vendor_name,
-                ANY_VALUE(vendor_cage) AS vendor_cage,
-                ANY_VALUE(sub_agency) AS sub_agency,
-                ANY_VALUE(parent_agency) AS parent_agency,
-                ANY_VALUE(description) AS description,
-                ANY_VALUE(platform_family) AS platform_family,
-                ANY_VALUE(market_segment) AS market_segment,
-                ANY_VALUE(tech_type) AS tech_type,
-                ANY_VALUE(capability_name) AS capability_name,
-                ANY_VALUE(naics_code) AS naics_code,
-                ANY_VALUE(psc) AS psc,
-                ANY_VALUE(city) AS city,
-                ANY_VALUE(state) AS state,
-                ANY_VALUE(country) AS country,
-                ANY_VALUE(pricing_type) AS pricing_type,
-                ANY_VALUE(competition_type) AS competition_type,
-                ANY_VALUE(offers_count) AS offers_count,
-                ANY_VALUE(set_aside_type) AS set_aside_type,
-                ANY_VALUE(solicitation_id) AS solicitation_id,
-                MAX(year) AS year
-            FROM read_parquet('{parts_dir}/*.parquet')
-            GROUP BY contract_id
+            SELECT * FROM read_parquet('{parts_dir}/*.parquet')
         ) TO '{local_output}' (FORMAT PARQUET, COMPRESSION ZSTD);
     """)
     con.close()
 
     print(f"   ⬆️ Uploading consolidated {output_filename} to S3...")
     s3.upload_file(local_output, BUCKET_NAME, f"{CACHE_PREFIX}{output_filename}")
-
-    os.remove(local_output)
-    shutil.rmtree(parts_dir)
     print(f"   ✅ Successfully published consolidated {output_filename}!")
+
+    if os.path.exists(local_output):
+        os.remove(local_output)
+    if os.path.exists(parts_dir):
+        shutil.rmtree(parts_dir, ignore_errors=True)
+
 
 # AWS Clients
 session = boto3.Session(region_name='us-east-1')
@@ -311,7 +295,7 @@ def optimize_and_upload():
             SELECT 
                 vendor_name, cage_code, sub_agency, market_segment, platform_family,
                 psc_code, psc_description, CAST(naics_code AS VARCHAR) as naics_code,
-                naics_description, city, state, month, year, total_spend, contract_count
+                naics_description, city, state, country, month, year, total_spend, contract_count
             FROM dashboard_summary_v2
         """)
 
@@ -563,32 +547,87 @@ def optimize_and_upload():
     # ### [NEW] FETCH & UPLOAD TRANSACTIONS (Last 7 Years) ###
     # This powers the instant "Awards" tab without hitting Athena
     # ---------------------------------------------------------
-    # ### [UPDATED] FETCH & UPLOAD TRANSACTIONS (5 Years) ###
+# ---------------------------------------------------------
+    # ### [UPDATED] FETCH & UPLOAD TRANSACTIONS (5 Years - OOM SAFE) ###
     # ---------------------------------------------------------
-    # ### [UPDATED] FETCH & UPLOAD TRANSACTIONS (5 Years) ###
-    print("📥 Fetching Transaction History (Last 5 Years)...")
+    print("📥 Fetching Transaction History (Last 5 Years, OOM Safe)...")
     if is_cache_fresh("transactions.parquet", max_age_hours=12):
         print("   ↩️ Skipping transactions.parquet (Fresh file already in S3)")
-        df_transactions = pd.DataFrame()
     else:
-        df_transactions = run_query("""
+        print("📦 Athena UNLOAD -> Parquet (avoids local RAM blowup)...")
+        
+        # ✅ Added geo, nsn, and part_number
+        txn_sql = """
             SELECT 
                 contract_id, action_date, vendor_name, vendor_cage, 
                 sub_agency, parent_agency, description, spend_amount, 
                 naics_code, psc, platform_family, market_segment, year,
+                nsn, part_number, city, state, country,
                 SUBSTR(REGEXP_REPLACE(nsn, '[^0-9]', ''), -9) AS niin
-            FROM dashboard_master_view
+            FROM "market_intel_gold"."dashboard_master_view"
             WHERE year >= 2021
-        """)
-    
-    if not df_transactions.empty:
-        df_transactions['spend_amount'] = pd.to_numeric(df_transactions['spend_amount'], errors='coerce').fillna(0).astype('float32')
-        df_transactions['year'] = pd.to_numeric(df_transactions['year'], errors='coerce').fillna(0).astype('int16')
-        for col in ['vendor_name', 'vendor_cage', 'sub_agency', 'parent_agency', 'platform_family']:
-            if col in df_transactions.columns:
-                df_transactions[col] = df_transactions[col].astype(str).str.upper().str.strip()
+        """
 
-    upload_df(df_transactions, "transactions.parquet")
+        txn_unload_prefix = f"{UNLOAD_OUTPUT_PREFIX}transactions/{uuid.uuid4().hex}/"
+        txn_out_prefix = unload_to_s3(txn_sql, txn_unload_prefix)
+
+        # --- DuckDB Stitching (Zero Pandas = Zero OOM) ---
+        print("   🦆 Merging Transactions using DuckDB...")
+        txn_parts_dir = os.path.join(TEMP_DIR, "duckdb_txn_parts_" + uuid.uuid4().hex)
+        os.makedirs(txn_parts_dir, exist_ok=True)
+
+        all_keys = list(list_s3_keys(txn_out_prefix))
+        part_keys = [k for k in all_keys if not k.endswith("/")]
+
+        print(f"   ⬇️ Downloading {len(part_keys)} parts locally...")
+        for k in part_keys:
+            dest_filename = os.path.basename(k)
+            if not dest_filename.endswith(".parquet"):
+                dest_filename += ".parquet"
+            s3.download_file(BUCKET_NAME, k, os.path.join(txn_parts_dir, dest_filename))
+
+        txn_local_output = os.path.join(TEMP_DIR, "transactions.parquet")
+        
+        con = duckdb.connect('etl_temp.db')
+        con.execute("PRAGMA temp_directory='./ducktmp';")
+        con.execute("PRAGMA memory_limit='6GB';")
+        
+        # ✅ Replaces your old Pandas logic to clean strings and cast types safely inside DuckDB
+        con.execute(f"""
+            COPY (
+                SELECT 
+                    contract_id,
+                    action_date,
+                    UPPER(TRIM(vendor_name)) as vendor_name,
+                    UPPER(TRIM(vendor_cage)) as vendor_cage,
+                    UPPER(TRIM(sub_agency)) as sub_agency,
+                    UPPER(TRIM(parent_agency)) as parent_agency,
+                    description,
+                    CAST(spend_amount AS REAL) as spend_amount,
+                    naics_code,
+                    psc,
+                    UPPER(TRIM(platform_family)) as platform_family,
+                    market_segment,
+                    CAST(year AS INTEGER) as year,
+                    nsn,
+                    part_number,
+                    city,
+                    state,
+                    country,
+                    niin
+                FROM read_parquet('{txn_parts_dir}/*.parquet')
+            ) TO '{txn_local_output}' (FORMAT PARQUET, COMPRESSION ZSTD);
+        """)
+        con.close()
+
+        print(f"   ⬆️ Uploading transactions.parquet to S3...")
+        s3.upload_file(txn_local_output, BUCKET_NAME, f"{CACHE_PREFIX}transactions.parquet")
+        print("   ✅ Successfully published transactions.parquet!")
+
+        if os.path.exists(txn_local_output):
+            os.remove(txn_local_output)
+        if os.path.exists(txn_parts_dir):
+            shutil.rmtree(txn_parts_dir, ignore_errors=True)
 
     # ---------------------------------------------------------
     # ### [UPDATED] FETCH ROLLED-UP CONTRACTS (Preserves ALL Business Logic) ###

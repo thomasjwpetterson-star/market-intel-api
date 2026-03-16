@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, date
 import boto3
@@ -29,6 +29,8 @@ import random
 import anyio 
 import math
 import numpy as np
+from pydantic import BaseModel
+import uuid
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -1223,6 +1225,7 @@ def reload_all_data():
             for view_name, file_name in views_to_create:
                 file_path = str((LOCAL_CACHE_DIR / file_name).resolve())
                 if os.path.exists(file_path):
+                    conn.execute(f"DROP VIEW IF EXISTS {view_name};")
                     conn.execute(f"DROP TABLE IF EXISTS {view_name};")
                     conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{file_path}');")
 
@@ -1269,6 +1272,7 @@ def reload_all_data():
             # ✅ NEW: KPIs as a Native Table
             # Restore KPIs as a View
             kpis_path = str((LOCAL_CACHE_DIR / "kpis.parquet").resolve())
+            conn.execute("DROP VIEW IF EXISTS v_kpis;")
             conn.execute("DROP TABLE IF EXISTS v_kpis;")
             if os.path.exists(kpis_path):
                 conn.execute(f"""
@@ -1440,6 +1444,7 @@ def reload_all_data():
                     summary_temp_path.replace(summary_final_path) 
                 
                 # Drop the table to clear RAM and restore the lightweight View
+                conn.execute("DROP VIEW IF EXISTS v_summary;")
                 conn.execute("DROP TABLE IF EXISTS v_summary;")
                 conn.execute(
                     f"CREATE OR REPLACE VIEW v_summary AS SELECT * FROM read_parquet('{str(summary_final_path)}');"
@@ -1604,6 +1609,187 @@ def reload_all_data():
     finally:
         RELOAD_LOCK.release()
 
+# ==========================================
+# DATA EXPLORER & EXPORT API (✅ NEW BLOCK)
+# ==========================================
+
+class ExplorerRequest(BaseModel):
+    table: str = "v_contracts_rolled"
+    columns: List[str]
+    filters: Dict[str, Any]
+    subscription_status: str = "free"
+
+ALLOWED_EXPLORER_TABLES = {"v_contracts_rolled", "v_transactions", "v_summary"}
+# ✅ UPDATED: Added NSN, Part Number, and Geographic columns from the new ETL build
+ALLOWED_EXPLORER_COLUMNS = {
+    "contract_id", "year", "action_date", "last_action_date", "total_spend", "spend_amount", "contract_count",
+    "vendor_cage", "cage_code", "vendor_name", "sub_agency", "parent_agency", "clean_parent",
+    "psc", "psc_code", "psc_description", "naics_code", "naics_description",
+    "platform_family", "market_segment", "description",
+    "city", "state", "country", "piid", "idv_piid", "transaction_id",
+    "nsn", "part_number", "pricing_type", "set_aside_type", "competition_type", "offers_count"
+}
+
+def build_explorer_query(payload: ExplorerRequest, row_limit: int):
+    table = payload.table if payload.table in ALLOWED_EXPLORER_TABLES else "v_contracts_rolled"
+
+    safe_cols = [c for c in payload.columns if c in ALLOWED_EXPLORER_COLUMNS]
+    if not safe_cols:
+        safe_cols = ["vendor_name", "vendor_cage", "total_spend"]
+
+    select_clause = ", ".join(safe_cols)
+    where_parts = ["1=1"]
+    params = []
+    has_valid_filter = False
+
+    # ✅ THE NEW VALUE FILTER LOGIC
+    # It automatically knows which spend column to target based on the current table
+    spend_col = "spend_amount" if table == "v_transactions" else "total_spend"
+    
+    if "min_spend" in payload.filters:
+        try:
+            where_parts.append(f"{spend_col} >= ?")
+            params.append(float(payload.filters["min_spend"]))
+            has_valid_filter = True
+        except ValueError:
+            pass
+            
+    if "max_spend" in payload.filters:
+        try:
+            where_parts.append(f"{spend_col} <= ?")
+            params.append(float(payload.filters["max_spend"]))
+            has_valid_filter = True
+        except ValueError:
+            pass
+
+    # The standard loop for exact text matches
+    for col, val in payload.filters.items():
+        # Skip the custom range filters so they don't break the text loop
+        if col in ["min_spend", "max_spend"]:
+            continue
+            
+        if col in ALLOWED_EXPLORER_COLUMNS and val is not None and str(val).strip() != "":
+            has_valid_filter = True
+            
+            if isinstance(val, list) and len(val) > 0:
+                if all(isinstance(v, int) for v in val):
+                    placeholders = ",".join(["?"] * len(val))
+                    where_parts.append(f"{col} IN ({placeholders})")
+                    params.extend(val)
+                else:
+                    placeholders = ",".join(["?"] * len(val))
+                    where_parts.append(f"UPPER(CAST({col} AS VARCHAR)) IN ({placeholders})")
+                    params.extend([str(v).strip().upper() for v in val])
+            
+            elif not isinstance(val, list):
+                where_parts.append(f"UPPER(CAST({col} AS VARCHAR)) = ?")
+                params.append(str(val).strip().upper())
+
+    if not has_valid_filter and table in {"v_contracts_rolled", "v_transactions"}:
+        raise HTTPException(status_code=400, detail="At least one filter is required to explore raw granular data.")
+
+    where_clause = " AND ".join(where_parts)
+
+    sql = f"SELECT {select_clause} FROM {table} WHERE {where_clause} LIMIT {row_limit}"
+    return sql, params
+
+@app.post("/api/explorer/preview")
+def explorer_preview(payload: ExplorerRequest):
+    sql, params = build_explorer_query(payload, row_limit=50)
+    try:
+        df = duck_fetch_df(sql, params)
+        if df.empty:
+            return []
+        return df_sanitize_for_json(df).to_dict(orient="records")
+    except Exception as e:
+        logger.error(f"Explorer Preview Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate data preview.")
+
+def cleanup_temp_file(filepath: str):
+    try:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+            logger.info(f"Cleaned up temp export file: {filepath}")
+    except Exception as e:
+        logger.error(f"Failed to delete temp file {filepath}: {e}")
+
+@app.get("/api/explorer/vendors/search")
+def explorer_vendor_search(q: str = Query(..., min_length=2)):
+    """Powers the ultra-fast React Typeahead for Vendor selection"""
+    # ✅ FIX: Added GROUP BY cage_code to collapse multiple messy names into one clean result
+    sql = """
+        SELECT MAX(vendor_name) as vendor_name, cage_code, MAX(city) as city, MAX(state) as state 
+        FROM v_summary 
+        WHERE UPPER(vendor_name) LIKE ? OR UPPER(cage_code) LIKE ? 
+        GROUP BY cage_code
+        LIMIT 10
+    """
+    params = [f"%{q.upper()}%", f"%{q.upper()}%"]
+    try:
+        df = duck_fetch_df(sql, params)
+        if df.empty:
+            return []
+        return df_sanitize_for_json(df).to_dict(orient="records")
+    except Exception as e:
+        logger.error(f"Vendor Autocomplete Error: {e}")
+        raise HTTPException(status_code=500, detail="Vendor search failed")
+
+@app.get("/api/explorer/taxonomy/search")
+def explorer_taxonomy_search(type: str = Query(...), q: str = Query(..., min_length=2)):
+    """✅ NEW: Powers the Autocomplete Dropdowns for NAICS and PSC codes"""
+    col_code = "naics_code" if type == "naics" else "psc_code"
+    col_desc = "naics_description" if type == "naics" else "psc_description"
+    
+    sql = f"""
+        SELECT {col_code} as code, MAX({col_desc}) as description
+        FROM v_summary 
+        WHERE {col_code} IS NOT NULL 
+          AND (UPPER(CAST({col_code} AS VARCHAR)) LIKE ? OR UPPER({col_desc}) LIKE ?)
+        GROUP BY {col_code}
+        LIMIT 15
+    """
+    params = [f"%{q.upper()}%", f"%{q.upper()}%"]
+    try:
+        df = duck_fetch_df(sql, params)
+        if df.empty:
+            return []
+        return df_sanitize_for_json(df).to_dict(orient="records")
+    except Exception as e:
+        logger.error(f"Taxonomy Autocomplete Error: {e}")
+        raise HTTPException(status_code=500, detail="Taxonomy search failed")
+
+@app.post("/api/explorer/export")
+def explorer_export(payload: ExplorerRequest, background_tasks: BackgroundTasks):
+    
+    # ✅ THE STRIPE/SUPABASE LIMITS
+    # Only paying customers with cleared payments get the 5k limit.
+    # 'trialing', 'free', 'past_due', 'canceled', etc. all get clamped to 1k.
+    if payload.subscription_status == "active":
+        export_limit = 5000
+    else:
+        export_limit = 1000 
+
+    sql, params = build_explorer_query(payload, row_limit=export_limit)
+    
+    filename = f"mimir_export_{uuid.uuid4().hex[:8]}.csv"
+    filepath = str((LOCAL_CACHE_DIR / filename).resolve())
+    
+    try:
+        with DUCK_LOCK:
+            conn = ensure_duck_conn()
+            copy_sql = f"COPY ({sql}) TO '{filepath}' (HEADER, DELIMITER ',');"
+            conn.execute(copy_sql, params)
+        
+        background_tasks.add_task(cleanup_temp_file, filepath)
+        
+        return FileResponse(
+            path=filepath, 
+            media_type='text/csv', 
+            filename=f"mimir_data_export.csv"
+        )
+    except Exception as e:
+        logger.error(f"Explorer Export Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate export file.")
 
 
 # ==========================================
