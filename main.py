@@ -75,7 +75,7 @@ DUCK_INIT_LOCK = threading.RLock()
 
 # ✅ Tiny execution pool to allow a little concurrency without opening many connections
 # Pool size 1 is safest/lowest RAM; 2 is usually fine.
-DUCK_POOL_SIZE = int(os.getenv("DUCK_POOL_SIZE", "1"))
+DUCK_POOL_SIZE = int(os.getenv("DUCK_POOL_SIZE", "3"))
 _DUCK_POOL = None  # will be a queue.Queue of connections
 
 def _apply_duck_pragmas(conn: duckdb.DuckDBPyConnection):
@@ -161,7 +161,7 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
     # Read mode: use pool
     c = None
     try:
-        c = _DUCK_POOL.get(timeout=float(os.getenv("DUCK_POOL_TIMEOUT", "5")))
+        c = _DUCK_POOL.get(timeout=float(os.getenv("DUCK_POOL_TIMEOUT", "15")))
         # Use a cursor for isolation of statement state
         df = c.cursor().execute(sql, params).fetchdf()
         return df_sanitize_for_json(df)
