@@ -835,7 +835,8 @@ def query_summary_df(
     if not ignore_cap and limit > MAX_JSON_ROWS:
         limit = MAX_JSON_ROWS
 
-    sql = f"SELECT {select_sql} FROM read_parquet(?) WHERE {where_sql}"
+    # ✅ OPTIMIZED: Query the pre-built memory view instead of reading the parquet file
+    sql = f"SELECT {select_sql} FROM v_summary WHERE {where_sql}"
     
     if group_by_sql:
         sql += f" GROUP BY {group_by_sql}"
@@ -843,7 +844,7 @@ def query_summary_df(
     if order_by_sql:
         sql += f" ORDER BY {order_by_sql}"
         
-    local_params = [str(path)] + list(params)
+    local_params = list(params)
 
     if limit > 0:
         sql += " LIMIT ?"
@@ -852,10 +853,9 @@ def query_summary_df(
         sql += " OFFSET ?"
         local_params.append(offset)
 
-    with DUCK_LOCK:
-        ensure_duck_conn() 
-        df = DUCK_CONN.execute(sql, local_params).fetchdf()
-        return df_sanitize_for_json(df)
+    # ✅ OPTIMIZED: Use the connection pool (no locks!) so queries run simultaneously
+    df = duck_fetch_df(sql, local_params)
+    return df
 
 
 
@@ -972,13 +972,22 @@ def get_parent_aggregate_stats(parent_name: str, years: Optional[List[int]] = No
     )
     top_naics: List[str] = []
     if not naics.empty and "naics_code" in naics.columns:
-        for r in naics.itertuples(index=False):
-            code = str(getattr(r, "naics_code", "")).strip()
-            desc = str(getattr(r, "naics_description", "")).strip() if "naics_description" in naics.columns else ""
-            if code and desc and desc.lower() != "nan":
-                top_naics.append(f"{code} - {desc}")
-            elif code:
-                top_naics.append(code)
+        # Vectorized string formatting
+        naics["naics_code"] = naics["naics_code"].astype(str).str.strip()
+        
+        if "naics_description" in naics.columns:
+            naics["naics_description"] = naics["naics_description"].astype(str).str.strip()
+            
+            # Create boolean mask for valid descriptions
+            valid_desc = (naics["naics_description"] != "") & (naics["naics_description"].str.lower() != "nan")
+            
+            # Apply formatting conditionally without loops
+            naics.loc[valid_desc, "formatted"] = naics["naics_code"] + " - " + naics["naics_description"]
+            naics.loc[~valid_desc, "formatted"] = naics["naics_code"]
+            
+            top_naics = naics["formatted"].tolist()
+        else:
+            top_naics = naics["naics_code"].tolist()
 
     plats = query_summary_df(
         where_sql, params,
@@ -1862,19 +1871,21 @@ def get_filter_options(
         opts["top_parents"] = top_df["label"].dropna().astype(str).tolist() if not top_df.empty else []
         return opts
 
+
     # With filters: compute option lists from filtered universe (DuckDB DISTINCTs)
     where_sql, params = build_summary_where(years, filters)
 
-    agencies_df = query_summary_df(where_sql, params, "DISTINCT sub_agency", order_by_sql="sub_agency ASC", limit=5000)
-    domains_df  = query_summary_df(where_sql, params, "DISTINCT market_segment", order_by_sql="market_segment ASC", limit=5000)
-    plats_df    = query_summary_df(where_sql, params, "DISTINCT platform_family", order_by_sql="platform_family ASC", limit=5000)
+    # Run all 4 aggregations concurrently
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        f_agencies = executor.submit(query_summary_df, where_sql, params, "DISTINCT sub_agency", order_by_sql="sub_agency ASC", limit=5000)
+        f_domains  = executor.submit(query_summary_df, where_sql, params, "DISTINCT market_segment", order_by_sql="market_segment ASC", limit=5000)
+        f_plats    = executor.submit(query_summary_df, where_sql, params, "DISTINCT platform_family", order_by_sql="platform_family ASC", limit=5000)
+        f_psc      = executor.submit(query_summary_df, where_sql, params, "DISTINCT psc_code, psc_description", order_by_sql="psc_code ASC, psc_description ASC", limit=5000)
 
-    psc_df = query_summary_df(
-        where_sql, params,
-        "DISTINCT psc_code, psc_description",
-        order_by_sql="psc_code ASC, psc_description ASC",
-        limit=5000
-    )
+        agencies_df = f_agencies.result()
+        domains_df  = f_domains.result()
+        plats_df    = f_plats.result()
+        psc_df      = f_psc.result()
 
     return {
         "years": (GLOBAL_CACHE.get("options", {}) or {}).get("years", []),
@@ -2115,20 +2126,17 @@ def get_dashboard_subsidiaries(
     if df.empty:
         return []
 
-    out = []
-    for r in df.itertuples(index=False):
-        cage_val = str(getattr(r, "cage_code", "")).strip().upper()
-        loc = loc_map.get(cage_val, {}) or {}
-        out.append({
-            "cage": cage_val,
-            "name": str(getattr(r, "vendor_name", "")),
-            "total_obligations": float(getattr(r, "total_spend", 0) or 0),
-            "contract_count": int(getattr(r, "contract_count", 0) or 0),
-            "city": str(loc.get("city", "")) if loc.get("city") else "N/A",
-            "state": str(loc.get("state", "")) if loc.get("state") else "N/A",
-        })
+    # Fast vectorized cleanup and mapping
+    df["cage"] = df["cage_code"].astype(str).str.strip().str.upper()
+    df["name"] = df["vendor_name"].astype(str)
+    df["total_obligations"] = df["total_spend"].fillna(0).astype(float)
+    df["contract_count"] = df["contract_count"].fillna(0).astype(int)
+    
+    # Map location data vector-style
+    df["city"] = df["cage"].apply(lambda c: str(loc_map.get(c, {}).get("city", "") or "N/A"))
+    df["state"] = df["cage"].apply(lambda c: str(loc_map.get(c, {}).get("state", "") or "N/A"))
 
-    return out
+    return df[["cage", "name", "total_obligations", "contract_count", "city", "state"]].to_dict(orient="records")
 
 
 
@@ -2167,14 +2175,13 @@ def get_top_vendors(
     if df.empty:
         return []
 
-    out = []
-    for r in df.itertuples(index=False):
-        out.append({
-            "vendor": str(getattr(r, "vendor", "")),
-            "spend_m": float(getattr(r, "total_spend", 0.0) or 0.0) / 1_000_000.0,
-            "contracts": int(getattr(r, "contract_count", 0) or 0),
-        })
-    return out
+    # Vectorized casting and math (C-speed)
+    df["vendor"] = df["vendor"].astype(str)
+    df["spend_m"] = (df["total_spend"].fillna(0).astype(float) / 1_000_000.0)
+    df["contracts"] = df["contract_count"].fillna(0).astype(int)
+
+    # Export directly to list of dictionaries
+    return df[["vendor", "spend_m", "contracts"]].to_dict(orient="records")
 
 
 # --- REPLACE THIS FUNCTION IN API.PY ---
@@ -2228,16 +2235,16 @@ def get_market_distributions(
         if d.empty:
             return []
 
-        top = d.head(4)
+        top = d.head(4).copy() # Use .copy() to avoid SettingWithCopyWarning
         top_sum = float(top["spend"].sum()) if "spend" in top.columns else 0.0
         other_val = max(0.0, total - top_sum)
 
-        out = []
-        for r in top.itertuples(index=False):
-            out.append({
-                "label": str(getattr(r, "label", "")),
-                "value": round((float(getattr(r, "spend", 0.0) or 0.0) / total) * 100.0, 1),
-            })
+        # Vectorized percentage calculation
+        top["label"] = top["label"].astype(str)
+        top["value"] = ((top["spend"].fillna(0).astype(float) / total) * 100.0).round(1)
+
+        out = top[["label", "value"]].to_dict(orient="records")
+        
         if other_val > 0:
             out.append({"label": "Other", "value": round((other_val / total) * 100.0, 1)})
         return out
@@ -2302,17 +2309,16 @@ def get_map_data(
         # ✅ FIX 4: Sanitize NaNs
         df = df_sanitize_for_json(df)
         
-        out = []
-        for r in df.itertuples(index=False):
-            out.append({
-                "id": str(getattr(r, "id", "")),
-                "vendor": str(getattr(r, "vendor", "")),
-                "cage": str(getattr(r, "cage", "")),
-                "lat": float(getattr(r, "lat", 0.0)),
-                "lon": float(getattr(r, "lon", 0.0)),
-                "spend": float(getattr(r, "spend", 0.0)),
-            })
-        return out
+        # Cast columns vector-style to ensure JSON serialization succeeds
+        df["id"] = df["id"].astype(str)
+        df["vendor"] = df["vendor"].astype(str)
+        df["cage"] = df["cage"].astype(str)
+        df["lat"] = df["lat"].astype(float)
+        df["lon"] = df["lon"].astype(float)
+        df["spend"] = df["spend"].astype(float)
+
+        # Export directly to a list of dictionaries at C-speed
+        return df[["id", "vendor", "cage", "lat", "lon", "spend"]].to_dict(orient="records")
     except Exception as e:
         logger.error(f"Map Query Error: {e}")
         return []
@@ -2328,44 +2334,44 @@ def get_market_opportunities(
     platform: Optional[str] = None,
     vendor: Optional[str] = None,
 ):
+    # ✅ OPTIMIZED: Query the local DuckDB view instead of AWS Athena!
     query_base = """
     SELECT 
-        id as noticeid,
-        sol_num,
-        title,
-        agency,
-        deadline,
-        naics as naicscode,
-        set_aside_type as setaside,
-        poc_email as primarycontactemail,
-        COUNT(*) OVER() as total_matches
-    FROM "market_intel_gold"."view_unified_opportunities_dod"
-    WHERE 1=1
+        id as noticeid, sol_num, title, agency, deadline, 
+        naics as naicscode, set_aside_type as setaside, 
+        poc_email as primarycontactemail, COUNT(*) OVER() as total_matches
+    FROM v_opportunities
+    WHERE try_cast(deadline as date) >= current_date()
     """
 
-    conditions: List[str] = []
+    conditions = []
+    params = []
 
     if agency:
-        conditions.append(safe_contains_upper("agency", agency))
+        conditions.append("upper(agency) LIKE ? ESCAPE '#'")
+        params.append(f"%{agency.upper().replace('%', '#%').replace('_', '#_')}%")
 
-    def title_or_desc_contains(val: str) -> str:
-        return f"({safe_contains_upper('title', val)} OR {safe_contains_upper('description', val)})"
+    # Helper for searching title and description
+    def add_search(val: str):
+        conditions.append("(upper(title) LIKE ? ESCAPE '#' OR upper(description) LIKE ? ESCAPE '#')")
+        clean_val = f"%{val.upper().replace('%', '#%').replace('_', '#_')}%"
+        params.extend([clean_val, clean_val])
 
-    if domain:
-        conditions.append(title_or_desc_contains(domain))
-
-    if platform:
-        conditions.append(title_or_desc_contains(platform))
-
-    if vendor:
-        conditions.append(title_or_desc_contains(vendor))
+    if domain: add_search(domain)
+    if platform: add_search(platform)
+    if vendor: add_search(vendor)
 
     if conditions:
         query_base += " AND " + " AND ".join(conditions)
 
-    query_base += " ORDER BY try(from_iso8601_timestamp(deadline)) ASC NULLS LAST LIMIT 50"
+    query_base += " ORDER BY try_cast(deadline as date) ASC NULLS LAST LIMIT 50"
 
-    return run_athena_query(query_base)
+    # Use the blazing fast DuckDB connection pool
+    df = duck_fetch_df(query_base, params)
+    if df.empty:
+        return []
+        
+    return df.to_dict(orient="records")
 
 # ==========================================
 #        GLOBAL SEARCH (NEW)
