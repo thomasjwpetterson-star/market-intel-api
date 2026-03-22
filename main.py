@@ -1619,6 +1619,27 @@ def reload_all_data():
         RELOAD_LOCK.release()
 
 # ==========================================
+# CONSTANTS / HELPERS
+# ==========================================
+
+import re
+
+GENERIC_AWARD_DESC_REGEX = re.compile(
+    r"(LUBRICATING OIL|CLEANING COMPOUND|CORROSION PREVENTIV|"
+    r"\bADHESIVE\b|REMOVER,SEALANT|SEALING COMPOUND|"
+    r"\bDETECTOR,GAS\b|MILK OF MAGNESIA|PRIMER COATING|"
+    r"BRUSH PLATING SOLUT|THREADLOCKER ADHESI|"
+    r"GREASE,GENERAL PURP|SEALER,CHEMICAL|RESIN COATING|"
+    r"INSPECTION PENETRAN|PLUG,PROTECTIVE,DUS)",
+    re.IGNORECASE,
+)
+
+GENERIC_VARIANT_REGEX = re.compile(
+    r"GENERAL USE CONSUMABLES|GUC",
+    re.IGNORECASE,
+)
+
+# ==========================================
 # DATA EXPLORER & EXPORT API (✅ NEW BLOCK)
 # ==========================================
 
@@ -2903,13 +2924,17 @@ def get_platform_awards(
     offset: int = 0,
     years: Optional[List[int]] = Query(None),
     agency: Optional[str] = None,
-    threshold: Optional[float] = 0
+    threshold: Optional[float] = 0.5, # Defaults to $500k minimum
 ):
     safe_plat = sanitize(name)
-    
-    # ✅ FIX: Query DISK (transactions.parquet)
-    # Fetch recent awards for this platform directly from disk
-    limit_query = limit + offset + 100 # Fetch enough for pagination
+    limit_i = max(1, min(int(limit), 500))
+    offset_i = max(0, int(offset))
+
+    # Bumping this slightly. Since the 500k filter drops a lot of rows, 
+    # we need to pull more from the database initially to ensure we 
+    # have enough left over to fill the pagination limit.
+    limit_query = limit_i + offset_i + 1000
+
     df = get_subset_from_disk(
         "transactions.parquet",
         where_clause="platform_family = ?",
@@ -2918,36 +2943,43 @@ def get_platform_awards(
         limit=limit_query
     )
 
+    if df.empty:
+        return []
 
-    
-    if df.empty: return []
-
-    # Apply remaining filters in RAM (on the small subset)
     mask = pd.Series(True, index=df.index)
+
     if agency:
         safe_ag = sanitize(agency)
         if "sub_agency" in df.columns:
-            mask &= (df["sub_agency"] == safe_ag)
-    if years:
-        mask &= df["year"].isin(years)
-    if threshold and threshold > 0:
-        mask &= (df["spend_amount"] >= (threshold * 1_000_000))
+            mask &= (df["sub_agency"].fillna("") == safe_ag)
 
-    filtered = df[mask]
-    start = int(offset)
-    end = start + int(limit)
-    page = filtered.iloc[start:end]
+    if years and "year" in df.columns:
+        mask &= df["year"].isin(years)
+
+    # Apply the $500k minimum threshold
+    if threshold and threshold > 0 and "spend_amount" in df.columns:
+        mask &= (pd.to_numeric(df["spend_amount"], errors="coerce").fillna(0) >= (threshold * 1_000_000))
+
+    filtered = df.loc[mask].copy()
+
+    # Re-sort by date before pagination
+    if "action_date" in filtered.columns:
+        filtered = filtered.sort_values("action_date", ascending=False, kind="mergesort")
+
+    page = filtered.iloc[offset_i: offset_i + limit_i]
 
     return [
         {
-            "contract_id": r.contract_id,
-            "action_date": str(r.action_date),
-            "vendor_name": r.vendor_name,
-            "vendor_cage": r.vendor_cage,
-            "agency": r.sub_agency if hasattr(r, 'sub_agency') else r.parent_agency,
-            "description": r.description,
-            "spend": float(r.spend_amount),
-            "naics": r.naics_code
+            "contract_id": getattr(r, "contract_id", ""),
+            "action_date": str(getattr(r, "action_date", "")),
+            "vendor_name": getattr(r, "vendor_name", ""),
+            "vendor_cage": getattr(r, "vendor_cage", ""),
+            "agency": getattr(r, "sub_agency", "") if hasattr(r, "sub_agency") else getattr(r, "parent_agency", ""),
+            "description": getattr(r, "description", ""),
+            "spend": float(getattr(r, "spend_amount", 0) or 0),
+            "naics": getattr(r, "naics_code", ""),
+            "platform_family": getattr(r, "platform_family", ""),
+            "clean_variant": getattr(r, "clean_variant", "") if hasattr(r, "clean_variant") else "",
         }
         for r in page.itertuples()
     ]
