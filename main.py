@@ -648,7 +648,7 @@ def run_athena_query(query: str):
 
 
 ALLOWED_ORDER_BY = {
-    "action_date", "year", "total_spend", "spend_amount", "total_revenue"
+    "action_date", "year", "total_spend", "spend_amount", "total_revenue", "subaward_value"
 }
 
 def get_subset_from_disk(
@@ -1639,6 +1639,40 @@ GENERIC_VARIANT_REGEX = re.compile(
     re.IGNORECASE,
 )
 
+@app.get("/api/public/f35-supply-chain")
+def get_public_f35_supply_chain():
+    # ✅ FIX: Stripped out PSCs. Pure Prime-to-Sub flow-down.
+    sql = f"""
+        SELECT 
+            sub_name as sub_vendor,
+            sub_cage as sub_cage,
+            sub_city,
+            sub_state,
+            prime_name as prime_vendor,
+            array_to_string((array_agg(DISTINCT description))[1:3], ' | ') as description,
+            COUNT(*) as contract_count,
+            SUM(subaward_value) as subaward_value
+        FROM read_parquet(?)
+        WHERE UPPER(TRIM(platform_family)) = 'F-35'
+        GROUP BY sub_name, sub_cage, sub_city, sub_state, prime_name
+        ORDER BY subaward_value DESC
+    """
+    
+    path = LOCAL_CACHE_DIR / "network.parquet"
+    if not path.exists():
+        return []
+        
+    global DUCK_CONN
+    try:
+        with DUCK_LOCK:
+            ensure_duck_conn()
+            df = DUCK_CONN.execute(sql, [str(path)]).fetchdf()
+            df = df_sanitize_for_json(df)
+            return df.to_dict(orient="records")
+    except Exception as e:
+        logger.error(f"Public F-35 API Error: {e}")
+        return []
+    
 # ==========================================
 # DATA EXPLORER & EXPORT API (✅ NEW BLOCK)
 # ==========================================
@@ -2984,6 +3018,103 @@ def get_platform_awards(
         for r in page.itertuples()
     ]
 
+
+@app.get("/api/platform/subcontracts")
+def get_platform_subcontracts(
+    name: str,
+    psc: Optional[str] = None,
+    prime_vendor: Optional[str] = None,
+    sub_vendor: Optional[str] = None,
+    mode: str = "rollup", # "rollup" or "lines"
+    limit: int = 50,
+    offset: int = 0,
+):
+    safe_plat = sanitize(name)
+    limit_i = max(1, min(int(limit), 500))
+    offset_i = max(0, int(offset))
+
+    path = LOCAL_CACHE_DIR / "network.parquet"
+    if not path.exists():
+        return []
+
+    # Build WHERE clause dynamically
+    where_parts = ["platform_family = ?"]
+    params = [safe_plat]
+
+    if psc:
+        # ✅ FIX: The frontend sends "1620 - AIRCRAFT COMPONENTS", we extract just the 4-digit code to filter
+        raw_psc = str(psc).split(" - ")[0].strip()
+        where_parts.append("psc = ?")
+        params.append(sanitize(raw_psc))
+    if prime_vendor:
+        where_parts.append("prime_name = ?")
+        params.append(sanitize(prime_vendor))
+    if sub_vendor:
+        # ✅ FIX: Match against the exact site name
+        where_parts.append("sub_name = ?")
+        params.append(sanitize(sub_vendor))
+
+    where_clause = " AND ".join(where_parts)
+
+    global DUCK_CONN
+    try:
+        with DUCK_LOCK:
+            ensure_duck_conn()
+            
+            if mode == "rollup":
+                # ✅ FIX: Instantly join v_summary to get real English descriptions without re-running the ETL
+                sql = f"""
+                    WITH psc_mapping AS (
+                        SELECT psc_code, MAX(psc_description) as psc_desc 
+                        FROM v_summary 
+                        WHERE psc_code IS NOT NULL 
+                        GROUP BY psc_code
+                    ),
+                    grouped_network AS (
+                        SELECT 
+                            sub_name as sub_vendor,
+                            sub_cage as sub_cage,
+                            prime_name as prime_vendor,
+                            prime_cage as prime_cage,
+                            MAX(psc) as raw_psc,
+                            
+                            -- ✅ FIX: Grabs up to 3 unique descriptions and joins them with a pipe
+                            array_to_string((array_agg(DISTINCT description))[1:3], ' | ') as description,
+                            
+                            COUNT(*) as contract_count,
+                            SUM(subaward_value) as subaward_value,
+                            MAX(action_date) as action_date
+                        FROM read_parquet(?)
+                        WHERE {where_clause}
+                        GROUP BY sub_name, sub_cage, prime_name, prime_cage
+                    )
+                    SELECT 
+                        g.sub_vendor, g.sub_cage, g.prime_vendor, g.prime_cage,
+                        g.description, g.contract_count, g.subaward_value, g.action_date,
+                        COALESCE(g.raw_psc, 'UNKNOWN') || ' - ' || COALESCE(m.psc_desc, 'Unclassified Component') as psc
+                    FROM grouped_network g
+                    LEFT JOIN psc_mapping m ON g.raw_psc = m.psc_code
+                    ORDER BY g.subaward_value DESC
+                    LIMIT ? OFFSET ?
+                """
+            else:
+                # Raw individual lines
+                sql = f"""
+                    SELECT * FROM read_parquet(?) 
+                    WHERE {where_clause} 
+                    ORDER BY subaward_value DESC 
+                    LIMIT ? OFFSET ?
+                """
+                
+            all_params = (str(path),) + tuple(params) + (limit_i, offset_i)
+            df = DUCK_CONN.execute(sql, all_params).fetchdf()
+            df = df_sanitize_for_json(df)
+            
+            return df.to_dict(orient="records")
+            
+    except Exception as e:
+        logger.exception(f"DuckDB Subcontracts Query Failed")
+        return []
 
 
 

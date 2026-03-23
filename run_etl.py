@@ -396,18 +396,6 @@ def optimize_and_upload():
     else:
         df_risk = run_query('SELECT * FROM view_dashboard_risk_sidecar')
 
-    # ---------------------------------------------------------
-    # ### [UPDATED] FETCH NETWORK GRAPH DIRECTLY ###
-    print("📥 Fetching Network Graph...")
-    if is_cache_fresh("network.parquet"):
-        print("   ↩️ Skipping network.parquet")
-        df_network = pd.DataFrame()
-    else:
-        # ✅ Query the view directly, bypassing AWS Glue catalog race conditions
-        df_network = run_query('SELECT * FROM ref_company_network')
-        print(f"   ✅ Network Graph Loaded: {len(df_network):,} edges")
-    # ---------------------------------------------------------
-    # ---------------------------------------------------------
 
     # --- 2. OPTIMIZE & NORMALIZE ---
     print("⚡ Optimizing Data Types & Keys...")
@@ -453,22 +441,6 @@ def optimize_and_upload():
     if 'contract_count' in df_kpis.columns:
         df_kpis['contract_count'] = pd.to_numeric(df_kpis['contract_count'], errors='coerce').fillna(0).astype('int32')
 
-    # ---------------------------------------------------------
-    # ### [NEW 2/3] CLEAN NETWORK DATA ###
-    # We apply the same cleaning standards to the new dataframe
-    if not df_network.empty:
-        # Downcast floats
-        df_network['flow_amount_raw'] = pd.to_numeric(df_network['flow_amount_raw'], errors='coerce').fillna(0).astype('float32')
-        if 'flow_amount_capped' in df_network.columns:
-            df_network['flow_amount_capped'] = pd.to_numeric(df_network['flow_amount_capped'], errors='coerce').fillna(0).astype('float32')
-        
-        # Ensure join keys are uppercase strings
-        df_network['prime_gold_parent'] = df_network['prime_gold_parent'].fillna('UNKNOWN').astype(str).str.upper()
-        df_network['sub_gold_parent'] = df_network['sub_gold_parent'].fillna('UNKNOWN').astype(str).str.upper()
-
-        # Clean CAGEs using your helper function
-        if 'prime_cage' in df_network.columns: df_network['prime_cage'] = df_network['prime_cage'].apply(clean_cage)
-        if 'sub_cage' in df_network.columns: df_network['sub_cage'] = df_network['sub_cage'].apply(clean_cage)
     # ---------------------------------------------------------
 
     print("⚡ Pre-computing Search Indices for Dashboard...")
@@ -539,14 +511,67 @@ def optimize_and_upload():
     upload_df(df_kpis, "kpis.parquet")
     
     # ---------------------------------------------------------
-    # ### [NEW 3/3] UPLOAD NETWORK ###
-    upload_df(df_network, "network.parquet")
-    # ---------------------------------------------------------
-
-    # ---------------------------------------------------------
     # ### [NEW] FETCH & UPLOAD TRANSACTIONS (Last 7 Years) ###
     # This powers the instant "Awards" tab without hitting Athena
     # ---------------------------------------------------------
+    # ---------------------------------------------------------
+    # ### [UPDATED] FETCH NETWORK GRAPH (OOM-SAFE + PSC AWARE) ###
+    # ---------------------------------------------------------
+    print("📥 Fetching Network Graph (OOM Safe)...")
+    if is_cache_fresh("network.parquet", max_age_hours=12):
+        print("   ↩️ Skipping network.parquet (Fresh file already in S3)")
+    else:
+        print("📦 Athena UNLOAD -> Parquet (avoids local RAM blowup)...")
+        
+        # Join platform context AND apply data cleaning (replaces the old Pandas logic)
+        network_sql = """
+            SELECT 
+                UPPER(TRIM(n.prime_name)) as prime_name,
+                UPPER(TRIM(n.sub_name)) as sub_name,
+                COALESCE(UPPER(TRIM(n.prime_gold_parent)), 'UNKNOWN') as prime_gold_parent,
+                COALESCE(UPPER(TRIM(n.sub_gold_parent)), 'UNKNOWN') as sub_gold_parent,
+                
+                -- Replicates your clean_cage() function: Upper, Trim, and pad to 5 chars with leading zeros
+                LPAD(UPPER(TRIM(n.prime_cage)), 5, '0') as prime_cage,
+                LPAD(UPPER(TRIM(n.sub_cage)), 5, '0') as sub_cage,
+                
+                n.contract_id,
+                n.invoice_id,
+                n.subaward_description as description,
+                n.subaward_action_date as action_date,
+                
+                -- Downcast to save RAM (replaces .astype('int16') and .astype('float32'))
+                CAST(n.year AS INTEGER) as year,
+                CAST(COALESCE(n.flow_amount_capped, 0) AS REAL) as subaward_value,
+                
+                UPPER(TRIM(n.sub_city)) as sub_city,
+                UPPER(TRIM(n.sub_state)) as sub_state,
+                
+                p.platform_family,
+                p.psc,
+                p.market_segment
+            FROM "market_intel_gold"."ref_company_network" n
+            INNER JOIN (
+                -- Group by contract_id to ensure a clean 1-to-1 join
+                SELECT 
+                    contract_id, 
+                    MAX_BY(UPPER(TRIM(platform_family)), action_date) as platform_family,
+                    MAX_BY(UPPER(TRIM(psc)), action_date) as psc,
+                    MAX_BY(UPPER(TRIM(market_segment)), action_date) as market_segment
+                FROM "market_intel_gold"."dashboard_master_view"
+                WHERE platform_family IS NOT NULL AND platform_family != 'NONE'
+                GROUP BY contract_id
+            ) p ON n.contract_id = p.contract_id
+        """
+
+        network_unload_prefix = f"{UNLOAD_OUTPUT_PREFIX}network/{uuid.uuid4().hex}/"
+        network_out_prefix = unload_to_s3(network_sql, network_unload_prefix)
+
+        # Utilize your existing DuckDB helper to stitch and upload
+        merge_unload_parts_with_duckdb(network_out_prefix, "network.parquet")
+
+
+
 # ---------------------------------------------------------
     # ### [UPDATED] FETCH & UPLOAD TRANSACTIONS (5 Years - OOM SAFE) ###
     # ---------------------------------------------------------
