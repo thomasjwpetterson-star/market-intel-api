@@ -1578,6 +1578,20 @@ def reload_all_data():
                     ORDER BY score DESC
                     LIMIT 2000
                 )
+                UNION ALL
+                SELECT * FROM (
+                    -- 5. OPPORTUNITIES (No Limit, Instant Pipeline Search)
+                    SELECT 
+                        title AS label, 
+                        sol_num AS value, 
+                        'OPPORTUNITY' AS type, 
+                        999999999.0 AS score, -- High artificial score so active bids show at the top
+                        '' AS cage, 
+                        agency AS city, -- Stashing the agency name in 'city' so we can display it in the UI
+                        '' AS state
+                    FROM v_opportunities 
+                    WHERE title IS NOT NULL AND TRIM(CAST(title AS VARCHAR)) <> '' 
+                )
                 -- 5. FINAL COMBINED SORT (Mirrors your python: search_list.sort(...))
                 ORDER BY score DESC;
             """)
@@ -2434,31 +2448,27 @@ def get_market_opportunities(
 
 @app.get("/api/search/global")
 def search_global(q: str):
-    """
-    Unified search: Checks Name, CAGE, and now displays Location.
-    (Upgraded to Native DuckDB for zero-RAM overhead)
-    """
     if not q or len(q) < 2: return []
     clean_q = sanitize(q)
     results = []
 
-    # 1. FAST NATIVE DUCKDB SEARCH
+    # 1. FAST NATIVE DUCKDB SEARCH (Now includes Opportunities!)
     try:
-        # Parameterized query protects against SQL injection and wildcards
-        search_val = f"%{clean_q}%"
+        # Wildcard at the end for CAGE, both sides for text
+        search_val_text = f"%{clean_q}%"
+        search_val_cage = f"{clean_q}%" 
         
         query = """
             SELECT type, label, value, score, cage, city, state
             FROM search_index
-            WHERE label ILIKE ? OR cage ILIKE ?
+            WHERE label ILIKE ? OR cage ILIKE ? OR value ILIKE ?
             ORDER BY score DESC
             LIMIT 8
         """
         
-        # duck_fetch_df safely grabs a pooled connection
-        df_search = duck_fetch_df(query, [search_val, search_val])
+        # Also passing the text wildcard to the 'value' column so users can search by sol_num
+        df_search = duck_fetch_df(query, [search_val_text, search_val_cage, search_val_text])
         
-        # Fast iteration over the max 8 rows returned
         for r in df_search.itertuples(index=False):
             item_type = getattr(r, "type", "")
             item_label = getattr(r, "label", "")
@@ -2468,18 +2478,15 @@ def search_global(q: str):
             item_city = getattr(r, "city", "")
             item_state = getattr(r, "state", "")
 
-            spend_str = f"${item_score/1_000_000:,.1f}M" if item_score else ""
+            spend_str = f"${item_score/1_000_000:,.1f}M" if item_score and item_score < 999999999 else ""
             
-            # --- SMART LABELING WITH LOCATION ---
-            if item_type == 'CHILD' and item_cage and item_cage != 'AGGREGATE':
-                # ✅ Checks for location data seamlessly
-                if item_city and item_state:
-                    loc_str = f" • {item_city}, {item_state}"
-                elif item_city:
-                    loc_str = f" • {item_city}"
-                else:
-                    loc_str = ""
+            # --- SMART LABELING ---
+            if item_type == 'OPPORTUNITY':
+                # We stashed the Agency in the city column during the UNION
+                sub_label = f"Bid • {item_city}" 
 
+            elif item_type == 'CHILD' and item_cage and item_cage != 'AGGREGATE':
+                loc_str = f" • {item_city}, {item_state}" if item_city and item_state else f" • {item_city}" if item_city else ""
                 sub_label = f"{spend_str}{loc_str} • CAGE: {item_cage}"
 
             elif item_type == 'PARENT':
@@ -2499,7 +2506,6 @@ def search_global(q: str):
         logger.error(f"Native search query failed: {e}")
 
     # 2. NSN / NIIN Detection (Regex)
-    # Matches 9-digit NIINs or 13-digit NSNs
     nsn_pattern = r'^\d{4}-?\d{2}-?\d{3}-?\d{4}$|^\d{9}$|^\d{13}$'
     if re.match(nsn_pattern, q.strip()):
         results.insert(0, {
@@ -2509,28 +2515,7 @@ def search_global(q: str):
             "sub_label": "Supply Chain Search"
         })
 
-    # 3. LIVE PIPELINE SEARCH (Athena)
-    # Only run if the query looks specific enough (and isn't just a CAGE code)
-    if len(clean_q) > 3 and not re.match(r"^\d{5}$", clean_q):
-        try:
-            qv = clean_q.upper()
-            opp_query = f"""
-            SELECT title, sol_num, agency
-            FROM "market_intel_gold"."view_unified_opportunities_dod"
-            WHERE {safe_contains_upper("title", qv)} OR {safe_contains_upper("sol_num", qv)}
-            ORDER BY try(from_iso8601_timestamp(deadline)) ASC NULLS LAST
-            LIMIT 3
-            """
-            opps = run_athena_query(opp_query)
-            for o in opps:
-                results.append({
-                    "type": "OPPORTUNITY",
-                    "label": o.get("title"),
-                    "value": o.get("sol_num"),
-                    "sub_label": f"Bid • {o.get('agency')}",
-                })
-        except Exception:
-            logger.exception("global search opportunity lookup failed")
+    # Athena block is completely DELETED! DuckDB handles everything now.
 
     return results
 
