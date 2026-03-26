@@ -394,7 +394,15 @@ def optimize_and_upload():
         print("   ↩️ Skipping risk.parquet")
         df_risk = pd.DataFrame()
     else:
-        df_risk = run_query('SELECT * FROM view_dashboard_risk_sidecar')
+        df_risk = run_query("""
+            SELECT 
+                r.*, 
+                UPPER(TRIM(m.vendor_cage)) as cage_code,
+                UPPER(TRIM(m.ultimate_parent_name)) as clean_parent
+            FROM "market_intel_gold"."view_dashboard_risk_sidecar" r
+            LEFT JOIN "market_intel_gold"."dashboard_master_view" m 
+                ON r.contract_id = m.contract_id
+        """)
 
 
     # --- 2. OPTIMIZE & NORMALIZE ---
@@ -543,6 +551,7 @@ def optimize_and_upload():
                 -- Downcast to save RAM (replaces .astype('int16') and .astype('float32'))
                 CAST(n.year AS INTEGER) as year,
                 CAST(COALESCE(n.flow_amount_capped, 0) AS REAL) as subaward_value,
+                CAST(COALESCE(n.flow_amount_raw, 0) AS REAL) as subaward_value_raw,
                 
                 UPPER(TRIM(n.sub_city)) as sub_city,
                 UPPER(TRIM(n.sub_state)) as sub_state,
@@ -880,6 +889,35 @@ def optimize_and_upload():
     upload_df(df_products, "products.parquet")
 
     # ---------------------------------------------------------
+    # ### [NEW] FETCH PLATFORM BOM (Weapon System Crosswalk) ###
+    # ---------------------------------------------------------
+    print("📥 Fetching Platform BOM Crosswalk (WSDC to NIIN)...")
+    if is_cache_fresh("platform_bom.parquet", max_age_hours=12):
+        print("   ↩️ Skipping platform_bom.parquet")
+    else:
+        print("📦 Athena UNLOAD -> Parquet...")
+        
+        bom_sql = """
+            WITH platform_codes AS (
+                SELECT DISTINCT 
+                    UPPER(TRIM(platform_family)) as platform_family,
+                    TRIM(CAST(wsdc_code_ref AS VARCHAR)) AS wsdc_code_ref
+                FROM "market_intel_silver"."ref_platform_map"
+                WHERE wsdc_code_ref IS NOT NULL
+            )
+            SELECT DISTINCT 
+                p.platform_family,
+                LPAD(CAST(w.niin AS VARCHAR), 9, '0') as niin
+            FROM "market_intel_silver"."ref_wsdc" w
+            INNER JOIN platform_codes p ON w.wsdc_code = p.wsdc_code_ref
+            WHERE w.niin IS NOT NULL AND w.niin <> ''
+        """
+
+        bom_unload_prefix = f"{UNLOAD_OUTPUT_PREFIX}platform_bom/{uuid.uuid4().hex}/"
+        bom_out_prefix = unload_to_s3(bom_sql, bom_unload_prefix)
+        merge_unload_parts_with_duckdb(bom_out_prefix, "platform_bom.parquet")
+
+    # ---------------------------------------------------------
     # ### [NEW] FETCH OPPORTUNITIES (Powers Pipeline Instantly) ###
     # ---------------------------------------------------------
     print("📥 Fetching Active Opportunities...")
@@ -912,8 +950,13 @@ def optimize_and_upload():
     # --- 4. Clear Local Cache ---
     if os.path.exists("./local_data"):
         try:
-            shutil.rmtree("./local_data")
-            print("🧹 Cleared stale local_data cache.")
+            for filename in os.listdir("./local_data"):
+                file_path = os.path.join("./local_data", filename)
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            print("🧹 Cleared stale files from local_data cache.")
         except Exception as e:
             print(f"⚠️ Could not clear local cache: {e}")
     

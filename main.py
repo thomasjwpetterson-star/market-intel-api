@@ -1111,7 +1111,8 @@ def reload_all_data():
             "products.parquet", "summary.parquet", "geo.parquet",
             "profiles.parquet", "risk.parquet", "network.parquet",
             "transactions.parquet", "opportunities.parquet", "kpis.parquet",
-            "nsn_summary.parquet" # ✅ Added here
+            "nsn_summary.parquet",
+            "platform_bom.parquet" # ✅ Added here
         ]
 
         def fetch_file(filename: str) -> str:
@@ -1228,7 +1229,8 @@ def reload_all_data():
                 ("v_geo", "geo.parquet"),
                 ("v_risk", "risk.parquet"),
                 ("v_opportunities", "opportunities.parquet"),
-                ("v_nsn_summary", "nsn_summary.parquet") # ✅ Added here
+                ("v_nsn_summary", "nsn_summary.parquet"),
+                ("v_platform_bom", "platform_bom.parquet") # ✅ Added here
             ]
             
             for view_name, file_name in views_to_create:
@@ -2735,72 +2737,35 @@ def get_platform_parts(
     years: Optional[List[int]] = Query(None),
     agency: Optional[str] = None
 ):
-    safe_plat = sanitize(name)
+    safe_plat = sanitize(name).upper()
     
-    # 1. Try Disk First (Fastest - Primary Platform Match)
-    df = pd.DataFrame()
-    try:
-        df = get_subset_from_disk(
-            "products.parquet",
-            where_clause="upper(platform_family) = ?", 
-            params=(safe_plat,),
-            limit=limit + offset + 200
-        )
-    except Exception:
-        df = pd.DataFrame()
-
-    # 2. ✅ RICH FALLBACK: If Disk returned nothing/little, use Athena to find Shared Parts
-    # This query JOINS the Platform Map -> NIINs -> Gold Data to get rich stats
-    if df.empty:
-        safe_val = sql_literal(safe_plat)
-        
-        query = f"""
-        WITH platform_codes AS (
-            -- 1. Get WSDC Codes for this Platform (e.g. F-35)
-            SELECT DISTINCT TRIM(CAST(wsdc_code_ref AS VARCHAR)) AS wsdc_code_ref
-            FROM "market_intel_silver"."ref_platform_map"
-            WHERE upper(platform_family) = {safe_val}
-        ),
-        target_niins AS (
-            -- 2. Expand WSDC to NIINs
-            SELECT DISTINCT LPAD(CAST(niin AS VARCHAR), 9, '0') as join_niin
-            FROM "market_intel_silver"."ref_wsdc"
-            WHERE wsdc_code IN (SELECT wsdc_code_ref FROM platform_codes)
-              AND niin IS NOT NULL
-        )
-        -- 3. JOIN with GOLD DATA to get the Revenue/Trend/Supplier info
+    # 1. FAST NATIVE DUCKDB QUERY (Replaces Disk & Athena completely)
+    query = """
         SELECT 
             p.nsn,
             p.niin,
             p.description,
-            
-            -- ✅ FILL MISSING DATA
-            p.cage, 
+            p.cage,
             COALESCE(p.total_revenue, 0) as total_revenue,
             COALESCE(p.total_units_sold, 0) as total_units_sold,
             p.annual_revenue_trend,
             p.last_sold_date,
-            
-            -- Derive FSC
-            SUBSTR(p.nsn, 1, 4) as fsc_code,
-            
-            -- Context
-            '{safe_plat}' as platform_family
-            
-        FROM "market_intel_gold"."view_dashboard_products" p
-        INNER JOIN target_niins t ON LPAD(CAST(p.niin AS VARCHAR), 9, '0') = t.join_niin
-        
-        ORDER BY p.total_revenue DESC
-        LIMIT {limit}
-        """
-        
-        raw_data = run_athena_query(query)
-        if raw_data:
-            df = pd.DataFrame(raw_data)
-        else:
-            return []
+            p.fsc_code
+        FROM v_products p
+        INNER JOIN v_platform_bom b ON p.niin = b.niin
+        WHERE b.platform_family = ?
+    """
+    
+    try:
+        df = duck_fetch_df(query, [safe_plat])
+    except Exception as e:
+        logger.error(f"Failed to fetch parts from DuckDB: {e}")
+        df = pd.DataFrame()
 
-    # 3. Standard Logic (Filtering & Formatting)
+    if df.empty:
+        return []
+
+    # 2. UI Filtering & Formatting (Using Pandas)
     mask = pd.Series(True, index=df.index)
     
     if 'total_revenue' in df.columns:
@@ -2847,9 +2812,8 @@ def get_platform_parts(
     end = start + int(limit)
     page = agg_df.iloc[start:end]
 
-    # Format
-        # Format
-    name_map = GLOBAL_CACHE.get("cage_name_map", {}) or {}   # ✅ ADD THIS LINE
+    # Map CAGE codes to Vendor Names using the in-memory cache
+    name_map = GLOBAL_CACHE.get("cage_name_map", {}) or {}
 
     results = []
     for row in page.itertuples():
@@ -2858,8 +2822,8 @@ def get_platform_parts(
         if not nsn_val and niin_val:
             nsn_val = niin_val
 
-        cage_val = str(getattr(row, "cage", "") or "").strip().upper()   # ✅ ADD THIS LINE
-        vendor_name = name_map.get(cage_val, "")                         # ✅ ADD THIS LINE
+        cage_val = str(getattr(row, "cage", "") or "").strip().upper()
+        vendor_name = name_map.get(cage_val, "")
         
         results.append({
             "item_id": str(nsn_val),
@@ -2870,62 +2834,38 @@ def get_platform_parts(
             "total_units_sold": int(getattr(row, "total_units_sold", 0) or 0),
             "amount": float(getattr(row, "amount", 0) or 0),
             "annual_revenue_trend": getattr(row, "annual_revenue_trend", ""),
-
-            # existing field (keep as-is)
             "top_vendor": cage_val,
-
-            # ✅ NEW field (won’t break anything; UI can ignore it)
             "top_vendor_name": vendor_name,
-
             "last_sold": getattr(row, "last_sold_date", "")
         })
+        
     return results
 
 
 @app.get("/api/platform/parts/count")
-def get_platform_parts_count(name: str):
-    # ✅ FIX: Use safe SQL literal for exact match
-    safe_val = sql_literal((name or "").strip())
-    # ✅ FIX: Use safe LIKE for fuzzy match with new '#' escape
-    like_val = sql_like_contains((name or "").strip().upper())
-
-    # 1. Fast check
-    map_check = run_athena_query(f"""
-        SELECT COUNT(*) AS n
-        FROM "market_intel_silver"."ref_platform_map"
-        WHERE (platform_family = {safe_val}
-               OR UPPER(platform_family) LIKE {like_val} ESCAPE '#') 
-          AND wsdc_code_ref IS NOT NULL
-          AND TRIM(CAST(wsdc_code_ref AS VARCHAR)) <> ''
-    """)
+def get_platform_parts_count(
+    name: str,
+    years: Optional[List[int]] = Query(None), # Added to prevent FastAPI 422 crash from UI filters
+    agency: Optional[str] = None,
+    domain: Optional[str] = None,
+    platform: Optional[str] = None
+):
+    safe_plat = sanitize(name).upper()
     
-    if not map_check or int(map_check[0].get("n") or 0) == 0:
-        return {"count": 0}
-
-    # 2. Count Universe
-    query = f"""
-    WITH platform_codes AS (
-        SELECT DISTINCT TRIM(CAST(wsdc_code_ref AS VARCHAR)) AS wsdc_code_ref
-        FROM "market_intel_silver"."ref_platform_map"
-        WHERE wsdc_code_ref IS NOT NULL
-          AND TRIM(CAST(wsdc_code_ref AS VARCHAR)) <> ''
-          AND (
-                platform_family = {safe_val}
-             OR UPPER(platform_family) LIKE {like_val} ESCAPE '#'
-          )
-    )
-    SELECT COUNT(DISTINCT w.niin) as total
-    FROM "market_intel_silver"."ref_wsdc" w
-    WHERE w.wsdc_code IN (SELECT wsdc_code_ref FROM platform_codes)
-      AND w.niin IS NOT NULL AND w.niin <> ''
+    query = """
+        SELECT COUNT(DISTINCT niin) as total
+        FROM v_platform_bom
+        WHERE platform_family = ?
     """
-
-    results = cached_athena_query(query)
-
-    if results and len(results) > 0:
-        val = results[0].get('total', 0)
-        return {"count": int(val)}
-
+    
+    try:
+        df = duck_fetch_df(query, [safe_plat])
+        if not df.empty:
+            count_val = int(df.iloc[0]['total'])
+            return {"count": count_val}
+    except Exception as e:
+        logger.error(f"Parts count query failed: {e}")
+        
     return {"count": 0}
 
 # ==========================================
@@ -2943,65 +2883,59 @@ def get_platform_awards(
     offset: int = 0,
     years: Optional[List[int]] = Query(None),
     agency: Optional[str] = None,
-    threshold: Optional[float] = 0.5, # Defaults to $500k minimum
+    threshold: Optional[float] = 0.5,
 ):
     safe_plat = sanitize(name)
     limit_i = max(1, min(int(limit), 500))
     offset_i = max(0, int(offset))
 
-    # Bumping this slightly. Since the 500k filter drops a lot of rows, 
-    # we need to pull more from the database initially to ensure we 
-    # have enough left over to fill the pagination limit.
-    limit_query = limit_i + offset_i + 1000
-
-    df = get_subset_from_disk(
-        "transactions.parquet",
-        where_clause="platform_family = ?",
-        params=(safe_plat,),
-        order_by_sql="action_date DESC",
-        limit=limit_query
-    )
-
-    if df.empty:
-        return []
-
-    mask = pd.Series(True, index=df.index)
+    where_parts = ["platform_family = ?"]
+    params = [safe_plat]
 
     if agency:
+        where_parts.append("(sub_agency = ? OR parent_agency = ?)")
         safe_ag = sanitize(agency)
-        if "sub_agency" in df.columns:
-            mask &= (df["sub_agency"].fillna("") == safe_ag)
+        params.extend([safe_ag, safe_ag])
 
-    if years and "year" in df.columns:
-        mask &= df["year"].isin(years)
+    if years:
+        placeholders = ",".join(["?"] * len(years))
+        where_parts.append(f"year IN ({placeholders})")
+        params.extend(years)
 
-    # Apply the $500k minimum threshold
-    if threshold and threshold > 0 and "spend_amount" in df.columns:
-        mask &= (pd.to_numeric(df["spend_amount"], errors="coerce").fillna(0) >= (threshold * 1_000_000))
+    if threshold and threshold > 0:
+        where_parts.append("spend_amount >= ?")
+        params.append(threshold * 1_000_000)
 
-    filtered = df.loc[mask].copy()
+    where_clause = " AND ".join(where_parts)
 
-    # Re-sort by date before pagination
-    if "action_date" in filtered.columns:
-        filtered = filtered.sort_values("action_date", ascending=False, kind="mergesort")
+    query = f"""
+        SELECT 
+            contract_id,
+            action_date,
+            vendor_name,
+            vendor_cage,
+            COALESCE(sub_agency, parent_agency) AS agency,
+            description,
+            spend_amount AS spend,
+            naics_code AS naics,
+            platform_family
+        FROM v_transactions
+        WHERE {where_clause}
+        ORDER BY action_date DESC
+        LIMIT ? OFFSET ?
+    """
+    params.extend([limit_i, offset_i])
 
-    page = filtered.iloc[offset_i: offset_i + limit_i]
-
-    return [
-        {
-            "contract_id": getattr(r, "contract_id", ""),
-            "action_date": str(getattr(r, "action_date", "")),
-            "vendor_name": getattr(r, "vendor_name", ""),
-            "vendor_cage": getattr(r, "vendor_cage", ""),
-            "agency": getattr(r, "sub_agency", "") if hasattr(r, "sub_agency") else getattr(r, "parent_agency", ""),
-            "description": getattr(r, "description", ""),
-            "spend": float(getattr(r, "spend_amount", 0) or 0),
-            "naics": getattr(r, "naics_code", ""),
-            "platform_family": getattr(r, "platform_family", ""),
-            "clean_variant": getattr(r, "clean_variant", "") if hasattr(r, "clean_variant") else "",
-        }
-        for r in page.itertuples()
-    ]
+    try:
+        df = duck_fetch_df(query, params)
+        if df.empty: return []
+        
+        # Replace NaN with safe JSON nulls/empty strings
+        df = df.fillna("")
+        return df.to_dict(orient="records")
+    except Exception as e:
+        logger.error(f"Awards query failed: {e}")
+        return []
 
 
 @app.get("/api/platform/subcontracts")
@@ -3047,7 +2981,6 @@ def get_platform_subcontracts(
             ensure_duck_conn()
             
             if mode == "rollup":
-                # ✅ FIX: Instantly join v_summary to get real English descriptions without re-running the ETL
                 sql = f"""
                     WITH psc_mapping AS (
                         SELECT psc_code, MAX(psc_description) as psc_desc 
@@ -3062,14 +2995,11 @@ def get_platform_subcontracts(
                             prime_name as prime_vendor,
                             prime_cage as prime_cage,
                             MAX(psc) as raw_psc,
-                            
-                            -- ✅ FIX: Grabs up to 3 unique descriptions and joins them with a pipe
                             array_to_string((array_agg(DISTINCT description))[1:3], ' | ') as description,
-                            
                             COUNT(*) as contract_count,
                             SUM(subaward_value) as subaward_value,
                             MAX(action_date) as action_date
-                        FROM read_parquet(?)
+                        FROM v_network
                         WHERE {where_clause}
                         GROUP BY sub_name, sub_cage, prime_name, prime_cage
                     )
@@ -3083,15 +3013,15 @@ def get_platform_subcontracts(
                     LIMIT ? OFFSET ?
                 """
             else:
-                # Raw individual lines
                 sql = f"""
-                    SELECT * FROM read_parquet(?) 
+                    SELECT * FROM v_network 
                     WHERE {where_clause} 
                     ORDER BY subaward_value DESC 
                     LIMIT ? OFFSET ?
                 """
                 
-            all_params = (str(path),) + tuple(params) + (limit_i, offset_i)
+            # Removed the str(path) from parameters since we aren't using read_parquet anymore
+            all_params = tuple(params) + (limit_i, offset_i)
             df = DUCK_CONN.execute(sql, all_params).fetchdf()
             df = df_sanitize_for_json(df)
             
@@ -3437,9 +3367,9 @@ def get_company_network(
         SELECT
             {group_col} as name,
             {cage_col} as cage,
-            arbitrary(subaward_description) as platform,
-            sum(flow_amount_capped) as total,
-            sum(flow_amount_raw) as total_raw,
+            arbitrary(platform_family) as platform, 
+            sum(subaward_value) as total,
+            sum(subaward_value_raw) as total_raw, -- ✅ ADD THIS LINE
             count(contract_id) as transactions
         FROM network_source
         WHERE {where_clause}{year_filter}
@@ -5080,7 +5010,7 @@ def get_pipeline_live(
     agency: Optional[str] = None,
     domain: Optional[str] = None,
     keyword: Optional[str] = None,
-    # ✅ Add missing global parameters to prevent FastAPI 422 Errors
+    opp_type: Optional[str] = None, # ✅ NEW: Route DIBBS vs SAM
     years: Optional[List[int]] = Query(None), 
     psc: Optional[str] = None,
     limit: int = 50,
@@ -5092,6 +5022,12 @@ def get_pipeline_live(
     # Matches original data quality filter: Accept rows with EITHER a Sol Num OR a Notice ID
     conds.append("(NULLIF(TRIM(sol_num), '') IS NOT NULL OR NULLIF(TRIM(id), '') IS NOT NULL)")
     
+    # ✅ Route DIBBS vs SAM
+    if opp_type == "DIBBS":
+        conds.append("(upper(COALESCE(sol_num, id)) LIKE 'SPE%' OR upper(COALESCE(sol_num, id)) LIKE 'SPM%' OR upper(COALESCE(sol_num, id)) LIKE 'SPR%')")
+    elif opp_type == "SAM":
+        conds.append("(upper(COALESCE(sol_num, id)) NOT LIKE 'SPE%' AND upper(COALESCE(sol_num, id)) NOT LIKE 'SPM%' AND upper(COALESCE(sol_num, id)) NOT LIKE 'SPR%')")
+        
     if naics:
         conds.append("naics LIKE ?")
         params.append(f"%{sanitize(naics)}%")
@@ -5258,35 +5194,40 @@ def get_solicitation_details(id: str):
     if not id:
         return {"found": False}
 
-    raw = str(id).strip()
-    # allow reasonably safe identifier characters
-    safe_id = safe_ident(raw)
+    safe_id = sanitize(id).upper()
 
     query = f"""
-    SELECT 
-        id,
-        title,
-        agency,
-        sol_num,
-        sol_num as noticeid,
-        deadline,
-        set_aside_type as set_aside,
-        office,
-        poc_email,
-        description,
-        url,
-        state,
-        naics,
-        psc,
-        sub_agency
-    FROM "market_intel_gold"."view_unified_opportunities_dod"
-    WHERE upper(sol_num) = {sql_literal(safe_id)} OR upper(id) = {sql_literal(safe_id)}
+    SELECT *
+    FROM v_opportunities
+    WHERE upper(sol_num) = ? OR upper(id) = ?
     LIMIT 1
     """
-    results = run_athena_query(query)
-    if not results:
+    try:
+        df = duck_fetch_df(query, [safe_id, safe_id])
+        if df.empty:
+            return {"found": False}
+
+        df = df_sanitize_for_json(df)
+        row = df.iloc[0]
+
+        return {
+            "id": str(row.get("id", "")),
+            "title": str(row.get("title", "")),
+            "agency": str(row.get("agency", "")),
+            "sub_agency": str(row.get("sub_agency", "")),
+            "sol_num": str(row.get("sol_num", "")),
+            "noticeid": str(row.get("sol_num", "")), 
+            "deadline": str(row.get("deadline", "")),
+            "set_aside": str(row.get("set_aside_type", "")),
+            "poc_email": str(row.get("poc_email", "")),
+            "description": str(row.get("description", "")),
+            "state": str(row.get("state", "")),
+            "naics": str(row.get("naics", "")),
+            "psc": str(row.get("psc", ""))
+        }
+    except Exception as e:
+        logger.error(f"Details DuckDB Error: {e}")
         return {"found": False}
-    return results[0]
 
 if __name__ == "__main__":
     import uvicorn
