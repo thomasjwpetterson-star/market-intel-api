@@ -3,3 +3,5 @@ venv/*.parquet
 local_data/
 *.parquet
 *.csv
+.env
+venv/

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from contextlib import asynccontextmanager
@@ -1117,6 +1117,12 @@ def reload_all_data():
 
         def fetch_file(filename: str) -> str:
             final_path = (LOCAL_CACHE_DIR / filename).resolve()
+
+            # ✅ ADD THIS BLOCK: Skip download if we are in dev mode and file exists
+            if os.getenv("SKIP_DOWNLOADS") == "1" and final_path.exists():
+                logger.info(f"⏭️ DEV MODE: Skipping {filename} download (already exists locally).")
+                return filename
+            
             tmp_path = (LOCAL_CACHE_DIR / f"{filename}.tmp").resolve()
 
             logger.info("Downloading %s...", filename)
@@ -1145,6 +1151,12 @@ def reload_all_data():
             Downloads all parquet parts under a prefix into a local folder.
             Used for contracts_rolled dataset.
             """
+
+            # ✅ ADD THIS BLOCK: Skip download if folder has files and we are in dev mode
+            if os.getenv("SKIP_DOWNLOADS") == "1" and local_dir.exists() and any(local_dir.iterdir()):
+                logger.info(f"⏭️ DEV MODE: Skipping {prefix} download (already exists locally).")
+                return prefix
+            
             logger.info("Downloading prefix %s -> %s ...", prefix, str(local_dir))
             local_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3155,6 +3167,487 @@ def get_company_opportunities(
         return []
 
 
+from pydantic import BaseModel
+import os
+from openai import AsyncOpenAI
+from dotenv import load_dotenv
+
+# Load the environment variables from the .env file
+load_dotenv()
+
+# Initialize OpenAI client
+aclient = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+class UnlockRequest(BaseModel):
+    name: str
+    cage: str
+    prime_exposure: float
+    sub_exposure: float
+    top_platforms: list
+    top_capabilities: list
+    top_nsns: list
+
+import pandas as pd
+
+@app.post("/api/public/unlock-brief")
+async def generate_unlocked_brief(request: Request):
+    try:
+        data = await request.json()
+        safe_name = data.get("name")
+        safe_cage = data.get("cage")
+        is_parent = data.get("is_parent", False)
+        
+        filters = {"cage": safe_cage} if not is_parent else {"parent": safe_name}
+        where_sql, params = build_summary_where(years=None, filters=filters)
+
+        # 1. Top Platforms
+        plats_df = query_summary_df(
+            where_sql, params, select_sql="platform_family, sum(total_spend) as spend",
+            group_by_sql="platform_family", order_by_sql="spend DESC", limit=10
+        )
+        deep_platforms = plats_df.dropna(subset=['platform_family']).to_dict(orient="records") if not plats_df.empty else []
+
+        # 2. Top Funding Agencies
+        agency_df = query_summary_df(
+            where_sql, params, select_sql="sub_agency, sum(total_spend) as spend",
+            group_by_sql="sub_agency", order_by_sql="spend DESC", limit=5
+        )
+        deep_agencies = []
+        if not agency_df.empty:
+            for _, row in agency_df.dropna(subset=['sub_agency']).iterrows():
+                deep_agencies.append({"name": str(row['sub_agency']).title(), "spend": float(row['spend'])})
+
+        # 3. Top Capabilities (NAICS by Revenue)
+        cap_df = query_summary_df(
+            where_sql, params, select_sql="naics_description, sum(total_spend) as spend",
+            group_by_sql="naics_description", order_by_sql="spend DESC", limit=3
+        )
+        deep_capabilities = []
+        if not cap_df.empty:
+            for _, row in cap_df.dropna(subset=['naics_description']).iterrows():
+                deep_capabilities.append({"name": str(row['naics_description']).title(), "spend": float(row['spend'])})
+
+        # 4. Top NSNs (Using exact Pandas aggregation)
+        prod_where = "cage = ?" if not is_parent else "upper(vendor_name) LIKE ?"
+        prod_params = [safe_cage] if not is_parent else [f"%{safe_name.upper()}%"]
+        deep_nsns = []
+        
+        try:
+            prod_df = get_subset_from_disk(
+                "products.parquet",
+                where_clause=prod_where, params=tuple(prod_params)
+            )
+            
+            if not prod_df.empty:
+                prod_df["amount"] = pd.to_numeric(prod_df.get("total_revenue", 0), errors="coerce").fillna(0)
+                base = prod_df.get("niin", prod_df.get("nsn"))
+                prod_df["niin_key"] = base.astype(str).str.replace(r"[^0-9]", "", regex=True).str.strip().str.zfill(9)
+                
+                def weighted_avg_price(group):
+                    units = pd.to_numeric(group.get("total_units_sold", 0), errors="coerce").fillna(0).astype(float)
+                    price = pd.to_numeric(group.get("avg_unit_price", 0), errors="coerce").fillna(0).astype(float)
+                    denom = float(units.sum())
+                    if denom <= 0:
+                        return float(price.mean() if len(price) else 0.0)
+                    return float((price * units).sum() / denom)
+
+                agg = prod_df.groupby("niin_key", dropna=False).agg(
+                    description=("description", "first"),
+                    platform_family=("platform_family", "first"),
+                    amount=("amount", "sum"),
+                    direct_sales_market_share_pct=("direct_sales_market_share_pct", "max")
+                ).reset_index()
+                
+                avg_map = prod_df.groupby("niin_key").apply(weighted_avg_price).to_dict()
+                agg["avg_unit_price"] = agg["niin_key"].map(avg_map).fillna(0)
+                agg = agg.sort_values("amount", ascending=False).head(10)
+                
+                for _, row in agg.iterrows():
+                    raw_desc = str(row['description']).strip() if pd.notnull(row['description']) else "Unknown Part"
+                    if '!' in raw_desc: raw_desc = raw_desc.split('!', 1)[-1]
+                    
+                    market_share_val = float(row.get('direct_sales_market_share_pct', 0))
+                    if 0 < market_share_val <= 1.0: 
+                        market_share_val = market_share_val * 100
+                    
+                    deep_nsns.append({
+                        "nsn": str(row['niin_key']), 
+                        "desc": raw_desc.title().strip(), 
+                        "spend": float(row['amount']),
+                        "unit_price": float(row['avg_unit_price']),
+                        "platform": str(row['platform_family']) if pd.notnull(row['platform_family']) and str(row['platform_family']).strip() != '' else 'Unspecified',
+                        "market_share": round(market_share_val, 1) if market_share_val > 0 else None 
+                    })
+        except Exception as e:
+            print(f"Products fetch error: {e}")
+
+        # 5. Top Contracts (Filtered >= $250k)
+        txn_where = "(vendor_cage = ?) AND spend_amount >= 250000" if not is_parent else "(upper(vendor_name) LIKE ?) AND spend_amount >= 250000"
+        txn_params = [safe_cage] if not is_parent else [f"%{safe_name.upper()}%"]
+        
+        contracts_df = get_subset_from_disk(
+            "transactions.parquet",
+            where_clause=txn_where, params=tuple(txn_params),
+            columns_sql="action_date, sub_agency, description, spend_amount", 
+            order_by_sql="spend_amount DESC, action_date DESC", limit=10
+        )
+        deep_contracts = []
+        if not contracts_df.empty:
+            for _, row in contracts_df.iterrows():
+                raw_desc = str(row['description']).strip()
+                if '!' in raw_desc: raw_desc = raw_desc.split('!', 1)[-1]
+                deep_contracts.append({
+                    "date": str(row['action_date']).split(' ')[0],
+                    "agency": str(row.get('sub_agency', 'DoD')).title(),
+                    "desc": raw_desc.strip(),
+                    "spend": float(row['spend_amount'])
+                })
+
+        # 6. Network (Primes vs Subs)
+        net_data = get_company_network(name=safe_name, cage=safe_cage if not is_parent else None, years=None, limit=10)
+        primes_list = net_data.get("primes", []) if isinstance(net_data, dict) else []
+        subs_list = net_data.get("subs", []) if isinstance(net_data, dict) else []
+        
+        prime_spend = float(data.get("prime_exposure", 0))
+        sub_spend = sum(float(p.get("total", 0) or 0) for p in primes_list)
+        total_mapped = prime_spend + sub_spend
+        is_primarily_prime = prime_spend >= sub_spend
+        
+        deep_network = subs_list if is_primarily_prime and subs_list else primes_list
+        network_title = "Top Subcontractors" if is_primarily_prime and subs_list else "Top Prime Customers"
+
+        # 7. FORMAT NUMBERS & SHARES FOR LLM
+        def fmt_m(val): return f"${val/1_000_000:.1f}M"
+        def fmt_share(spend): 
+            pct = (spend / total_mapped * 100) if total_mapped > 0 else 0
+            return f" ({min(pct, 100):.0f}%)" # Caps at 100% to prevent multi-platform overlap bugs
+
+        prime_pct = (prime_spend / total_mapped * 100) if total_mapped > 0 else 0
+        sub_pct = (sub_spend / total_mapped * 100) if total_mapped > 0 else 0
+
+        formatted_agencies = [f"{a['name']}: {fmt_m(a['spend'])}{fmt_share(a['spend'])}" for a in deep_agencies]
+        formatted_platforms = [f"{p['platform_family']}: {fmt_m(p['spend'])}{fmt_share(p['spend'])}" for p in deep_platforms[:5]]
+        formatted_caps = [f"{c['name']}: {fmt_m(c['spend'])}{fmt_share(c['spend'])}" for c in deep_capabilities]
+
+        # 8. GENERATE HEADLINE METRIC (FIXED: Smarter DLA takeaway)
+        headline_metric = "Diversified defense footprint across multiple agencies and programs."
+        if total_mapped > 0 and deep_agencies:
+            top_agency = deep_agencies[0]
+            share_pct = (top_agency['spend'] / total_mapped) * 100
+            
+            if share_pct >= 50:
+                if "Logistics Agency" in top_agency['name']:
+                    headline_metric = f"Sustainment Focus: Defense Logistics Agency accounts for {share_pct:.0f}% of mapped exposure, indicating a strong aftermarket moat."
+                elif "Nav" in top_agency['name'] or "Air Force" in top_agency['name'] or "Army" in top_agency['name']:
+                    headline_metric = f"OEM / Program Focus: {top_agency['name']} drives {share_pct:.0f}% of federal exposure."
+                else:
+                    headline_metric = f"Highly Concentrated: {top_agency['name']} accounts for {share_pct:.0f}% of federal exposure."
+            elif len(deep_agencies) >= 2:
+                top_2_spend = deep_agencies[0]['spend'] + deep_agencies[1]['spend']
+                headline_metric = f"Top 2 customers account for {(top_2_spend/total_mapped)*100:.0f}% of observed federal exposure."
+
+        # 9. STRUCTURED A&D ANALYST PROMPT
+        system_prompt = """
+        You are an elite Aerospace & Defense (A&D) investment banking analyst writing a concise, hard-hitting intelligence brief on a defense contractor.
+        
+        Summarize ONLY what is supported by the mapped federal financial data provided. Do not speculate on their commercial business or total global revenue.
+        
+        MANDATORY FORMAT & RULES:
+        You MUST structure your response exactly with these three bolded headings. No intro/outro text. Write 1-3 highly analytical, professional sentences per section.
+        
+        **Position:** - Open EXACTLY with: "Between FY18 and Present, [Company] generated [Total] in identified DoD and federal contract revenue, split [Prime%] prime and [Sub%] subcontract."
+        - State if their federal footprint operates primarily as a Prime, Tier 1, or lower-tier supplier based on the prime/sub mix.
+        - DO NOT use words like "trust", "robust", "vulnerable", or "primary supplier". Use standard A&D terminology: "embedded", "Tier 1/2", "prime-oriented".
+        
+        **Dependency:** - Detail what drives their federal revenue using the provided Agencies, Platforms, and Capabilities (NAICS/PSCs).
+        - NEVER say "a significant portion of their business" (we do not know their commercial revenue). Use "a significant portion of their federal profile".
+        - If Defense Logistics Agency (DLA) is dominant, explicitly state they are embedded in the sustainment, aftermarket spares, and readiness lifecycle of legacy platforms. 
+        
+        **Implication:** - Provide the strategic A&D takeaway. 
+        - If they are heavy in DLA/Sustainment on specific platforms, state that this creates high switching costs, recurring revenue streams, and an embedded sole-source positioning on mature/legacy fleets. 
+        - DO NOT call reliance on DLA or DoD a "vulnerability" or suggest they need to "diversify". In defense, single-platform or single-agency embedding constitutes a protective moat and high barriers to entry, not a weakness.
+        """
+
+        user_message = f"""
+        Entity: {safe_name} (CAGE: {safe_cage})
+        
+        DATABASE SIGNALS (FY18 - Present):
+        - Total Mapped Revenue: {fmt_m(total_mapped)} ({prime_pct:.0f}% Prime / {sub_pct:.0f}% Sub)
+        - Agency Mix: {', '.join(formatted_agencies) if formatted_agencies else 'None mapped'}
+        - Top Platforms: {', '.join(formatted_platforms) if formatted_platforms else 'None mapped'}
+        - Core Federal Capabilities: {', '.join(formatted_caps) if formatted_caps else 'None mapped'}
+        """
+
+        completion = await aclient.chat.completions.create(
+            model="gpt-4o", 
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}],
+            max_tokens=400, 
+            temperature=0.2, # Keeps it highly grounded while allowing for the specific A&D terminology
+        )
+
+        return {
+            "success": True, 
+            "ai_brief": completion.choices[0].message.content,
+            "headline_metric": headline_metric, 
+            "deep_data": {
+                "platforms": deep_platforms,
+                "agencies": deep_agencies,
+                "nsns": deep_nsns,
+                "contracts": deep_contracts,
+                "network": deep_network,
+                "network_title": network_title
+            }
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ==========================================
+#        PUBLIC TEASER & RATE LIMITING
+# ==========================================
+
+from fastapi import Request, HTTPException, Depends, Response # Ensure Response is imported
+import time
+
+RATE_LIMIT_CACHE = {}
+MAX_REQUESTS_PER_IP = 3
+RATE_LIMIT_WINDOW_SECONDS = 86400 # 24 hours
+
+def check_rate_limit(request: Request):
+    client_ip = request.client.host
+    now = time.time()
+    for ip in list(RATE_LIMIT_CACHE.keys()):
+        if now - RATE_LIMIT_CACHE[ip]['timestamp'] > RATE_LIMIT_WINDOW_SECONDS:
+            del RATE_LIMIT_CACHE[ip]
+            
+    if client_ip in RATE_LIMIT_CACHE:
+        if RATE_LIMIT_CACHE[client_ip]['count'] >= MAX_REQUESTS_PER_IP:
+             raise HTTPException(status_code=429, detail="Daily limit reached. Create a free account to continue exploring.")
+        RATE_LIMIT_CACHE[client_ip]['count'] += 1
+    else:
+        RATE_LIMIT_CACHE[client_ip] = {'count': 1, 'timestamp': now}
+        
+    # We return the remaining count so the frontend can display it
+    remaining = MAX_REQUESTS_PER_IP - RATE_LIMIT_CACHE[client_ip]['count']
+    return max(0, remaining)
+
+@app.get("/api/public/company/teaser")
+def get_public_company_teaser(
+    request: Request,
+    response: Response, # Added Response to inject headers
+    cage: Optional[str] = None,
+    name: Optional[str] = None,
+    remaining_lookups: int = Depends(check_rate_limit) # Capture the remaining count
+):
+    """
+    Public-facing endpoint for high-level company metrics.
+    Rate-limited by IP address. Bypasses granular filters.
+    """
+    # Expose the remaining lookups to the frontend via a custom header
+    response.headers["X-RateLimit-Remaining"] = str(remaining_lookups)
+    
+    full_profile = get_company_profile(cage=cage, name=name, years=None)
+    if not full_profile or not full_profile.get("found"):
+        return {"found": False, "message": "Entity not found in the defense intelligence database."}
+
+    safe_name = full_profile.get("name")
+    safe_cage = full_profile.get("cage")
+    is_parent = safe_cage == "AGGREGATE"
+
+    # Prime Spend
+    prime_spend = float(full_profile.get("total_obligations", 0))
+
+    # Sub Spend & Dynamic Network
+    net_data = get_company_network(name=safe_name, cage=safe_cage if not is_parent else None, years=None, limit=100)
+    primes_list = net_data.get("primes", []) if isinstance(net_data, dict) else []
+    subs_list = net_data.get("subs", []) if isinstance(net_data, dict) else []
+    
+    sub_spend = sum(float(p.get("total", 0) or 0) for p in primes_list)
+    
+    # Smart Toggle for Prime vs Sub
+    is_primarily_prime = prime_spend >= sub_spend
+    
+    if is_primarily_prime and len(subs_list) > 0:
+        network_type = "Key Supply Chain Partners"
+        target_network = subs_list
+    elif len(primes_list) > 0:
+        network_type = "Key Customers"
+        target_network = primes_list
+    elif len(subs_list) > 0:
+        network_type = "Key Supply Chain Partners"
+        target_network = subs_list
+    else:
+        network_type = "Network Partners"
+        target_network = []
+
+    target_total = sum(float(x.get("total", 0) or 0) for x in target_network)
+    network_partners = []
+    top_customer_dependency = 0
+    
+    if target_total > 0:
+        for i, p in enumerate(target_network[:3]):
+            pct = int(round((float(p.get("total", 0) or 0) / target_total) * 100))
+            if pct > 0:
+                network_partners.append({"name": p.get("name"), "share": pct})
+                if i == 0: top_customer_dependency = pct
+                
+    network_hidden = max(0, len(target_network) - 3)
+
+    # Platform, Capabilities, and NSNs via DuckDB
+    filters = {"cage": safe_cage} if not is_parent else {"parent": safe_name}
+    where_sql, params = build_summary_where(years=None, filters=filters)
+    
+    top_platforms = []
+    plats_hidden = 0
+    top_plat_name = None
+    top_plat_dependency = 0
+    top_capabilities = []
+    caps_hidden = 0
+    top_nsns = []
+    nsns_hidden = 0
+
+    try:
+        # A. Fetch Platforms
+        plats_df = query_summary_df(
+            where_sql, params, select_sql="platform_family, sum(total_spend) as spend",
+            group_by_sql="platform_family", order_by_sql="spend DESC", limit=50
+        )
+        if not plats_df.empty and "platform_family" in plats_df.columns:
+            valid_plats = plats_df.dropna(subset=['platform_family'])
+            valid_plats = valid_plats[valid_plats['platform_family'].astype(str).str.strip() != ""]
+            plat_total = valid_plats['spend'].sum()
+            
+            if plat_total > 0:
+                top_plat_name = valid_plats.iloc[0]['platform_family']
+                for i, row in valid_plats.head(3).iterrows():
+                    pct = int(round((row['spend'] / plat_total) * 100))
+                    if pct > 0: 
+                        top_platforms.append({"name": row['platform_family'], "share": pct})
+                        if i == 0: top_plat_dependency = pct
+            plats_hidden = max(0, len(valid_plats) - 3)
+
+        # B. Fetch Top Capabilities (By PSC)
+        caps_df = query_summary_df(
+            where_sql, params, select_sql="psc_description, sum(total_spend) as spend",
+            group_by_sql="psc_description", order_by_sql="spend DESC", limit=15
+        )
+        if not caps_df.empty and "psc_description" in caps_df.columns:
+            valid_caps = caps_df.dropna(subset=['psc_description'])
+            valid_caps = valid_caps[valid_caps['psc_description'].astype(str).str.strip() != ""]
+            for _, row in valid_caps.head(3).iterrows():
+                top_capabilities.append(str(row['psc_description']).title())
+            caps_hidden = max(0, len(valid_caps) - 3)
+            
+        # C. Fetch Top NSNs (Components)
+        txn_nsn_where = "vendor_cage = ? AND nsn IS NOT NULL AND nsn != ''" if not is_parent else "upper(vendor_name) LIKE ? AND nsn IS NOT NULL AND nsn != ''"
+        txn_nsn_params = [safe_cage] if not is_parent else [f"%{safe_name.upper()}%"]
+        nsn_df = duck_fetch_df(f"""
+            SELECT nsn, ANY_VALUE(description) as description, sum(spend_amount) as spend
+            FROM v_transactions
+            WHERE {txn_nsn_where}
+            GROUP BY nsn
+            ORDER BY spend DESC
+            LIMIT 15
+        """, params=txn_nsn_params)
+        
+        if not nsn_df.empty:
+            for _, row in nsn_df.head(3).iterrows():
+                raw_desc = str(row['description']).strip()
+                if '!' in raw_desc:
+                    raw_desc = raw_desc.split('!', 1)[-1]
+                
+                desc = raw_desc.title().strip()
+                if desc.lower() in ["nan", "none", ""]: desc = "Unspecified Component"
+                top_nsns.append({"nsn": str(row['nsn']).strip(), "desc": desc})
+            nsns_hidden = max(0, len(nsn_df) - 3)
+
+    except Exception as e:
+        logger.error(f"Teaser Aggregate Query Error: {e}")
+
+    # Fetch a Single Top Contract for the "Aha" moment
+    top_contract_desc = None
+    try:
+        txn_where, txn_params = ("vendor_cage = ?", [safe_cage]) if not is_parent else ("upper(vendor_name) LIKE ?", [f"%{safe_name.upper()}%"])
+        txn_df = get_subset_from_disk(
+            "transactions.parquet",
+            where_clause=txn_where, params=tuple(txn_params),
+            columns_sql="description, spend_amount", order_by_sql="spend_amount DESC", limit=1
+        )
+        if not txn_df.empty:
+            raw_desc = str(txn_df.iloc[0]['description']).strip()
+            if '!' in raw_desc:
+                raw_desc = raw_desc.split('!', 1)[-1]
+                
+            desc = raw_desc.strip()
+            if desc and len(desc) > 3 and desc.upper() != "NAN":
+                top_contract_desc = desc
+    except Exception:
+        pass
+
+    # ==========================================
+    # AGGRESSIVE STRATEGIC SIGNAL GENERATION
+    # ==========================================
+    total_exposure = prime_spend + sub_spend
+    
+    # Calculate ratios to avoid highlighting 60% of a 1% bucket
+    sub_ratio = (sub_spend / total_exposure) if total_exposure > 0 else 0
+    prime_ratio = (prime_spend / total_exposure) if total_exposure > 0 else 0
+
+    insight_parts = []
+    
+    # 1. Macro Positioning
+    if prime_ratio >= 0.90:
+        insight_parts.append("Functions almost exclusively as a direct-to-DoD prime contractor.")
+    elif sub_ratio >= 0.90:
+        insight_parts.append("Functions almost exclusively as a sub-tier supplier within the industrial base.")
+    else:
+        role_str = "prime contractor" if is_primarily_prime else "sub-tier supplier"
+        insight_parts.append(f"Operates as a hybrid {role_str} with balanced direct and indirect exposure.")
+
+    # 2. Platform Dependency
+    if top_platforms and top_plat_dependency >= 50:
+        insight_parts.append(f"High structural dependency on the {top_plat_name} program (~{top_plat_dependency}% of mapped platform revenue).")
+    elif top_platforms:
+        insight_parts.append(f"Portfolio is diversified across multiple defense programs, led by {top_plat_name}.")
+
+    # 3. Network Dependency (Only flag if the network bucket is a meaningful part of their overall business)
+    if network_partners and top_customer_dependency >= 40:
+        if not is_primarily_prime:
+            # They are a Sub. Prime_list is their upstream.
+            insight_parts.append(f"Upstream revenue is heavily concentrated, with ~{top_customer_dependency}% tied directly to {network_partners[0]['name'].title()}.")
+        elif is_primarily_prime and sub_ratio > 0.15:
+            # They are a Prime, AND sub-contracting is a material part of their business (>15%)
+            insight_parts.append(f"Downstream execution relies heavily on {network_partners[0]['name'].title()} (~{top_customer_dependency}% of tracked subcontract flow).")
+
+    if not insight_parts:
+        insight_parts.append("Balanced strategic positioning across multiple platforms and prime integrators.")
+
+    insight = " ".join(insight_parts)
+
+    return {
+        "found": True,
+        "name": safe_name,
+        "cage": safe_cage,
+        "is_parent": is_parent,
+        "location": f"{full_profile.get('city', '')}, {full_profile.get('state', '')}".strip(', '),
+        "time_period": "FY18–Present",
+        "prime_exposure": prime_spend,
+        "sub_exposure": sub_spend,
+        "total_exposure": total_exposure,
+        "top_capabilities": top_capabilities,
+        "capabilities_hidden": caps_hidden,
+        "top_platforms": top_platforms,
+        "platforms_hidden": plats_hidden,
+        "network_type": network_type,
+        "network_partners": network_partners,
+        "network_hidden": network_hidden,
+        "top_nsns": top_nsns,
+        "nsns_hidden": nsns_hidden,
+        "insight": insight,
+        "top_contract_desc": top_contract_desc,
+        "remaining_lookups": remaining_lookups 
+    }
 # ==========================================
 #        COMPANY INTELLIGENCE
 # ==========================================
