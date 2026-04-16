@@ -39,6 +39,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mimir-api")
 
+def is_authenticated_user(request: Request) -> bool:
+    """If the frontend sends an Authorization header, they bypass the public limit."""
+    return "Authorization" in request.headers
+
 # ✅ GLOBAL MEMORY STORE (Initialized with empty defaults)
 # We will swap this entire dictionary reference atomically.
 GLOBAL_CACHE = {
@@ -3407,7 +3411,7 @@ async def generate_unlocked_brief(request: Request):
 #        PUBLIC TEASER & RATE LIMITING
 # ==========================================
 
-from fastapi import Request, HTTPException, Depends, Response # Ensure Response is imported
+from fastapi import Request, HTTPException, Depends, Response
 import time
 
 RATE_LIMIT_CACHE = {}
@@ -3415,20 +3419,31 @@ MAX_REQUESTS_PER_IP = 3
 RATE_LIMIT_WINDOW_SECONDS = 86400 # 24 hours
 
 def check_rate_limit(request: Request):
+    # ✅ VIP BYPASS: If the frontend sends an auth token, skip the rate limit entirely!
+    if "Authorization" in request.headers:
+        return None 
+
     client_ip = request.client.host
     now = time.time()
+    
+    # Cleanup expired IPs
     for ip in list(RATE_LIMIT_CACHE.keys()):
         if now - RATE_LIMIT_CACHE[ip]['timestamp'] > RATE_LIMIT_WINDOW_SECONDS:
             del RATE_LIMIT_CACHE[ip]
             
+    # Check limit for unauthenticated users
     if client_ip in RATE_LIMIT_CACHE:
         if RATE_LIMIT_CACHE[client_ip]['count'] >= MAX_REQUESTS_PER_IP:
-             raise HTTPException(status_code=429, detail="Daily limit reached. Create a free account to continue exploring.")
+             # ✅ FIXED: Updated to the premium up-sell message
+             raise HTTPException(
+                 status_code=429, 
+                 detail="Daily free search limit reached. Upgrade your Mimir account for unlimited deep-dive company intelligence."
+             )
         RATE_LIMIT_CACHE[client_ip]['count'] += 1
     else:
         RATE_LIMIT_CACHE[client_ip] = {'count': 1, 'timestamp': now}
         
-    # We return the remaining count so the frontend can display it
+    # Return the remaining count so the frontend can display it
     remaining = MAX_REQUESTS_PER_IP - RATE_LIMIT_CACHE[client_ip]['count']
     return max(0, remaining)
 
