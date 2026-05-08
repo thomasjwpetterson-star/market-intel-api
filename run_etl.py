@@ -377,7 +377,7 @@ def optimize_and_upload():
             WHERE rn = 1
             )
             SELECT
-            a.cage_code,
+            LPAD(UPPER(TRIM(a.cage_code)), 5, '0') as cage_code,
             p.vendor_name,
             a.total_lifetime_spend,
             a.total_contracts,
@@ -397,7 +397,7 @@ def optimize_and_upload():
         df_risk = run_query("""
             SELECT 
                 r.*, 
-                UPPER(TRIM(m.vendor_cage)) as cage_code,
+                LPAD(UPPER(TRIM(m.vendor_cage)), 5, '0') as cage_code,
                 UPPER(TRIM(m.ultimate_parent_name)) as clean_parent
             FROM "market_intel_gold"."view_dashboard_risk_sidecar" r
             LEFT JOIN "market_intel_gold"."dashboard_master_view" m 
@@ -425,8 +425,10 @@ def optimize_and_upload():
         df_sum['naics_code'] = df_sum['naics_code'].apply(clean_naics)
 
     def clean_cage(val):
+        if pd.isna(val) or str(val).lower() == 'nan':
+            return ""
         s = str(val).upper().strip()
-        if s.isdigit() and len(s) < 5:
+        if len(s) > 0 and len(s) < 5:
             return s.zfill(5)
         return s
 
@@ -525,6 +527,9 @@ def optimize_and_upload():
     # ---------------------------------------------------------
     # ### [UPDATED] FETCH NETWORK GRAPH (OOM-SAFE + PSC AWARE) ###
     # ---------------------------------------------------------
+# ---------------------------------------------------------
+    # ### [UPDATED] FETCH NETWORK GRAPH (OOM-SAFE + PSC AWARE) ###
+    # ---------------------------------------------------------
     print("📥 Fetching Network Graph (OOM Safe)...")
     if is_cache_fresh("network.parquet", max_age_hours=12):
         print("   ↩️ Skipping network.parquet (Fresh file already in S3)")
@@ -556,11 +561,11 @@ def optimize_and_upload():
                 UPPER(TRIM(n.sub_city)) as sub_city,
                 UPPER(TRIM(n.sub_state)) as sub_state,
                 
-                p.platform_family,
+                COALESCE(p.platform_family, 'UNMAPPED') as platform_family,
                 p.psc,
                 p.market_segment
             FROM "market_intel_gold"."ref_company_network" n
-            INNER JOIN (
+            LEFT JOIN (
                 -- Group by contract_id to ensure a clean 1-to-1 join
                 SELECT 
                     contract_id, 
@@ -568,7 +573,6 @@ def optimize_and_upload():
                     MAX_BY(UPPER(TRIM(psc)), action_date) as psc,
                     MAX_BY(UPPER(TRIM(market_segment)), action_date) as market_segment
                 FROM "market_intel_gold"."dashboard_master_view"
-                WHERE platform_family IS NOT NULL AND platform_family != 'NONE'
                 GROUP BY contract_id
             ) p ON n.contract_id = p.contract_id
         """
@@ -929,7 +933,7 @@ def optimize_and_upload():
             SELECT 
                 id, sol_num, title, agency, sub_agency, 
                 deadline, set_aside_type, naics, psc, 
-                description, poc_email, source_system, state
+                description, poc_email, source_system, state, url
             FROM "market_intel_gold"."view_unified_opportunities_dod"
             WHERE try(from_iso8601_timestamp(deadline)) >= current_date
         """)

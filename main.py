@@ -5636,6 +5636,7 @@ def get_pipeline_live(
             "description": str(getattr(row, 'description', '') or '')[:2000],
             "primarycontactemail": getattr(row, 'poc_email', ''),
             "source_system": getattr(row, 'source_system', ''),
+            "url": getattr(row, 'url', ''), # ✅ Add this line
             "days_left": int(days_left),
             "total_matches": int(total_matches)
         })
@@ -5731,7 +5732,8 @@ def get_solicitation_details(id: str):
             "description": str(row.get("description", "")),
             "state": str(row.get("state", "")),
             "naics": str(row.get("naics", "")),
-            "psc": str(row.get("psc", ""))
+            "psc": str(row.get("psc", "")),
+            "url": str(row.get("url", "")) # ✅ Add this line
         }
     except Exception as e:
         logger.error(f"Details DuckDB Error: {e}")
