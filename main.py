@@ -4291,7 +4291,7 @@ def get_company_awards(
             where_clause=where_clause,
             params=tuple(params),
             columns_sql="contract_id, action_date, sub_agency, parent_agency, description, spend_amount, naics_code, psc, platform_family",
-            order_by_sql="action_date DESC",
+            order_by_sql="spend_amount DESC", # ✅ Permanently sorted by highest value
             limit=limit,
             offset=offset
         )
