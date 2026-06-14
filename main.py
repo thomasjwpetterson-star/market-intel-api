@@ -31,6 +31,7 @@ import math
 import numpy as np
 from pydantic import BaseModel
 import uuid
+from fastapi import APIRouter
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -2464,15 +2465,15 @@ def get_market_opportunities(
 #        GLOBAL SEARCH (NEW)
 # ==========================================
 
+
 @app.get("/api/search/global")
 def search_global(q: str):
     if not q or len(q) < 2: return []
     clean_q = sanitize(q)
     results = []
 
-    # 1. FAST NATIVE DUCKDB SEARCH (Now includes Opportunities!)
+    # 1. FAST NATIVE DUCKDB SEARCH
     try:
-        # Wildcard at the end for CAGE, both sides for text
         search_val_text = f"%{clean_q}%"
         search_val_cage = f"{clean_q}%" 
         
@@ -2481,36 +2482,51 @@ def search_global(q: str):
             FROM search_index
             WHERE label ILIKE ? OR cage ILIKE ? OR value ILIKE ?
             ORDER BY score DESC
-            LIMIT 8
+            LIMIT 30
         """
         
-        # Also passing the text wildcard to the 'value' column so users can search by sol_num
         df_search = duck_fetch_df(query, [search_val_text, search_val_cage, search_val_text])
+
+        seen = set()
         
         for r in df_search.itertuples(index=False):
             item_type = getattr(r, "type", "")
             item_label = getattr(r, "label", "")
             item_value = getattr(r, "value", "")
-            item_score = float(getattr(r, "score", 0) or 0)
             item_cage = getattr(r, "cage", "")
             item_city = getattr(r, "city", "")
             item_state = getattr(r, "state", "")
 
-            spend_str = f"${item_score/1_000_000:,.1f}M" if item_score and item_score < 999999999 else ""
+            type_upper = item_type.upper()
+
+            # Dedupe logic: Ensures we only see one row per specific CAGE or Corporate Parent
+            if type_upper in ["CHILD", "VENDOR"] and item_cage and item_cage != "AGGREGATE":
+                dedupe_key = f"site-{item_cage.strip().upper()}"
+            elif type_upper == "PARENT":
+                dedupe_key = f"parent-{item_label.strip().upper()}"
+            else:
+                dedupe_key = f"{type_upper}-{str(item_value or item_label).strip().upper()}"
+
+            if dedupe_key in seen:
+                continue
+
+            seen.add(dedupe_key)
             
-            # --- SMART LABELING ---
+            # --- SMART LABELING (No Amounts) ---
             if item_type == 'OPPORTUNITY':
-                # We stashed the Agency in the city column during the UNION
                 sub_label = f"Bid • {item_city}" 
 
             elif item_type == 'CHILD' and item_cage and item_cage != 'AGGREGATE':
-                loc_str = f" • {item_city}, {item_state}" if item_city and item_state else f" • {item_city}" if item_city else ""
-                sub_label = f"{spend_str}{loc_str} • CAGE: {item_cage}"
+                loc_str = f"{item_city}, {item_state}" if item_city and item_state else item_city
+                if loc_str:
+                    sub_label = f"{loc_str} • CAGE: {item_cage}"
+                else:
+                    sub_label = f"CAGE: {item_cage}"
 
             elif item_type == 'PARENT':
-                sub_label = f"{spend_str} • Corporate Group"
+                sub_label = "Corporate Rollup"
             else:
-                sub_label = f"{spend_str} Obligations"
+                sub_label = "" # Removed generic "Obligations" text completely
 
             results.append({
                 "type": item_type,
@@ -2519,11 +2535,15 @@ def search_global(q: str):
                 "sub_label": sub_label,
                 "cage": item_cage
             })
+
+            # Stop once we have 8 unique, clean results for the frontend
+            if len(results) >= 8:
+                break
             
     except Exception as e:
         logger.error(f"Native search query failed: {e}")
 
-    # 2. NSN / NIIN Detection (Regex)
+    # 2. NSN / NIIN Detection
     nsn_pattern = r'^\d{4}-?\d{2}-?\d{3}-?\d{4}$|^\d{9}$|^\d{13}$'
     if re.match(nsn_pattern, q.strip()):
         results.insert(0, {
@@ -2532,8 +2552,6 @@ def search_global(q: str):
             "value": q.strip(),
             "sub_label": "Supply Chain Search"
         })
-
-    # Athena block is completely DELETED! DuckDB handles everything now.
 
     return results
 
