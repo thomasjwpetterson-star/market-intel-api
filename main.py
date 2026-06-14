@@ -2470,36 +2470,39 @@ def get_market_opportunities(
 def search_global(q: str):
     if not q or len(q) < 2: return []
     clean_q = sanitize(q)
-    results = []
-
-    # 1. FAST NATIVE DUCKDB SEARCH
+    
     try:
         search_val_text = f"%{clean_q}%"
         search_val_cage = f"{clean_q}%" 
         
+        # 1. FAST NATIVE SEARCH: Pull a larger buffer of raw fragments
+        # We use LIMIT 100 so we have enough fragments to sum together accurately, 
+        # but small enough that DuckDB doesn't break a sweat.
         query = """
             SELECT type, label, value, score, cage, city, state
             FROM search_index
             WHERE label ILIKE ? OR cage ILIKE ? OR value ILIKE ?
             ORDER BY score DESC
-            LIMIT 30
+            LIMIT 100
         """
         
         df_search = duck_fetch_df(query, [search_val_text, search_val_cage, search_val_text])
 
-        seen = set()
+        # 2. IN-MEMORY AGGREGATION: Group and sum the fragments safely in Python
+        aggregated_results = {}
         
         for r in df_search.itertuples(index=False):
             item_type = getattr(r, "type", "")
             item_label = getattr(r, "label", "")
             item_value = getattr(r, "value", "")
+            item_score = float(getattr(r, "score", 0) or 0)
             item_cage = getattr(r, "cage", "")
             item_city = getattr(r, "city", "")
             item_state = getattr(r, "state", "")
 
             type_upper = item_type.upper()
 
-            # Dedupe logic: Ensures we only see one row per specific CAGE or Corporate Parent
+            # Create the unique deduplication key
             if type_upper in ["CHILD", "VENDOR"] and item_cage and item_cage != "AGGREGATE":
                 dedupe_key = f"site-{item_cage.strip().upper()}"
             elif type_upper == "PARENT":
@@ -2507,43 +2510,69 @@ def search_global(q: str):
             else:
                 dedupe_key = f"{type_upper}-{str(item_value or item_label).strip().upper()}"
 
-            if dedupe_key in seen:
-                continue
-
-            seen.add(dedupe_key)
+            # If it's a new entity, initialize it. If it exists, add the score to the total.
+            if dedupe_key not in aggregated_results:
+                aggregated_results[dedupe_key] = {
+                    "type": item_type,
+                    "label": item_label,
+                    "value": item_value,
+                    "cage": item_cage,
+                    "city": item_city,
+                    "state": item_state,
+                    "total_score": 0.0
+                }
             
-            # --- SMART LABELING (No Amounts) ---
+            aggregated_results[dedupe_key]["total_score"] += item_score
+
+        # 3. SORT & SLICE: Rank by the newly combined totals and grab the top 8
+        sorted_entities = sorted(aggregated_results.values(), key=lambda x: x["total_score"], reverse=True)[:8]
+
+        results = []
+        for item in sorted_entities:
+            item_type = item["type"]
+            item_cage = item["cage"]
+            item_city = item["city"]
+            item_state = item["state"]
+            total_val = item["total_score"]
+
+            # --- SMART FORMATTING FOR DOLLAR AMOUNTS ---
+            spend_str = ""
+            if total_val > 0:
+                if total_val >= 1_000_000_000:
+                    spend_str = f"${total_val / 1_000_000_000:,.1f}B"
+                elif total_val >= 1_000_000:
+                    spend_str = f"${total_val / 1_000_000:,.1f}M"
+                else:
+                    spend_str = f"${total_val / 1_000:,.0f}K"
+
+            # --- SMART LABELING ---
             if item_type == 'OPPORTUNITY':
                 sub_label = f"Bid • {item_city}" 
 
             elif item_type == 'CHILD' and item_cage and item_cage != 'AGGREGATE':
                 loc_str = f"{item_city}, {item_state}" if item_city and item_state else item_city
-                if loc_str:
-                    sub_label = f"{loc_str} • CAGE: {item_cage}"
-                else:
-                    sub_label = f"CAGE: {item_cage}"
+                base_label = f"{loc_str} • CAGE: {item_cage}" if loc_str else f"CAGE: {item_cage}"
+                sub_label = f"{base_label} • {spend_str}" if spend_str else base_label
 
             elif item_type == 'PARENT':
-                sub_label = "Corporate Rollup"
+                sub_label = f"Corporate Rollup • {spend_str}" if spend_str else "Corporate Rollup"
+            
             else:
-                sub_label = "" # Removed generic "Obligations" text completely
+                sub_label = spend_str if spend_str else ""
 
             results.append({
                 "type": item_type,
-                "label": item_label,
-                "value": item_value,
+                "label": item["label"],
+                "value": item["value"],
                 "sub_label": sub_label,
                 "cage": item_cage
             })
-
-            # Stop once we have 8 unique, clean results for the frontend
-            if len(results) >= 8:
-                break
             
     except Exception as e:
         logger.error(f"Native search query failed: {e}")
+        results = []
 
-    # 2. NSN / NIIN Detection
+    # 4. NSN / NIIN Detection (Always injects at the top if it matches)
     nsn_pattern = r'^\d{4}-?\d{2}-?\d{3}-?\d{4}$|^\d{9}$|^\d{13}$'
     if re.match(nsn_pattern, q.strip()):
         results.insert(0, {
