@@ -1384,101 +1384,74 @@ def reload_all_data():
             except Exception:
                 logger.exception(f"Failed to load {file}")
 
-        # 6. LOAD SUMMARY (Atomic Swap Logic + Clean NaN)
+# 6. LOAD SUMMARY (Atomic Swap Logic + Clean NaN via DuckDB)
         try:
-            import pyarrow as pa
-            import pyarrow.parquet as pq
+            summary_in_path = str((LOCAL_CACHE_DIR / "summary.parquet").resolve())
+            summary_final_path = str((LOCAL_CACHE_DIR / SUMMARY_PARQUET_CLEAN).resolve())
+            summary_temp_path = str((LOCAL_CACHE_DIR / f"{SUMMARY_PARQUET_CLEAN}.tmp").resolve())
 
-            summary_in_path = (LOCAL_CACHE_DIR / "summary.parquet").resolve()
-            summary_final_path = (LOCAL_CACHE_DIR / SUMMARY_PARQUET_CLEAN).resolve()
-            summary_temp_path = (LOCAL_CACHE_DIR / f"{SUMMARY_PARQUET_CLEAN}.tmp").resolve()
+            if os.path.exists(summary_temp_path):
+                try: os.remove(summary_temp_path)
+                except Exception: pass
 
-            if summary_temp_path.exists():
-                try:
-                    summary_temp_path.unlink()
-                except Exception:
-                    pass
-
-            parquet_file = pq.ParquetFile(str(summary_in_path))
-            name_corrections = {
-                "THE BOEING": "THE BOEING COMPANY",
-                "BOEING": "THE BOEING COMPANY",
-                "BOEING CO": "THE BOEING COMPANY",
-            }
-
-            writer = None
-
-            for i in range(parquet_file.num_row_groups):
-                chunk = parquet_file.read_row_group(i).to_pandas()
-                
-                # Cleanup Strings
-                string_cols = [
-                    "vendor_name", "clean_parent", "ultimate_parent_name", "cage_code",
-                    "platform_family", "sub_agency", "market_segment", "psc_description"
-                ]
-                for col in string_cols:
-                    if col in chunk.columns:
-                        if isinstance(chunk[col].dtype, pd.ArrowDtype):
-                            chunk[col] = chunk[col].astype(str)
-                        chunk[col] = chunk[col].astype(str).str.upper().str.strip()
-
-                # Apply Parent Mapping
-                cage_col = "cage_code" if "cage_code" in chunk.columns else "vendor_cage"
-                if cage_col in chunk.columns and cage_map:
-                    chunk["clean_parent"] = chunk[cage_col].map(cage_map)
-                else:
-                    chunk["clean_parent"] = None
-
-                if "ultimate_parent_name" in chunk.columns:
-                    chunk["clean_parent"] = chunk["clean_parent"].fillna(chunk["ultimate_parent_name"])
-                if "vendor_name" in chunk.columns:
-                    chunk["clean_parent"] = chunk["clean_parent"].fillna(chunk["vendor_name"])
-
-                chunk["clean_parent"] = chunk["clean_parent"].astype(str).str.upper().str.strip()
-                chunk["clean_parent"] = chunk["clean_parent"].replace(name_corrections)
-                if "vendor_name" in chunk.columns:
-                    chunk["vendor_name"] = chunk["vendor_name"].replace(name_corrections)
-
-                # ✅ YOUR CRITICAL LOGIC: Clean NANs
-                for col in ["platform_family", "market_segment", "sub_agency", "psc_description"]:
-                    if col in chunk.columns:
-                        m = chunk[col].astype(str).str.upper().isin(["NAN", "NAN.0", "NONE", "", "UNKNOWN"])
-                        chunk.loc[m, col] = None
-
-                if "cage_code" in chunk.columns:
-                    chunk["cage_code"] = chunk["cage_code"].astype(str).str.upper().str.strip()
-                    bad = chunk["cage_code"].isin(["NAN", "NONE", "NULL", ""])
-                    chunk.loc[bad, "cage_code"] = None
-                
-                table = pa.Table.from_pandas(chunk, preserve_index=False)
-
-                if writer is None:
-                    writer = pq.ParquetWriter(str(summary_temp_path), table.schema, compression="zstd")
-                
-                writer.write_table(table)
-                del chunk
-                del table
-                if i % 5 == 0:
-                    gc.collect()
-
-            if writer:
-                writer.close()
-
-            # Atomic Swap
             with DUCK_INIT_LOCK:
                 conn = ensure_duck_conn()
                 
-                if summary_temp_path.exists():
-                    summary_temp_path.replace(summary_final_path) 
+                # 1. Register the Athena cage_map as a temporary table so DuckDB can use it
+                map_df = pd.DataFrame(list(cage_map.items()), columns=['cage', 'parent']) if cage_map else pd.DataFrame(columns=['cage', 'parent'])
+                conn.register('temp_cage_map', map_df)
+
+                logger.info("Cleaning summary.parquet using DuckDB streaming (OOM-Safe)...")
+
+                # 2. Let DuckDB read, clean, map, and write the parquet file entirely out-of-core
+                conn.execute(f"""
+                    COPY (
+                        SELECT 
+                            -- Keep all other columns untouched
+                            s.* EXCLUDE (vendor_name, cage_code, platform_family, market_segment, sub_agency, psc_description),
+
+                            -- Apply Name Corrections
+                            CASE 
+                                WHEN upper(trim(s.vendor_name)) IN ('THE BOEING', 'BOEING', 'BOEING CO') THEN 'THE BOEING COMPANY'
+                                ELSE upper(trim(s.vendor_name))
+                            END AS vendor_name,
+
+                            -- Clean cage_code
+                            CASE 
+                                WHEN upper(trim(s.cage_code)) IN ('NAN', 'NONE', 'NULL', '') THEN NULL 
+                                ELSE upper(trim(s.cage_code)) 
+                            END AS cage_code,
+
+                            -- Clean categorical text to NULLs
+                            CASE WHEN upper(trim(s.platform_family)) IN ('NAN', 'NAN.0', 'NONE', '', 'UNKNOWN') THEN NULL ELSE upper(trim(s.platform_family)) END AS platform_family,
+                            CASE WHEN upper(trim(s.market_segment)) IN ('NAN', 'NAN.0', 'NONE', '', 'UNKNOWN') THEN NULL ELSE upper(trim(s.market_segment)) END AS market_segment,
+                            CASE WHEN upper(trim(s.sub_agency)) IN ('NAN', 'NAN.0', 'NONE', '', 'UNKNOWN') THEN NULL ELSE upper(trim(s.sub_agency)) END AS sub_agency,
+                            CASE WHEN upper(trim(s.psc_description)) IN ('NAN', 'NAN.0', 'NONE', '', 'UNKNOWN') THEN NULL ELSE upper(trim(s.psc_description)) END AS psc_description,
+
+                            -- Map the parent dynamically
+                            CASE 
+                                WHEN upper(trim(COALESCE(m.parent, s.vendor_name))) IN ('THE BOEING', 'BOEING', 'BOEING CO') THEN 'THE BOEING COMPANY'
+                                ELSE upper(trim(COALESCE(m.parent, s.vendor_name)))
+                            END AS clean_parent
+
+                        FROM read_parquet('{summary_in_path}') s
+                        LEFT JOIN temp_cage_map m ON upper(trim(s.cage_code)) = m.cage
+                    ) TO '{summary_temp_path}' (FORMAT PARQUET, COMPRESSION ZSTD);
+                """)
+
+                # Cleanup the virtual table mapping
+                conn.unregister('temp_cage_map')
+
+                # 3. Atomic Swap
+                if os.path.exists(summary_temp_path):
+                    os.replace(summary_temp_path, summary_final_path) 
                 
-                # Drop the table to clear RAM and restore the lightweight View
+                # 4. Re-create the memory-efficient View
                 conn.execute("DROP VIEW IF EXISTS v_summary;")
                 conn.execute("DROP TABLE IF EXISTS v_summary;")
-                conn.execute(
-                    f"CREATE OR REPLACE VIEW v_summary AS SELECT * FROM read_parquet('{str(summary_final_path)}');"
-                )
+                conn.execute(f"CREATE OR REPLACE VIEW v_summary AS SELECT * FROM read_parquet('{summary_final_path}');")
             
-            logger.info("Summary updated safely via atomic swap (View).")
+            logger.info("Summary updated safely via DuckDB swap (View).")
             new_global_cache["df"] = pd.DataFrame()
 
             # Re-compute options
