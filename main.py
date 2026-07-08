@@ -32,6 +32,9 @@ import numpy as np
 from pydantic import BaseModel
 import uuid
 from fastapi import APIRouter
+from dotenv import load_dotenv
+
+load_dotenv()
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -1117,7 +1120,8 @@ def reload_all_data():
             "profiles.parquet", "risk.parquet", "network.parquet",
             "transactions.parquet", "opportunities.parquet", "kpis.parquet",
             "nsn_summary.parquet",
-            "platform_bom.parquet" # ✅ Added here
+            "nsn_cage_reference.parquet",
+            "platform_bom.parquet" # unrelated to NSN/CAGE reference, leave only if another feature uses it
         ]
 
         def fetch_file(filename: str) -> str:
@@ -1247,6 +1251,7 @@ def reload_all_data():
                 ("v_risk", "risk.parquet"),
                 ("v_opportunities", "opportunities.parquet"),
                 ("v_nsn_summary", "nsn_summary.parquet"),
+                ("v_nsn_cage_reference", "nsn_cage_reference.parquet"),
                 ("v_platform_bom", "platform_bom.parquet") # ✅ Added here
             ]
             
@@ -1680,100 +1685,342 @@ def get_public_f35_supply_chain():
         return []
     
 # ==========================================
-# DATA EXPLORER & EXPORT API (✅ NEW BLOCK)
+# DATA EXPLORER & EXPORT API
 # ==========================================
 
 class ExplorerRequest(BaseModel):
     table: str = "v_contracts_rolled"
-    columns: List[str]
-    filters: Dict[str, Any]
+    columns: List[str] = []
+    filters: Dict[str, Any] = {}
     subscription_status: str = "free"
+    limit: Optional[int] = None
+    offset: Optional[int] = 0
 
-ALLOWED_EXPLORER_TABLES = {"v_contracts_rolled", "v_transactions", "v_summary"}
-# ✅ UPDATED: Added NSN, Part Number, and Geographic columns from the new ETL build
+
+NSN_REF_TABLE = "v_nsn_cage_reference"
+
+ALLOWED_EXPLORER_TABLES = {
+    "v_contracts_rolled",
+    "v_transactions",
+    "v_summary",
+    NSN_REF_TABLE,
+}
+
 ALLOWED_EXPLORER_COLUMNS = {
+    # Existing revenue-backed / award-backed fields
     "contract_id", "year", "action_date", "last_action_date", "total_spend", "spend_amount", "contract_count",
-    "vendor_cage", "cage_code", "vendor_name", "sub_agency", "parent_agency", "clean_parent",
+    "vendor_cage", "cage_code", "cage", "vendor_name", "sub_agency", "parent_agency", "clean_parent",
     "psc", "psc_code", "psc_description", "naics_code", "naics_description",
     "platform_family", "market_segment", "description",
     "city", "state", "country", "piid", "idv_piid", "transaction_id",
-    "nsn", "part_number", "pricing_type", "set_aside_type", "competition_type", "offers_count"
+    "nsn", "niin", "part_number", "pricing_type", "set_aside_type", "competition_type", "offers_count",
+
+    # Full NSN/CAGE reference fields
+    "fsc", "fsc_code", "item_name", "nomenclature", "source", "source_layer", "data_source",
+    "demil_code", "shelf_life_code", "mgmt_control_code", "unit_of_issue",
+    "source_of_supply", "govt_estimated_price", "acquisition_advice_code",
 }
 
-def build_explorer_query(payload: ExplorerRequest, row_limit: int):
+EXPLORER_DEFAULT_COLUMNS = {
+    "v_contracts_rolled": [
+        "contract_id", "last_action_date", "vendor_name", "vendor_cage", "total_spend", "description"
+    ],
+    "v_transactions": [
+        "contract_id", "action_date", "vendor_name", "vendor_cage", "spend_amount", "nsn", "part_number", "description"
+    ],
+    "v_summary": [
+        "vendor_name", "cage_code", "clean_parent", "total_spend", "contract_count", "market_segment", "platform_family"
+    ],
+    NSN_REF_TABLE: [
+        "nsn", "niin", "cage_code", "vendor_name", "part_number", "description", "fsc_code", "source"
+    ],
+}
+
+# These are granular tables. Do not allow accidental full-table scans.
+EXPLORER_FILTER_REQUIRED_TABLES = {
+    "v_contracts_rolled",
+    "v_transactions",
+    NSN_REF_TABLE,
+}
+
+# Lets the frontend use stable names even if the parquet uses slightly different names.
+EXPLORER_COLUMN_ALIASES = {
+    NSN_REF_TABLE: {
+        "cage": ["cage", "cage_code", "vendor_cage"],
+        "cage_code": ["cage_code", "cage", "vendor_cage"],
+        "vendor_cage": ["vendor_cage", "cage_code", "cage"],
+        "vendor_name": ["vendor_name", "company_name", "manufacturer_name", "entity_name"],
+        "description": ["description", "item_name", "nomenclature", "product_description", "item_description"],
+        "item_name": ["item_name", "description", "nomenclature"],
+        "fsc_code": ["fsc_code", "fsc"],
+        "fsc": ["fsc", "fsc_code"],
+        "source": ["source", "source_layer", "data_source"],
+    }
+}
+
+
+def quote_ident(identifier: str) -> str:
+    return '"' + str(identifier).replace('"', '""') + '"'
+
+
+def get_duck_table_columns(table: str) -> set:
+    if table not in ALLOWED_EXPLORER_TABLES:
+        return set()
+
+    try:
+        df = duck_fetch_df(f"DESCRIBE {table}")
+        if df.empty or "column_name" not in df.columns:
+            return set()
+        return {str(c).strip().lower() for c in df["column_name"].dropna().tolist()}
+    except Exception:
+        logger.exception("Failed to describe explorer table: %s", table)
+        return set()
+
+
+def resolve_explorer_column(table: str, requested_col: str, actual_cols: set) -> Optional[str]:
+    requested = str(requested_col).strip().lower()
+
+    if requested in actual_cols:
+        return requested
+
+    aliases = EXPLORER_COLUMN_ALIASES.get(table, {}).get(requested, [])
+    for alt in aliases:
+        if alt.lower() in actual_cols:
+            return alt.lower()
+
+    return None
+
+
+def normalised_niin_filter_expr(actual_col: str) -> str:
+    col = quote_ident(actual_col)
+    digits = f"REGEXP_REPLACE(CAST({col} AS VARCHAR), '[^0-9]', '', 'g')"
+    return f"RIGHT(LPAD({digits}, 9, '0'), 9)"
+
+
+def build_explorer_query(
+    payload: ExplorerRequest,
+    row_limit: int,
+    offset: int = 0,
+    count_only: bool = False
+):
     table = payload.table if payload.table in ALLOWED_EXPLORER_TABLES else "v_contracts_rolled"
+    actual_cols = get_duck_table_columns(table)
 
-    safe_cols = [c for c in payload.columns if c in ALLOWED_EXPLORER_COLUMNS]
-    if not safe_cols:
-        safe_cols = ["vendor_name", "vendor_cage", "total_spend"]
+    if not actual_cols:
+        raise HTTPException(status_code=503, detail=f"{table} is not available yet. Reload may still be running.")
 
-    select_clause = ", ".join(safe_cols)
+    requested_cols = payload.columns or EXPLORER_DEFAULT_COLUMNS.get(table, [])
+    select_parts: List[str] = []
+
+    for requested_col in requested_cols:
+        requested_clean = str(requested_col).strip().lower()
+        if requested_clean not in ALLOWED_EXPLORER_COLUMNS:
+            continue
+
+        actual_col = resolve_explorer_column(table, requested_clean, actual_cols)
+        if not actual_col:
+            continue
+
+        if actual_col == requested_clean:
+            select_parts.append(quote_ident(actual_col))
+        else:
+            select_parts.append(f"{quote_ident(actual_col)} AS {quote_ident(requested_clean)}")
+
+    if not select_parts:
+        fallback_cols = EXPLORER_DEFAULT_COLUMNS.get(table, [])
+        for requested_col in fallback_cols:
+            actual_col = resolve_explorer_column(table, requested_col, actual_cols)
+            if actual_col:
+                select_parts.append(f"{quote_ident(actual_col)} AS {quote_ident(requested_col)}")
+
+    if not select_parts:
+        first_col = sorted(actual_cols)[0]
+        select_parts = [quote_ident(first_col)]
+
     where_parts = ["1=1"]
-    params = []
+    params: List[Any] = []
     has_valid_filter = False
 
-    # ✅ THE NEW VALUE FILTER LOGIC
-    # It automatically knows which spend column to target based on the current table
-    spend_col = "spend_amount" if table == "v_transactions" else "total_spend"
-    
-    if "min_spend" in payload.filters:
+    filters = payload.filters or {}
+
+    # Spend filters only apply where a spend column actually exists.
+    spend_col = None
+    if table == "v_transactions" and "spend_amount" in actual_cols:
+        spend_col = "spend_amount"
+    elif "total_spend" in actual_cols:
+        spend_col = "total_spend"
+    elif "spend_amount" in actual_cols:
+        spend_col = "spend_amount"
+
+    if spend_col and "min_spend" in filters:
         try:
-            where_parts.append(f"{spend_col} >= ?")
-            params.append(float(payload.filters["min_spend"]))
+            where_parts.append(f"{quote_ident(spend_col)} >= ?")
+            params.append(float(filters["min_spend"]))
             has_valid_filter = True
-        except ValueError:
-            pass
-            
-    if "max_spend" in payload.filters:
-        try:
-            where_parts.append(f"{spend_col} <= ?")
-            params.append(float(payload.filters["max_spend"]))
-            has_valid_filter = True
-        except ValueError:
+        except (ValueError, TypeError):
             pass
 
-    # The standard loop for exact text matches
-    for col, val in payload.filters.items():
-        # Skip the custom range filters so they don't break the text loop
-        if col in ["min_spend", "max_spend"]:
+    if spend_col and "max_spend" in filters:
+        try:
+            where_parts.append(f"{quote_ident(spend_col)} <= ?")
+            params.append(float(filters["max_spend"]))
+            has_valid_filter = True
+        except (ValueError, TypeError):
+            pass
+
+    # Generic search for the reference universe.
+    search_value = filters.get("q") or filters.get("search") or filters.get("query")
+    if search_value and table == NSN_REF_TABLE:
+        search_cols = []
+        for candidate in [
+            "nsn", "niin", "part_number", "description", "item_name", "nomenclature",
+            "cage", "cage_code", "vendor_cage", "vendor_name"
+        ]:
+            actual_col = resolve_explorer_column(table, candidate, actual_cols)
+            if actual_col and actual_col not in search_cols:
+                search_cols.append(actual_col)
+
+        if search_cols:
+            search_terms = []
+            p = _like_param_contains(str(search_value))
+            for c in search_cols:
+                search_terms.append(f"UPPER(CAST({quote_ident(c)} AS VARCHAR)) LIKE ? ESCAPE '\\'")
+                params.append(p)
+            where_parts.append("(" + " OR ".join(search_terms) + ")")
+            has_valid_filter = True
+
+    for col, val in filters.items():
+        if col in ["min_spend", "max_spend", "q", "search", "query"]:
             continue
-            
-        if col in ALLOWED_EXPLORER_COLUMNS and val is not None and str(val).strip() != "":
-            has_valid_filter = True
-            
-            if isinstance(val, list) and len(val) > 0:
-                if all(isinstance(v, int) for v in val):
-                    placeholders = ",".join(["?"] * len(val))
-                    where_parts.append(f"{col} IN ({placeholders})")
-                    params.extend(val)
-                else:
-                    placeholders = ",".join(["?"] * len(val))
-                    where_parts.append(f"UPPER(CAST({col} AS VARCHAR)) IN ({placeholders})")
-                    params.extend([str(v).strip().upper() for v in val])
-            
-            elif not isinstance(val, list):
-                where_parts.append(f"UPPER(CAST({col} AS VARCHAR)) = ?")
-                params.append(str(val).strip().upper())
 
-    if not has_valid_filter and table in {"v_contracts_rolled", "v_transactions"}:
-        raise HTTPException(status_code=400, detail="At least one filter is required to explore raw granular data.")
+        requested_col = str(col).strip().lower()
+        if requested_col not in ALLOWED_EXPLORER_COLUMNS:
+            continue
+
+        actual_col = resolve_explorer_column(table, requested_col, actual_cols)
+        if not actual_col:
+            continue
+
+        if val is None or str(val).strip() == "":
+            continue
+
+        has_valid_filter = True
+
+        # NSN / NIIN filters match the canonical 9-digit NIIN.
+        if requested_col in {"nsn", "niin"}:
+            safe_niin = get_niin(str(val))
+            where_parts.append(f"{normalised_niin_filter_expr(actual_col)} = ?")
+            params.append(safe_niin)
+            continue
+
+        # CAGE filters are exact.
+        if requested_col in {"cage", "cage_code", "vendor_cage"}:
+            where_parts.append(f"UPPER(TRIM(CAST({quote_ident(actual_col)} AS VARCHAR))) = ?")
+            params.append(str(val).strip().upper())
+            continue
+
+        if isinstance(val, list) and len(val) > 0:
+            placeholders = ",".join(["?"] * len(val))
+            where_parts.append(f"UPPER(TRIM(CAST({quote_ident(actual_col)} AS VARCHAR))) IN ({placeholders})")
+            params.extend([str(v).strip().upper() for v in val])
+
+        elif not isinstance(val, list):
+            where_parts.append(f"UPPER(TRIM(CAST({quote_ident(actual_col)} AS VARCHAR))) = ?")
+            params.append(str(val).strip().upper())
+
+    if not has_valid_filter and table in EXPLORER_FILTER_REQUIRED_TABLES:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one filter is required for granular/reference data. Use cage_code, nsn, niin, part_number, or search."
+        )
 
     where_clause = " AND ".join(where_parts)
 
-    sql = f"SELECT {select_clause} FROM {table} WHERE {where_clause} LIMIT {row_limit}"
+    if count_only:
+        sql = f"SELECT COUNT(*) AS count FROM {table} WHERE {where_clause}"
+        return sql, params
+
+    row_limit = safe_int(row_limit, 50, 1, 500_000)
+    offset = safe_int(offset, 0, 0, 10_000_000)
+
+    select_clause = ", ".join(select_parts)
+    sql = f"SELECT {select_clause} FROM {table} WHERE {where_clause} LIMIT ? OFFSET ?"
+    params.extend([row_limit, offset])
+
     return sql, params
+
 
 @app.post("/api/explorer/preview")
 def explorer_preview(payload: ExplorerRequest):
-    sql, params = build_explorer_query(payload, row_limit=50)
+    sql, params = build_explorer_query(payload, row_limit=50, offset=0)
+
     try:
         df = duck_fetch_df(sql, params)
         if df.empty:
             return []
         return df_sanitize_for_json(df).to_dict(orient="records")
+
+    except HTTPException:
+        raise
+
     except Exception as e:
         logger.error(f"Explorer Preview Error: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate data preview.")
+
+
+@app.post("/api/explorer/page")
+def explorer_page(payload: ExplorerRequest):
+    """
+    Paginated explorer endpoint.
+
+    Use this for the NSN/CAGE reference toggle:
+    - show first 50/100 rows in the UI
+    - let export handle the larger batch download
+    """
+    page_limit = safe_int(payload.limit, 100, 1, 500)
+    page_offset = safe_int(payload.offset, 0, 0, 10_000_000)
+
+    sql, params = build_explorer_query(payload, row_limit=page_limit, offset=page_offset)
+
+    try:
+        df = duck_fetch_df(sql, params)
+        if df.empty:
+            return []
+        return df_sanitize_for_json(df).to_dict(orient="records")
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(f"Explorer Page Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate data page.")
+
+
+@app.post("/api/explorer/count")
+def explorer_count(payload: ExplorerRequest):
+    """
+    Count endpoint for pagination.
+
+    Important for v_nsn_cage_reference so the UI can show:
+    'Showing 100 of 12,431 rows' without loading all rows.
+    """
+    sql, params = build_explorer_query(payload, row_limit=0, count_only=True)
+
+    try:
+        df = duck_fetch_df(sql, params)
+        if df.empty or "count" not in df.columns:
+            return {"count": 0}
+
+        val = df["count"].iloc[0]
+        return {"count": 0 if pd.isna(val) else int(val)}
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(f"Explorer Count Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to count explorer rows.")
+
 
 def cleanup_temp_file(filepath: str):
     try:
@@ -1783,10 +2030,10 @@ def cleanup_temp_file(filepath: str):
     except Exception as e:
         logger.error(f"Failed to delete temp file {filepath}: {e}")
 
+
 @app.get("/api/explorer/vendors/search")
 def explorer_vendor_search(q: str = Query(..., min_length=2)):
     """Powers the ultra-fast React Typeahead for Vendor selection"""
-    # ✅ FIX: Added GROUP BY cage_code to collapse multiple messy names into one clean result
     sql = """
         SELECT MAX(vendor_name) as vendor_name, cage_code, MAX(city) as city, MAX(state) as state 
         FROM v_summary 
@@ -1795,18 +2042,21 @@ def explorer_vendor_search(q: str = Query(..., min_length=2)):
         LIMIT 10
     """
     params = [f"%{q.upper()}%", f"%{q.upper()}%"]
+
     try:
         df = duck_fetch_df(sql, params)
         if df.empty:
             return []
         return df_sanitize_for_json(df).to_dict(orient="records")
+
     except Exception as e:
         logger.error(f"Vendor Autocomplete Error: {e}")
         raise HTTPException(status_code=500, detail="Vendor search failed")
 
+
 @app.get("/api/explorer/taxonomy/search")
 def explorer_taxonomy_search(type: str = Query(...), q: str = Query(..., min_length=2)):
-    """✅ NEW: Powers the Autocomplete Dropdowns for NAICS and PSC codes"""
+    """Powers the Autocomplete Dropdowns for NAICS and PSC codes"""
     col_code = "naics_code" if type == "naics" else "psc_code"
     col_desc = "naics_description" if type == "naics" else "psc_description"
     
@@ -1819,27 +2069,35 @@ def explorer_taxonomy_search(type: str = Query(...), q: str = Query(..., min_len
         LIMIT 15
     """
     params = [f"%{q.upper()}%", f"%{q.upper()}%"]
+
     try:
         df = duck_fetch_df(sql, params)
         if df.empty:
             return []
         return df_sanitize_for_json(df).to_dict(orient="records")
+
     except Exception as e:
         logger.error(f"Taxonomy Autocomplete Error: {e}")
         raise HTTPException(status_code=500, detail="Taxonomy search failed")
 
+
 @app.post("/api/explorer/export")
 def explorer_export(payload: ExplorerRequest, background_tasks: BackgroundTasks):
     
-    # ✅ THE STRIPE/SUPABASE LIMITS
-    # Only paying customers with cleared payments get the 5k limit.
-    # 'trialing', 'free', 'past_due', 'canceled', etc. all get clamped to 1k.
-    if payload.subscription_status == "active":
-        export_limit = 5000
+    # Existing award/transaction export caps stay unchanged.
+    # Keep NSN/CAGE reference exports bounded for browser/download safety.
+    if payload.table == NSN_REF_TABLE:
+        if payload.subscription_status == "active":
+            export_limit = safe_int(os.getenv("NSN_REF_EXPORT_LIMIT_ACTIVE", 5000), 5000, 1000, 5000)
+        else:
+            export_limit = safe_int(os.getenv("NSN_REF_EXPORT_LIMIT_FREE", 1000), 1000, 100, 1000)
     else:
-        export_limit = 1000 
+        if payload.subscription_status == "active":
+            export_limit = 5000
+        else:
+            export_limit = 1000
 
-    sql, params = build_explorer_query(payload, row_limit=export_limit)
+    sql, params = build_explorer_query(payload, row_limit=export_limit, offset=0)
     
     filename = f"mimir_export_{uuid.uuid4().hex[:8]}.csv"
     filepath = str((LOCAL_CACHE_DIR / filename).resolve())
@@ -1855,12 +2113,15 @@ def explorer_export(payload: ExplorerRequest, background_tasks: BackgroundTasks)
         return FileResponse(
             path=filepath, 
             media_type='text/csv', 
-            filename=f"mimir_data_export.csv"
+            filename="mimir_data_export.csv"
         )
+
+    except HTTPException:
+        raise
+
     except Exception as e:
         logger.error(f"Explorer Export Error: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate export file.")
-
 
 # ==========================================
 #        MARKET DASHBOARD ENDPOINTS
@@ -3194,10 +3455,6 @@ def get_company_opportunities(
 from pydantic import BaseModel
 import os
 from openai import AsyncOpenAI
-from dotenv import load_dotenv
-
-# Load the environment variables from the .env file
-load_dotenv()
 
 # Initialize OpenAI client
 aclient = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
@@ -3697,11 +3954,19 @@ def get_company_profile(
 ):
     profiles_df = GLOBAL_CACHE.get("profiles_df", pd.DataFrame())
     loc_map = GLOBAL_CACHE.get("location_map", {}) or {}
+    profiles_ready = (
+        not profiles_df.empty
+        and {"cage_code", "vendor_name"}.issubset(set(profiles_df.columns))
+    )
     
     # 1. SPECIFIC CAGE (Drill-down) -> CHILD LOGIC
     if cage:
         clean_cage = cage.strip().upper()
-        match = profiles_df[profiles_df['cage_code'] == clean_cage]
+        match = (
+            profiles_df[profiles_df['cage_code'] == clean_cage]
+            if profiles_ready
+            else pd.DataFrame()
+        )
 
         if not match.empty:
             row = match.iloc[0]
@@ -3734,6 +3999,7 @@ def get_company_profile(
             return {
                 "found": True,
                 "type": "PARENT", 
+                "profile_source": "AWARD_BACKED",
                 "name": name.upper(),
                 "cage": "AGGREGATE",
                 "total_obligations": stats["total_obligations"],
@@ -3741,14 +4007,19 @@ def get_company_profile(
                 "last_active": stats["last_active"],
                 "top_naics": stats["top_naics"],
                 "top_platforms": stats["top_platforms"],
-                # ✅ CRITICAL: Force empty location for Parents.
-                # This ensures the News API runs the "General Search" strategy.
+                "network_flow_total": 0.0,
+                "network_contract_count": 0,
+                "network_last_active_year": 0,
                 "city": "", 
                 "state": ""
             }
 
         # B. CHILD LOGIC (Specific Entity found by Name)
-        child_match = profiles_df[profiles_df['vendor_name'] == clean_name]
+        child_match = (
+            profiles_df[profiles_df['vendor_name'] == clean_name]
+            if profiles_ready
+            else pd.DataFrame()
+        )
         if not child_match.empty:
             row = child_match.iloc[0]
             c_code = str(row.get('cage_code') or "").strip().upper()
@@ -3809,6 +4080,10 @@ def format_profile_response_with_loc(row, city, state, type="CHILD", overrides: 
 
         "top_naics": hydrated_naics,
         "top_platforms": row.get('top_platforms', '').split(',') if row.get('top_platforms') else [],
+        "profile_source": row.get("profile_source", "AWARD_BACKED"),
+        "network_flow_total": float(row.get("network_flow_total", 0) or 0),
+        "network_contract_count": int(row.get("network_contract_count", 0) or 0),
+        "network_last_active_year": int(row.get("network_last_active_year", 0) or 0),
         "city": str(city) if city else "",
         "state": str(state) if state else ""
     }
@@ -4587,22 +4862,200 @@ from fastapi import Query
 from typing import Optional, List
 import pandas as pd
 
+
+# ==========================================
+# NSN/CAGE REFERENCE HELPERS
+# ==========================================
+
+def nsn_ref_col(cols: set, candidates: List[str]) -> Optional[str]:
+    for c in candidates:
+        if c.lower() in cols:
+            return c.lower()
+    return None
+
+
+def nsn_ref_niin_where(cols: set, safe_niin: str) -> Tuple[str, List[Any]]:
+    parts = []
+    params: List[Any] = []
+
+    niin_col = nsn_ref_col(cols, ["niin"])
+    nsn_col = nsn_ref_col(cols, ["nsn"])
+
+    if niin_col:
+        parts.append(f"{normalised_niin_filter_expr(niin_col)} = ?")
+        params.append(safe_niin)
+
+    if nsn_col:
+        parts.append(f"{normalised_niin_filter_expr(nsn_col)} = ?")
+        params.append(safe_niin)
+
+    if not parts:
+        return "1=0", []
+
+    return "(" + " OR ".join(parts) + ")", params
+
+
+def nsn_ref_profile_lookup(safe_niin: str) -> Dict[str, Any]:
+    cols = get_duck_table_columns(NSN_REF_TABLE)
+    if not cols:
+        return {}
+
+    where_sql, params = nsn_ref_niin_where(cols, safe_niin)
+    if where_sql == "1=0":
+        return {}
+
+    nsn_col = nsn_ref_col(cols, ["nsn"])
+    desc_col = nsn_ref_col(cols, ["description", "item_name", "nomenclature", "product_description", "item_description"])
+    fsc_col = nsn_ref_col(cols, ["fsc_code", "fsc"])
+    cage_col = nsn_ref_col(cols, ["cage_code", "cage", "vendor_cage"])
+    part_col = nsn_ref_col(cols, ["part_number", "part_no", "pn"])
+    source_col = nsn_ref_col(cols, ["source", "source_layer", "data_source"])
+
+    select_parts = [
+        f"'{safe_niin}' AS niin",
+        "COUNT(*) AS reference_rows",
+    ]
+
+    if nsn_col:
+        select_parts.append(f"MAX(NULLIF(TRIM(CAST({quote_ident(nsn_col)} AS VARCHAR)), '')) AS nsn")
+    else:
+        select_parts.append("CAST(NULL AS VARCHAR) AS nsn")
+
+    if desc_col:
+        select_parts.append(f"MAX(NULLIF(TRIM(CAST({quote_ident(desc_col)} AS VARCHAR)), '')) AS item_name")
+    else:
+        select_parts.append("CAST(NULL AS VARCHAR) AS item_name")
+
+    if fsc_col:
+        select_parts.append(f"MAX(NULLIF(TRIM(CAST({quote_ident(fsc_col)} AS VARCHAR)), '')) AS fsc_code")
+    else:
+        select_parts.append("CAST(NULL AS VARCHAR) AS fsc_code")
+
+    if cage_col:
+        select_parts.append(f"COUNT(DISTINCT UPPER(TRIM(CAST({quote_ident(cage_col)} AS VARCHAR)))) AS reference_supplier_count")
+    else:
+        select_parts.append("CAST(0 AS BIGINT) AS reference_supplier_count")
+
+    if part_col:
+        select_parts.append(f"COUNT(DISTINCT NULLIF(TRIM(CAST({quote_ident(part_col)} AS VARCHAR)), '')) AS reference_part_count")
+    else:
+        select_parts.append("CAST(0 AS BIGINT) AS reference_part_count")
+
+    if source_col:
+        select_parts.append(f"string_agg(DISTINCT NULLIF(TRIM(CAST({quote_ident(source_col)} AS VARCHAR)), ''), ', ') AS reference_sources")
+    else:
+        select_parts.append("CAST(NULL AS VARCHAR) AS reference_sources")
+
+    sql = f"""
+        SELECT
+            {", ".join(select_parts)}
+        FROM {NSN_REF_TABLE}
+        WHERE {where_sql}
+    """
+
+    try:
+        df = duck_fetch_df(sql, params)
+        if df.empty:
+            return {}
+
+        row = df.iloc[0].to_dict()
+
+        if not row.get("reference_rows"):
+            return {}
+
+        return row
+
+    except Exception:
+        logger.exception("NSN reference profile lookup failed for NIIN=%s", safe_niin)
+        return {}
+
+
+def nsn_ref_supplier_lookup(safe_niin: str) -> Dict[str, Dict[str, Any]]:
+    cols = get_duck_table_columns(NSN_REF_TABLE)
+    if not cols:
+        return {}
+
+    where_sql, params = nsn_ref_niin_where(cols, safe_niin)
+    if where_sql == "1=0":
+        return {}
+
+    cage_col = nsn_ref_col(cols, ["cage_code", "cage", "vendor_cage"])
+    if not cage_col:
+        return {}
+
+    vendor_col = nsn_ref_col(cols, ["vendor_name", "company_name", "manufacturer_name", "entity_name"])
+    part_col = nsn_ref_col(cols, ["part_number", "part_no", "pn"])
+    source_col = nsn_ref_col(cols, ["source", "source_layer", "data_source"])
+
+    select_parts = [
+        f"UPPER(TRIM(CAST({quote_ident(cage_col)} AS VARCHAR))) AS cage"
+    ]
+
+    if vendor_col:
+        select_parts.append(f"MAX(NULLIF(TRIM(CAST({quote_ident(vendor_col)} AS VARCHAR)), '')) AS vendor")
+    else:
+        select_parts.append("CAST(NULL AS VARCHAR) AS vendor")
+
+    if part_col:
+        select_parts.append(f"string_agg(DISTINCT NULLIF(TRIM(CAST({quote_ident(part_col)} AS VARCHAR)), ''), ', ') AS part_numbers")
+    else:
+        select_parts.append("CAST(NULL AS VARCHAR) AS part_numbers")
+
+    if source_col:
+        select_parts.append(f"string_agg(DISTINCT NULLIF(TRIM(CAST({quote_ident(source_col)} AS VARCHAR)), ''), ', ') AS source")
+    else:
+        select_parts.append("CAST(NULL AS VARCHAR) AS source")
+
+    sql = f"""
+        SELECT
+            {", ".join(select_parts)}
+        FROM {NSN_REF_TABLE}
+        WHERE {where_sql}
+          AND TRIM(CAST({quote_ident(cage_col)} AS VARCHAR)) <> ''
+        GROUP BY 1
+    """
+
+    try:
+        df = duck_fetch_df(sql, params)
+        if df.empty:
+            return {}
+
+        out = {}
+
+        for r in df.to_dict(orient="records"):
+            cage = str(r.get("cage") or "").strip().upper()
+            if not cage or cage in {"NAN", "NONE", "NULL"}:
+                continue
+
+            out[cage] = {
+                "vendor": r.get("vendor"),
+                "part_numbers": r.get("part_numbers") or "—",
+                "source": r.get("source"),
+            }
+
+        return out
+
+    except Exception:
+        logger.exception("NSN reference supplier lookup failed for NIIN=%s", safe_niin)
+        return {}
+
+
 @app.get("/api/nsn/profile")
 def get_nsn_profile(
     nsn: str,
-    # ✅ Keep parameters to prevent 422 errors, but IGNORE them for DuckDB 
-    # because Logistics data is universal and doesn't change based on F-35/Navy filters
+    # Keep parameters to prevent 422 errors.
+    # Revenue metrics remain revenue-backed; reference metadata comes from v_nsn_cage_reference.
     years: Optional[List[int]] = Query(None),
     agency: Optional[str] = None,
     domain: Optional[str] = None,
     platform: Optional[str] = None,
     psc: Optional[str] = None
 ):
-    # 1) Clean Input (Standard 9-digit NIIN logic)
+    # 1) Clean Input
     clean = ''.join(filter(str.isdigit, str(nsn)))
     safe_niin = clean.zfill(9) if len(clean) < 9 else clean[-9:]
 
-    # 2) Query Universal Data from Disk (No global filters applied here)
+    # 2) Revenue-backed product lookup remains unchanged.
     df = get_subset_from_disk(
         "products.parquet",
         where_clause="niin = ?",
@@ -4610,15 +5063,53 @@ def get_nsn_profile(
         limit=50000
     )
 
+    # 3) Reference lookup from the new full NSN/CAGE universe.
+    ref_profile = nsn_ref_profile_lookup(safe_niin)
+
+    # 4) If there is no revenue-backed product row, still allow the NSN dashboard to open
+    # from the full reference universe.
     if df.empty:
-        return {"found": False}
+        if not ref_profile:
+            return {"found": False}
+
+        fsc_code = ref_profile.get("fsc_code") or ""
+        item_name = ref_profile.get("item_name") or "Unknown"
+
+        return {
+            "found": True,
+            "nsn": f"{fsc_code}-{safe_niin}" if fsc_code else safe_niin,
+            "niin": safe_niin,
+            "item_name": item_name,
+            "fsc_code": fsc_code,
+
+            "total_revenue": 0.0,
+            "total_units_sold": 0,
+            "market_price": 0.0,
+            "last_sold_date": None,
+            "annual_revenue_trend": {},
+
+            "demil_code": None,
+            "shelf_life_code": None,
+            "mgmt_control_code": None,
+            "unit_of_issue": None,
+            "source_of_supply": None,
+            "govt_estimated_price": 0.0,
+            "acquisition_advice_code": None,
+
+            "has_sales_history": False,
+            "has_reference_history": True,
+            "reference_supplier_count": int(ref_profile.get("reference_supplier_count") or 0),
+            "reference_part_count": int(ref_profile.get("reference_part_count") or 0),
+            "reference_rows": int(ref_profile.get("reference_rows") or 0),
+            "reference_sources": ref_profile.get("reference_sources"),
+        }
 
     match = df.copy()
 
     match["total_revenue"] = pd.to_numeric(match.get("total_revenue", 0), errors="coerce").fillna(0)
     match["total_units_sold"] = pd.to_numeric(match.get("total_units_sold", 0), errors="coerce").fillna(0)
 
-    # 3) Calculate Dynamic Revenue based on Years (Since revenue *is* temporal)
+    # 5) Calculate Dynamic Revenue based on Years.
     if years:
         match["dynamic_amount"] = match["annual_revenue_trend"].apply(
             lambda s: calculate_trend_sum(s or "", years)
@@ -4629,7 +5120,7 @@ def get_nsn_profile(
         
     total_units = int(match["total_units_sold"].sum())
 
-    # 4) Best Row Logic (prefer a real description)
+    # 6) Best Row Logic.
     best_row = match.iloc[0]
     if "description" in match.columns:
         for r in match.itertuples(index=False):
@@ -4640,17 +5131,29 @@ def get_nsn_profile(
     else:
         best_row = match.iloc[0]
 
-    # Helper getters 
     def g(obj, key, default=None):
-        try: return getattr(obj, key)
-        except: 
-            try: return obj.get(key, default)
-            except: return default
+        try:
+            return getattr(obj, key)
+        except Exception:
+            try:
+                return obj.get(key, default)
+            except Exception:
+                return default
 
-    fsc_code = g(best_row, "fsc_code", "") or g(best_row, "fsc", "")
-    desc = g(best_row, "description", None) or g(best_row, "item_name", None) or "Unknown"
+    fsc_code = (
+        g(best_row, "fsc_code", "")
+        or g(best_row, "fsc", "")
+        or ref_profile.get("fsc_code", "")
+    )
 
-    # Calculate weighted average price
+    desc = (
+        g(best_row, "description", None)
+        or g(best_row, "item_name", None)
+        or ref_profile.get("item_name")
+        or "Unknown"
+    )
+
+    # 7) Weighted average price.
     match["avg_unit_price"] = pd.to_numeric(match.get("avg_unit_price", 0), errors="coerce").fillna(0)
     if total_units > 0:
         avg_unit_price = float((match["avg_unit_price"] * match["total_units_sold"]).sum() / total_units)
@@ -4659,7 +5162,7 @@ def get_nsn_profile(
 
     last_sold_date = str(match["last_sold_date"].max()) if "last_sold_date" in match.columns else None
     
-    # Trend
+    # 8) Trend.
     trend_dicts = match["annual_revenue_trend"].apply(_parse_trend_to_dict).tolist()
     trend = _sum_trend_dicts(trend_dicts)
 
@@ -4685,7 +5188,12 @@ def get_nsn_profile(
         "govt_estimated_price": float(g(best_row, "govt_estimated_price", 0) or 0),
         "acquisition_advice_code": g(best_row, "acquisition_advice_code", None),
 
-        "has_sales_history": bool(total_rev > 0)
+        "has_sales_history": bool(total_rev > 0),
+        "has_reference_history": bool(ref_profile),
+        "reference_supplier_count": int(ref_profile.get("reference_supplier_count") or 0) if ref_profile else 0,
+        "reference_part_count": int(ref_profile.get("reference_part_count") or 0) if ref_profile else 0,
+        "reference_rows": int(ref_profile.get("reference_rows") or 0) if ref_profile else 0,
+        "reference_sources": ref_profile.get("reference_sources") if ref_profile else None,
     }
 
 
@@ -4701,7 +5209,8 @@ def get_nsn_suppliers(
 ):
     safe_niin = get_niin(nsn).zfill(9)
 
-    # 1. DUCKDB: Instant math for revenue and contract counts
+    # 1. DUCKDB: Instant math for revenue and contract counts.
+    # This stays revenue-backed.
     where_parts = ["niin = ?"]
     params = [safe_niin]
 
@@ -4744,19 +5253,12 @@ def get_nsn_suppliers(
         logger.error(f"NSN Suppliers DuckDB Error: {e}")
         sales_records = []
 
-    # 2. ATHENA: Tiny, 1-second lookup for authorized part numbers
-    athena_query = f"""
-        SELECT 
-            TRIM(UPPER(cage_code)) as cage_code,
-            array_join(array_agg(DISTINCT part_number), ', ') as part_numbers
-        FROM "market_intel_silver"."ref_approved_sources"
-        WHERE LPAD(CAST(niin AS VARCHAR), 9, '0') = '{safe_niin}'
-        GROUP BY 1
-    """
+    # 2. LOCAL DUCKDB: full NSN/CAGE reference lookup.
+    # This replaces the Athena approved-source lookup and is safe because it is one NIIN at a time.
     try:
-        approved_data = run_athena_query(athena_query)
-        approved_map = {r['cage_code']: r['part_numbers'] for r in (approved_data or [])}
+        approved_map = nsn_ref_supplier_lookup(safe_niin)
     except Exception:
+        logger.exception("NSN reference supplier lookup failed")
         approved_map = {}
 
     # ✅ RESTORED BUSINESS LOGIC: Government & Standards Dictionary
@@ -4776,49 +5278,62 @@ def get_nsn_suppliers(
     }
 
     def resolve_vendor_name(cage_code, tx_name):
-        # 1. Prefer the transaction name if valid
+        # 1. Prefer the transaction/reference name if valid.
         if tx_name and str(tx_name).strip() and str(tx_name).upper() not in ["NAN", "NONE"]:
             return tx_name
-        # 2. Fallback to Military/Gov Dictionary
+
+        # 2. Fallback to Military/Gov Dictionary.
         if cage_code in gov_dict:
             return gov_dict[cage_code]
-        # 3. Fallback to Global Cache (which contains SAM data from profiles_df)
+
+        # 3. Fallback to Global Cache.
         cached_name = GLOBAL_CACHE.get("cage_name_map", {}).get(cage_code)
         if cached_name:
             return cached_name
-        # 4. Final Fallback
+
+        # 4. Final fallback.
         return f"Unknown Manufacturer (CAGE: {cage_code})"
 
-    # 3. MERGE Results
+    # 3. MERGE Results.
     out = []
     sales_cages = set()
     
     for r in sales_records:
         c = str(r.get('cage', '')).strip().upper()
-        if not c or c == 'NAN': continue
+        if not c or c == 'NAN':
+            continue
         
         sales_cages.add(c)
-        r['vendor'] = resolve_vendor_name(c, r.get('vendor'))
+
+        ref_row = approved_map.get(c, {})
+        ref_vendor = ref_row.get("vendor") if isinstance(ref_row, dict) else None
+
+        r['vendor'] = resolve_vendor_name(c, r.get('vendor') or ref_vendor)
         r['is_approved_source'] = c in approved_map
-        r['part_numbers'] = approved_map.get(c, '—')
+        r['part_numbers'] = ref_row.get("part_numbers", "—") if isinstance(ref_row, dict) else "—"
+        r['reference_source'] = ref_row.get("source") if isinstance(ref_row, dict) else None
         r['total_revenue'] = float(r.get('total_revenue') or 0.0)
         r['contracts'] = int(r.get('contracts') or 0)
+
         out.append(r)
 
-    # Append authorized sources that have 0 sales in the filtered time window
-    for c, pn in approved_map.items():
+    # Append reference sources that have 0 sales in the filtered time window.
+    for c, ref_row in approved_map.items():
         if c not in sales_cages:
+            ref_vendor = ref_row.get("vendor") if isinstance(ref_row, dict) else None
+
             out.append({
                 "cage": c,
-                "vendor": resolve_vendor_name(c, None),
+                "vendor": resolve_vendor_name(c, ref_vendor),
                 "contracts": 0,
                 "last_sold": None,
                 "total_revenue": 0.0,
                 "is_approved_source": True,
-                "part_numbers": pn
+                "part_numbers": ref_row.get("part_numbers", "—") if isinstance(ref_row, dict) else "—",
+                "reference_source": ref_row.get("source") if isinstance(ref_row, dict) else None,
             })
 
-    # Sort by Revenue, then Authorization status
+    # Sort by Revenue, then Authorization/reference status.
     out.sort(key=lambda x: (x['total_revenue'], x['is_approved_source']), reverse=True)
     return out
 

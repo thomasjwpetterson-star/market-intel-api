@@ -21,6 +21,11 @@ DATABASE = 'market_intel_gold'
 
 # ✅ FORCE REBUILD SWITCH (temporary override)
 FORCE_REBUILD = os.getenv("FORCE_REBUILD", "0").strip().lower() in ("1", "true", "yes")
+FORCE_REBUILD_FILES = {
+    name.strip()
+    for name in os.getenv("FORCE_REBUILD_FILES", "").split(",")
+    if name.strip()
+}
 
 # Temp locations
 TEMP_DIR = "./temp_etl_downloads"
@@ -57,6 +62,11 @@ def is_cache_fresh(cache_name: str, max_age_hours: float = 12.0) -> bool:
     # 🧨 Global override — forces rebuild regardless of age
     if FORCE_REBUILD:
         print(f"🧨 FORCE_REBUILD=1 -> treating {cache_name} as stale")
+        return False
+
+    cache_stem = cache_name.replace(".parquet", "")
+    if cache_name in FORCE_REBUILD_FILES or cache_stem in FORCE_REBUILD_FILES:
+        print(f"🧨 FORCE_REBUILD_FILES -> treating {cache_name} as stale")
         return False
 
     keys_to_check = [f"{CACHE_PREFIX}{cache_name}", f"{CACHE_PREFIX}{cache_name}.DONE"]
@@ -325,68 +335,171 @@ def optimize_and_upload():
         df_profiles = pd.DataFrame()
     else:
         df_profiles = run_query("""
-            WITH base AS (
-            SELECT
-                cage_code,
-                vendor_name,
-                total_spend,
-                contract_count,
-                year,
-                naics_code,
-                naics_description,
-                platform_family
-            FROM dashboard_summary_v2
-            WHERE cage_code IS NOT NULL
-            ),
-            agg AS (
-            SELECT
-                cage_code,
-                SUM(total_spend) AS total_lifetime_spend,
-                SUM(contract_count) AS total_contracts,
-                MAX(year) AS last_active_year,
-                array_join(
-                slice(
-                    array_agg(DISTINCT CAST(naics_code AS VARCHAR) || ' - ' || COALESCE(naics_description, 'Unknown')),
-                    1, 5
-                ),
-                ','
-                ) AS top_naics_codes,
-                array_join(
-                slice(array_agg(DISTINCT platform_family), 1, 5),
-                ','
-                ) AS top_platforms
-            FROM base
-            GROUP BY cage_code
-            ),
-            pick_name AS (
-            SELECT cage_code, vendor_name
-            FROM (
+            WITH award_base AS (
                 SELECT
-                cage_code,
-                -- ✅ safety: strip trailing "(0975)"-style site codes if they exist
-                regexp_replace(vendor_name, '\\s*\\(\\d{4}\\)\\s*$', '') AS vendor_name,
-                year,
-                total_spend,
-                ROW_NUMBER() OVER (
-                    PARTITION BY cage_code
-                    ORDER BY year DESC, total_spend DESC, vendor_name DESC
-                ) AS rn
-                FROM base
-                WHERE vendor_name IS NOT NULL AND trim(vendor_name) <> ''
-            )
-            WHERE rn = 1
+                    LPAD(UPPER(REGEXP_REPLACE(CAST(cage_code AS VARCHAR), '[^A-Za-z0-9]', '')), 5, '0') AS cage_code,
+                    vendor_name,
+                    total_spend,
+                    contract_count,
+                    year,
+                    naics_code,
+                    naics_description,
+                    platform_family
+                FROM dashboard_summary_v2
+                WHERE cage_code IS NOT NULL
+            ),
+            award_agg AS (
+                SELECT
+                    cage_code,
+                    SUM(total_spend) AS total_lifetime_spend,
+                    SUM(contract_count) AS total_contracts,
+                    MAX(year) AS last_active_year,
+                    array_join(
+                        slice(
+                            array_agg(DISTINCT CAST(naics_code AS VARCHAR) || ' - ' || COALESCE(naics_description, 'Unknown')),
+                            1, 5
+                        ),
+                        ','
+                    ) AS top_naics_codes,
+                    array_join(
+                        slice(array_agg(DISTINCT platform_family), 1, 5),
+                        ','
+                    ) AS top_platforms
+                FROM award_base
+                WHERE cage_code NOT IN ('', '00000', 'UNKNO', 'UNKNOWN', 'NONE', 'NULL', 'NAN')
+                GROUP BY cage_code
+            ),
+            award_pick_name AS (
+                SELECT cage_code, vendor_name
+                FROM (
+                    SELECT
+                        cage_code,
+                        regexp_replace(vendor_name, '\\s*\\(\\d{4}\\)\\s*$', '') AS vendor_name,
+                        year,
+                        total_spend,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY cage_code
+                            ORDER BY year DESC, total_spend DESC, vendor_name DESC
+                        ) AS rn
+                    FROM award_base
+                    WHERE vendor_name IS NOT NULL AND trim(vendor_name) <> ''
+                )
+                WHERE rn = 1
+            ),
+            award_profiles AS (
+                SELECT
+                    a.cage_code,
+                    p.vendor_name,
+                    a.total_lifetime_spend,
+                    a.total_contracts,
+                    a.last_active_year,
+                    a.top_naics_codes,
+                    a.top_platforms
+                FROM award_agg a
+                LEFT JOIN award_pick_name p
+                    ON a.cage_code = p.cage_code
+            ),
+            contract_context AS (
+                SELECT
+                    contract_id,
+                    MAX_BY(UPPER(TRIM(platform_family)), action_date) AS platform_family
+                FROM "market_intel_gold"."dashboard_master_view"
+                WHERE contract_id IS NOT NULL
+                GROUP BY contract_id
+            ),
+            network_entities_raw AS (
+                SELECT
+                    LPAD(UPPER(REGEXP_REPLACE(CAST(n.prime_cage AS VARCHAR), '[^A-Za-z0-9]', '')), 5, '0') AS cage_code,
+                    UPPER(TRIM(n.prime_name)) AS vendor_name,
+                    CAST(n.year AS INTEGER) AS year,
+                    n.contract_id,
+                    p.platform_family,
+                    CAST(COALESCE(n.flow_amount_capped, 0) AS DOUBLE) AS network_flow
+                FROM "market_intel_gold"."ref_company_network" n
+                LEFT JOIN contract_context p
+                    ON n.contract_id = p.contract_id
+                WHERE n.prime_cage IS NOT NULL
+
+                UNION ALL
+
+                SELECT
+                    LPAD(UPPER(REGEXP_REPLACE(CAST(n.sub_cage AS VARCHAR), '[^A-Za-z0-9]', '')), 5, '0') AS cage_code,
+                    UPPER(TRIM(n.sub_name)) AS vendor_name,
+                    CAST(n.year AS INTEGER) AS year,
+                    n.contract_id,
+                    p.platform_family,
+                    CAST(COALESCE(n.flow_amount_capped, 0) AS DOUBLE) AS network_flow
+                FROM "market_intel_gold"."ref_company_network" n
+                LEFT JOIN contract_context p
+                    ON n.contract_id = p.contract_id
+                WHERE n.sub_cage IS NOT NULL
+            ),
+            network_entities AS (
+                SELECT *
+                FROM network_entities_raw
+                WHERE cage_code NOT IN ('', '00000', 'UNKNO', 'UNKNOWN', 'NONE', 'NULL', 'NAN')
+            ),
+            network_agg AS (
+                SELECT
+                    cage_code,
+                    SUM(network_flow) AS network_flow_total,
+                    COUNT(DISTINCT contract_id) AS network_contract_count,
+                    MAX(year) AS network_last_active_year,
+                    array_join(
+                        slice(array_agg(DISTINCT platform_family), 1, 5),
+                        ','
+                    ) AS network_top_platforms
+                FROM network_entities
+                GROUP BY cage_code
+            ),
+            network_pick_name AS (
+                SELECT cage_code, vendor_name
+                FROM (
+                    SELECT
+                        cage_code,
+                        vendor_name,
+                        year,
+                        network_flow,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY cage_code
+                            ORDER BY year DESC, network_flow DESC, vendor_name DESC
+                        ) AS rn
+                    FROM network_entities
+                    WHERE vendor_name IS NOT NULL AND trim(vendor_name) <> ''
+                )
+                WHERE rn = 1
+            ),
+            network_profiles AS (
+                SELECT
+                    n.cage_code,
+                    p.vendor_name,
+                    n.network_flow_total,
+                    n.network_contract_count,
+                    n.network_last_active_year,
+                    n.network_top_platforms
+                FROM network_agg n
+                LEFT JOIN network_pick_name p
+                    ON n.cage_code = p.cage_code
             )
             SELECT
-            LPAD(UPPER(TRIM(a.cage_code)), 5, '0') as cage_code,
-            p.vendor_name,
-            a.total_lifetime_spend,
-            a.total_contracts,
-            a.last_active_year,
-            a.top_naics_codes,
-            a.top_platforms
-            FROM agg a
-            LEFT JOIN pick_name p
-            ON a.cage_code = p.cage_code
+                COALESCE(a.cage_code, n.cage_code) AS cage_code,
+                COALESCE(a.vendor_name, n.vendor_name) AS vendor_name,
+                COALESCE(a.total_lifetime_spend, 0) AS total_lifetime_spend,
+                COALESCE(a.total_contracts, 0) AS total_contracts,
+                COALESCE(a.last_active_year, n.network_last_active_year, 0) AS last_active_year,
+                COALESCE(a.top_naics_codes, '') AS top_naics_codes,
+                COALESCE(a.top_platforms, n.network_top_platforms, '') AS top_platforms,
+                CASE
+                    WHEN a.cage_code IS NOT NULL AND n.cage_code IS NOT NULL THEN 'AWARD_AND_NETWORK'
+                    WHEN a.cage_code IS NOT NULL THEN 'AWARD_BACKED'
+                    ELSE 'NETWORK_ONLY'
+                END AS profile_source,
+                COALESCE(n.network_flow_total, 0) AS network_flow_total,
+                COALESCE(n.network_contract_count, 0) AS network_contract_count,
+                COALESCE(n.network_last_active_year, 0) AS network_last_active_year
+            FROM award_profiles a
+            FULL OUTER JOIN network_profiles n
+                ON a.cage_code = n.cage_code
         """)
 
     print("📥 Fetching Risk Sidecar...")
@@ -803,80 +916,75 @@ def optimize_and_upload():
 
 
     # -------------------------------------------------------
-    # 8. Product Catalog (Aggregated)
+    # 8. Product Catalog (Revenue-Backed, Aggregated)
     # -------------------------------------------------------
-    # -------------------------------------------------------
-    # 8. Product Catalog (Aggregated)
-    # -------------------------------------------------------
-    print("📥 Fetching Product Catalog (Aggregated with Platform Context)...")
+    print("📥 Fetching Product Catalog (Revenue-Backed with Platform Context)...")
     
     if is_cache_fresh("products.parquet", max_age_hours=12):
         print("   ↩️ Skipping products.parquet (Fresh file already in S3)")
         df_products = pd.DataFrame()
     else:
         # LOGIC EXPLAINED:
-        # 1. 'part_platforms' (CTE): Scans the Master View to find which Platform buys this Part the most.
-        # 2. 'view_dashboard_products': Provides the clean pre-calculated trends and revenue.
-        # 3. 'ref_flis_mgmt': Provides the Logistics/Demil codes (which are not in the Master View).
+        # 1. 'part_platforms' CTE scans the Master View to find which platform buys this part the most.
+        # 2. 'view_dashboard_products' provides the clean pre-calculated trends and revenue.
+        # 3. 'ref_flis_mgmt' provides the logistics/demil codes.
+        # 4. This file intentionally keeps WHERE p.total_revenue > 0 because it powers company/platform product tabs.
         
         df_products = run_query("""
             WITH part_platforms AS (
+                SELECT 
+                    SUBSTR(REGEXP_REPLACE(nsn, '[^0-9]', ''), -9) AS join_niin,
+                    MAX_BY(platform_family, spend_amount) AS derived_platform
+                FROM "market_intel_gold"."dashboard_master_view"
+                WHERE platform_family IS NOT NULL 
+                  AND nsn IS NOT NULL
+                  AND LENGTH(REGEXP_REPLACE(nsn, '[^0-9]', '')) >= 9
+                GROUP BY 1
+            )
             SELECT 
-                substr(regexp_replace(nsn, '[^0-9]', ''), -9) as join_niin,
-                MAX_BY(platform_family, spend_amount) as derived_platform
-            FROM "market_intel_gold"."dashboard_master_view"
-            WHERE platform_family IS NOT NULL 
-              AND nsn IS NOT NULL
-            GROUP BY 1
-        )
-        SELECT 
-            -- Identifiers
-            LPAD(CAST(p.niin AS VARCHAR), 9, '0') as niin,
-            p.nsn,
-            p.cage,
-            
-            -- Metadata
-            p.description,
-            p.part_number,
-            
-            -- ✅ FIX 1: Derive FSC Code from NSN (First 4 digits)
-            -- This works because FSC is literally the prefix of the NSN.
-            SUBSTR(REGEXP_REPLACE(p.nsn, '[^0-9]', ''), 1, 4) AS fsc_code,
-            
-            -- Metrics
-            p.total_revenue,
-            p.total_units_sold,  -- Correct column name from your schema
-            p.avg_unit_price,
-            p.last_sold_date,
-            p.annual_revenue_trend,
-            p.market_share_pct,
-            p.direct_sales_market_share_pct,
-                            
-            
-            -- ✅ FIX 2: Restore Platform Family (Joined from the Master View CTE above)
-            COALESCE(pp.derived_platform, 'UNKNOWN') as platform_family,
-            
-            -- Logistics Columns (Joined from Silver)
-            m.ciic as demil_code,
-            m.slc as shelf_life_code,
-            m.mgmt_ctl as mgmt_control_code,
-            m.ui as unit_of_issue,
-            COALESCE(m.sos, m.moe) as source_of_supply,
-            m.unit_price as govt_estimated_price,
-            m.aac as acquisition_advice_code
+                -- Identifiers
+                LPAD(CAST(p.niin AS VARCHAR), 9, '0') AS niin,
+                p.nsn,
+                p.cage,
+                
+                -- Metadata
+                p.description,
+                p.part_number,
+                
+                -- FSC Code from NSN
+                SUBSTR(REGEXP_REPLACE(p.nsn, '[^0-9]', ''), 1, 4) AS fsc_code,
+                
+                -- Metrics
+                p.total_revenue,
+                p.total_units_sold,
+                p.avg_unit_price,
+                p.last_sold_date,
+                p.annual_revenue_trend,
+                p.market_share_pct,
+                p.direct_sales_market_share_pct,
+                                
+                -- Platform Family
+                COALESCE(pp.derived_platform, 'UNKNOWN') AS platform_family,
+                
+                -- Logistics Columns
+                m.ciic AS demil_code,
+                m.slc AS shelf_life_code,
+                m.mgmt_ctl AS mgmt_control_code,
+                m.ui AS unit_of_issue,
+                COALESCE(m.sos, m.moe) AS source_of_supply,
+                m.unit_price AS govt_estimated_price,
+                m.aac AS acquisition_advice_code
 
-        FROM "market_intel_gold"."view_dashboard_products" p
-        
-        -- Join Logistics (Silver)
-        LEFT JOIN "market_intel_silver"."ref_flis_mgmt" m 
-            ON LPAD(CAST(p.niin AS VARCHAR), 9, '0') = LPAD(CAST(m.niin AS VARCHAR), 9, '0')
+            FROM "market_intel_gold"."view_dashboard_products" p
             
-        -- Join Platforms (Master View Calculation)
-        LEFT JOIN part_platforms pp
-            ON LPAD(CAST(p.niin AS VARCHAR), 9, '0') = pp.join_niin
-            
-        WHERE p.total_revenue > 0 
-    """)
+            LEFT JOIN "market_intel_silver"."ref_flis_mgmt" m 
+                ON LPAD(CAST(p.niin AS VARCHAR), 9, '0') = LPAD(CAST(m.niin AS VARCHAR), 9, '0')
+                
+            LEFT JOIN part_platforms pp
+                ON LPAD(CAST(p.niin AS VARCHAR), 9, '0') = pp.join_niin
+                
+            WHERE p.total_revenue > 0
+        """)
     
     if not df_products.empty:
         # Optimization: Downcast numbers to save RAM
@@ -891,6 +999,230 @@ def optimize_and_upload():
                 df_products[col] = df_products[col].astype(str).str.upper().str.strip().replace('NAN', '')
 
     upload_df(df_products, "products.parquet")
+
+
+    # -------------------------------------------------------
+    # 8B. Full NSN/CAGE Reference Catalog
+    # -------------------------------------------------------
+    print("📥 Fetching Full NSN/CAGE Reference Catalog...")
+
+    if is_cache_fresh("nsn_cage_reference.parquet", max_age_hours=12):
+        print("   ↩️ Skipping nsn_cage_reference.parquet (Fresh file already in S3)")
+    else:
+        print("📦 Athena UNLOAD -> Parquet for full NSN/CAGE reference file...")
+
+        # LOGIC EXPLAINED:
+        # 1. Uses the same broad source family as products.parquet.
+        # 2. Does NOT apply WHERE p.total_revenue > 0.
+        # 3. Adds has_observed_revenue and revenue_status so the UI can distinguish:
+        #       - REVENUE_LINKED
+        #       - REFERENCE_ONLY
+        # 4. Uses Athena UNLOAD + DuckDB merge to avoid pulling the wider universe into Pandas.
+
+        nsn_cage_reference_sql = """
+            WITH product_base AS (
+                SELECT
+                    CASE
+                        WHEN p.niin IS NOT NULL 
+                             AND TRIM(CAST(p.niin AS VARCHAR)) <> ''
+                        THEN LPAD(CAST(p.niin AS VARCHAR), 9, '0')
+
+                        WHEN p.nsn IS NOT NULL 
+                             AND LENGTH(REGEXP_REPLACE(CAST(p.nsn AS VARCHAR), '[^0-9]', '')) >= 9
+                        THEN SUBSTR(REGEXP_REPLACE(CAST(p.nsn AS VARCHAR), '[^0-9]', ''), -9)
+
+                        ELSE NULL
+                    END AS join_niin,
+
+                    p.niin AS raw_niin,
+                    p.nsn,
+                    p.cage,
+                    p.description,
+                    p.part_number,
+                    p.total_revenue,
+                    p.total_units_sold,
+                    p.avg_unit_price,
+                    p.last_sold_date,
+                    p.annual_revenue_trend,
+                    p.market_share_pct,
+                    p.direct_sales_market_share_pct
+
+                FROM "market_intel_gold"."view_dashboard_products" p
+                WHERE 
+                    (
+                        p.niin IS NOT NULL 
+                        AND TRIM(CAST(p.niin AS VARCHAR)) <> ''
+                    )
+                    OR
+                    (
+                        p.nsn IS NOT NULL 
+                        AND LENGTH(REGEXP_REPLACE(CAST(p.nsn AS VARCHAR), '[^0-9]', '')) >= 9
+                    )
+            ),
+
+            observed_nsn_metrics AS (
+                SELECT
+                    SUBSTR(REGEXP_REPLACE(CAST(nsn AS VARCHAR), '[^0-9]', ''), -9) AS join_niin,
+                    CAST(SUM(COALESCE(spend_amount, 0)) AS DOUBLE) AS observed_spend,
+                    CAST(COUNT(DISTINCT contract_id) AS INTEGER) AS observed_contract_count,
+                    CAST(COUNT(*) AS INTEGER) AS observed_row_count,
+                    CAST(MIN(year) AS INTEGER) AS first_observed_year,
+                    CAST(MAX(year) AS INTEGER) AS last_observed_year,
+                    MAX(action_date) AS last_observed_date
+                FROM "market_intel_gold"."dashboard_master_view"
+                WHERE nsn IS NOT NULL
+                  AND LENGTH(REGEXP_REPLACE(CAST(nsn AS VARCHAR), '[^0-9]', '')) >= 9
+                GROUP BY 1
+            ),
+
+            platform_spend AS (
+                SELECT
+                    SUBSTR(REGEXP_REPLACE(CAST(nsn AS VARCHAR), '[^0-9]', ''), -9) AS join_niin,
+                    UPPER(TRIM(platform_family)) AS platform_family,
+                    UPPER(TRIM(market_segment)) AS market_segment,
+                    UPPER(TRIM(tech_type)) AS tech_type,
+                    UPPER(TRIM(capability_name)) AS capability_name,
+                    UPPER(TRIM(psc)) AS psc,
+                    CAST(SUM(COALESCE(spend_amount, 0)) AS DOUBLE) AS platform_spend
+                FROM "market_intel_gold"."dashboard_master_view"
+                WHERE nsn IS NOT NULL
+                  AND LENGTH(REGEXP_REPLACE(CAST(nsn AS VARCHAR), '[^0-9]', '')) >= 9
+                GROUP BY 1, 2, 3, 4, 5, 6
+            ),
+
+            part_platforms AS (
+                SELECT
+                    join_niin,
+                    MAX_BY(platform_family, platform_spend) AS platform_family,
+                    MAX_BY(market_segment, platform_spend) AS market_segment,
+                    MAX_BY(tech_type, platform_spend) AS tech_type,
+                    MAX_BY(capability_name, platform_spend) AS capability_name,
+                    MAX_BY(psc, platform_spend) AS psc
+                FROM platform_spend
+                GROUP BY join_niin
+            )
+
+            SELECT
+                -- Core NSN / CAGE identifiers
+                pb.join_niin AS niin,
+
+                CASE
+                    WHEN pb.nsn IS NOT NULL 
+                         AND TRIM(CAST(pb.nsn AS VARCHAR)) <> ''
+                    THEN CAST(pb.nsn AS VARCHAR)
+                    ELSE NULL
+                END AS nsn,
+
+                CASE
+                    WHEN pb.nsn IS NOT NULL 
+                         AND LENGTH(REGEXP_REPLACE(CAST(pb.nsn AS VARCHAR), '[^0-9]', '')) >= 4
+                    THEN SUBSTR(REGEXP_REPLACE(CAST(pb.nsn AS VARCHAR), '[^0-9]', ''), 1, 4)
+                    ELSE NULL
+                END AS fsc_code,
+
+                CASE
+                    WHEN pb.cage IS NULL 
+                         OR TRIM(CAST(pb.cage AS VARCHAR)) = ''
+                    THEN NULL
+                    ELSE LPAD(UPPER(TRIM(CAST(pb.cage AS VARCHAR))), 5, '0')
+                END AS cage,
+
+                -- Part metadata
+                pb.description,
+                pb.part_number,
+
+                -- Revenue / observed procurement fields
+                CAST(COALESCE(pb.total_revenue, om.observed_spend, 0) AS REAL) AS total_revenue,
+                CAST(COALESCE(pb.total_units_sold, 0) AS REAL) AS total_units_sold,
+                CAST(COALESCE(pb.avg_unit_price, 0) AS REAL) AS avg_unit_price,
+                pb.last_sold_date,
+                pb.annual_revenue_trend,
+                CAST(COALESCE(pb.market_share_pct, 0) AS REAL) AS market_share_pct,
+                CAST(COALESCE(pb.direct_sales_market_share_pct, 0) AS REAL) AS direct_sales_market_share_pct,
+
+                CAST(COALESCE(om.observed_spend, 0) AS REAL) AS observed_spend,
+                COALESCE(om.observed_contract_count, 0) AS observed_contract_count,
+                COALESCE(om.observed_row_count, 0) AS observed_row_count,
+                om.first_observed_year,
+                om.last_observed_year,
+                om.last_observed_date,
+
+                CASE 
+                    WHEN COALESCE(pb.total_revenue, om.observed_spend, 0) > 0 THEN TRUE 
+                    ELSE FALSE 
+                END AS has_observed_revenue,
+
+                CASE 
+                    WHEN COALESCE(pb.total_revenue, om.observed_spend, 0) > 0 THEN 'REVENUE_LINKED'
+                    ELSE 'REFERENCE_ONLY'
+                END AS revenue_status,
+
+                -- Platform / market context where observed
+                CASE 
+                    WHEN pp.platform_family IN ('NAN', 'NONE', 'UNKNOWN', '') THEN NULL
+                    ELSE pp.platform_family
+                END AS platform_family,
+
+                CASE 
+                    WHEN pp.market_segment IN ('NAN', 'NONE', 'UNKNOWN', '') THEN NULL
+                    ELSE pp.market_segment
+                END AS market_segment,
+
+                CASE 
+                    WHEN pp.tech_type IN ('NAN', 'NONE', 'UNKNOWN', '') THEN NULL
+                    ELSE pp.tech_type
+                END AS tech_type,
+
+                CASE 
+                    WHEN pp.capability_name IN ('NAN', 'NONE', 'UNKNOWN', '') THEN NULL
+                    ELSE pp.capability_name
+                END AS capability_name,
+
+                CASE 
+                    WHEN pp.psc IN ('NAN', 'NONE', 'UNKNOWN', '') THEN NULL
+                    ELSE pp.psc
+                END AS psc,
+
+                -- Logistics columns
+                m.ciic AS demil_code,
+                m.slc AS shelf_life_code,
+                m.mgmt_ctl AS mgmt_control_code,
+                m.ui AS unit_of_issue,
+                COALESCE(m.sos, m.moe) AS source_of_supply,
+                CAST(COALESCE(m.unit_price, 0) AS REAL) AS govt_estimated_price,
+                m.aac AS acquisition_advice_code,
+
+                -- Source / search helper
+                'view_dashboard_products' AS reference_source,
+
+                UPPER(
+                    CONCAT(
+                        COALESCE(CAST(pb.nsn AS VARCHAR), ''), ' ',
+                        COALESCE(pb.join_niin, ''), ' ',
+                        COALESCE(CAST(pb.cage AS VARCHAR), ''), ' ',
+                        COALESCE(CAST(pb.part_number AS VARCHAR), ''), ' ',
+                        COALESCE(CAST(pb.description AS VARCHAR), '')
+                    )
+                ) AS search_text
+
+            FROM product_base pb
+
+            LEFT JOIN "market_intel_silver"."ref_flis_mgmt" m
+                ON pb.join_niin = LPAD(CAST(m.niin AS VARCHAR), 9, '0')
+
+            LEFT JOIN observed_nsn_metrics om
+                ON pb.join_niin = om.join_niin
+
+            LEFT JOIN part_platforms pp
+                ON pb.join_niin = pp.join_niin
+
+            WHERE pb.join_niin IS NOT NULL
+        """
+
+        nsn_ref_unload_prefix = f"{UNLOAD_OUTPUT_PREFIX}nsn_cage_reference/{uuid.uuid4().hex}/"
+        nsn_ref_out_prefix = unload_to_s3(nsn_cage_reference_sql, nsn_ref_unload_prefix)
+
+        merge_unload_parts_with_duckdb(nsn_ref_out_prefix, "nsn_cage_reference.parquet")
 
     # ---------------------------------------------------------
     # ### [NEW] FETCH PLATFORM BOM (Weapon System Crosswalk) ###
