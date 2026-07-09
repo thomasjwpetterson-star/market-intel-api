@@ -1120,6 +1120,8 @@ def reload_all_data():
             "profiles.parquet", "risk.parquet", "network.parquet",
             "transactions.parquet", "opportunities.parquet", "kpis.parquet",
             "nsn_summary.parquet",
+            "nsn_profile_lookup.parquet",
+            "nsn_supplier_lookup.parquet",
             "nsn_cage_reference.parquet",
             "platform_bom.parquet" # unrelated to NSN/CAGE reference, leave only if another feature uses it
         ]
@@ -1251,6 +1253,8 @@ def reload_all_data():
                 ("v_risk", "risk.parquet"),
                 ("v_opportunities", "opportunities.parquet"),
                 ("v_nsn_summary", "nsn_summary.parquet"),
+                ("v_nsn_profile_lookup", "nsn_profile_lookup.parquet"),
+                ("v_nsn_supplier_lookup", "nsn_supplier_lookup.parquet"),
                 ("v_nsn_cage_reference", "nsn_cage_reference.parquet"),
                 ("v_platform_bom", "platform_bom.parquet") # ✅ Added here
             ]
@@ -4268,6 +4272,86 @@ def _sum_trend_dicts(dicts: List[Dict[int, float]]) -> str:
             total[y] = total.get(y, 0.0) + float(v or 0.0)
     return "|".join([f"{y}:{total[y]}" for y in sorted(total.keys())])
 
+def _clean_optional_value(value, default=None):
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+    text = str(value).strip()
+    if text.upper() in ("", "NAN", "NONE", "NULL", "NAT"):
+        return default
+    return value
+
+def nsn_profile_fast_lookup(safe_niin: str, years: Optional[List[int]] = None) -> Optional[Dict[str, Any]]:
+    """
+    Small pre-aggregated lookup built by ETL. This keeps NSN clicks fast and leaves
+    the older products.parquet scan as a fallback if the sidecar is absent.
+    """
+    try:
+        fast_df = duck_fetch_df(
+            """
+            SELECT *
+            FROM v_nsn_profile_lookup
+            WHERE niin = ?
+            LIMIT 1
+            """,
+            [safe_niin],
+        )
+    except Exception:
+        return None
+
+    if fast_df.empty:
+        return None
+
+    row = fast_df.iloc[0].to_dict()
+
+    def g(key, default=None):
+        return _clean_optional_value(row.get(key), default)
+
+    trend_raw = g("annual_revenue_trend", "") or ""
+    ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
+    if ys:
+        total_rev = float(calculate_trend_sum(str(trend_raw), ys))
+    else:
+        total_rev = float(g("total_revenue", 0) or 0)
+
+    fsc_code = str(g("fsc_code", "") or "")
+    nsn_value = str(g("nsn", "") or "")
+    if not nsn_value:
+        nsn_value = f"{fsc_code}-{safe_niin}" if fsc_code else safe_niin
+
+    return {
+        "found": True,
+        "nsn": nsn_value,
+        "niin": safe_niin,
+        "item_name": g("item_name", None) or g("description", None) or "Unknown",
+        "fsc_code": fsc_code,
+
+        "total_revenue": total_rev,
+        "total_units_sold": int(float(g("total_units_sold", 0) or 0)),
+        "market_price": float(g("market_price", 0) or 0),
+        "last_sold_date": g("last_sold_date", None),
+        "annual_revenue_trend": trend_raw,
+
+        "demil_code": g("demil_code", None),
+        "shelf_life_code": g("shelf_life_code", None),
+        "mgmt_control_code": g("mgmt_control_code", None),
+        "unit_of_issue": g("unit_of_issue", None),
+        "source_of_supply": g("source_of_supply", None),
+        "govt_estimated_price": float(g("govt_estimated_price", 0) or 0),
+        "acquisition_advice_code": g("acquisition_advice_code", None),
+
+        "has_sales_history": bool(total_rev > 0),
+        "has_reference_history": False,
+        "reference_supplier_count": 0,
+        "reference_part_count": 0,
+        "reference_rows": 0,
+        "reference_sources": None,
+    }
+
 # --- REPLACEMENT ENDPOINT ---
 # --- REPLACEMENT ENDPOINT ---
 @app.get("/api/company/parts")
@@ -5055,7 +5139,13 @@ def get_nsn_profile(
     clean = ''.join(filter(str.isdigit, str(nsn)))
     safe_niin = clean.zfill(9) if len(clean) < 9 else clean[-9:]
 
-    # 2) Revenue-backed product lookup remains unchanged.
+    # 2) Fast revenue-backed profile lookup. Falls back to the older products.parquet
+    # scan if the new ETL sidecar has not been published yet.
+    fast_profile = nsn_profile_fast_lookup(safe_niin, years)
+    if fast_profile:
+        return fast_profile
+
+    # 3) Revenue-backed product lookup remains unchanged.
     df = get_subset_from_disk(
         "products.parquet",
         where_clause="niin = ?",
@@ -5063,12 +5153,13 @@ def get_nsn_profile(
         limit=50000
     )
 
-    # 3) Reference lookup from the new full NSN/CAGE universe.
-    ref_profile = nsn_ref_profile_lookup(safe_niin)
+    # 3) Fast path: avoid scanning the huge NSN/CAGE reference file for revenue-backed NSNs.
+    ref_profile = {}
 
-    # 4) If there is no revenue-backed product row, still allow the NSN dashboard to open
-    # from the full reference universe.
+    # 4) If there is no revenue-backed product row, then use the full reference universe.
     if df.empty:
+        ref_profile = nsn_ref_profile_lookup(safe_niin)
+
         if not ref_profile:
             return {"found": False}
 
@@ -5234,32 +5325,51 @@ def get_nsn_suppliers(
 
     where_sql = " AND ".join(where_parts)
 
-    duck_query = f"""
-        SELECT 
-            TRIM(UPPER(vendor_cage)) as cage,
-            MAX(vendor_name) as vendor,
-            COUNT(DISTINCT contract_id) as contracts,
-            MAX(action_date) as last_sold,
-            SUM(spend_amount) as total_revenue
-        FROM v_transactions
-        WHERE {where_sql}
-        GROUP BY 1
-    """
-    
     try:
-        sales_df = duck_fetch_df(duck_query, params)
+        fast_supplier_query = f"""
+            SELECT
+                TRIM(UPPER(cage)) as cage,
+                MAX(vendor) as vendor,
+                COUNT(DISTINCT contract_id) as contracts,
+                MAX(last_sold) as last_sold,
+                SUM(total_revenue) as total_revenue
+            FROM v_nsn_supplier_lookup
+            WHERE {where_sql}
+            GROUP BY 1
+        """
+
+        sales_df = duck_fetch_df(fast_supplier_query, params)
         sales_records = sales_df.to_dict('records') if not sales_df.empty else []
-    except Exception as e:
-        logger.error(f"NSN Suppliers DuckDB Error: {e}")
-        sales_records = []
+    except Exception:
+        duck_query = f"""
+            SELECT 
+                TRIM(UPPER(vendor_cage)) as cage,
+                MAX(vendor_name) as vendor,
+                COUNT(DISTINCT contract_id) as contracts,
+                    MAX(action_date) as last_sold,
+                SUM(spend_amount) as total_revenue
+            FROM v_transactions
+            WHERE {where_sql}
+            GROUP BY 1
+        """
+
+        try:
+            sales_df = duck_fetch_df(duck_query, params)
+            sales_records = sales_df.to_dict('records') if not sales_df.empty else []
+        except Exception as e:
+            logger.error(f"NSN Suppliers DuckDB Error: {e}")
+            sales_records = []
 
     # 2. LOCAL DUCKDB: full NSN/CAGE reference lookup.
-    # This replaces the Athena approved-source lookup and is safe because it is one NIIN at a time.
-    try:
-        approved_map = nsn_ref_supplier_lookup(safe_niin)
-    except Exception:
-        logger.exception("NSN reference supplier lookup failed")
-        approved_map = {}
+    # Fast path: only hit the large reference file when no revenue-backed suppliers were found.
+    approved_map = {}
+
+    if not sales_records:
+        try:
+            approved_map = nsn_ref_supplier_lookup(safe_niin)
+        except Exception:
+            logger.exception("NSN reference supplier lookup failed")
+            approved_map = {}
 
     # ✅ RESTORED BUSINESS LOGIC: Government & Standards Dictionary
     gov_dict = {

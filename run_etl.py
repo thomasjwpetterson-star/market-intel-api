@@ -59,6 +59,13 @@ def is_cache_fresh(cache_name: str, max_age_hours: float = 12.0) -> bool:
     Checks if a file exists in the S3 cache AND was modified within the last `max_age_hours`.
     """
 
+    # Local targeted refresh mode: reuse existing S3 cache unless explicitly forced.
+    if os.getenv("ONLY_FORCE_REBUILD_FILES", "0").strip().lower() in ("1", "true", "yes"):
+        cache_stem = cache_name.replace(".parquet", "")
+        if cache_name not in FORCE_REBUILD_FILES and cache_stem not in FORCE_REBUILD_FILES:
+            print(f"   ↩️ ONLY_FORCE_REBUILD_FILES=1 -> reusing {cache_name}")
+            return True
+
     # 🧨 Global override — forces rebuild regardless of age
     if FORCE_REBUILD:
         print(f"🧨 FORCE_REBUILD=1 -> treating {cache_name} as stale")
@@ -912,6 +919,158 @@ def optimize_and_upload():
         os.remove(nsn_local_output)
         shutil.rmtree(nsn_parts_dir)
         print("   ✅ Successfully published nsn_summary.parquet!")
+
+
+    # -------------------------------------------------------
+    # 7B. Fast NSN profile lookup
+    # -------------------------------------------------------
+    print("📥 Fetching Fast NSN Profile Lookup...")
+
+    if is_cache_fresh("nsn_profile_lookup.parquet", max_age_hours=12):
+        print("   ↩️ Skipping nsn_profile_lookup.parquet (Fresh file already in S3)")
+    else:
+        nsn_profile_lookup_sql = """
+            WITH product_base AS (
+                SELECT
+                    LPAD(CAST(p.niin AS VARCHAR), 9, '0') AS niin,
+                    CAST(p.nsn AS VARCHAR) AS nsn,
+                    CAST(p.description AS VARCHAR) AS description,
+                    SUBSTR(REGEXP_REPLACE(CAST(p.nsn AS VARCHAR), '[^0-9]', ''), 1, 4) AS fsc_code,
+                    COALESCE(TRY_CAST(p.total_revenue AS DOUBLE), 0) AS total_revenue,
+                    COALESCE(TRY_CAST(p.total_units_sold AS DOUBLE), 0) AS total_units_sold,
+                    COALESCE(TRY_CAST(p.avg_unit_price AS DOUBLE), 0) AS avg_unit_price,
+                    CAST(p.last_sold_date AS VARCHAR) AS last_sold_date,
+                    CAST(p.annual_revenue_trend AS VARCHAR) AS annual_revenue_trend
+                FROM "market_intel_gold"."view_dashboard_products" p
+                WHERE p.niin IS NOT NULL
+                  AND COALESCE(TRY_CAST(p.total_revenue AS DOUBLE), 0) > 0
+            ),
+            profile_agg AS (
+                SELECT
+                    niin,
+                    MAX_BY(nsn, total_revenue) AS nsn,
+                    MAX_BY(NULLIF(TRIM(description), ''), total_revenue) AS item_name,
+                    MAX_BY(NULLIF(TRIM(fsc_code), ''), total_revenue) AS fsc_code,
+                    CAST(SUM(total_revenue) AS REAL) AS total_revenue,
+                    CAST(SUM(total_units_sold) AS BIGINT) AS total_units_sold,
+                    CAST(
+                        CASE
+                            WHEN SUM(total_units_sold) > 0
+                            THEN SUM(avg_unit_price * total_units_sold) / SUM(total_units_sold)
+                            ELSE AVG(NULLIF(avg_unit_price, 0))
+                        END
+                    AS REAL) AS market_price,
+                    MAX(last_sold_date) AS last_sold_date
+                FROM product_base
+                GROUP BY 1
+            ),
+            trend_rows AS (
+                SELECT
+                    pb.niin,
+                    TRY_CAST(SPLIT_PART(seg, ':', 1) AS INTEGER) AS trend_year,
+                    TRY_CAST(SPLIT_PART(seg, ':', 2) AS DOUBLE) AS trend_amount
+                FROM product_base pb
+                CROSS JOIN UNNEST(SPLIT(COALESCE(pb.annual_revenue_trend, ''), '|')) AS u(seg)
+                WHERE seg LIKE '%:%'
+            ),
+            trend_year_agg AS (
+                SELECT
+                    niin,
+                    trend_year,
+                    CAST(SUM(COALESCE(trend_amount, 0)) AS REAL) AS trend_amount
+                FROM trend_rows
+                WHERE trend_year IS NOT NULL
+                GROUP BY 1, 2
+            ),
+            trend_final AS (
+                SELECT
+                    niin,
+                    ARRAY_JOIN(
+                        ARRAY_SORT(
+                            ARRAY_AGG(CAST(trend_year AS VARCHAR) || ':' || CAST(trend_amount AS VARCHAR))
+                        ),
+                        '|'
+                    ) AS annual_revenue_trend
+                FROM trend_year_agg
+                GROUP BY 1
+            ),
+            flis_one AS (
+                SELECT
+                    LPAD(CAST(niin AS VARCHAR), 9, '0') AS niin,
+                    MAX(CAST(ciic AS VARCHAR)) AS demil_code,
+                    MAX(CAST(slc AS VARCHAR)) AS shelf_life_code,
+                    MAX(CAST(mgmt_ctl AS VARCHAR)) AS mgmt_control_code,
+                    MAX(CAST(ui AS VARCHAR)) AS unit_of_issue,
+                    MAX(CAST(COALESCE(sos, moe) AS VARCHAR)) AS source_of_supply,
+                    MAX(TRY_CAST(unit_price AS DOUBLE)) AS govt_estimated_price,
+                    MAX(CAST(aac AS VARCHAR)) AS acquisition_advice_code
+                FROM "market_intel_silver"."ref_flis_mgmt"
+                WHERE niin IS NOT NULL
+                GROUP BY 1
+            )
+            SELECT
+                p.niin,
+                p.nsn,
+                p.item_name,
+                p.fsc_code,
+                p.total_revenue,
+                p.total_units_sold,
+                p.market_price,
+                p.last_sold_date,
+                COALESCE(t.annual_revenue_trend, '') AS annual_revenue_trend,
+                f.demil_code,
+                f.shelf_life_code,
+                f.mgmt_control_code,
+                f.unit_of_issue,
+                f.source_of_supply,
+                CAST(COALESCE(f.govt_estimated_price, 0) AS REAL) AS govt_estimated_price,
+                f.acquisition_advice_code
+            FROM profile_agg p
+            LEFT JOIN trend_final t ON p.niin = t.niin
+            LEFT JOIN flis_one f ON p.niin = f.niin
+        """
+
+        nsn_profile_unload_prefix = f"{UNLOAD_OUTPUT_PREFIX}nsn_profile_lookup/{uuid.uuid4().hex}/"
+        nsn_profile_out_prefix = unload_to_s3(nsn_profile_lookup_sql, nsn_profile_unload_prefix)
+        merge_unload_parts_with_duckdb(nsn_profile_out_prefix, "nsn_profile_lookup.parquet")
+        print("   ✅ Successfully published nsn_profile_lookup.parquet!")
+
+    # -------------------------------------------------------
+    # 7C. Fast NSN supplier lookup
+    # -------------------------------------------------------
+    print("📥 Fetching Fast NSN Supplier Lookup...")
+
+    if is_cache_fresh("nsn_supplier_lookup.parquet", max_age_hours=12):
+        print("   ↩️ Skipping nsn_supplier_lookup.parquet (Fresh file already in S3)")
+    else:
+        nsn_supplier_lookup_sql = """
+            SELECT
+                SUBSTR(REGEXP_REPLACE(CAST(nsn AS VARCHAR), '[^0-9]', ''), -9) AS niin,
+                CAST(year AS INTEGER) AS year,
+                TRIM(UPPER(CAST(vendor_cage AS VARCHAR))) AS cage,
+                MAX_BY(CAST(vendor_name AS VARCHAR), CAST(action_date AS VARCHAR)) AS vendor,
+                TRIM(UPPER(COALESCE(CAST(parent_agency AS VARCHAR), ''))) AS parent_agency,
+                TRIM(UPPER(COALESCE(CAST(sub_agency AS VARCHAR), ''))) AS sub_agency,
+                TRIM(UPPER(COALESCE(CAST(market_segment AS VARCHAR), ''))) AS market_segment,
+                TRIM(UPPER(COALESCE(CAST(platform_family AS VARCHAR), ''))) AS platform_family,
+                TRIM(UPPER(COALESCE(CAST(psc AS VARCHAR), ''))) AS psc,
+                CAST(contract_id AS VARCHAR) AS contract_id,
+                MAX(CAST(action_date AS VARCHAR)) AS last_sold,
+                CAST(SUM(COALESCE(TRY_CAST(spend_amount AS DOUBLE), 0)) AS REAL) AS total_revenue
+            FROM "market_intel_gold"."dashboard_master_view"
+            WHERE nsn IS NOT NULL
+              AND LENGTH(REGEXP_REPLACE(CAST(nsn AS VARCHAR), '[^0-9]', '')) >= 9
+              AND vendor_cage IS NOT NULL
+              AND TRIM(CAST(vendor_cage AS VARCHAR)) <> ''
+              AND spend_amount IS NOT NULL
+            GROUP BY 1, 2, 3, 5, 6, 7, 8, 9, 10
+        """
+
+        nsn_supplier_unload_prefix = f"{UNLOAD_OUTPUT_PREFIX}nsn_supplier_lookup/{uuid.uuid4().hex}/"
+        nsn_supplier_out_prefix = unload_to_s3(nsn_supplier_lookup_sql, nsn_supplier_unload_prefix)
+        merge_unload_parts_with_duckdb(nsn_supplier_out_prefix, "nsn_supplier_lookup.parquet")
+        print("   ✅ Successfully published nsn_supplier_lookup.parquet!")
+
 
 
 
