@@ -5688,80 +5688,84 @@ def get_top_nsns(
     if is_default_load and DEFAULT_TOP_NSN_CACHE is not None:
         return DEFAULT_TOP_NSN_CACHE
 
+    # Keep the landing grid local/parquet-backed. This endpoint is loaded every
+    # time the NSN dashboard opens, so it must not depend on a live Athena scan.
+    use_supplier_lookup = bool(vendor or cage or parent)
+    source_table = "v_nsn_supplier_lookup" if use_supplier_lookup else "v_nsn_summary"
+    spend_col = "total_revenue" if use_supplier_lookup else "spend_amount"
+    contracts_expr = "COUNT(DISTINCT contract_id)" if use_supplier_lookup else "SUM(contracts)"
+
     cond: List[str] = ["1=1"]
+    params: List[Any] = []
+
+    def add_contains(col: str, value: Optional[str]):
+        if value:
+            cond.append(f"UPPER(CAST({col} AS VARCHAR)) LIKE ?")
+            params.append(f"%{str(value).strip().upper()}%")
 
     ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
     if ys:
-        years_csv = ",".join([str(y) for y in ys])
-        # ✅ Super-fast integer lookup using the corrected view column
-        cond.append(f"year IN ({years_csv})")
+        cond.append(f"year IN ({','.join(['?'] * len(ys))})")
+        params.extend(ys)
 
-    if vendor:
-        cond.append(safe_contains_upper("vendor_name", vendor))
-    if parent:
-        cond.append(safe_contains_upper("ultimate_parent_name", parent))
-    if cage:
-        cond.append(safe_contains_upper("vendor_cage", cage))
+    if use_supplier_lookup:
+        add_contains("vendor", vendor or parent)
+        add_contains("cage", cage)
     if agency:
-        a = agency
-        cond.append(f"({safe_contains_upper('sub_agency', a)} OR {safe_contains_upper('parent_agency', a)})")
-    if platform:
-        cond.append(safe_contains_upper("platform_family", platform))
-    if psc:
-        cond.append(safe_contains_upper("psc", psc))
+        cond.append("(UPPER(CAST(sub_agency AS VARCHAR)) LIKE ? OR UPPER(CAST(parent_agency AS VARCHAR)) LIKE ?)")
+        params.extend([f"%{agency.strip().upper()}%", f"%{agency.strip().upper()}%"])
+    add_contains("platform_family", platform)
+    add_contains("psc", psc)
     if domain:
-        d = domain
-        cond.append(f"({safe_contains_upper('psc', d)} OR {safe_contains_upper('naics_code', d)})")
+        cond.append("(UPPER(CAST(market_segment AS VARCHAR)) LIKE ? OR UPPER(CAST(psc AS VARCHAR)) LIKE ?)")
+        params.extend([f"%{domain.strip().upper()}%", f"%{domain.strip().upper()}%"])
 
     where_clause = " AND ".join(cond)
-
-    # ✅ FAST STRING SLICING
-    niin_expr = "SUBSTR(nsn, 5, 9)"
 
     query = f"""
     WITH top_spending AS (
         SELECT
-            LPAD({niin_expr}, 9, '0') AS join_niin,
-            MAX(description) as raw_desc,
-            SUM(spend_amount) AS spend,
-            COUNT(DISTINCT contract_id) AS contracts
-        FROM "market_intel_gold"."dashboard_master_view"
+            LPAD(CAST(niin AS VARCHAR), 9, '0') AS join_niin,
+            SUM(COALESCE({spend_col}, 0)) AS spend,
+            {contracts_expr} AS contracts
+        FROM {source_table}
         WHERE {where_clause}
-          AND nsn IS NOT NULL
-          AND LENGTH(nsn) = 13
+          AND niin IS NOT NULL
+          AND TRIM(CAST(niin AS VARCHAR)) <> ''
         GROUP BY 1
         ORDER BY spend DESC
         LIMIT {limit_i}
     ),
-    catalog_match AS (
+    profile_match AS (
         SELECT 
-            LPAD(CAST(niin AS VARCHAR), 9, '0') as niin,
-            item_name,
-            fsc
-        FROM "market_intel_silver"."ref_flis_nsn"
+            LPAD(CAST(niin AS VARCHAR), 9, '0') AS niin,
+            MAX(NULLIF(CAST(nsn AS VARCHAR), '')) AS nsn,
+            MAX(NULLIF(CAST(item_name AS VARCHAR), '')) AS item_name,
+            MAX(NULLIF(CAST(fsc_code AS VARCHAR), '')) AS fsc_code
+        FROM v_nsn_profile_lookup
         WHERE LPAD(CAST(niin AS VARCHAR), 9, '0') IN (SELECT join_niin FROM top_spending)
+        GROUP BY 1
     )
     SELECT
         CASE 
-            WHEN c.fsc IS NOT NULL THEN CAST(c.fsc AS VARCHAR) || '-' || t.join_niin 
+            WHEN p.nsn IS NOT NULL THEN p.nsn
+            WHEN p.fsc_code IS NOT NULL THEN p.fsc_code || '-' || t.join_niin
             ELSE t.join_niin 
         END AS nsn,
-        COALESCE(
-            c.item_name, 
-            CASE 
-                WHEN strpos(t.raw_desc, '!') > 0 THEN split_part(t.raw_desc, '!', 2)
-                ELSE t.raw_desc 
-            END,
-            'Unknown Item'
-        ) AS description,
+        COALESCE(p.item_name, 'Unknown Item') AS description,
         t.spend,
         t.contracts
     FROM top_spending t
-    LEFT JOIN catalog_match c ON t.join_niin = c.niin
+    LEFT JOIN profile_match p ON t.join_niin = p.niin
     ORDER BY t.spend DESC
     """
-    
-    result = cached_athena_query(query)
+
+    try:
+        df = duck_fetch_df(query, params)
+        result = df_sanitize_for_json(df).to_dict(orient="records") if not df.empty else []
+    except Exception:
+        logger.exception("NSN top lookup failed via DuckDB")
+        result = []
     
     # ✅ SAVE TO CACHE IF DEFAULT LOAD
     if is_default_load and result:
