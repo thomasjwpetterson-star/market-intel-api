@@ -1246,6 +1246,7 @@ def reload_all_data():
             # ✅ NEW: Define all files that should be handled by DuckDB instead of RAM
             views_to_create = [
                 ("v_products", "products.parquet"),
+                ("v_profiles", "profiles.parquet"),
                 ("v_transactions", "transactions.parquet"),
                 # v_contracts_rolled handled specially below (file OR folder)
                 ("v_network", "network.parquet"),
@@ -1545,7 +1546,32 @@ def reload_all_data():
                 )
                 UNION ALL
                 SELECT * FROM (
-                    -- 3. PLATFORMS (Limit 2000)
+                    -- 3. PROFILE-BACKED COMPANIES (includes low-spend and network-only sites)
+                    SELECT
+                        p.vendor_name AS label,
+                        p.vendor_name AS value,
+                        'CHILD' AS type,
+                        GREATEST(
+                            COALESCE(TRY_CAST(p.total_lifetime_spend AS DOUBLE), 0.0),
+                            COALESCE(TRY_CAST(p.network_flow_total AS DOUBLE), 0.0),
+                            1.0
+                        ) AS score,
+                        p.cage_code AS cage,
+                        COALESCE(ANY_VALUE(g.city), '') AS city,
+                        COALESCE(ANY_VALUE(g.state), '') AS state
+                    FROM v_profiles p
+                    LEFT JOIN v_geo g ON UPPER(TRIM(CAST(p.cage_code AS VARCHAR))) = UPPER(TRIM(CAST(g.cage_code AS VARCHAR)))
+                    WHERE p.vendor_name IS NOT NULL
+                      AND TRIM(CAST(p.vendor_name AS VARCHAR)) <> ''
+                      AND p.cage_code IS NOT NULL
+                      AND TRIM(CAST(p.cage_code AS VARCHAR)) NOT IN ('NAN', 'NONE', 'NULL', '')
+                    GROUP BY p.vendor_name, p.cage_code, p.total_lifetime_spend, p.network_flow_total
+                    ORDER BY score DESC
+                    LIMIT 50000
+                )
+                UNION ALL
+                SELECT * FROM (
+                    -- 4. PLATFORMS (Limit 2000)
                     SELECT 
                         platform_family AS label, 
                         platform_family AS value, 
