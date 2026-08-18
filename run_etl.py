@@ -194,7 +194,7 @@ def upload_unload_parts_to_cache(unload_prefix: str, cache_name: str):
     print(f"   ✅ Uploaded {len(part_keys)} parquet parts to {cache_folder}")
 
 # ✅ NEW HELPER ADDED HERE:
-def merge_unload_parts_with_duckdb(unload_prefix: str, output_filename: str):
+def merge_unload_parts_with_duckdb(unload_prefix: str, output_filename: str, order_by: str = None):
     """
     Downloads Athena's UNLOAD parts, uses DuckDB to safely 
     merge them into ONE file, and uploads it to S3.
@@ -230,10 +230,15 @@ def merge_unload_parts_with_duckdb(unload_prefix: str, output_filename: str):
     
     # ✅ FIX: Removed the massive GROUP BY. Athena already did the math!
     # DuckDB now streams the data incredibly fast with almost 0 RAM/Disk bloat.
+    order_clause = f" ORDER BY {order_by}" if order_by else ""
     con.execute(f"""
         COPY (
-            SELECT * FROM read_parquet('{parts_dir}/*.parquet')
-        ) TO '{local_output}' (FORMAT PARQUET, COMPRESSION ZSTD);
+            SELECT * FROM read_parquet('{parts_dir}/*.parquet'){order_clause}
+        ) TO '{local_output}' (
+            FORMAT PARQUET,
+            COMPRESSION ZSTD,
+            ROW_GROUP_SIZE 100000
+        );
     """)
     con.close()
 
@@ -714,16 +719,43 @@ def optimize_and_upload():
     else:
         print("📦 Athena UNLOAD -> Parquet (avoids local RAM blowup)...")
         
-        # ✅ Added geo, nsn, and part_number
+        # Keep the action-level cache narrow while retaining explorer metadata.
         txn_sql = """
-            SELECT 
-                contract_id, action_date, vendor_name, vendor_cage, 
-                sub_agency, parent_agency, description, spend_amount, 
-                naics_code, psc, platform_family, market_segment, year,
-                nsn, part_number, city, state, country,
-                SUBSTR(REGEXP_REPLACE(nsn, '[^0-9]', ''), -9) AS niin
-            FROM "market_intel_gold"."dashboard_master_view"
-            WHERE year >= 2021
+            WITH flis_one AS (
+                SELECT
+                    LPAD(CAST(niin AS VARCHAR), 9, '0') AS niin,
+                    MAX(NULLIF(TRIM(CAST(sos AS VARCHAR)), '')) AS source_of_supply
+                FROM "market_intel_silver"."ref_flis_mgmt"
+                WHERE niin IS NOT NULL
+                GROUP BY 1
+            )
+            SELECT
+                d.contract_id,
+                d.action_date,
+                d.vendor_name,
+                d.vendor_cage,
+                d.sub_agency,
+                d.parent_agency,
+                d.description,
+                d.base_award_description,
+                d.action_description,
+                d.spend_amount,
+                d.naics_code,
+                d.psc,
+                d.platform_family,
+                d.market_segment,
+                d.year,
+                d.nsn,
+                d.part_number,
+                d.city,
+                d.state,
+                d.country,
+                SUBSTR(REGEXP_REPLACE(CAST(d.nsn AS VARCHAR), '[^0-9]', ''), -9) AS niin,
+                f.source_of_supply
+            FROM "market_intel_gold"."dashboard_master_view" d
+            LEFT JOIN flis_one f
+              ON SUBSTR(REGEXP_REPLACE(CAST(d.nsn AS VARCHAR), '[^0-9]', ''), -9) = f.niin
+            WHERE d.year >= 2021
         """
 
         txn_unload_prefix = f"{UNLOAD_OUTPUT_PREFIX}transactions/{uuid.uuid4().hex}/"
@@ -761,6 +793,8 @@ def optimize_and_upload():
                     UPPER(TRIM(sub_agency)) as sub_agency,
                     UPPER(TRIM(parent_agency)) as parent_agency,
                     description,
+                    base_award_description,
+                    action_description,
                     CAST(spend_amount AS REAL) as spend_amount,
                     naics_code,
                     psc,
@@ -772,7 +806,8 @@ def optimize_and_upload():
                     city,
                     state,
                     country,
-                    niin
+                    niin,
+                    source_of_supply
                 FROM read_parquet('{txn_parts_dir}/*.parquet')
             ) TO '{txn_local_output}' (FORMAT PARQUET, COMPRESSION ZSTD);
         """)
@@ -1001,7 +1036,7 @@ def optimize_and_upload():
                     MAX(CAST(slc AS VARCHAR)) AS shelf_life_code,
                     MAX(CAST(mgmt_ctl AS VARCHAR)) AS mgmt_control_code,
                     MAX(CAST(ui AS VARCHAR)) AS unit_of_issue,
-                    MAX(CAST(COALESCE(sos, moe) AS VARCHAR)) AS source_of_supply,
+                    MAX(CAST(sos AS VARCHAR)) AS source_of_supply,
                     MAX(TRY_CAST(unit_price AS DOUBLE)) AS govt_estimated_price,
                     MAX(CAST(aac AS VARCHAR)) AS acquisition_advice_code
                 FROM "market_intel_silver"."ref_flis_mgmt"
@@ -1099,6 +1134,20 @@ def optimize_and_upload():
                   AND nsn IS NOT NULL
                   AND LENGTH(REGEXP_REPLACE(nsn, '[^0-9]', '')) >= 9
                 GROUP BY 1
+            ),
+            flis_one AS (
+                SELECT
+                    LPAD(CAST(niin AS VARCHAR), 9, '0') AS niin,
+                    MAX(CAST(ciic AS VARCHAR)) AS ciic,
+                    MAX(CAST(slc AS VARCHAR)) AS slc,
+                    MAX(CAST(mgmt_ctl AS VARCHAR)) AS mgmt_ctl,
+                    MAX(CAST(ui AS VARCHAR)) AS ui,
+                    MAX(NULLIF(TRIM(CAST(sos AS VARCHAR)), '')) AS sos,
+                    MAX(TRY_CAST(unit_price AS DOUBLE)) AS unit_price,
+                    MAX(CAST(aac AS VARCHAR)) AS aac
+                FROM "market_intel_silver"."ref_flis_mgmt"
+                WHERE niin IS NOT NULL
+                GROUP BY 1
             )
             SELECT 
                 -- Identifiers
@@ -1130,14 +1179,14 @@ def optimize_and_upload():
                 m.slc AS shelf_life_code,
                 m.mgmt_ctl AS mgmt_control_code,
                 m.ui AS unit_of_issue,
-                COALESCE(m.sos, m.moe) AS source_of_supply,
+                m.sos AS source_of_supply,
                 m.unit_price AS govt_estimated_price,
                 m.aac AS acquisition_advice_code
 
             FROM "market_intel_gold"."view_dashboard_products" p
             
-            LEFT JOIN "market_intel_silver"."ref_flis_mgmt" m 
-                ON LPAD(CAST(p.niin AS VARCHAR), 9, '0') = LPAD(CAST(m.niin AS VARCHAR), 9, '0')
+            LEFT JOIN flis_one m
+                ON LPAD(CAST(p.niin AS VARCHAR), 9, '0') = m.niin
                 
             LEFT JOIN part_platforms pp
                 ON LPAD(CAST(p.niin AS VARCHAR), 9, '0') = pp.join_niin
@@ -1219,6 +1268,52 @@ def optimize_and_upload():
                     )
             ),
 
+            source_status AS (
+                SELECT
+                    niin,
+                    cage_code,
+                    normalized_part_number,
+                    ARRAY_JOIN(ARRAY_DISTINCT(ARRAY_AGG(rncc)), ',') AS rncc_codes,
+                    ARRAY_JOIN(ARRAY_DISTINCT(ARRAY_AGG(rnvc)), ',') AS rnvc_codes,
+                    ARRAY_JOIN(ARRAY_DISTINCT(ARRAY_AGG(rnsc)), ',') AS rnsc_codes,
+                    ARRAY_JOIN(ARRAY_DISTINCT(ARRAY_AGG(cage_status)), ',') AS cage_status_codes,
+                    MAX(CASE WHEN is_procurement_authorized THEN 1 ELSE 0 END) = 1
+                        AS is_procurement_authorized,
+                    MAX(CASE WHEN is_active_authorized_source THEN 1 ELSE 0 END) = 1
+                        AS is_active_authorized_source
+                FROM "market_intel_gold"."ref_flis_source_relationships"
+                GROUP BY 1, 2, 3
+            ),
+
+            flis_one AS (
+                SELECT
+                    LPAD(CAST(niin AS VARCHAR), 9, '0') AS niin,
+                    MAX(CAST(ciic AS VARCHAR)) AS ciic,
+                    MAX(CAST(slc AS VARCHAR)) AS slc,
+                    MAX(CAST(mgmt_ctl AS VARCHAR)) AS mgmt_ctl,
+                    MAX(CAST(ui AS VARCHAR)) AS ui,
+                    MAX(CAST(sos AS VARCHAR)) AS source_of_supply,
+                    MAX(TRY_CAST(unit_price AS DOUBLE)) AS unit_price,
+                    MAX(CAST(aac AS VARCHAR)) AS aac
+                FROM "market_intel_silver"."ref_flis_mgmt"
+                WHERE niin IS NOT NULL
+                GROUP BY 1
+            ),
+
+            vendor_names AS (
+                SELECT
+                    LPAD(
+                        UPPER(REGEXP_REPLACE(CAST(cage_code AS VARCHAR), '[^A-Za-z0-9]', '')),
+                        5,
+                        '0'
+                    ) AS cage_code,
+                    MAX(NULLIF(TRIM(CAST(vendor_name AS VARCHAR)), '')) AS vendor_name
+                FROM "market_intel_gold"."view_vendor_sites_hybrid"
+                WHERE cage_code IS NOT NULL
+                  AND TRIM(CAST(cage_code AS VARCHAR)) <> ''
+                GROUP BY 1
+            ),
+
             observed_nsn_metrics AS (
                 SELECT
                     SUBSTR(REGEXP_REPLACE(CAST(nsn AS VARCHAR), '[^0-9]', ''), -9) AS join_niin,
@@ -1267,15 +1362,19 @@ def optimize_and_upload():
 
                 CASE
                     WHEN pb.nsn IS NOT NULL 
-                         AND TRIM(CAST(pb.nsn AS VARCHAR)) <> ''
-                    THEN CAST(pb.nsn AS VARCHAR)
+                         AND LENGTH(REGEXP_REPLACE(CAST(pb.nsn AS VARCHAR), '[^0-9]', '')) >= 13
+                    THEN SUBSTR(REGEXP_REPLACE(CAST(pb.nsn AS VARCHAR), '[^0-9]', ''), -13)
                     ELSE NULL
                 END AS nsn,
 
                 CASE
                     WHEN pb.nsn IS NOT NULL 
-                         AND LENGTH(REGEXP_REPLACE(CAST(pb.nsn AS VARCHAR), '[^0-9]', '')) >= 4
-                    THEN SUBSTR(REGEXP_REPLACE(CAST(pb.nsn AS VARCHAR), '[^0-9]', ''), 1, 4)
+                         AND LENGTH(REGEXP_REPLACE(CAST(pb.nsn AS VARCHAR), '[^0-9]', '')) >= 13
+                    THEN SUBSTR(
+                        SUBSTR(REGEXP_REPLACE(CAST(pb.nsn AS VARCHAR), '[^0-9]', ''), -13),
+                        1,
+                        4
+                    )
                     ELSE NULL
                 END AS fsc_code,
 
@@ -1286,9 +1385,48 @@ def optimize_and_upload():
                     ELSE LPAD(UPPER(TRIM(CAST(pb.cage AS VARCHAR))), 5, '0')
                 END AS cage,
 
+                vn.vendor_name,
+
                 -- Part metadata
                 pb.description,
                 pb.part_number,
+
+                -- Authoritative FLIS reference/source status. These fields describe
+                -- this exact NIIN + CAGE + part-number relationship.
+                sr.rncc_codes,
+                sr.rnvc_codes,
+                sr.rnsc_codes,
+                sr.cage_status_codes,
+                COALESCE(sr.is_procurement_authorized, FALSE) AS is_procurement_authorized,
+                COALESCE(sr.is_active_authorized_source, FALSE) AS is_active_authorized_source,
+
+                CASE
+                    WHEN COALESCE(sr.is_active_authorized_source, FALSE)
+                        THEN 'Active authorized source'
+                    WHEN COALESCE(sr.is_procurement_authorized, FALSE)
+                        THEN 'Authorized source; CAGE not active'
+                    WHEN REGEXP_LIKE(COALESCE(sr.rnsc_codes, ''), '(^|,)F(,|$)')
+                        THEN 'Qualified source required'
+                    WHEN REGEXP_LIKE(COALESCE(sr.rnsc_codes, ''), '(^|,)D(,|$)')
+                        THEN 'Procurement authority not evaluated'
+                    WHEN sr.niin IS NOT NULL
+                        THEN 'Reference relationship only'
+                    ELSE 'Observed supplier; source status not confirmed'
+                END AS supplier_status,
+
+                CASE
+                    WHEN COALESCE(sr.is_active_authorized_source, FALSE)
+                        THEN 'DLA FLIS identifies this exact NIIN, CAGE and part-number relationship as authorized for procurement, and the CAGE is active.'
+                    WHEN COALESCE(sr.is_procurement_authorized, FALSE)
+                        THEN 'DLA FLIS identifies this exact relationship as authorized for procurement, but the current CAGE status is not active.'
+                    WHEN REGEXP_LIKE(COALESCE(sr.rnsc_codes, ''), '(^|,)F(,|$)')
+                        THEN 'Procurement is restricted to qualified manufacturers or sources; this row does not by itself confirm active authorization.'
+                    WHEN REGEXP_LIKE(COALESCE(sr.rnsc_codes, ''), '(^|,)D(,|$)')
+                        THEN 'The FLIS reference record does not confirm that procurement authority has been evaluated.'
+                    WHEN sr.niin IS NOT NULL
+                        THEN 'DLA FLIS contains this exact NIIN, CAGE and part-number relationship, but it does not meet the active authorized-source rule.'
+                    ELSE 'This supplier relationship was observed in procurement data, but no exact active-authorized FLIS relationship was found.'
+                END AS supplier_status_detail,
 
                 -- Revenue / observed procurement fields
                 CAST(COALESCE(pb.total_revenue, om.observed_spend, 0) AS REAL) AS total_revenue,
@@ -1347,18 +1485,22 @@ def optimize_and_upload():
                 m.slc AS shelf_life_code,
                 m.mgmt_ctl AS mgmt_control_code,
                 m.ui AS unit_of_issue,
-                COALESCE(m.sos, m.moe) AS source_of_supply,
+                m.source_of_supply,
                 CAST(COALESCE(m.unit_price, 0) AS REAL) AS govt_estimated_price,
                 m.aac AS acquisition_advice_code,
 
                 -- Source / search helper
-                'view_dashboard_products' AS reference_source,
+                CASE
+                    WHEN sr.niin IS NOT NULL THEN 'DLA_FLIS_PART_REFERENCE'
+                    ELSE 'OBSERVED_DLA_SALE'
+                END AS reference_source,
 
                 UPPER(
                     CONCAT(
                         COALESCE(CAST(pb.nsn AS VARCHAR), ''), ' ',
                         COALESCE(pb.join_niin, ''), ' ',
                         COALESCE(CAST(pb.cage AS VARCHAR), ''), ' ',
+                        COALESCE(vn.vendor_name, ''), ' ',
                         COALESCE(CAST(pb.part_number AS VARCHAR), ''), ' ',
                         COALESCE(CAST(pb.description AS VARCHAR), '')
                     )
@@ -1366,8 +1508,16 @@ def optimize_and_upload():
 
             FROM product_base pb
 
-            LEFT JOIN "market_intel_silver"."ref_flis_mgmt" m
-                ON pb.join_niin = LPAD(CAST(m.niin AS VARCHAR), 9, '0')
+            LEFT JOIN source_status sr
+                ON pb.join_niin = sr.niin
+               AND UPPER(TRIM(CAST(pb.cage AS VARCHAR))) = sr.cage_code
+               AND UPPER(TRIM(CAST(pb.part_number AS VARCHAR))) = sr.normalized_part_number
+
+            LEFT JOIN flis_one m
+                ON pb.join_niin = m.niin
+
+            LEFT JOIN vendor_names vn
+                ON LPAD(UPPER(TRIM(CAST(pb.cage AS VARCHAR))), 5, '0') = vn.cage_code
 
             LEFT JOIN observed_nsn_metrics om
                 ON pb.join_niin = om.join_niin
@@ -1381,7 +1531,11 @@ def optimize_and_upload():
         nsn_ref_unload_prefix = f"{UNLOAD_OUTPUT_PREFIX}nsn_cage_reference/{uuid.uuid4().hex}/"
         nsn_ref_out_prefix = unload_to_s3(nsn_cage_reference_sql, nsn_ref_unload_prefix)
 
-        merge_unload_parts_with_duckdb(nsn_ref_out_prefix, "nsn_cage_reference.parquet")
+        merge_unload_parts_with_duckdb(
+            nsn_ref_out_prefix,
+            "nsn_cage_reference.parquet",
+            order_by="niin, cage, part_number"
+        )
 
     # ---------------------------------------------------------
     # ### [NEW] FETCH PLATFORM BOM (Weapon System Crosswalk) ###
@@ -1445,13 +1599,27 @@ def optimize_and_upload():
     # --- 4. Clear Local Cache ---
     if os.path.exists("./local_data"):
         try:
-            for filename in os.listdir("./local_data"):
+            targeted_refresh = os.getenv("ONLY_FORCE_REBUILD_FILES", "0").strip().lower() in ("1", "true", "yes")
+            targeted_files = {
+                name if name.endswith(".parquet") else f"{name}.parquet"
+                for name in FORCE_REBUILD_FILES
+            }
+            files_to_remove = (
+                [name for name in os.listdir("./local_data") if name in targeted_files]
+                if targeted_refresh
+                else os.listdir("./local_data")
+            )
+
+            for filename in files_to_remove:
                 file_path = os.path.join("./local_data", filename)
                 if os.path.isfile(file_path) or os.path.islink(file_path):
                     os.unlink(file_path)
                 elif os.path.isdir(file_path):
                     shutil.rmtree(file_path)
-            print("🧹 Cleared stale files from local_data cache.")
+            if targeted_refresh:
+                print(f"🧹 Cleared targeted local cache files: {', '.join(sorted(targeted_files))}")
+            else:
+                print("🧹 Cleared stale files from local_data cache.")
         except Exception as e:
             print(f"⚠️ Could not clear local cache: {e}")
     

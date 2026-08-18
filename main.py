@@ -31,6 +31,8 @@ import math
 import numpy as np
 from pydantic import BaseModel
 import uuid
+import hmac
+import csv
 from fastapi import APIRouter
 from dotenv import load_dotenv
 
@@ -1307,6 +1309,32 @@ def reload_all_data():
                         WHERE 1=0;
                     """)
 
+            conn.execute("DROP VIEW IF EXISTS v_subcontracts;")
+            conn.execute("""
+                CREATE OR REPLACE VIEW v_subcontracts AS
+                SELECT
+                    CAST(prime_name AS VARCHAR) AS prime_name,
+                    CAST(prime_cage AS VARCHAR) AS prime_cage,
+                    CAST(contract_id AS VARCHAR) AS prime_award_id,
+                    CAST(sub_name AS VARCHAR) AS subcontractor_name,
+                    CAST(sub_cage AS VARCHAR) AS subcontractor_cage,
+                    CAST(invoice_id AS VARCHAR) AS subcontract_id,
+                    CAST(description AS VARCHAR) AS subcontract_description,
+                    CAST(action_date AS VARCHAR) AS subcontract_action_date,
+                    TRY_CAST(year AS INTEGER) AS year,
+                    TRY_CAST(subaward_value AS DOUBLE) AS subcontract_value_usd,
+                    TRY_CAST(subaward_value_raw AS DOUBLE) AS subcontract_value_raw_usd,
+                    CAST(sub_city AS VARCHAR) AS subcontractor_city,
+                    CAST(sub_state AS VARCHAR) AS subcontractor_state,
+                    CAST(platform_family AS VARCHAR) AS platform_family,
+                    CAST(psc AS VARCHAR) AS psc_code,
+                    CAST(NULL AS VARCHAR) AS psc_description,
+                    CAST(NULL AS VARCHAR) AS naics_code,
+                    CAST(NULL AS VARCHAR) AS naics_description,
+                    CAST(market_segment AS VARCHAR) AS market_segment
+                FROM v_network;
+            """)
+
             # ✅ NEW: KPIs as a Native Table
             # Restore KPIs as a View
             kpis_path = str((LOCAL_CACHE_DIR / "kpis.parquet").resolve())
@@ -1728,8 +1756,24 @@ class ExplorerRequest(BaseModel):
 
 
 NSN_REF_TABLE = "v_nsn_cage_reference"
+CONTRACT_AWARD_EXPLORER_TABLE = "v_contract_awards_enriched"
+SUBCONTRACT_EXPLORER_TABLE = "v_subcontracts"
+
+CONTRACT_AWARD_SYNTHETIC_COLUMNS = {
+    "contract_id", "vendor_name", "vendor_cage", "parent_agency", "sub_agency",
+    "city", "state", "country", "market_segment", "platform_family",
+    "psc_code", "psc", "psc_description", "naics_code", "naics_description",
+    "base_award_description", "latest_action_description", "source_of_supply",
+    "obligations_in_selected_period_usd", "lifetime_obligations_usd",
+    "number_of_actions_in_selected_period",
+    "earliest_action_date_in_selected_period", "latest_action_date_in_selected_period",
+    "earliest_action_date_lifetime", "latest_action_date_lifetime",
+    "award_type_code", "award_type_description",
+}
 
 ALLOWED_EXPLORER_TABLES = {
+    CONTRACT_AWARD_EXPLORER_TABLE,
+    SUBCONTRACT_EXPLORER_TABLE,
     "v_contracts_rolled",
     "v_transactions",
     "v_summary",
@@ -1746,12 +1790,40 @@ ALLOWED_EXPLORER_COLUMNS = {
     "nsn", "niin", "part_number", "pricing_type", "set_aside_type", "competition_type", "offers_count",
 
     # Full NSN/CAGE reference fields
-    "fsc", "fsc_code", "item_name", "nomenclature", "source", "source_layer", "data_source",
+    "fsc", "fsc_code", "item_name", "nomenclature",
     "demil_code", "shelf_life_code", "mgmt_control_code", "unit_of_issue",
     "source_of_supply", "govt_estimated_price", "acquisition_advice_code",
+    "rncc_codes", "rnvc_codes", "rnsc_codes", "cage_status_codes",
+    "is_procurement_authorized", "is_active_authorized_source",
+    "supplier_status", "supplier_status_detail",
+
+    # Contract-award explorer fields
+    "base_award_description", "action_description", "latest_action_description",
+    "obligations_in_selected_period_usd", "lifetime_obligations_usd",
+    "number_of_actions_in_selected_period",
+    "earliest_action_date_in_selected_period", "latest_action_date_in_selected_period",
+    "earliest_action_date_lifetime", "latest_action_date_lifetime",
+    "award_type_code", "award_type_description",
+
+    # Subcontract explorer fields
+    "prime_name", "prime_cage", "prime_award_id", "subcontractor_name", "subcontractor_cage",
+    "subcontract_id", "subcontract_description", "subcontract_action_date",
+    "subcontract_value_usd", "subcontract_value_raw_usd", "subcontractor_city", "subcontractor_state",
 }
 
 EXPLORER_DEFAULT_COLUMNS = {
+    CONTRACT_AWARD_EXPLORER_TABLE: [
+        "contract_id", "vendor_name", "vendor_cage",
+        "obligations_in_selected_period_usd", "lifetime_obligations_usd",
+        "number_of_actions_in_selected_period", "earliest_action_date_in_selected_period",
+        "latest_action_date_in_selected_period", "award_type_description",
+        "base_award_description", "latest_action_description",
+    ],
+    SUBCONTRACT_EXPLORER_TABLE: [
+        "prime_name", "prime_cage", "prime_award_id", "subcontractor_name", "subcontractor_cage",
+        "subcontract_value_usd", "subcontract_action_date", "platform_family", "psc_code",
+        "subcontract_description",
+    ],
     "v_contracts_rolled": [
         "contract_id", "last_action_date", "vendor_name", "vendor_cage", "total_spend", "description"
     ],
@@ -1762,12 +1834,15 @@ EXPLORER_DEFAULT_COLUMNS = {
         "vendor_name", "cage_code", "clean_parent", "total_spend", "contract_count", "market_segment", "platform_family"
     ],
     NSN_REF_TABLE: [
-        "nsn", "niin", "cage_code", "vendor_name", "part_number", "description", "fsc_code", "source"
+        "nsn", "niin", "cage_code", "vendor_name", "part_number", "description",
+        "platform_family", "supplier_status"
     ],
 }
 
 # These are granular tables. Do not allow accidental full-table scans.
 EXPLORER_FILTER_REQUIRED_TABLES = {
+    CONTRACT_AWARD_EXPLORER_TABLE,
+    SUBCONTRACT_EXPLORER_TABLE,
     "v_contracts_rolled",
     "v_transactions",
     NSN_REF_TABLE,
@@ -1775,6 +1850,17 @@ EXPLORER_FILTER_REQUIRED_TABLES = {
 
 # Lets the frontend use stable names even if the parquet uses slightly different names.
 EXPLORER_COLUMN_ALIASES = {
+    SUBCONTRACT_EXPLORER_TABLE: {
+        "vendor_cage": ["subcontractor_cage", "prime_cage"],
+        "cage_code": ["subcontractor_cage", "prime_cage"],
+        "cage": ["subcontractor_cage", "prime_cage"],
+        "vendor_name": ["subcontractor_name", "prime_name"],
+        "psc": ["psc_code"],
+        "description": ["subcontract_description"],
+        "action_date": ["subcontract_action_date"],
+        "spend_amount": ["subcontract_value_usd"],
+        "total_spend": ["subcontract_value_usd"],
+    },
     NSN_REF_TABLE: {
         "cage": ["cage", "cage_code", "vendor_cage"],
         "cage_code": ["cage_code", "cage", "vendor_cage"],
@@ -1784,7 +1870,8 @@ EXPLORER_COLUMN_ALIASES = {
         "item_name": ["item_name", "description", "nomenclature"],
         "fsc_code": ["fsc_code", "fsc"],
         "fsc": ["fsc", "fsc_code"],
-        "source": ["source", "source_layer", "data_source"],
+        "source": ["source", "reference_source", "source_layer", "data_source"],
+        "reference_source": ["reference_source", "source", "source_layer", "data_source"],
     }
 }
 
@@ -1796,6 +1883,9 @@ def quote_ident(identifier: str) -> str:
 def get_duck_table_columns(table: str) -> set:
     if table not in ALLOWED_EXPLORER_TABLES:
         return set()
+
+    if table == CONTRACT_AWARD_EXPLORER_TABLE:
+        return set(CONTRACT_AWARD_SYNTHETIC_COLUMNS)
 
     try:
         df = duck_fetch_df(f"DESCRIBE {table}")
@@ -1827,6 +1917,332 @@ def normalised_niin_filter_expr(actual_col: str) -> str:
     return f"RIGHT(LPAD({digits}, 9, '0'), 9)"
 
 
+def _null_expr(alias: str, sql_type: str = "VARCHAR") -> str:
+    return f"CAST(NULL AS {sql_type}) AS {quote_ident(alias)}"
+
+
+def _source_expr(actual_cols: set, col: str, alias: Optional[str] = None, sql_type: str = "VARCHAR") -> str:
+    alias = alias or col
+    if col in actual_cols:
+        return f"{quote_ident(col)} AS {quote_ident(alias)}"
+    return _null_expr(alias, sql_type)
+
+
+def _contract_award_type_description_expr(code_expr: str) -> str:
+    return f"""
+        CASE
+            WHEN {code_expr} IN ('A', 'B', 'C', 'D') THEN 'Definitive contract'
+            WHEN {code_expr} IN ('DO', 'DELIVERY ORDER', 'DELIVERY_ORDER') THEN 'Delivery order'
+            WHEN {code_expr} IN ('PO', 'PURCHASE ORDER', 'PURCHASE_ORDER') THEN 'Purchase order'
+            WHEN {code_expr} IN ('BPA_CALL', 'BPA CALL') THEN 'BPA call'
+            WHEN {code_expr} IS NULL OR TRIM(CAST({code_expr} AS VARCHAR)) = '' THEN NULL
+            ELSE CAST({code_expr} AS VARCHAR)
+        END
+    """
+
+
+def build_contract_awards_explorer_query(
+    payload: ExplorerRequest,
+    row_limit: int,
+    offset: int = 0,
+    count_only: bool = False
+):
+    actual_cols = get_duck_table_columns("v_transactions")
+    if not actual_cols:
+        raise HTTPException(status_code=503, detail="v_transactions is not available yet. Reload may still be running.")
+
+    requested_cols = payload.columns or EXPLORER_DEFAULT_COLUMNS[CONTRACT_AWARD_EXPLORER_TABLE]
+    selected_fields = [str(c).strip().lower() for c in requested_cols if str(c).strip().lower() in CONTRACT_AWARD_SYNTHETIC_COLUMNS]
+    if not selected_fields:
+        selected_fields = EXPLORER_DEFAULT_COLUMNS[CONTRACT_AWARD_EXPLORER_TABLE]
+
+    def col_or_null(col: str, alias: Optional[str] = None, sql_type: str = "VARCHAR") -> str:
+        return _source_expr(actual_cols, col, alias, sql_type)
+
+    selected_where = ["contract_id IS NOT NULL", "TRIM(CAST(contract_id AS VARCHAR)) <> ''"]
+    params: List[Any] = []
+    has_valid_filter = False
+    filters = payload.filters or {}
+    spend_min = None
+    spend_max = None
+
+    filter_column_map = {
+        "contract_id": "contract_id",
+        "year": "year",
+        "sub_agency": "sub_agency",
+        "parent_agency": "parent_agency",
+        "market_segment": "market_segment",
+        "platform_family": "platform_family",
+        "country": "country",
+        "state": "state",
+        "city": "city",
+        "vendor_name": "vendor_name",
+        "vendor_cage": "vendor_cage",
+        "cage_code": "vendor_cage",
+        "cage": "vendor_cage",
+        "nsn": "nsn",
+        "niin": "niin",
+        "part_number": "part_number",
+        "source_of_supply": "source_of_supply",
+        "naics_code": "naics_code",
+        "psc": "psc",
+        "psc_code": "psc",
+    }
+
+    for raw_col, val in filters.items():
+        requested_col = str(raw_col).strip().lower()
+
+        if requested_col == "min_spend":
+            try:
+                spend_min = float(val)
+                has_valid_filter = True
+            except (TypeError, ValueError):
+                pass
+            continue
+
+        if requested_col == "max_spend":
+            try:
+                spend_max = float(val)
+                has_valid_filter = True
+            except (TypeError, ValueError):
+                pass
+            continue
+
+        if requested_col in {"q", "search", "query"}:
+            if val is None or str(val).strip() == "":
+                continue
+            search_cols = [c for c in [
+                "contract_id", "vendor_name", "vendor_cage", "description",
+                "base_award_description", "action_description", "nsn", "niin", "part_number"
+            ] if c in actual_cols]
+            if search_cols:
+                p = _like_param_contains(str(val))
+                selected_where.append("(" + " OR ".join([f"UPPER(CAST({quote_ident(c)} AS VARCHAR)) LIKE ? ESCAPE '\\\\'" for c in search_cols]) + ")")
+                params.extend([p] * len(search_cols))
+                has_valid_filter = True
+            continue
+
+        actual_col = filter_column_map.get(requested_col)
+        if not actual_col or actual_col not in actual_cols:
+            continue
+
+        if val is None or str(val).strip() == "":
+            continue
+
+        has_valid_filter = True
+
+        if requested_col in {"nsn", "niin"}:
+            safe_niin = get_niin(str(val))
+            selected_where.append(f"{normalised_niin_filter_expr(actual_col)} = ?")
+            params.append(safe_niin)
+            continue
+
+        if requested_col in {"vendor_cage", "cage_code", "cage"}:
+            selected_where.append(f"UPPER(TRIM(CAST({quote_ident(actual_col)} AS VARCHAR))) = ?")
+            params.append(str(val).strip().upper())
+            continue
+
+        if isinstance(val, list) and len(val) > 0:
+            placeholders = ",".join(["?"] * len(val))
+            selected_where.append(f"UPPER(TRIM(CAST({quote_ident(actual_col)} AS VARCHAR))) IN ({placeholders})")
+            params.extend([str(v).strip().upper() for v in val])
+            continue
+
+        if not isinstance(val, list):
+            selected_where.append(f"UPPER(TRIM(CAST({quote_ident(actual_col)} AS VARCHAR))) = ?")
+            params.append(str(val).strip().upper())
+
+    if not has_valid_filter:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one filter is required for contract-award data. Use years, vendor, platform, agency, PSC, NAICS, NSN, or search."
+        )
+
+    selected_where_clause = " AND ".join(selected_where)
+
+    selected_spend_filters = []
+    if spend_min is not None:
+        selected_spend_filters.append("COALESCE(obligations_in_selected_period_usd, 0) >= ?")
+        params.append(spend_min)
+    if spend_max is not None:
+        selected_spend_filters.append("COALESCE(obligations_in_selected_period_usd, 0) <= ?")
+        params.append(spend_max)
+    selected_spend_where = "WHERE " + " AND ".join(selected_spend_filters) if selected_spend_filters else ""
+
+    award_type_source_expr = "CAST(NULL AS VARCHAR)"
+    for candidate in ["award_type_code", "award_type", "award_type_description"]:
+        if candidate in actual_cols:
+            award_type_source_expr = f"CAST({quote_ident(candidate)} AS VARCHAR)"
+            break
+
+    field_exprs = {
+        "contract_id": "f.contract_id",
+        "vendor_name": "f.vendor_name",
+        "vendor_cage": "f.vendor_cage",
+        "parent_agency": "f.parent_agency",
+        "sub_agency": "f.sub_agency",
+        "city": "f.city",
+        "state": "f.state",
+        "country": "f.country",
+        "market_segment": "f.market_segment",
+        "platform_family": "f.platform_family",
+        "psc": "f.psc_code AS psc",
+        "psc_code": "f.psc_code",
+        "psc_description": "f.psc_description",
+        "naics_code": "f.naics_code",
+        "naics_description": "f.naics_description",
+        "base_award_description": "f.base_award_description",
+        "latest_action_description": "f.latest_action_description",
+        "source_of_supply": "f.source_of_supply",
+        "obligations_in_selected_period_usd": "f.obligations_in_selected_period_usd",
+        "lifetime_obligations_usd": "f.lifetime_obligations_usd",
+        "number_of_actions_in_selected_period": "f.number_of_actions_in_selected_period",
+        "earliest_action_date_in_selected_period": "f.earliest_action_date_in_selected_period",
+        "latest_action_date_in_selected_period": "f.latest_action_date_in_selected_period",
+        "earliest_action_date_lifetime": "f.earliest_action_date_lifetime",
+        "latest_action_date_lifetime": "f.latest_action_date_lifetime",
+        "award_type_code": "f.award_type_code",
+        "award_type_description": "f.award_type_description",
+    }
+
+    select_parts = []
+    for field in selected_fields:
+        expr = field_exprs.get(field)
+        if not expr:
+            continue
+        if " AS " in expr:
+            select_parts.append(expr)
+        else:
+            select_parts.append(f"{expr} AS {quote_ident(field)}")
+
+    select_clause = ", ".join(select_parts) or "f.contract_id"
+
+    base_cte = f"""
+        WITH source_actions AS (
+            SELECT
+                {col_or_null("contract_id")},
+                {col_or_null("action_date")},
+                {col_or_null("vendor_name")},
+                {col_or_null("vendor_cage")},
+                {col_or_null("parent_agency")},
+                {col_or_null("sub_agency")},
+                {col_or_null("city")},
+                {col_or_null("state")},
+                {col_or_null("country")},
+                {col_or_null("market_segment")},
+                {col_or_null("platform_family")},
+                {col_or_null("psc")},
+                {col_or_null("naics_code")},
+                {col_or_null("description")},
+                {col_or_null("base_award_description")},
+                {col_or_null("action_description")},
+                {col_or_null("source_of_supply")},
+                {col_or_null("nsn")},
+                {col_or_null("niin")},
+                {col_or_null("part_number")},
+                {col_or_null("year", sql_type="INTEGER")},
+                COALESCE(TRY_CAST({quote_ident("spend_amount")} AS DOUBLE), 0.0) AS spend_amount,
+                {award_type_source_expr} AS award_type_code
+            FROM v_transactions
+        ),
+        selected_actions AS (
+            SELECT *
+            FROM source_actions
+            WHERE {selected_where_clause}
+        ),
+        selected_contracts AS (
+            SELECT DISTINCT contract_id FROM selected_actions
+        ),
+        selected_rollup AS (
+            SELECT
+                contract_id,
+                MAX_BY(vendor_name, TRY_CAST(action_date AS DATE)) AS vendor_name,
+                MAX_BY(vendor_cage, TRY_CAST(action_date AS DATE)) AS vendor_cage,
+                MAX_BY(parent_agency, TRY_CAST(action_date AS DATE)) AS parent_agency,
+                MAX_BY(sub_agency, TRY_CAST(action_date AS DATE)) AS sub_agency,
+                MAX_BY(city, TRY_CAST(action_date AS DATE)) AS city,
+                MAX_BY(state, TRY_CAST(action_date AS DATE)) AS state,
+                MAX_BY(country, TRY_CAST(action_date AS DATE)) AS country,
+                MAX_BY(market_segment, TRY_CAST(action_date AS DATE)) AS market_segment,
+                MAX_BY(platform_family, TRY_CAST(action_date AS DATE)) AS platform_family,
+                MAX_BY(psc, TRY_CAST(action_date AS DATE)) AS psc_code,
+                MAX_BY(naics_code, TRY_CAST(action_date AS DATE)) AS naics_code,
+                COALESCE(
+                    MAX_BY(NULLIF(action_description, ''), TRY_CAST(action_date AS DATE)),
+                    MAX_BY(NULLIF(description, ''), TRY_CAST(action_date AS DATE))
+                ) AS latest_action_description,
+                MAX_BY(NULLIF(source_of_supply, ''), TRY_CAST(action_date AS DATE)) AS source_of_supply,
+                MAX_BY(NULLIF(award_type_code, ''), TRY_CAST(action_date AS DATE)) AS award_type_code,
+                SUM(spend_amount) AS obligations_in_selected_period_usd,
+                COUNT(*) AS number_of_actions_in_selected_period,
+                MIN(TRY_CAST(action_date AS DATE)) AS earliest_action_date_in_selected_period,
+                MAX(TRY_CAST(action_date AS DATE)) AS latest_action_date_in_selected_period
+            FROM selected_actions
+            GROUP BY contract_id
+        ),
+        lifetime_rollup AS (
+            SELECT
+                a.contract_id,
+                SUM(a.spend_amount) AS lifetime_obligations_usd,
+                MIN(TRY_CAST(a.action_date AS DATE)) AS earliest_action_date_lifetime,
+                MAX(TRY_CAST(a.action_date AS DATE)) AS latest_action_date_lifetime,
+                COALESCE(
+                    MAX_BY(NULLIF(a.base_award_description, ''), TRY_CAST(a.action_date AS DATE)),
+                    MIN_BY(NULLIF(a.description, ''), TRY_CAST(a.action_date AS DATE))
+                ) AS base_award_description
+            FROM source_actions a
+            INNER JOIN selected_contracts sc ON a.contract_id = sc.contract_id
+            GROUP BY a.contract_id
+        ),
+        psc_map AS (
+            SELECT psc_code, MAX(psc_description) AS psc_description
+            FROM v_summary
+            WHERE psc_code IS NOT NULL
+            GROUP BY psc_code
+        ),
+        naics_map AS (
+            SELECT naics_code, MAX(naics_description) AS naics_description
+            FROM v_summary
+            WHERE naics_code IS NOT NULL
+            GROUP BY naics_code
+        ),
+        final_rows AS (
+            SELECT
+                s.*,
+                l.lifetime_obligations_usd,
+                l.earliest_action_date_lifetime,
+                l.latest_action_date_lifetime,
+                l.base_award_description,
+                pm.psc_description,
+                nm.naics_description,
+                {_contract_award_type_description_expr("s.award_type_code")} AS award_type_description
+            FROM selected_rollup s
+            INNER JOIN lifetime_rollup l ON s.contract_id = l.contract_id
+            LEFT JOIN psc_map pm ON TRIM(CAST(s.psc_code AS VARCHAR)) = TRIM(CAST(pm.psc_code AS VARCHAR))
+            LEFT JOIN naics_map nm ON TRIM(CAST(s.naics_code AS VARCHAR)) = TRIM(CAST(nm.naics_code AS VARCHAR))
+        ),
+        filtered_rows AS (
+            SELECT *
+            FROM final_rows
+            {selected_spend_where}
+        )
+    """
+
+    if count_only:
+        return base_cte + " SELECT COUNT(*) AS count FROM filtered_rows", params
+
+    row_limit = safe_int(row_limit, 50, 1, 500_000)
+    offset = safe_int(offset, 0, 0, 10_000_000)
+    sql = base_cte + f"""
+        SELECT {select_clause}
+        FROM filtered_rows f
+        ORDER BY COALESCE(f.obligations_in_selected_period_usd, 0) DESC NULLS LAST
+        LIMIT ? OFFSET ?
+    """
+    params.extend([row_limit, offset])
+    return sql, params
+
+
 def build_explorer_query(
     payload: ExplorerRequest,
     row_limit: int,
@@ -1834,6 +2250,15 @@ def build_explorer_query(
     count_only: bool = False
 ):
     table = payload.table if payload.table in ALLOWED_EXPLORER_TABLES else "v_contracts_rolled"
+
+    if table == CONTRACT_AWARD_EXPLORER_TABLE:
+        return build_contract_awards_explorer_query(
+            payload,
+            row_limit=row_limit,
+            offset=offset,
+            count_only=count_only,
+        )
+
     actual_cols = get_duck_table_columns(table)
 
     if not actual_cols:
@@ -1877,6 +2302,8 @@ def build_explorer_query(
     spend_col = None
     if table == "v_transactions" and "spend_amount" in actual_cols:
         spend_col = "spend_amount"
+    elif table == SUBCONTRACT_EXPLORER_TABLE and "subcontract_value_usd" in actual_cols:
+        spend_col = "subcontract_value_usd"
     elif "total_spend" in actual_cols:
         spend_col = "total_spend"
     elif "spend_amount" in actual_cols:
@@ -2112,20 +2539,34 @@ def explorer_taxonomy_search(type: str = Query(...), q: str = Query(..., min_len
 
 
 @app.post("/api/explorer/export")
-def explorer_export(payload: ExplorerRequest, background_tasks: BackgroundTasks):
-    
-    # Existing award/transaction export caps stay unchanged.
-    # Keep NSN/CAGE reference exports bounded for browser/download safety.
-    if payload.table == NSN_REF_TABLE:
-        if payload.subscription_status == "active":
-            export_limit = safe_int(os.getenv("NSN_REF_EXPORT_LIMIT_ACTIVE", 5000), 5000, 1000, 5000)
-        else:
-            export_limit = safe_int(os.getenv("NSN_REF_EXPORT_LIMIT_FREE", 1000), 1000, 100, 1000)
-    else:
-        if payload.subscription_status == "active":
+def explorer_export(payload: ExplorerRequest, background_tasks: BackgroundTasks, request: Request):
+    expected_key = os.getenv("MIMIR_EXPORT_PROXY_SECRET", "").strip()
+    supplied_key = request.headers.get("X-Mimir-Export-Key", "").strip()
+    require_proxy = os.getenv("REQUIRE_EXPORT_PROXY", "0").strip().lower() in {"1", "true", "yes"}
+    proxy_verified = bool(expected_key and hmac.compare_digest(supplied_key, expected_key))
+
+    if require_proxy and not expected_key:
+        logger.error("REQUIRE_EXPORT_PROXY is enabled without MIMIR_EXPORT_PROXY_SECRET")
+        raise HTTPException(status_code=503, detail="Export authorization is not configured.")
+    if require_proxy and not proxy_verified:
+        raise HTTPException(status_code=403, detail="Export requires an authorized application session.")
+
+    if proxy_verified:
+        plan_tier = request.headers.get("X-Mimir-Plan-Tier", "free").strip().lower()
+        if plan_tier == "enterprise":
+            export_limit = safe_int(
+                os.getenv("EXPLORER_EXPORT_LIMIT_ENTERPRISE", 100000),
+                100000,
+                5000,
+                100000,
+            )
+        elif plan_tier == "professional":
             export_limit = 5000
         else:
-            export_limit = 1000
+            raise HTTPException(status_code=403, detail="This plan does not include CSV exports.")
+    else:
+        # Transitional behavior only. Enable REQUIRE_EXPORT_PROXY after the UI proxy is deployed.
+        export_limit = 5000 if payload.subscription_status == "active" else 1000
 
     sql, params = build_explorer_query(payload, row_limit=export_limit, offset=0)
     
@@ -2133,17 +2574,52 @@ def explorer_export(payload: ExplorerRequest, background_tasks: BackgroundTasks)
     filepath = str((LOCAL_CACHE_DIR / filename).resolve())
     
     try:
-        with DUCK_LOCK:
-            conn = ensure_duck_conn()
-            copy_sql = f"COPY ({sql}) TO '{filepath}' (HEADER, DELIMITER ',');"
-            conn.execute(copy_sql, params)
+        if payload.table == NSN_REF_TABLE:
+            df = duck_fetch_df(sql, params)
+            customer_headers = {
+                "nsn": "National Stock Number (NSN)",
+                "niin": "National Item Identification Number (NIIN)",
+                "cage_code": "CAGE Code",
+                "vendor_name": "Organization Name",
+                "part_number": "Part Number",
+                "description": "Item Description",
+                "fsc_code": "Federal Supply Class (FSC)",
+                "platform_family": "Mapped Platform",
+                "market_segment": "Market Domain",
+                "psc": "Product and Service Code (PSC)",
+                "supplier_status": "Relationship Status",
+                "supplier_status_detail": "Relationship Status Detail",
+                "demil_code": "Controlled Item Code",
+                "shelf_life_code": "Shelf-Life Code",
+                "mgmt_control_code": "Management Control Code",
+                "unit_of_issue": "Unit of Issue",
+                "source_of_supply": "Managing Supply Activity",
+                "govt_estimated_price": "Government Estimated Unit Price (USD)",
+                "acquisition_advice_code": "Acquisition Advice Code (AAC)",
+                "rnsc_codes": "Reference Status Code (RNSC)",
+                "rncc_codes": "Reference Category Code (RNCC)",
+                "rnvc_codes": "Reference Variation Code (RNVC)",
+                "cage_status_codes": "CAGE Status Code",
+                "is_procurement_authorized": "Procurement Authorized",
+                "is_active_authorized_source": "Active Authorized Source",
+            }
+            df.rename(columns=customer_headers).to_csv(filepath, index=False)
+        else:
+            with DUCK_LOCK:
+                conn = ensure_duck_conn()
+                copy_sql = f"COPY ({sql}) TO '{filepath}' (HEADER, DELIMITER ',');"
+                conn.execute(copy_sql, params)
         
         background_tasks.add_task(cleanup_temp_file, filepath)
         
+        with open(filepath, "r", encoding="utf-8", newline="") as export_file:
+            row_count = max(0, sum(1 for _ in csv.reader(export_file)) - 1)
+
         return FileResponse(
             path=filepath, 
             media_type='text/csv', 
-            filename="mimir_data_export.csv"
+            filename="mimir_data_export.csv",
+            headers={"X-Export-Row-Count": str(row_count)},
         )
 
     except HTTPException:
@@ -4985,24 +5461,18 @@ def nsn_ref_col(cols: set, candidates: List[str]) -> Optional[str]:
 
 
 def nsn_ref_niin_where(cols: set, safe_niin: str) -> Tuple[str, List[Any]]:
-    parts = []
-    params: List[Any] = []
-
     niin_col = nsn_ref_col(cols, ["niin"])
     nsn_col = nsn_ref_col(cols, ["nsn"])
 
+    # The ETL writes NIIN as a normalized nine-character string. Keeping this
+    # predicate direct allows DuckDB to prune the NIIN-sorted Parquet row groups.
     if niin_col:
-        parts.append(f"{normalised_niin_filter_expr(niin_col)} = ?")
-        params.append(safe_niin)
+        return f"{quote_ident(niin_col)} = ?", [safe_niin]
 
     if nsn_col:
-        parts.append(f"{normalised_niin_filter_expr(nsn_col)} = ?")
-        params.append(safe_niin)
+        return f"{normalised_niin_filter_expr(nsn_col)} = ?", [safe_niin]
 
-    if not parts:
-        return "1=0", []
-
-    return "(" + " OR ".join(parts) + ")", params
+    return "1=0", []
 
 
 def nsn_ref_profile_lookup(safe_niin: str) -> Dict[str, Any]:
@@ -5019,7 +5489,7 @@ def nsn_ref_profile_lookup(safe_niin: str) -> Dict[str, Any]:
     fsc_col = nsn_ref_col(cols, ["fsc_code", "fsc"])
     cage_col = nsn_ref_col(cols, ["cage_code", "cage", "vendor_cage"])
     part_col = nsn_ref_col(cols, ["part_number", "part_no", "pn"])
-    source_col = nsn_ref_col(cols, ["source", "source_layer", "data_source"])
+    source_col = nsn_ref_col(cols, ["reference_source", "source", "source_layer", "data_source"])
 
     select_parts = [
         f"'{safe_niin}' AS niin",
@@ -5095,7 +5565,15 @@ def nsn_ref_supplier_lookup(safe_niin: str) -> Dict[str, Dict[str, Any]]:
 
     vendor_col = nsn_ref_col(cols, ["vendor_name", "company_name", "manufacturer_name", "entity_name"])
     part_col = nsn_ref_col(cols, ["part_number", "part_no", "pn"])
-    source_col = nsn_ref_col(cols, ["source", "source_layer", "data_source"])
+    source_col = nsn_ref_col(cols, ["reference_source", "source", "source_layer", "data_source"])
+    rncc_col = nsn_ref_col(cols, ["rncc_codes", "rncc"])
+    rnvc_col = nsn_ref_col(cols, ["rnvc_codes", "rnvc"])
+    rnsc_col = nsn_ref_col(cols, ["rnsc_codes", "rnsc"])
+    cage_status_col = nsn_ref_col(cols, ["cage_status_codes", "cage_status"])
+    supplier_status_col = nsn_ref_col(cols, ["supplier_status"])
+    supplier_status_detail_col = nsn_ref_col(cols, ["supplier_status_detail"])
+    procurement_authorized_col = nsn_ref_col(cols, ["is_procurement_authorized"])
+    active_authorized_col = nsn_ref_col(cols, ["is_active_authorized_source"])
 
     select_parts = [
         f"UPPER(TRIM(CAST({quote_ident(cage_col)} AS VARCHAR))) AS cage"
@@ -5115,6 +5593,35 @@ def nsn_ref_supplier_lookup(safe_niin: str) -> Dict[str, Dict[str, Any]]:
         select_parts.append(f"string_agg(DISTINCT NULLIF(TRIM(CAST({quote_ident(source_col)} AS VARCHAR)), ''), ', ') AS source")
     else:
         select_parts.append("CAST(NULL AS VARCHAR) AS source")
+
+    for source_column, alias in (
+        (rncc_col, "rncc_codes"),
+        (rnvc_col, "rnvc_codes"),
+        (rnsc_col, "rnsc_codes"),
+        (cage_status_col, "cage_status_codes"),
+        (supplier_status_col, "supplier_status"),
+        (supplier_status_detail_col, "supplier_status_detail"),
+    ):
+        if source_column:
+            select_parts.append(
+                f"string_agg(DISTINCT NULLIF(TRIM(CAST({quote_ident(source_column)} AS VARCHAR)), ''), ',') AS {alias}"
+            )
+        else:
+            select_parts.append(f"CAST(NULL AS VARCHAR) AS {alias}")
+
+    if procurement_authorized_col:
+        select_parts.append(
+            f"BOOL_OR(COALESCE(CAST({quote_ident(procurement_authorized_col)} AS BOOLEAN), FALSE)) AS is_procurement_authorized"
+        )
+    else:
+        select_parts.append("FALSE AS is_procurement_authorized")
+
+    if active_authorized_col:
+        select_parts.append(
+            f"BOOL_OR(COALESCE(CAST({quote_ident(active_authorized_col)} AS BOOLEAN), FALSE)) AS is_active_authorized_source"
+        )
+    else:
+        select_parts.append("FALSE AS is_active_authorized_source")
 
     sql = f"""
         SELECT
@@ -5141,6 +5648,14 @@ def nsn_ref_supplier_lookup(safe_niin: str) -> Dict[str, Dict[str, Any]]:
                 "vendor": r.get("vendor"),
                 "part_numbers": r.get("part_numbers") or "—",
                 "source": r.get("source"),
+                "rncc_codes": r.get("rncc_codes"),
+                "rnvc_codes": r.get("rnvc_codes"),
+                "rnsc_codes": r.get("rnsc_codes"),
+                "cage_status_codes": r.get("cage_status_codes"),
+                "supplier_status": r.get("supplier_status"),
+                "supplier_status_detail": r.get("supplier_status_detail"),
+                "is_procurement_authorized": bool(r.get("is_procurement_authorized") or False),
+                "is_active_authorized_source": bool(r.get("is_active_authorized_source") or False),
             }
 
         return out
@@ -5386,16 +5901,15 @@ def get_nsn_suppliers(
             logger.error(f"NSN Suppliers DuckDB Error: {e}")
             sales_records = []
 
-    # 2. LOCAL DUCKDB: full NSN/CAGE reference lookup.
-    # Fast path: only hit the large reference file when no revenue-backed suppliers were found.
+    # 2. LOCAL DUCKDB: full NSN/CAGE reference lookup. The reference parquet is
+    # sorted by NIIN, so this direct lookup remains row-group prunable.
     approved_map = {}
 
-    if not sales_records:
-        try:
-            approved_map = nsn_ref_supplier_lookup(safe_niin)
-        except Exception:
-            logger.exception("NSN reference supplier lookup failed")
-            approved_map = {}
+    try:
+        approved_map = nsn_ref_supplier_lookup(safe_niin)
+    except Exception:
+        logger.exception("NSN reference supplier lookup failed")
+        approved_map = {}
 
     # ✅ RESTORED BUSINESS LOGIC: Government & Standards Dictionary
     gov_dict = {
@@ -5445,9 +5959,17 @@ def get_nsn_suppliers(
         ref_vendor = ref_row.get("vendor") if isinstance(ref_row, dict) else None
 
         r['vendor'] = resolve_vendor_name(c, r.get('vendor') or ref_vendor)
-        r['is_approved_source'] = c in approved_map
+        r['is_approved_source'] = bool(ref_row.get("is_active_authorized_source", False)) if isinstance(ref_row, dict) else False
+        r['is_procurement_authorized'] = bool(ref_row.get("is_procurement_authorized", False)) if isinstance(ref_row, dict) else False
+        r['is_active_authorized_source'] = r['is_approved_source']
         r['part_numbers'] = ref_row.get("part_numbers", "—") if isinstance(ref_row, dict) else "—"
         r['reference_source'] = ref_row.get("source") if isinstance(ref_row, dict) else None
+        r['rncc_codes'] = ref_row.get("rncc_codes") if isinstance(ref_row, dict) else None
+        r['rnvc_codes'] = ref_row.get("rnvc_codes") if isinstance(ref_row, dict) else None
+        r['rnsc_codes'] = ref_row.get("rnsc_codes") if isinstance(ref_row, dict) else None
+        r['cage_status_codes'] = ref_row.get("cage_status_codes") if isinstance(ref_row, dict) else None
+        r['supplier_status'] = ref_row.get("supplier_status") if isinstance(ref_row, dict) else None
+        r['supplier_status_detail'] = ref_row.get("supplier_status_detail") if isinstance(ref_row, dict) else None
         r['total_revenue'] = float(r.get('total_revenue') or 0.0)
         r['contracts'] = int(r.get('contracts') or 0)
 
@@ -5455,7 +5977,7 @@ def get_nsn_suppliers(
 
     # Append reference sources that have 0 sales in the filtered time window.
     for c, ref_row in approved_map.items():
-        if c not in sales_cages:
+        if c not in sales_cages and bool(ref_row.get("is_active_authorized_source", False)):
             ref_vendor = ref_row.get("vendor") if isinstance(ref_row, dict) else None
 
             out.append({
@@ -5465,8 +5987,16 @@ def get_nsn_suppliers(
                 "last_sold": None,
                 "total_revenue": 0.0,
                 "is_approved_source": True,
+                "is_procurement_authorized": True,
+                "is_active_authorized_source": True,
                 "part_numbers": ref_row.get("part_numbers", "—") if isinstance(ref_row, dict) else "—",
                 "reference_source": ref_row.get("source") if isinstance(ref_row, dict) else None,
+                "rncc_codes": ref_row.get("rncc_codes") if isinstance(ref_row, dict) else None,
+                "rnvc_codes": ref_row.get("rnvc_codes") if isinstance(ref_row, dict) else None,
+                "rnsc_codes": ref_row.get("rnsc_codes") if isinstance(ref_row, dict) else None,
+                "cage_status_codes": ref_row.get("cage_status_codes") if isinstance(ref_row, dict) else None,
+                "supplier_status": ref_row.get("supplier_status") if isinstance(ref_row, dict) else None,
+                "supplier_status_detail": ref_row.get("supplier_status_detail") if isinstance(ref_row, dict) else None,
             })
 
     # Sort by Revenue, then Authorization/reference status.
