@@ -750,6 +750,10 @@ def optimize_and_upload():
                 d.city,
                 d.state,
                 d.country,
+                d.place_of_performance_city,
+                d.place_of_performance_state,
+                d.place_of_performance_country,
+                d.place_of_performance_zip,
                 SUBSTR(REGEXP_REPLACE(CAST(d.nsn AS VARCHAR), '[^0-9]', ''), -9) AS niin,
                 f.source_of_supply
             FROM "market_intel_gold"."dashboard_master_view" d
@@ -806,6 +810,10 @@ def optimize_and_upload():
                     city,
                     state,
                     country,
+                    place_of_performance_city,
+                    place_of_performance_state,
+                    place_of_performance_country,
+                    place_of_performance_zip,
                     niin,
                     source_of_supply
                 FROM read_parquet('{txn_parts_dir}/*.parquet')
@@ -835,35 +843,91 @@ def optimize_and_upload():
     else:
         print("📦 Athena UNLOAD -> Parquet (avoids local RAM blowup)...")
 
-        # ✅ FIX: Added MIN(action_date) and all missing metadata columns
-        select_sql = """
+        # Keep one row per contract while retaining enough annual measures for
+        # selected-fiscal-year explorer calculations without rescanning actions.
+        now_utc = datetime.now(timezone.utc)
+        current_fiscal_year = now_utc.year + (1 if now_utc.month >= 10 else 0)
+        rollup_years = range(2019, current_fiscal_year + 1)
+
+        annual_rollup_columns = []
+        for fiscal_year in rollup_years:
+            annual_rollup_columns.extend([
+                f"CAST(SUM(CASE WHEN year = {fiscal_year} THEN COALESCE(spend_amount, 0) ELSE 0 END) AS DOUBLE) AS obligations_fy{fiscal_year}",
+                f"COUNT_IF(year = {fiscal_year}) AS action_count_fy{fiscal_year}",
+                f"MIN(CASE WHEN year = {fiscal_year} THEN action_date END) AS earliest_action_date_fy{fiscal_year}",
+                f"MAX(CASE WHEN year = {fiscal_year} THEN action_date END) AS latest_action_date_fy{fiscal_year}",
+            ])
+
+        annual_rollup_sql = ",\n                ".join(annual_rollup_columns)
+
+        select_sql = f"""
             SELECT 
                 contract_id,
                 MAX(action_date) AS last_action_date,
                 MIN(action_date) AS start_date,
                 SUM(COALESCE(spend_amount, 0)) AS total_spend,
+                COUNT(*) AS action_count,
+                MIN(year) AS first_year,
                 MAX_BY(vendor_name, action_date) AS vendor_name,
                 MAX_BY(vendor_cage, action_date) AS vendor_cage,
                 MAX_BY(sub_agency, action_date) AS sub_agency,
                 MAX_BY(parent_agency, action_date) AS parent_agency,
                 MAX_BY(description, action_date) AS description,
+                COALESCE(
+                    MAX_BY(
+                        NULLIF(TRIM(base_award_description), ''),
+                        IF(NULLIF(TRIM(base_award_description), '') IS NOT NULL, action_date, NULL)
+                    ),
+                    MIN_BY(
+                        NULLIF(TRIM(description), ''),
+                        IF(NULLIF(TRIM(description), '') IS NOT NULL, action_date, NULL)
+                    )
+                ) AS base_award_description,
+                COALESCE(
+                    MAX_BY(
+                        NULLIF(TRIM(action_description), ''),
+                        IF(NULLIF(TRIM(action_description), '') IS NOT NULL, action_date, NULL)
+                    ),
+                    MAX_BY(
+                        NULLIF(TRIM(description), ''),
+                        IF(NULLIF(TRIM(description), '') IS NOT NULL, action_date, NULL)
+                    )
+                ) AS latest_action_description,
                 MAX_BY(platform_family, action_date) AS platform_family,
                 MAX_BY(market_segment, action_date) AS market_segment,
                 MAX_BY(tech_type, action_date) AS tech_type,
                 MAX_BY(capability_name, action_date) AS capability_name,
                 MAX_BY(naics_code, action_date) AS naics_code,
+                MAX_BY(naics_description, action_date) AS naics_description,
                 MAX_BY(psc, action_date) AS psc,
                 MAX_BY(city, action_date) AS city,
                 MAX_BY(state, action_date) AS state,
                 MAX_BY(country, action_date) AS country,
+                MAX_BY(
+                    place_of_performance_city,
+                    IF(NULLIF(TRIM(place_of_performance_city), '') IS NOT NULL, action_date, NULL)
+                ) AS place_of_performance_city,
+                MAX_BY(
+                    place_of_performance_state,
+                    IF(NULLIF(TRIM(place_of_performance_state), '') IS NOT NULL, action_date, NULL)
+                ) AS place_of_performance_state,
+                MAX_BY(
+                    place_of_performance_country,
+                    IF(NULLIF(TRIM(place_of_performance_country), '') IS NOT NULL, action_date, NULL)
+                ) AS place_of_performance_country,
+                MAX_BY(
+                    place_of_performance_zip,
+                    IF(NULLIF(TRIM(place_of_performance_zip), '') IS NOT NULL, action_date, NULL)
+                ) AS place_of_performance_zip,
                 MAX_BY(pricing_type, action_date) AS pricing_type,
                 MAX_BY(competition_type, action_date) AS competition_type,
                 MAX_BY(CAST(offers_count AS VARCHAR), action_date) AS offers_count,
                 MAX_BY(set_aside_type, action_date) AS set_aside_type,
                 MAX_BY(solicitation_identifier, action_date) AS solicitation_id,
-                CAST(MAX(year) AS INTEGER) AS year
+                CAST(MAX(year) AS INTEGER) AS year,
+                {annual_rollup_sql}
             FROM dashboard_master_view
-            WHERE year >= 2018
+            WHERE year >= 2019
             GROUP BY contract_id
         """
 

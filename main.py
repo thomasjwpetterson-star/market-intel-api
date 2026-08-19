@@ -84,8 +84,9 @@ DUCK_CONN = None
 DUCK_INIT_LOCK = threading.RLock()
 
 # ✅ Tiny execution pool to allow a little concurrency without opening many connections
-# Pool size 1 is safest/lowest RAM; 2 is usually fine.
-DUCK_POOL_SIZE = int(os.getenv("DUCK_POOL_SIZE", "3"))
+# Two readers keep the dashboard responsive without allowing three large
+# aggregations to compete for a small Render instance at the same time.
+DUCK_POOL_SIZE = int(os.getenv("DUCK_POOL_SIZE", "2"))
 _DUCK_POOL = None  # will be a queue.Queue of connections
 
 def _apply_duck_pragmas(conn: duckdb.DuckDBPyConnection):
@@ -101,7 +102,8 @@ def _apply_duck_pragmas(conn: duckdb.DuckDBPyConnection):
     # ✅ Render/OOM-friendly defaults (tune via env vars)
     conn.execute(f"PRAGMA temp_directory='{duck_tmp}';")
     conn.execute(f"PRAGMA threads={int(os.getenv('DUCKDB_THREADS', '1'))};")
-    conn.execute(f"PRAGMA memory_limit='{os.getenv('DUCKDB_MEM', '900MB')}';")
+    conn.execute(f"PRAGMA memory_limit='{os.getenv('DUCKDB_MEM', '650MB')}';")
+    conn.execute("SET preserve_insertion_order=false;")
     conn.execute("PRAGMA enable_object_cache=false;")
 
 def ensure_duck_conn() -> duckdb.DuckDBPyConnection:
@@ -171,7 +173,7 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
     # Read mode: use pool
     c = None
     try:
-        c = _DUCK_POOL.get(timeout=float(os.getenv("DUCK_POOL_TIMEOUT", "15")))
+        c = _DUCK_POOL.get(timeout=float(os.getenv("DUCK_POOL_TIMEOUT", "60")))
         # Use a cursor for isolation of statement state
         df = c.cursor().execute(sql, params).fetchdf()
         return df_sanitize_for_json(df)
@@ -194,7 +196,7 @@ async def lifespan(app: FastAPI):
     # ✅ OOM-friendly thread limiter (don’t set too high on small Render instances)
     try:
         limiter = anyio.to_thread.current_default_thread_limiter()
-        limiter.total_tokens = int(os.getenv("ANYIO_THREADS", "40"))
+        limiter.total_tokens = int(os.getenv("ANYIO_THREADS", "12"))
         logger.info("AnyIO thread limiter set to %s", limiter.total_tokens)
     except Exception:
         logger.exception("Failed to set AnyIO thread limiter")
@@ -1762,13 +1764,13 @@ SUBCONTRACT_EXPLORER_TABLE = "v_subcontracts"
 CONTRACT_AWARD_SYNTHETIC_COLUMNS = {
     "contract_id", "vendor_name", "vendor_cage", "parent_agency", "sub_agency",
     "city", "state", "country", "market_segment", "platform_family",
+    "place_of_performance_city", "place_of_performance_state",
+    "place_of_performance_country", "place_of_performance_zip",
     "psc_code", "psc", "psc_description", "naics_code", "naics_description",
     "base_award_description", "latest_action_description", "source_of_supply",
-    "obligations_in_selected_period_usd", "lifetime_obligations_usd",
+    "obligations_in_selected_period_usd",
     "number_of_actions_in_selected_period",
     "earliest_action_date_in_selected_period", "latest_action_date_in_selected_period",
-    "earliest_action_date_lifetime", "latest_action_date_lifetime",
-    "award_type_code", "award_type_description",
 }
 
 ALLOWED_EXPLORER_TABLES = {
@@ -1787,6 +1789,8 @@ ALLOWED_EXPLORER_COLUMNS = {
     "psc", "psc_code", "psc_description", "naics_code", "naics_description",
     "platform_family", "market_segment", "description",
     "city", "state", "country", "piid", "idv_piid", "transaction_id",
+    "place_of_performance_city", "place_of_performance_state",
+    "place_of_performance_country", "place_of_performance_zip",
     "nsn", "niin", "part_number", "pricing_type", "set_aside_type", "competition_type", "offers_count",
 
     # Full NSN/CAGE reference fields
@@ -1814,10 +1818,11 @@ ALLOWED_EXPLORER_COLUMNS = {
 EXPLORER_DEFAULT_COLUMNS = {
     CONTRACT_AWARD_EXPLORER_TABLE: [
         "contract_id", "vendor_name", "vendor_cage",
-        "obligations_in_selected_period_usd", "lifetime_obligations_usd",
+        "obligations_in_selected_period_usd",
         "number_of_actions_in_selected_period", "earliest_action_date_in_selected_period",
-        "latest_action_date_in_selected_period", "award_type_description",
+        "latest_action_date_in_selected_period",
         "base_award_description", "latest_action_description",
+        "place_of_performance_city", "place_of_performance_state",
     ],
     SUBCONTRACT_EXPLORER_TABLE: [
         "prime_name", "prime_cage", "prime_award_id", "subcontractor_name", "subcontractor_cage",
@@ -1941,7 +1946,7 @@ def _contract_award_type_description_expr(code_expr: str) -> str:
     """
 
 
-def build_contract_awards_explorer_query(
+def build_contract_awards_explorer_query_from_actions(
     payload: ExplorerRequest,
     row_limit: int,
     offset: int = 0,
@@ -1976,6 +1981,10 @@ def build_contract_awards_explorer_query(
         "country": "country",
         "state": "state",
         "city": "city",
+        "place_of_performance_country": "place_of_performance_country",
+        "place_of_performance_state": "place_of_performance_state",
+        "place_of_performance_city": "place_of_performance_city",
+        "place_of_performance_zip": "place_of_performance_zip",
         "vendor_name": "vendor_name",
         "vendor_cage": "vendor_cage",
         "cage_code": "vendor_cage",
@@ -2062,12 +2071,12 @@ def build_contract_awards_explorer_query(
 
     selected_spend_filters = []
     if spend_min is not None:
-        selected_spend_filters.append("COALESCE(obligations_in_selected_period_usd, 0) >= ?")
+        selected_spend_filters.append("COALESCE(SUM(spend_amount), 0) >= ?")
         params.append(spend_min)
     if spend_max is not None:
-        selected_spend_filters.append("COALESCE(obligations_in_selected_period_usd, 0) <= ?")
+        selected_spend_filters.append("COALESCE(SUM(spend_amount), 0) <= ?")
         params.append(spend_max)
-    selected_spend_where = "WHERE " + " AND ".join(selected_spend_filters) if selected_spend_filters else ""
+    selected_spend_having = "HAVING " + " AND ".join(selected_spend_filters) if selected_spend_filters else ""
 
     award_type_source_expr = "CAST(NULL AS VARCHAR)"
     for candidate in ["award_type_code", "award_type", "award_type_description"]:
@@ -2084,6 +2093,10 @@ def build_contract_awards_explorer_query(
         "city": "f.city",
         "state": "f.state",
         "country": "f.country",
+        "place_of_performance_city": "f.place_of_performance_city",
+        "place_of_performance_state": "f.place_of_performance_state",
+        "place_of_performance_country": "f.place_of_performance_country",
+        "place_of_performance_zip": "f.place_of_performance_zip",
         "market_segment": "f.market_segment",
         "platform_family": "f.platform_family",
         "psc": "f.psc_code AS psc",
@@ -2117,8 +2130,8 @@ def build_contract_awards_explorer_query(
 
     select_clause = ", ".join(select_parts) or "f.contract_id"
 
-    base_cte = f"""
-        WITH source_actions AS (
+    source_ctes = f"""
+        WITH source_actions AS NOT MATERIALIZED (
             SELECT
                 {col_or_null("contract_id")},
                 {col_or_null("action_date")},
@@ -2129,6 +2142,10 @@ def build_contract_awards_explorer_query(
                 {col_or_null("city")},
                 {col_or_null("state")},
                 {col_or_null("country")},
+                {col_or_null("place_of_performance_city")},
+                {col_or_null("place_of_performance_state")},
+                {col_or_null("place_of_performance_country")},
+                {col_or_null("place_of_performance_zip")},
                 {col_or_null("market_segment")},
                 {col_or_null("platform_family")},
                 {col_or_null("psc")},
@@ -2145,40 +2162,73 @@ def build_contract_awards_explorer_query(
                 {award_type_source_expr} AS award_type_code
             FROM v_transactions
         ),
-        selected_actions AS (
+        selected_actions AS NOT MATERIALIZED (
             SELECT *
             FROM source_actions
             WHERE {selected_where_clause}
         ),
         selected_contracts AS (
-            SELECT DISTINCT contract_id FROM selected_actions
-        ),
-        selected_rollup AS (
             SELECT
                 contract_id,
-                MAX_BY(vendor_name, TRY_CAST(action_date AS DATE)) AS vendor_name,
-                MAX_BY(vendor_cage, TRY_CAST(action_date AS DATE)) AS vendor_cage,
-                MAX_BY(parent_agency, TRY_CAST(action_date AS DATE)) AS parent_agency,
-                MAX_BY(sub_agency, TRY_CAST(action_date AS DATE)) AS sub_agency,
-                MAX_BY(city, TRY_CAST(action_date AS DATE)) AS city,
-                MAX_BY(state, TRY_CAST(action_date AS DATE)) AS state,
-                MAX_BY(country, TRY_CAST(action_date AS DATE)) AS country,
-                MAX_BY(market_segment, TRY_CAST(action_date AS DATE)) AS market_segment,
-                MAX_BY(platform_family, TRY_CAST(action_date AS DATE)) AS platform_family,
-                MAX_BY(psc, TRY_CAST(action_date AS DATE)) AS psc_code,
-                MAX_BY(naics_code, TRY_CAST(action_date AS DATE)) AS naics_code,
-                COALESCE(
-                    MAX_BY(NULLIF(action_description, ''), TRY_CAST(action_date AS DATE)),
-                    MAX_BY(NULLIF(description, ''), TRY_CAST(action_date AS DATE))
-                ) AS latest_action_description,
-                MAX_BY(NULLIF(source_of_supply, ''), TRY_CAST(action_date AS DATE)) AS source_of_supply,
-                MAX_BY(NULLIF(award_type_code, ''), TRY_CAST(action_date AS DATE)) AS award_type_code,
                 SUM(spend_amount) AS obligations_in_selected_period_usd,
                 COUNT(*) AS number_of_actions_in_selected_period,
                 MIN(TRY_CAST(action_date AS DATE)) AS earliest_action_date_in_selected_period,
                 MAX(TRY_CAST(action_date AS DATE)) AS latest_action_date_in_selected_period
             FROM selected_actions
             GROUP BY contract_id
+            {selected_spend_having}
+        )
+    """
+
+    if count_only:
+        return source_ctes + " SELECT COUNT(*) AS count FROM selected_contracts", params
+
+    row_limit = safe_int(row_limit, 50, 1, 500_000)
+    offset = safe_int(offset, 0, 0, 10_000_000)
+
+    detail_ctes = f"""
+        , candidate_contracts AS (
+            SELECT *
+            FROM selected_contracts
+            ORDER BY obligations_in_selected_period_usd DESC NULLS LAST, contract_id
+            LIMIT ? OFFSET ?
+        ),
+        selected_rollup AS (
+            SELECT
+                c.contract_id,
+                MAX_BY(a.vendor_name, TRY_CAST(a.action_date AS DATE)) AS vendor_name,
+                MAX_BY(a.vendor_cage, TRY_CAST(a.action_date AS DATE)) AS vendor_cage,
+                MAX_BY(a.parent_agency, TRY_CAST(a.action_date AS DATE)) AS parent_agency,
+                MAX_BY(a.sub_agency, TRY_CAST(a.action_date AS DATE)) AS sub_agency,
+                MAX_BY(a.city, TRY_CAST(a.action_date AS DATE)) AS city,
+                MAX_BY(a.state, TRY_CAST(a.action_date AS DATE)) AS state,
+                MAX_BY(a.country, TRY_CAST(a.action_date AS DATE)) AS country,
+                MAX_BY(a.place_of_performance_city, TRY_CAST(a.action_date AS DATE)) AS place_of_performance_city,
+                MAX_BY(a.place_of_performance_state, TRY_CAST(a.action_date AS DATE)) AS place_of_performance_state,
+                MAX_BY(a.place_of_performance_country, TRY_CAST(a.action_date AS DATE)) AS place_of_performance_country,
+                MAX_BY(a.place_of_performance_zip, TRY_CAST(a.action_date AS DATE)) AS place_of_performance_zip,
+                MAX_BY(a.market_segment, TRY_CAST(a.action_date AS DATE)) AS market_segment,
+                MAX_BY(a.platform_family, TRY_CAST(a.action_date AS DATE)) AS platform_family,
+                MAX_BY(a.psc, TRY_CAST(a.action_date AS DATE)) AS psc_code,
+                MAX_BY(a.naics_code, TRY_CAST(a.action_date AS DATE)) AS naics_code,
+                COALESCE(
+                    MAX_BY(NULLIF(a.action_description, ''), TRY_CAST(a.action_date AS DATE)),
+                    MAX_BY(NULLIF(a.description, ''), TRY_CAST(a.action_date AS DATE))
+                ) AS latest_action_description,
+                MAX_BY(NULLIF(a.source_of_supply, ''), TRY_CAST(a.action_date AS DATE)) AS source_of_supply,
+                MAX_BY(NULLIF(a.award_type_code, ''), TRY_CAST(a.action_date AS DATE)) AS award_type_code,
+                c.obligations_in_selected_period_usd,
+                c.number_of_actions_in_selected_period,
+                c.earliest_action_date_in_selected_period,
+                c.latest_action_date_in_selected_period
+            FROM selected_actions a
+            INNER JOIN candidate_contracts c ON a.contract_id = c.contract_id
+            GROUP BY
+                c.contract_id,
+                c.obligations_in_selected_period_usd,
+                c.number_of_actions_in_selected_period,
+                c.earliest_action_date_in_selected_period,
+                c.latest_action_date_in_selected_period
         ),
         lifetime_rollup AS (
             SELECT
@@ -2191,7 +2241,7 @@ def build_contract_awards_explorer_query(
                     MIN_BY(NULLIF(a.description, ''), TRY_CAST(a.action_date AS DATE))
                 ) AS base_award_description
             FROM source_actions a
-            INNER JOIN selected_contracts sc ON a.contract_id = sc.contract_id
+            INNER JOIN candidate_contracts c ON a.contract_id = c.contract_id
             GROUP BY a.contract_id
         ),
         psc_map AS (
@@ -2220,27 +2270,312 @@ def build_contract_awards_explorer_query(
             INNER JOIN lifetime_rollup l ON s.contract_id = l.contract_id
             LEFT JOIN psc_map pm ON TRIM(CAST(s.psc_code AS VARCHAR)) = TRIM(CAST(pm.psc_code AS VARCHAR))
             LEFT JOIN naics_map nm ON TRIM(CAST(s.naics_code AS VARCHAR)) = TRIM(CAST(nm.naics_code AS VARCHAR))
-        ),
-        filtered_rows AS (
-            SELECT *
-            FROM final_rows
-            {selected_spend_where}
         )
     """
 
-    if count_only:
-        return base_cte + " SELECT COUNT(*) AS count FROM filtered_rows", params
-
-    row_limit = safe_int(row_limit, 50, 1, 500_000)
-    offset = safe_int(offset, 0, 0, 10_000_000)
-    sql = base_cte + f"""
+    sql = source_ctes + detail_ctes + f"""
         SELECT {select_clause}
-        FROM filtered_rows f
-        ORDER BY COALESCE(f.obligations_in_selected_period_usd, 0) DESC NULLS LAST
-        LIMIT ? OFFSET ?
+        FROM final_rows f
+        ORDER BY COALESCE(f.obligations_in_selected_period_usd, 0) DESC NULLS LAST, f.contract_id
     """
     params.extend([row_limit, offset])
     return sql, params
+
+
+def _rolled_contract_years(actual_cols: set) -> List[int]:
+    years = []
+    for col in actual_cols:
+        match = re.fullmatch(r"obligations_fy(\d{4})", str(col).lower())
+        if match:
+            years.append(int(match.group(1)))
+    return sorted(set(years))
+
+
+def build_contract_awards_explorer_query_from_rollup(
+    payload: ExplorerRequest,
+    row_limit: int,
+    offset: int = 0,
+    count_only: bool = False,
+):
+    actual_cols = get_duck_table_columns("v_contracts_rolled")
+    available_years = _rolled_contract_years(actual_cols)
+    if not actual_cols or not available_years:
+        raise HTTPException(
+            status_code=503,
+            detail="The enriched contract-award cache is not available yet. Rebuild contracts_rolled.parquet and reload the API.",
+        )
+
+    requested_cols = payload.columns or EXPLORER_DEFAULT_COLUMNS[CONTRACT_AWARD_EXPLORER_TABLE]
+    selected_fields = [
+        str(c).strip().lower()
+        for c in requested_cols
+        if str(c).strip().lower() in CONTRACT_AWARD_SYNTHETIC_COLUMNS
+    ]
+    if not selected_fields:
+        selected_fields = EXPLORER_DEFAULT_COLUMNS[CONTRACT_AWARD_EXPLORER_TABLE]
+
+    filters = payload.filters or {}
+    where_parts = ["r.contract_id IS NOT NULL", "TRIM(CAST(r.contract_id AS VARCHAR)) <> ''"]
+    params: List[Any] = []
+    has_valid_filter = False
+    spend_min = None
+    spend_max = None
+
+    requested_year_values = filters.get("year")
+    if requested_year_values is None:
+        selected_years = available_years
+    else:
+        raw_years = requested_year_values if isinstance(requested_year_values, list) else [requested_year_values]
+        parsed_years = {
+            safe_int(value, -1, 1900, 2200)
+            for value in raw_years
+            if str(value).strip()
+        }
+        selected_years = [year for year in available_years if year in parsed_years]
+        has_valid_filter = bool(parsed_years)
+        if not selected_years:
+            where_parts.append("1=0")
+
+    obligations_terms = [
+        f"COALESCE(TRY_CAST(r.{quote_ident(f'obligations_fy{year}')} AS DOUBLE), 0.0)"
+        for year in selected_years
+    ]
+    action_terms = [
+        f"COALESCE(TRY_CAST(r.{quote_ident(f'action_count_fy{year}')} AS BIGINT), 0)"
+        for year in selected_years
+        if f"action_count_fy{year}" in actual_cols
+    ]
+    obligations_expr = " + ".join(obligations_terms) if obligations_terms else "0.0"
+    actions_expr = " + ".join(action_terms) if action_terms else "0"
+
+    earliest_terms = [
+        f"COALESCE(TRY_CAST(r.{quote_ident(f'earliest_action_date_fy{year}')} AS DATE), DATE '9999-12-31')"
+        for year in selected_years
+        if f"earliest_action_date_fy{year}" in actual_cols
+    ]
+    latest_terms = [
+        f"COALESCE(TRY_CAST(r.{quote_ident(f'latest_action_date_fy{year}')} AS DATE), DATE '0001-01-01')"
+        for year in selected_years
+        if f"latest_action_date_fy{year}" in actual_cols
+    ]
+    earliest_expr = (
+        f"CASE WHEN ({actions_expr}) > 0 THEN LEAST({', '.join(earliest_terms)}) END"
+        if earliest_terms else "CAST(NULL AS DATE)"
+    )
+    latest_expr = (
+        f"CASE WHEN ({actions_expr}) > 0 THEN GREATEST({', '.join(latest_terms)}) END"
+        if latest_terms else "CAST(NULL AS DATE)"
+    )
+
+    # A selected year means the contract must have at least one action in that period.
+    if requested_year_values is not None and selected_years:
+        where_parts.append(f"({actions_expr}) > 0")
+
+    filter_column_map = {
+        "contract_id": "contract_id",
+        "sub_agency": "sub_agency",
+        "parent_agency": "parent_agency",
+        "market_segment": "market_segment",
+        "platform_family": "platform_family",
+        "country": "country",
+        "state": "state",
+        "city": "city",
+        "place_of_performance_country": "place_of_performance_country",
+        "place_of_performance_state": "place_of_performance_state",
+        "place_of_performance_city": "place_of_performance_city",
+        "place_of_performance_zip": "place_of_performance_zip",
+        "vendor_name": "vendor_name",
+        "vendor_cage": "vendor_cage",
+        "cage_code": "vendor_cage",
+        "cage": "vendor_cage",
+        "naics_code": "naics_code",
+        "psc": "psc",
+        "psc_code": "psc",
+    }
+
+    for raw_col, val in filters.items():
+        requested_col = str(raw_col).strip().lower()
+        if requested_col == "year":
+            continue
+        if requested_col == "min_spend":
+            try:
+                spend_min = float(val)
+                has_valid_filter = True
+            except (TypeError, ValueError):
+                pass
+            continue
+        if requested_col == "max_spend":
+            try:
+                spend_max = float(val)
+                has_valid_filter = True
+            except (TypeError, ValueError):
+                pass
+            continue
+        if requested_col in {"q", "search", "query"}:
+            if val is None or str(val).strip() == "":
+                continue
+            search_cols = [
+                col for col in [
+                    "contract_id", "vendor_name", "vendor_cage", "description",
+                    "base_award_description", "latest_action_description",
+                ]
+                if col in actual_cols
+            ]
+            if search_cols:
+                p = _like_param_contains(str(val))
+                where_parts.append(
+                    "(" + " OR ".join([
+                        f"UPPER(CAST(r.{quote_ident(col)} AS VARCHAR)) LIKE ? ESCAPE '\\\\'"
+                        for col in search_cols
+                    ]) + ")"
+                )
+                params.extend([p] * len(search_cols))
+                has_valid_filter = True
+            continue
+
+        actual_col = filter_column_map.get(requested_col)
+        if not actual_col or actual_col not in actual_cols:
+            continue
+        if val is None or str(val).strip() == "":
+            continue
+
+        has_valid_filter = True
+        if requested_col in {"vendor_cage", "cage_code", "cage"}:
+            where_parts.append(f"UPPER(TRIM(CAST(r.{quote_ident(actual_col)} AS VARCHAR))) = ?")
+            params.append(str(val).strip().upper())
+        elif isinstance(val, list) and val:
+            placeholders = ",".join(["?"] * len(val))
+            where_parts.append(
+                f"UPPER(TRIM(CAST(r.{quote_ident(actual_col)} AS VARCHAR))) IN ({placeholders})"
+            )
+            params.extend([str(v).strip().upper() for v in val])
+        elif not isinstance(val, list):
+            where_parts.append(f"UPPER(TRIM(CAST(r.{quote_ident(actual_col)} AS VARCHAR))) = ?")
+            params.append(str(val).strip().upper())
+
+    if not has_valid_filter:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one filter is required for contract-award data. Use fiscal years, vendor, platform, agency, PSC, NAICS, or search.",
+        )
+
+    if spend_min is not None:
+        where_parts.append(f"({obligations_expr}) >= ?")
+        params.append(spend_min)
+    if spend_max is not None:
+        where_parts.append(f"({obligations_expr}) <= ?")
+        params.append(spend_max)
+
+    where_clause = " AND ".join(where_parts)
+    if count_only:
+        return f"SELECT COUNT(*) AS count FROM v_contracts_rolled r WHERE {where_clause}", params
+
+    row_limit = safe_int(row_limit, 50, 1, 500_000)
+    offset = safe_int(offset, 0, 0, 10_000_000)
+
+    field_exprs = {
+        "contract_id": "f.contract_id",
+        "vendor_name": "f.vendor_name",
+        "vendor_cage": "f.vendor_cage",
+        "parent_agency": "f.parent_agency",
+        "sub_agency": "f.sub_agency",
+        "city": "f.city",
+        "state": "f.state",
+        "country": "f.country",
+        "place_of_performance_city": "f.place_of_performance_city",
+        "place_of_performance_state": "f.place_of_performance_state",
+        "place_of_performance_country": "f.place_of_performance_country",
+        "place_of_performance_zip": "f.place_of_performance_zip",
+        "market_segment": "f.market_segment",
+        "platform_family": "f.platform_family",
+        "psc": "f.psc AS psc",
+        "psc_code": "f.psc AS psc_code",
+        "psc_description": "pm.psc_description",
+        "naics_code": "f.naics_code",
+        "naics_description": "COALESCE(f.naics_description, nm.naics_description) AS naics_description",
+        "base_award_description": "f.base_award_description",
+        "latest_action_description": "f.latest_action_description",
+        "obligations_in_selected_period_usd": "f.obligations_in_selected_period_usd",
+        "number_of_actions_in_selected_period": "f.number_of_actions_in_selected_period",
+        "earliest_action_date_in_selected_period": "f.earliest_action_date_in_selected_period",
+        "latest_action_date_in_selected_period": "f.latest_action_date_in_selected_period",
+        "award_type_code": "CAST(NULL AS VARCHAR) AS award_type_code",
+        "award_type_description": "CAST(NULL AS VARCHAR) AS award_type_description",
+    }
+    select_parts = []
+    for field in selected_fields:
+        expr = field_exprs.get(field)
+        if not expr:
+            continue
+        select_parts.append(expr if " AS " in expr else f"{expr} AS {quote_ident(field)}")
+    select_clause = ", ".join(select_parts) or "f.contract_id"
+
+    sql = f"""
+        WITH candidate_contracts AS (
+            SELECT
+                r.*,
+                ({obligations_expr}) AS obligations_in_selected_period_usd,
+                ({actions_expr}) AS number_of_actions_in_selected_period,
+                {earliest_expr} AS earliest_action_date_in_selected_period,
+                {latest_expr} AS latest_action_date_in_selected_period
+            FROM v_contracts_rolled r
+            WHERE {where_clause}
+            ORDER BY obligations_in_selected_period_usd DESC NULLS LAST, r.contract_id
+            LIMIT ? OFFSET ?
+        ),
+        psc_map AS (
+            SELECT psc_code, MAX(psc_description) AS psc_description
+            FROM v_summary
+            WHERE psc_code IS NOT NULL
+            GROUP BY psc_code
+        ),
+        naics_map AS (
+            SELECT naics_code, MAX(naics_description) AS naics_description
+            FROM v_summary
+            WHERE naics_code IS NOT NULL
+            GROUP BY naics_code
+        )
+        SELECT {select_clause}
+        FROM candidate_contracts f
+        LEFT JOIN psc_map pm
+          ON TRIM(CAST(f.psc AS VARCHAR)) = TRIM(CAST(pm.psc_code AS VARCHAR))
+        LEFT JOIN naics_map nm
+          ON TRIM(CAST(f.naics_code AS VARCHAR)) = TRIM(CAST(nm.naics_code AS VARCHAR))
+        ORDER BY f.obligations_in_selected_period_usd DESC NULLS LAST, f.contract_id
+    """
+    params.extend([row_limit, offset])
+    return sql, params
+
+
+def build_contract_awards_explorer_query(
+    payload: ExplorerRequest,
+    row_limit: int,
+    offset: int = 0,
+    count_only: bool = False,
+):
+    # Item/source filters live at action grain. They are typically narrow, so
+    # retain the action-based path only when those relationships are requested.
+    granular_filter_keys = {"nsn", "niin", "part_number", "source_of_supply"}
+    active_granular_filter = any(
+        key in granular_filter_keys and value not in (None, "", [])
+        for key, value in (payload.filters or {}).items()
+    )
+    requests_source_field = "source_of_supply" in {
+        str(col).strip().lower() for col in (payload.columns or [])
+    }
+    if active_granular_filter or requests_source_field:
+        return build_contract_awards_explorer_query_from_actions(
+            payload,
+            row_limit=row_limit,
+            offset=offset,
+            count_only=count_only,
+        )
+    return build_contract_awards_explorer_query_from_rollup(
+        payload,
+        row_limit=row_limit,
+        offset=offset,
+        count_only=count_only,
+    )
 
 
 def build_explorer_query(
@@ -6346,15 +6681,22 @@ def get_award_profile(id: str):
     safe_id = sanitize(id)
 
     try:
+        rolled_cols = get_duck_table_columns("v_contracts_rolled")
+        description_expr = (
+            "COALESCE(NULLIF(TRIM(base_award_description), ''), description)"
+            if "base_award_description" in rolled_cols
+            else "description"
+        )
+
         # ✅ FIX: Instantly grab the complete 7-year profile from the rolled view
-        df = duck_fetch_df("""
+        df = duck_fetch_df(f"""
             SELECT
                 contract_id,
                 vendor_name,
                 vendor_cage,
                 sub_agency,
                 parent_agency,
-                description,
+                {description_expr} AS description,
                 platform_family,
                 city,
                 state,
