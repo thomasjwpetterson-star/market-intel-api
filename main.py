@@ -1926,7 +1926,7 @@ ALLOWED_EXPLORER_COLUMNS = {
     # Existing revenue-backed / award-backed fields
     "award_key", "transaction_key", "source_system", "modification_number", "awarding_agency_code",
     "po_number", "po_item_number", "source_reference_rows", "reference_part_number_count",
-    "part_number_reference_status", "source_report_id", "source_report_last_modified_date", "source_dedup_key",
+    "part_number_reference_status", "source_report_id", "source_dedup_key",
     "nsn_source_system", "nsn_derivation_method", "nsn_resolution_status", "location_quality",
     "sub_cage_resolution", "sub_cage_source_period", "sub_cage_candidate_count", "sub_cage_candidates",
     "contract_id", "year", "action_date", "last_action_date", "total_spend", "spend_amount", "contract_count",
@@ -1960,10 +1960,23 @@ ALLOWED_EXPLORER_COLUMNS = {
     "subcontract_id", "subcontract_description", "subcontract_action_date",
     "subcontract_value_usd", "subcontract_value_raw_usd", "subcontractor_city", "subcontractor_state",
     "subcontractor_country", "subcontractor_zip", "subcontractor_uei", "prime_award_description",
-    "subcontract_value_treatment", "included_in_adjusted_total", "prime_award_control_value",
-    "source_report_version_count", "exact_repeat_count", "reported_action_version_count",
-    "same_date_description_version_count", "equal_value_description_report_count",
-    "subcontract_data_source", "subcontract_methodology",
+    "prime_award_control_value",
+}
+
+SUBCONTRACT_INTERNAL_EXPORT_COLUMNS = {
+    "award_key",
+    "source_report_id",
+    "source_report_last_modified_date",
+    "source_dedup_key",
+    "subcontract_value_treatment",
+    "included_in_adjusted_total",
+    "source_report_version_count",
+    "exact_repeat_count",
+    "reported_action_version_count",
+    "same_date_description_version_count",
+    "equal_value_description_report_count",
+    "subcontract_data_source",
+    "subcontract_methodology",
 }
 
 EXPLORER_DEFAULT_COLUMNS = {
@@ -3265,6 +3278,17 @@ def explorer_export(payload: ExplorerRequest, background_tasks: BackgroundTasks,
         # Transitional behavior only. Enable REQUIRE_EXPORT_PROXY after the UI proxy is deployed.
         export_limit = 5000 if payload.subscription_status == "active" else 1000
 
+    if payload.table == SUBCONTRACT_EXPLORER_TABLE:
+        requested_columns = payload.columns or EXPLORER_DEFAULT_COLUMNS[SUBCONTRACT_EXPLORER_TABLE]
+        payload.columns = [
+            column for column in requested_columns
+            if str(column).strip().lower() not in SUBCONTRACT_INTERNAL_EXPORT_COLUMNS
+        ]
+        payload.filters = {
+            key: value for key, value in (payload.filters or {}).items()
+            if str(key).strip().lower() not in SUBCONTRACT_INTERNAL_EXPORT_COLUMNS
+        }
+
     sql, params = build_explorer_query(payload, row_limit=export_limit, offset=0)
     
     filename = f"mimir_export_{uuid.uuid4().hex[:8]}.csv"
@@ -3306,6 +3330,40 @@ def explorer_export(payload: ExplorerRequest, background_tasks: BackgroundTasks,
                 conn = ensure_duck_conn()
                 copy_sql = f"COPY ({sql}) TO '{filepath}' (HEADER, DELIMITER ',');"
                 conn.execute(copy_sql, params)
+
+            if payload.table == SUBCONTRACT_EXPLORER_TABLE:
+                customer_headers = {
+                    "prime_name": "Prime Contractor",
+                    "prime_cage": "Prime CAGE",
+                    "prime_award_id": "Prime Award ID",
+                    "subcontractor_name": "Subcontractor",
+                    "subcontractor_cage": "Subcontractor CAGE",
+                    "subcontract_id": "Subcontract ID",
+                    "subcontract_description": "Subcontract Description",
+                    "subcontract_action_date": "Subcontract Action Date",
+                    "year": "Fiscal Year",
+                    "subcontract_value_usd": "Mimir Modelled Subcontract Value (USD)",
+                    "subcontract_value_raw_usd": "Reported Raw Value (USD)",
+                    "prime_award_control_value": "Prime Award Value (USD)",
+                    "subcontractor_city": "Subcontract Place of Performance City",
+                    "subcontractor_state": "Subcontract Place of Performance State",
+                    "platform_family": "Platform",
+                    "market_segment": "Market Domain",
+                    "psc_code": "PSC Code",
+                    "psc_description": "PSC Description",
+                    "naics_code": "NAICS Code",
+                    "naics_description": "NAICS Description",
+                }
+                renamed_filepath = f"{filepath}.headers"
+                with open(filepath, "r", encoding="utf-8", newline="") as source_file, open(
+                    renamed_filepath, "w", encoding="utf-8", newline=""
+                ) as target_file:
+                    reader = csv.reader(source_file)
+                    writer = csv.writer(target_file)
+                    header = next(reader, [])
+                    writer.writerow([customer_headers.get(column, column) for column in header])
+                    writer.writerows(reader)
+                os.replace(renamed_filepath, filepath)
         
         background_tasks.add_task(cleanup_temp_file, filepath)
         
