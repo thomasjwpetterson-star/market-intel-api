@@ -1120,8 +1120,9 @@ def reload_all_data():
         # 2. DOWNLOAD FILES
         LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         files = [
-            "products.parquet", "summary.parquet", "geo.parquet",
+            "products.parquet", "summary.parquet", "geo.parquet", "cage_locations.parquet",
             "profiles.parquet", "risk.parquet", "network.parquet",
+            "subcontract_descriptions.parquet",
             "transactions.parquet", "opportunities.parquet", "kpis.parquet",
             "nsn_summary.parquet",
             "nsn_profile_lookup.parquet",
@@ -1255,6 +1256,7 @@ def reload_all_data():
                 # v_contracts_rolled handled specially below (file OR folder)
                 ("v_network", "network.parquet"),
                 ("v_geo", "geo.parquet"),
+                ("v_cage_locations", "cage_locations.parquet"),
                 ("v_risk", "risk.parquet"),
                 ("v_opportunities", "opportunities.parquet"),
                 ("v_nsn_summary", "nsn_summary.parquet"),
@@ -1270,6 +1272,68 @@ def reload_all_data():
                     conn.execute(f"DROP VIEW IF EXISTS {view_name};")
                     conn.execute(f"DROP TABLE IF EXISTS {view_name};")
                     conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{file_path}');")
+
+            description_path = str(
+                (LOCAL_CACHE_DIR / "subcontract_descriptions.parquet").resolve()
+            )
+            conn.execute("DROP VIEW IF EXISTS v_subcontract_descriptions;")
+            conn.execute("DROP TABLE IF EXISTS v_subcontract_descriptions;")
+            if os.path.exists(description_path):
+                description_columns = {
+                    str(row[0]).strip().lower()
+                    for row in conn.execute(
+                        f"DESCRIBE SELECT * FROM read_parquet('{description_path}')"
+                    ).fetchall()
+                }
+
+                def description_col_or_null(column_name: str, sql_type: str = "VARCHAR") -> str:
+                    if column_name in description_columns:
+                        return f"TRY_CAST({column_name} AS {sql_type})"
+                    return f"CAST(NULL AS {sql_type})"
+
+                conn.execute(f"""
+                    CREATE OR REPLACE VIEW v_subcontract_descriptions AS
+                    SELECT
+                        CAST(source_report_id AS VARCHAR) AS source_report_id,
+                        CAST(source_dedup_key AS VARCHAR) AS source_dedup_key,
+                        CAST(description_lookup_key AS VARCHAR) AS description_lookup_key,
+                        TRY_CAST(reported_description_count AS INTEGER) AS reported_description_count,
+                        {description_col_or_null("equal_value_report_count", "INTEGER")} AS equal_value_report_count,
+                        {description_col_or_null("source_record_count", "INTEGER")} AS source_record_count,
+                        {description_col_or_null("superseded_source_version_count", "INTEGER")} AS superseded_source_version_count,
+                        {description_col_or_null("earliest_reported_action_date", "DATE")} AS earliest_reported_action_date,
+                        {description_col_or_null("latest_reported_action_date", "DATE")} AS latest_reported_action_date,
+                        {description_col_or_null("report_id")} AS report_id,
+                        {description_col_or_null("report_dedup_key")} AS report_dedup_key,
+                        {description_col_or_null("report_last_modified_date")} AS report_last_modified_date,
+                        {description_col_or_null("report_action_date")} AS report_action_date,
+                        {description_col_or_null("report_amount", "DOUBLE")} AS report_amount,
+                        {description_col_or_null("report_description")} AS report_description,
+                        {description_col_or_null("is_current_source_version", "BOOLEAN")} AS is_current_source_version
+                    FROM read_parquet('{description_path}');
+                """)
+            else:
+                conn.execute("""
+                    CREATE OR REPLACE VIEW v_subcontract_descriptions AS
+                    SELECT
+                        CAST(NULL AS VARCHAR) AS source_report_id,
+                        CAST(NULL AS VARCHAR) AS source_dedup_key,
+                        CAST(NULL AS VARCHAR) AS description_lookup_key,
+                        CAST(NULL AS INTEGER) AS reported_description_count,
+                        CAST(NULL AS INTEGER) AS equal_value_report_count,
+                        CAST(NULL AS INTEGER) AS source_record_count,
+                        CAST(NULL AS INTEGER) AS superseded_source_version_count,
+                        CAST(NULL AS DATE) AS earliest_reported_action_date,
+                        CAST(NULL AS DATE) AS latest_reported_action_date,
+                        CAST(NULL AS VARCHAR) AS report_id,
+                        CAST(NULL AS VARCHAR) AS report_dedup_key,
+                        CAST(NULL AS VARCHAR) AS report_last_modified_date,
+                        CAST(NULL AS VARCHAR) AS report_action_date,
+                        CAST(NULL AS DOUBLE) AS report_amount,
+                        CAST(NULL AS VARCHAR) AS report_description,
+                        CAST(NULL AS BOOLEAN) AS is_current_source_version
+                    WHERE 1=0;
+                """)
 
             # ✅ Special handling: contracts_rolled -> MATERIALIZED TABLE + INDEX (award speed win)
             # ✅ Revert: contracts_rolled back to a VIEW (no table build, no index build)
@@ -1308,6 +1372,12 @@ def reload_all_data():
                             CAST(NULL AS VARCHAR) AS platform_family,
                             CAST(NULL AS VARCHAR) AS naics_code,
                             CAST(NULL AS VARCHAR) AS psc,
+                            CAST(NULL AS VARCHAR) AS nsn,
+                            CAST(NULL AS VARCHAR) AS niin,
+                            CAST(NULL AS VARCHAR) AS nsn_source_system,
+                            CAST(NULL AS VARCHAR) AS nsn_derivation_method,
+                            CAST(NULL AS VARCHAR) AS nsn_resolution_status,
+                            CAST(NULL AS VARCHAR) AS location_quality,
                             CAST(NULL AS INTEGER) AS year
                         WHERE 1=0;
                     """)
@@ -1337,6 +1407,11 @@ def reload_all_data():
                 if "source_dedup_key" in network_columns
                 else "CAST(NULL AS VARCHAR)"
             )
+            def optional_network_column(name: str, sql_type: str = "VARCHAR") -> str:
+                if name in network_columns:
+                    return f"TRY_CAST({name} AS {sql_type})"
+                return f"CAST(NULL AS {sql_type})"
+
             conn.execute(f"""
                 CREATE OR REPLACE VIEW v_subcontracts AS
                 SELECT
@@ -1344,6 +1419,22 @@ def reload_all_data():
                     {source_report_id_expr} AS source_report_id,
                     {source_report_modified_expr} AS source_report_last_modified_date,
                     {source_dedup_key_expr} AS source_dedup_key,
+                    {optional_network_column("internal_value_treatment")} AS subcontract_value_treatment,
+                    {optional_network_column("included_in_adjusted_total", "BOOLEAN")} AS included_in_adjusted_total,
+                    {optional_network_column("prime_award_control_value", "DOUBLE")} AS prime_award_control_value,
+                    {optional_network_column("source_report_version_count", "INTEGER")} AS source_report_version_count,
+                    {optional_network_column("exact_repeat_count", "INTEGER")} AS exact_repeat_count,
+                    {optional_network_column("reported_action_version_count", "INTEGER")} AS reported_action_version_count,
+                    {optional_network_column("same_date_description_version_count", "INTEGER")} AS same_date_description_version_count,
+                    {optional_network_column("equal_value_description_report_count", "INTEGER")} AS equal_value_description_report_count,
+                    'USAspending.gov first-tier subaward reports' AS subcontract_data_source,
+                    'Reported subcontract value v3' AS subcontract_methodology,
+                    {optional_network_column("sub_cage_resolution")} AS sub_cage_resolution,
+                    {optional_network_column("sub_cage_source_period")} AS sub_cage_source_period,
+                    {optional_network_column("sub_cage_candidate_count", "INTEGER")} AS sub_cage_candidate_count,
+                    {optional_network_column("sub_cage_candidates")} AS sub_cage_candidates,
+                    {optional_network_column("subawardee_uei")} AS subcontractor_uei,
+                    {optional_network_column("prime_award_description")} AS prime_award_description,
                     CAST(prime_name AS VARCHAR) AS prime_name,
                     CAST(prime_cage AS VARCHAR) AS prime_cage,
                     CAST(contract_id AS VARCHAR) AS prime_award_id,
@@ -1357,6 +1448,8 @@ def reload_all_data():
                     TRY_CAST(subaward_value_raw AS DOUBLE) AS subcontract_value_raw_usd,
                     CAST(sub_city AS VARCHAR) AS subcontractor_city,
                     CAST(sub_state AS VARCHAR) AS subcontractor_state,
+                    {optional_network_column("sub_country")} AS subcontractor_country,
+                    {optional_network_column("sub_zip")} AS subcontractor_zip,
                     CAST(platform_family AS VARCHAR) AS platform_family,
                     CAST(psc AS VARCHAR) AS psc_code,
                     CAST(NULL AS VARCHAR) AS psc_description,
@@ -1548,7 +1641,16 @@ def reload_all_data():
         
         # ✅ FIX: Build location_map using DuckDB instead of RAM
         try:
-            geo_mapping_df = duck_fetch_df("SELECT cage_code, city, state FROM v_geo WHERE cage_code IS NOT NULL", use_writer=True)
+            try:
+                geo_mapping_df = duck_fetch_df(
+                    "SELECT cage_code, city, state FROM v_cage_locations WHERE cage_code IS NOT NULL",
+                    use_writer=True,
+                )
+            except Exception:
+                geo_mapping_df = duck_fetch_df(
+                    "SELECT cage_code, city, state FROM v_geo WHERE cage_code IS NOT NULL",
+                    use_writer=True,
+                )
             if not geo_mapping_df.empty:
                 new_global_cache["location_map"] = geo_mapping_df.set_index("cage_code")[["city", "state"]].to_dict(orient="index")
             else:
@@ -1786,6 +1888,12 @@ class ExplorerRequest(BaseModel):
     offset: Optional[int] = 0
 
 
+class SubcontractDescriptionsRequest(BaseModel):
+    source_report_id: Optional[str] = None
+    source_dedup_key: Optional[str] = None
+    primary_description: Optional[str] = None
+
+
 NSN_REF_TABLE = "v_nsn_cage_reference"
 CONTRACT_AWARD_EXPLORER_TABLE = "v_contract_awards_enriched"
 SUBCONTRACT_EXPLORER_TABLE = "v_subcontracts"
@@ -1795,6 +1903,9 @@ CONTRACT_AWARD_SYNTHETIC_COLUMNS = {
     "city", "state", "country", "market_segment", "platform_family",
     "place_of_performance_city", "place_of_performance_state",
     "place_of_performance_country", "place_of_performance_zip",
+    "nsn", "niin",
+    "nsn_source_system", "nsn_derivation_method", "nsn_resolution_status",
+    "location_quality",
     "psc_code", "psc", "psc_description", "naics_code", "naics_description",
     "base_award_description", "latest_action_description", "source_of_supply",
     "obligations_in_selected_period_usd",
@@ -1816,10 +1927,12 @@ ALLOWED_EXPLORER_COLUMNS = {
     "award_key", "transaction_key", "source_system", "modification_number", "awarding_agency_code",
     "po_number", "po_item_number", "source_reference_rows", "reference_part_number_count",
     "part_number_reference_status", "source_report_id", "source_report_last_modified_date", "source_dedup_key",
+    "nsn_source_system", "nsn_derivation_method", "nsn_resolution_status", "location_quality",
+    "sub_cage_resolution", "sub_cage_source_period", "sub_cage_candidate_count", "sub_cage_candidates",
     "contract_id", "year", "action_date", "last_action_date", "total_spend", "spend_amount", "contract_count",
     "vendor_cage", "cage_code", "cage", "vendor_name", "sub_agency", "parent_agency", "clean_parent",
     "psc", "psc_code", "psc_description", "naics_code", "naics_description",
-    "platform_family", "platform_families", "platform_count", "market_segment", "description",
+    "platform_family", "platform_families", "platform_count", "platform_attribution_status", "market_segment", "description",
     "city", "state", "country", "piid", "idv_piid", "transaction_id",
     "place_of_performance_city", "place_of_performance_state",
     "place_of_performance_country", "place_of_performance_zip",
@@ -1846,6 +1959,11 @@ ALLOWED_EXPLORER_COLUMNS = {
     "prime_name", "prime_cage", "prime_award_id", "subcontractor_name", "subcontractor_cage",
     "subcontract_id", "subcontract_description", "subcontract_action_date",
     "subcontract_value_usd", "subcontract_value_raw_usd", "subcontractor_city", "subcontractor_state",
+    "subcontractor_country", "subcontractor_zip", "subcontractor_uei", "prime_award_description",
+    "subcontract_value_treatment", "included_in_adjusted_total", "prime_award_control_value",
+    "source_report_version_count", "exact_repeat_count", "reported_action_version_count",
+    "same_date_description_version_count", "equal_value_description_report_count",
+    "subcontract_data_source", "subcontract_methodology",
 }
 
 EXPLORER_DEFAULT_COLUMNS = {
@@ -2139,6 +2257,24 @@ def build_contract_awards_explorer_query_from_actions(
         "psc_description": "f.psc_description",
         "naics_code": "f.naics_code",
         "naics_description": "f.naics_description",
+        "nsn": "f.nsn",
+        "niin": "f.niin",
+        "nsn_source_system": (
+            "f.nsn_source_system" if "nsn_source_system" in actual_cols
+            else "CAST(NULL AS VARCHAR) AS nsn_source_system"
+        ),
+        "nsn_derivation_method": (
+            "f.nsn_derivation_method" if "nsn_derivation_method" in actual_cols
+            else "CAST(NULL AS VARCHAR) AS nsn_derivation_method"
+        ),
+        "nsn_resolution_status": (
+            "f.nsn_resolution_status" if "nsn_resolution_status" in actual_cols
+            else "CAST(NULL AS VARCHAR) AS nsn_resolution_status"
+        ),
+        "location_quality": (
+            "f.location_quality" if "location_quality" in actual_cols
+            else "CAST(NULL AS VARCHAR) AS location_quality"
+        ),
         "base_award_description": "f.base_award_description",
         "latest_action_description": "f.latest_action_description",
         "source_of_supply": "f.source_of_supply",
@@ -2193,6 +2329,10 @@ def build_contract_awards_explorer_query_from_actions(
                 {col_or_null("source_of_supply")},
                 {col_or_null("nsn")},
                 {col_or_null("niin")},
+                {col_or_null("nsn_source_system")},
+                {col_or_null("nsn_derivation_method")},
+                {col_or_null("nsn_resolution_status")},
+                {col_or_null("location_quality")},
                 {col_or_null("part_number")},
                 {col_or_null("year", sql_type="INTEGER")},
                 COALESCE(TRY_CAST({quote_ident("spend_amount")} AS DOUBLE), 0.0) AS spend_amount,
@@ -2265,6 +2405,18 @@ def build_contract_awards_explorer_query_from_actions(
                 MAX_BY(a.platform_family, TRY_CAST(a.action_date AS DATE)) AS platform_family,
                 MAX_BY(a.psc, TRY_CAST(a.action_date AS DATE)) AS psc_code,
                 MAX_BY(a.naics_code, TRY_CAST(a.action_date AS DATE)) AS naics_code,
+                CASE
+                    WHEN COUNT(DISTINCT NULLIF(TRIM(a.nsn), '')) = 1
+                    THEN MIN(NULLIF(TRIM(a.nsn), ''))
+                END AS nsn,
+                CASE
+                    WHEN COUNT(DISTINCT NULLIF(TRIM(a.niin), '')) = 1
+                    THEN MIN(NULLIF(TRIM(a.niin), ''))
+                END AS niin,
+                MAX_BY(a.nsn_source_system, TRY_CAST(a.action_date AS DATE)) AS nsn_source_system,
+                MAX_BY(a.nsn_derivation_method, TRY_CAST(a.action_date AS DATE)) AS nsn_derivation_method,
+                MAX_BY(a.nsn_resolution_status, TRY_CAST(a.action_date AS DATE)) AS nsn_resolution_status,
+                MAX_BY(a.location_quality, TRY_CAST(a.action_date AS DATE)) AS location_quality,
                 COALESCE(
                     MAX_BY(NULLIF(a.action_description, ''), TRY_CAST(a.action_date AS DATE)),
                     MAX_BY(NULLIF(a.description, ''), TRY_CAST(a.action_date AS DATE))
@@ -2551,6 +2703,24 @@ def build_contract_awards_explorer_query_from_rollup(
         "psc_description": "pm.psc_description",
         "naics_code": "f.naics_code",
         "naics_description": "COALESCE(f.naics_description, nm.naics_description) AS naics_description",
+        "nsn": "f.nsn",
+        "niin": "f.niin",
+        "nsn_source_system": (
+            "f.nsn_source_system" if "nsn_source_system" in actual_cols
+            else "CAST(NULL AS VARCHAR) AS nsn_source_system"
+        ),
+        "nsn_derivation_method": (
+            "f.nsn_derivation_method" if "nsn_derivation_method" in actual_cols
+            else "CAST(NULL AS VARCHAR) AS nsn_derivation_method"
+        ),
+        "nsn_resolution_status": (
+            "f.nsn_resolution_status" if "nsn_resolution_status" in actual_cols
+            else "CAST(NULL AS VARCHAR) AS nsn_resolution_status"
+        ),
+        "location_quality": (
+            "f.location_quality" if "location_quality" in actual_cols
+            else "CAST(NULL AS VARCHAR) AS location_quality"
+        ),
         "base_award_description": "f.base_award_description",
         "latest_action_description": "f.latest_action_description",
         "obligations_in_selected_period_usd": "f.obligations_in_selected_period_usd",
@@ -2889,6 +3059,123 @@ def explorer_count(payload: ExplorerRequest):
         raise HTTPException(status_code=500, detail="Failed to count explorer rows.")
 
 
+@app.post("/api/explorer/subcontract-descriptions")
+def explorer_subcontract_descriptions(payload: SubcontractDescriptionsRequest):
+    """Return non-additive source history for one retained subcontract row."""
+    source_report_id = (payload.source_report_id or "").strip()
+    source_dedup_key = (payload.source_dedup_key or "").strip()
+    primary_description = (payload.primary_description or "").strip()
+    lookup_key = source_report_id or source_dedup_key
+    methodology = {
+        "measure": "Net reported subcontract value for subawards dated within the selected fiscal-year period.",
+        "source": "USAspending.gov first-tier subaward reports",
+        "version": "Reported subcontract value v3",
+        "additivity_note": "Prime obligations and subcontract values describe different procurement layers and should be analysed separately.",
+    }
+    fallback = {
+        "reported_description_count": 1 if primary_description else 0,
+        "descriptions": [primary_description] if primary_description else [],
+        "audit": None,
+        "methodology": methodology,
+    }
+    if not lookup_key:
+        return fallback
+
+    try:
+        df = duck_fetch_df(
+            """
+            SELECT
+                reported_description_count,
+                equal_value_report_count,
+                source_record_count,
+                superseded_source_version_count,
+                earliest_reported_action_date,
+                latest_reported_action_date,
+                report_id,
+                report_dedup_key,
+                report_last_modified_date,
+                report_action_date,
+                report_amount,
+                report_description,
+                is_current_source_version,
+                CASE
+                    WHEN NULLIF(TRIM(source_report_id), '') IS NOT NULL
+                     AND report_id = source_report_id THEN TRUE
+                    WHEN NULLIF(TRIM(source_dedup_key), '') IS NOT NULL
+                     AND report_dedup_key = source_dedup_key THEN TRUE
+                    ELSE FALSE
+                END AS is_selected_source_report
+            FROM v_subcontract_descriptions
+            WHERE description_lookup_key = ?
+            ORDER BY
+                is_selected_source_report DESC,
+                is_current_source_version DESC NULLS LAST,
+                TRY_CAST(SUBSTR(report_last_modified_date, 1, 10) AS DATE) DESC NULLS LAST,
+                TRY_CAST(SUBSTR(report_action_date, 1, 10) AS DATE) DESC NULLS LAST,
+                report_id DESC NULLS LAST
+            LIMIT 101
+            """,
+            [lookup_key],
+        )
+        if df.empty:
+            return fallback
+
+        descriptions = []
+        for value in df["report_description"].tolist():
+            if value is None or pd.isna(value):
+                continue
+            description = str(value).strip()
+            if description and description not in descriptions:
+                descriptions.append(description)
+            if len(descriptions) >= 100:
+                break
+        if primary_description and primary_description not in descriptions:
+            descriptions.insert(0, primary_description)
+
+        def optional_int(column_name: str) -> Optional[int]:
+            value = df[column_name].iloc[0]
+            return None if pd.isna(value) else int(value)
+
+        def optional_text(column_name: str) -> Optional[str]:
+            value = df[column_name].iloc[0]
+            return None if pd.isna(value) else str(value)
+
+        source_record_count = optional_int("source_record_count") or len(df)
+        report_rows = df.head(100)
+        reports = []
+        for _, row in report_rows.iterrows():
+            reported_amount = row.get("report_amount")
+            reports.append({
+                "report_id": None if pd.isna(row.get("report_id")) else str(row.get("report_id")),
+                "source_record_key": None if pd.isna(row.get("report_dedup_key")) else str(row.get("report_dedup_key")),
+                "last_modified_date": None if pd.isna(row.get("report_last_modified_date")) else str(row.get("report_last_modified_date")),
+                "action_date": None if pd.isna(row.get("report_action_date")) else str(row.get("report_action_date")),
+                "reported_amount": None if pd.isna(reported_amount) else float(reported_amount),
+                "description": None if pd.isna(row.get("report_description")) else str(row.get("report_description")),
+                "is_current_source_version": bool(row.get("is_current_source_version")) if not pd.isna(row.get("is_current_source_version")) else False,
+                "is_selected_source_report": bool(row.get("is_selected_source_report")) if not pd.isna(row.get("is_selected_source_report")) else False,
+            })
+
+        return {
+            "reported_description_count": len(descriptions),
+            "descriptions": descriptions,
+            "audit": {
+                "equal_value_report_count": optional_int("equal_value_report_count"),
+                "source_record_count": source_record_count,
+                "superseded_source_version_count": optional_int("superseded_source_version_count"),
+                "earliest_reported_action_date": optional_text("earliest_reported_action_date"),
+                "latest_reported_action_date": optional_text("latest_reported_action_date"),
+                "reports_returned": len(reports),
+                "reports_truncated": source_record_count > len(reports),
+                "reports": reports,
+            },
+            "methodology": methodology,
+        }
+    except Exception as e:
+        logger.error(f"Subcontract Description Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load subcontract source details.")
+
+
 def cleanup_temp_file(filepath: str):
     try:
         if os.path.exists(filepath):
@@ -3144,11 +3431,21 @@ def get_filter_options(
 
 def get_recompete_kpi(filters):
     where_sql, params = build_summary_where(None, filters)
+
+    try:
+        risk_schema = duck_fetch_df("DESCRIBE v_risk")
+        risk_columns = {
+            str(value).strip().lower()
+            for value in risk_schema.get("column_name", pd.Series(dtype=str)).dropna().tolist()
+        }
+    except Exception:
+        risk_columns = set()
+    risk_identity = "award_key" if "award_key" in risk_columns else "contract_id"
     
     query = f"""
         SELECT 
             SUM(spend_amount) as total_value,
-            COUNT(DISTINCT contract_id) as count
+            COUNT(DISTINCT {risk_identity}) as count
         FROM v_risk
         WHERE {where_sql}
           AND try_cast(completion_date as date) >= current_date()
@@ -3157,20 +3454,20 @@ def get_recompete_kpi(filters):
     try:
         df = duck_fetch_df(query, params)
         if df.empty or pd.isna(df['total_value'].iloc[0]):
-            return {"label": "Contracts Ending (90d)", "value": "N/A", "sub_label": "No Data"}
+            return {"label": "Obligations on Awards Ending (90d)", "value": "N/A", "sub_label": "No Data"}
             
         total_value = float(df['total_value'].iloc[0] or 0)
         count = int(df['count'].iloc[0] or 0)
         
         return {
-            "label": "Contracts Ending (90d)",
+            "label": "Obligations on Awards Ending (90d)",
             "value": f"${total_value/1e9:.2f}B",
-            "sub_label": f"{count} Contracts Ending",
+            "sub_label": f"{count} awards ending",
             "status": "warning"
         }
     except Exception as e:
         logger.error(f"Risk KPI Error: {e}")
-        return {"label": "Contracts Ending (90d)", "value": "N/A", "sub_label": "No Data"}
+        return {"label": "Obligations on Awards Ending (90d)", "value": "N/A", "sub_label": "No Data"}
     
 
 @app.get("/api/dashboard/kpis")
@@ -3542,6 +3839,29 @@ def get_map_data(
     
     try:
         df = duck_fetch_df(query, params)
+        if df.empty and cage:
+            clean_cage = sanitize(cage).upper().strip()
+            try:
+                df = duck_fetch_df(
+                    """
+                    SELECT
+                        UPPER(TRIM(CAST(cage_code AS VARCHAR))) AS id,
+                        COALESCE(vendor_name, 'CAGE ' || UPPER(TRIM(CAST(cage_code AS VARCHAR)))) AS vendor,
+                        UPPER(TRIM(CAST(cage_code AS VARCHAR))) AS cage,
+                        CAST(latitude AS DOUBLE) AS lat,
+                        CAST(longitude AS DOUBLE) AS lon,
+                        CAST(0 AS DOUBLE) AS spend
+                    FROM v_cage_locations
+                    WHERE UPPER(TRIM(CAST(cage_code AS VARCHAR))) = ?
+                      AND latitude IS NOT NULL
+                      AND longitude IS NOT NULL
+                    LIMIT 1
+                    """,
+                    [clean_cage],
+                )
+            except Exception:
+                df = pd.DataFrame()
+
         if df.empty: return []
         
         # ✅ FIX 4: Sanitize NaNs
@@ -3951,107 +4271,140 @@ def get_platform_parts(
     agency: Optional[str] = None
 ):
     safe_plat = sanitize(name).upper()
-    
-    # 1. FAST NATIVE DUCKDB QUERY (Replaces Disk & Athena completely)
-    query = """
-        SELECT 
-            p.nsn,
-            p.niin,
-            p.description,
-            p.cage,
-            COALESCE(p.total_revenue, 0) as total_revenue,
-            COALESCE(p.total_units_sold, 0) as total_units_sold,
-            p.annual_revenue_trend,
-            p.last_sold_date,
-            p.fsc_code
-        FROM v_products p
-        INNER JOIN v_platform_bom b ON p.niin = b.niin
-        WHERE b.platform_family = ?
-    """
-    
-    try:
-        df = duck_fetch_df(query, [safe_plat])
-    except Exception as e:
-        logger.error(f"Failed to fetch parts from DuckDB: {e}")
-        df = pd.DataFrame()
 
-    if df.empty:
+    ys = safe_years(years, min_year=2019, max_year=2200, max_len=50)
+    year_clause = ""
+    params: List[Any] = [safe_plat]
+    if ys:
+        placeholders = ",".join(["?"] * len(ys))
+        year_clause = f"AND s.year IN ({placeholders})"
+        params.extend(ys)
+
+    # Financials stay at NIIN/CAGE/fiscal-year grain. Platform membership is
+    # joined separately, so part-reference multiplicity cannot multiply value.
+    query = f"""
+        WITH bom_niins AS (
+            SELECT DISTINCT LPAD(TRIM(CAST(niin AS VARCHAR)), 9, '0') AS niin
+            FROM v_platform_bom
+            WHERE UPPER(TRIM(CAST(platform_family AS VARCHAR))) = ?
+        ),
+        scoped AS (
+            SELECT
+                LPAD(TRIM(CAST(s.niin AS VARCHAR)), 9, '0') AS niin,
+                TRY_CAST(s.year AS INTEGER) AS fiscal_year,
+                UPPER(TRIM(CAST(s.cage AS VARCHAR))) AS cage,
+                NULLIF(TRIM(CAST(s.vendor AS VARCHAR)), '') AS vendor,
+                TRY_CAST(s.total_revenue AS DOUBLE) AS line_value,
+                TRY_CAST(s.total_units_sold AS DOUBLE) AS line_units,
+                TRY_CAST(s.last_sold AS DATE) AS last_sold,
+                TRY_CAST(s.platform_count AS INTEGER) AS platform_count,
+                CAST(s.platform_attribution_status AS VARCHAR) AS platform_attribution_status
+            FROM v_nsn_supplier_lookup s
+            INNER JOIN bom_niins b
+                ON LPAD(TRIM(CAST(s.niin AS VARCHAR)), 9, '0') = b.niin
+            WHERE 1=1 {year_clause}
+        ),
+        year_totals AS (
+            SELECT
+                niin,
+                fiscal_year,
+                SUM(COALESCE(line_value, 0)) AS year_value,
+                SUM(COALESCE(line_units, 0)) AS year_units,
+                MAX(last_sold) AS year_last_sold,
+                MAX(platform_count) AS platform_count,
+                MAX(platform_attribution_status) AS platform_attribution_status
+            FROM scoped
+            GROUP BY 1, 2
+        ),
+        niin_totals AS (
+            SELECT
+                niin,
+                SUM(year_value) AS observed_value,
+                SUM(year_units) AS observed_units,
+                MAX(year_last_sold) AS last_sold_date,
+                STRING_AGG(
+                    CAST(fiscal_year AS VARCHAR) || ':' || CAST(year_value AS VARCHAR),
+                    '|' ORDER BY fiscal_year
+                ) AS annual_revenue_trend,
+                MAX(platform_count) AS platform_count,
+                MAX(platform_attribution_status) AS platform_attribution_status
+            FROM year_totals
+            GROUP BY 1
+        ),
+        vendor_totals AS (
+            SELECT
+                niin,
+                cage,
+                MAX(vendor) AS vendor,
+                SUM(COALESCE(line_value, 0)) AS vendor_value
+            FROM scoped
+            GROUP BY 1, 2
+        ),
+        top_vendors AS (
+            SELECT
+                niin,
+                MAX_BY(cage, vendor_value) AS top_vendor,
+                MAX_BY(vendor, vendor_value) AS top_vendor_name
+            FROM vendor_totals
+            GROUP BY 1
+        )
+        SELECT
+            b.niin,
+            COALESCE(NULLIF(TRIM(CAST(p.nsn AS VARCHAR)), ''), b.niin) AS nsn,
+            NULLIF(TRIM(CAST(p.item_name AS VARCHAR)), '') AS description,
+            NULLIF(TRIM(CAST(p.fsc_code AS VARCHAR)), '') AS fsc_code,
+            COALESCE(t.observed_value, 0) AS amount,
+            COALESCE(t.observed_units, 0) AS total_units_sold,
+            COALESCE(t.annual_revenue_trend, '') AS annual_revenue_trend,
+            t.last_sold_date,
+            v.top_vendor,
+            v.top_vendor_name,
+            COALESCE(t.platform_count, 0) AS platform_count,
+            COALESCE(t.platform_attribution_status, 'UNMAPPED') AS platform_attribution_status
+        FROM bom_niins b
+        LEFT JOIN niin_totals t ON b.niin = t.niin
+        LEFT JOIN top_vendors v ON b.niin = v.niin
+        LEFT JOIN v_nsn_profile_lookup p
+            ON b.niin = LPAD(TRIM(CAST(p.niin AS VARCHAR)), 9, '0')
+        WHERE (? OR COALESCE(t.observed_value, 0) > 0)
+          AND COALESCE(t.observed_value, 0) >= ?
+        ORDER BY amount DESC, b.niin
+        LIMIT ? OFFSET ?
+    """
+    params.extend([
+        bool(include_zero),
+        float(min_spend),
+        max(1, min(int(limit), 5000)),
+        max(0, int(offset)),
+    ])
+
+    try:
+        df = duck_fetch_df(query, params)
+    except Exception as e:
+        logger.error(f"Failed to fetch platform parts from NIIN/CAGE fiscal sidecar: {e}")
         return []
 
-    # 2. UI Filtering & Formatting (Using Pandas)
-    mask = pd.Series(True, index=df.index)
-    
-    if 'total_revenue' in df.columns:
-        df['total_revenue'] = pd.to_numeric(df['total_revenue'], errors='coerce').fillna(0)
-        if not include_zero:
-            mask &= (df['total_revenue'] > 0)
-        if min_spend > 0 and not years:
-            mask &= (df['total_revenue'] >= min_spend)
-    
-    filtered = df[mask].copy()
-    
-    # Trend/Year Logic
-    if years and 'annual_revenue_trend' in filtered.columns:
-        filtered['amount'] = filtered['annual_revenue_trend'].apply(
-            lambda s: calculate_trend_sum(s or "", years)
-        )
-        filtered = filtered.sort_values("amount", ascending=False)
-    elif 'total_revenue' in filtered.columns:
-        filtered['amount'] = filtered['total_revenue']
-        filtered = filtered.sort_values("total_revenue", ascending=False)
-    else:
-        filtered['amount'] = 0
-
-    # Roll up the part-level rows back to the NSN level for the Platform UI
-    agg_df = (
-        filtered.groupby("niin", observed=True, dropna=False)
-        .agg(
-            nsn=("nsn", "first"),
-            description=("description", "first"),
-            fsc_code=("fsc_code", "first"),
-            total_units_sold=("total_units_sold", "sum"),
-            amount=("amount", "sum"),
-            annual_revenue_trend=("annual_revenue_trend", lambda s: _sum_trend_dicts(s.apply(_parse_trend_to_dict).tolist())),
-            last_sold_date=("last_sold_date", "max"),
-            cage=("cage", "first") # Takes the top vendor's CAGE based on previous sort
-        )
-        .reset_index()
-    )
-    
-    agg_df = agg_df.sort_values("amount", ascending=False, kind="mergesort")
-
-    # Paginate the rolled-up data
-    start = int(offset)
-    end = start + int(limit)
-    page = agg_df.iloc[start:end]
-
-    # Map CAGE codes to Vendor Names using the in-memory cache
-    name_map = GLOBAL_CACHE.get("cage_name_map", {}) or {}
-
     results = []
-    for row in page.itertuples():
-        niin_val = getattr(row, "niin", "")
-        nsn_val = getattr(row, "nsn", "")
-        if not nsn_val and niin_val:
-            nsn_val = niin_val
-
-        cage_val = str(getattr(row, "cage", "") or "").strip().upper()
-        vendor_name = name_map.get(cage_val, "")
-        
+    for row in df.itertuples(index=False):
+        platform_count = int(getattr(row, "platform_count", 0) or 0)
         results.append({
-            "item_id": str(nsn_val),
-            "nsn": str(nsn_val),
-            "niin": str(niin_val).zfill(9),
-            "description": getattr(row, "description", ""),
-            "fsc_code": getattr(row, "fsc_code", ""),
+            "item_id": str(getattr(row, "nsn", "") or getattr(row, "niin", "")),
+            "nsn": str(getattr(row, "nsn", "") or getattr(row, "niin", "")),
+            "niin": str(getattr(row, "niin", "") or "").zfill(9),
+            "description": getattr(row, "description", "") or "",
+            "fsc_code": getattr(row, "fsc_code", "") or "",
             "total_units_sold": int(getattr(row, "total_units_sold", 0) or 0),
             "amount": float(getattr(row, "amount", 0) or 0),
-            "annual_revenue_trend": getattr(row, "annual_revenue_trend", ""),
-            "top_vendor": cage_val,
-            "top_vendor_name": vendor_name,
-            "last_sold": getattr(row, "last_sold_date", "")
+            "annual_revenue_trend": getattr(row, "annual_revenue_trend", "") or "",
+            "top_vendor": getattr(row, "top_vendor", "") or "",
+            "top_vendor_name": getattr(row, "top_vendor_name", "") or "",
+            "last_sold": getattr(row, "last_sold_date", None),
+            "platform_count": platform_count,
+            "platform_attribution_status": getattr(row, "platform_attribution_status", "UNMAPPED"),
+            "shared_platform_exposure": platform_count > 1,
+            "financial_grain": "NIIN_CAGE_FISCAL_YEAR",
         })
-        
+
     return results
 
 
@@ -4888,6 +5241,49 @@ def get_company_profile(
                 overrides=over
             )
 
+        # Exact-CAGE reference fallback. This supplies identity and location
+        # without implying observed prime or subcontract financial activity.
+        try:
+            reference_match = duck_fetch_df(
+                """
+                SELECT
+                    cage_code,
+                    vendor_name,
+                    city,
+                    state,
+                    location_quality,
+                    entity_source
+                FROM v_cage_locations
+                WHERE UPPER(TRIM(CAST(cage_code AS VARCHAR))) = ?
+                LIMIT 1
+                """,
+                [clean_cage],
+            )
+        except Exception:
+            reference_match = pd.DataFrame()
+
+        if not reference_match.empty:
+            reference_row = reference_match.iloc[0]
+            return {
+                "found": True,
+                "type": "CHILD",
+                "profile_source": "CAGE_REFERENCE_ONLY",
+                "name": reference_row.get("vendor_name") or f"CAGE {clean_cage}",
+                "cage": clean_cage,
+                "total_obligations": 0.0,
+                "total_contracts": 0,
+                "last_active": 0,
+                "top_naics": [],
+                "top_platforms": [],
+                "network_flow_total": 0.0,
+                "network_contract_count": 0,
+                "network_last_active_year": 0,
+                "city": reference_row.get("city") or "",
+                "state": reference_row.get("state") or "",
+                "location_quality": reference_row.get("location_quality"),
+                "entity_source": reference_row.get("entity_source"),
+            }
+
     # 2. NAME MATCH
     if name:
         clean_name = name.strip().upper().replace("'", "")
@@ -4981,6 +5377,9 @@ def format_profile_response_with_loc(row, city, state, type="CHILD", overrides: 
         "top_platforms": row.get('top_platforms', '').split(',') if row.get('top_platforms') else [],
         "profile_source": row.get("profile_source", "AWARD_BACKED"),
         "network_flow_total": float(row.get("network_flow_total", 0) or 0),
+        "network_included_report_count": int(row.get("network_included_report_count", 0) or 0),
+        "network_excluded_report_count": int(row.get("network_excluded_report_count", 0) or 0),
+        "network_source_report_count": int(row.get("network_source_report_count", 0) or 0),
         "network_contract_count": int(row.get("network_contract_count", 0) or 0),
         "network_last_active_year": int(row.get("network_last_active_year", 0) or 0),
         "city": str(city) if city else "",
@@ -5040,6 +5439,7 @@ def get_company_network(
 
     # Detect which FY column exists in network.parquet: prefer fiscal_year, fallback to year
     year_col: Optional[str] = None
+    network_columns_lower: set[str] = set()
     try:
         with DUCK_LOCK:
             conn = ensure_duck_conn()
@@ -5048,6 +5448,7 @@ def get_company_network(
                 cols = conn.execute(
                     f"SELECT * FROM read_parquet('{str(net_path)}') LIMIT 0"
                 ).df().columns
+                network_columns_lower = {str(column).strip().lower() for column in cols}
                 if "fiscal_year" in cols:
                     year_col = "fiscal_year"
                 elif "year" in cols:
@@ -5064,6 +5465,12 @@ def get_company_network(
         year_filter_sql = ""
         year_params = []
 
+    value_treatments_expr = (
+        "array_to_string(array_agg(DISTINCT internal_value_treatment), ', ')"
+        if "internal_value_treatment" in network_columns_lower
+        else "'Legacy subcontract model'"
+    )
+
     # --- SQL Template (Parameterized) ---
     sql_template = """
         SELECT
@@ -5071,7 +5478,10 @@ def get_company_network(
             {cage_col} as cage,
             arbitrary(platform_family) as platform, 
             sum(subaward_value) as total,
-            sum(subaward_value_raw) as total_raw, -- ✅ ADD THIS LINE
+            sum(subaward_value_raw) as total_raw,
+            count(subaward_value) as included_reports,
+            count(*) as source_reports,
+            {value_treatments_expr} as value_treatments,
             count(contract_id) as transactions
         FROM network_source
         WHERE {where_clause}{year_filter}
@@ -5089,7 +5499,8 @@ def get_company_network(
                 group_col="sub_name",
                 cage_col="sub_cage",
                 where_clause="prime_cage = ?",
-                year_filter=year_filter_sql
+                year_filter=year_filter_sql,
+                value_treatments_expr=value_treatments_expr
             ),
             tuple([safe_cage, *year_params, int(limit)])
         )
@@ -5100,7 +5511,8 @@ def get_company_network(
                 group_col="prime_name",
                 cage_col="prime_cage",
                 where_clause="sub_cage = ?",
-                year_filter=year_filter_sql
+                year_filter=year_filter_sql,
+                value_treatments_expr=value_treatments_expr
             ),
             tuple([safe_cage, *year_params, int(limit)])
         )
@@ -5111,7 +5523,8 @@ def get_company_network(
                 group_col="sub_name",
                 cage_col="sub_cage",
                 where_clause="upper(prime_gold_parent) = ?",
-                year_filter=year_filter_sql
+                year_filter=year_filter_sql,
+                value_treatments_expr=value_treatments_expr
             ),
             tuple([safe_name, *year_params, int(limit)])
         )
@@ -5121,7 +5534,8 @@ def get_company_network(
                 group_col="prime_name",
                 cage_col="prime_cage",
                 where_clause="upper(sub_gold_parent) = ?",
-                year_filter=year_filter_sql
+                year_filter=year_filter_sql,
+                value_treatments_expr=value_treatments_expr
             ),
             tuple([safe_name, *year_params, int(limit)])
         )
@@ -6562,60 +6976,68 @@ def get_nsn_platforms(
     platform: Optional[str] = None,
     psc: Optional[str] = None
 ):
-    safe_niin = get_niin(nsn)
+    safe_niin = get_niin(nsn).zfill(9)
+    where_parts = ["LPAD(TRIM(CAST(niin AS VARCHAR)), 9, '0') = ?"]
+    params: List[Any] = [safe_niin]
 
-    # ✅ Hit the fast DuckDB summary view!
-    where_parts = [
-        f"niin = {sql_literal(safe_niin)}", 
-        "platform_family IS NOT NULL", 
-        "trim(CAST(platform_family AS VARCHAR)) <> ''",
-        "upper(platform_family) <> 'UNKNOWN'"
-    ]
-
-    ys = safe_years(years, min_year=1900, max_year=2200, max_len=50)
+    ys = safe_years(years, min_year=2019, max_year=2200, max_len=50)
     if ys:
-        years_csv = ",".join([str(y) for y in ys])
-        where_parts.append(f"year IN ({years_csv})")
-        
+        placeholders = ",".join(["?"] * len(ys))
+        where_parts.append(f"year IN ({placeholders})")
+        params.extend(ys)
     if agency:
-        where_parts.append(f"(upper(sub_agency) = {sql_literal(sanitize(agency).upper())} OR upper(parent_agency) = {sql_literal(sanitize(agency).upper())})")
+        where_parts.append("(UPPER(sub_agency) = ? OR UPPER(parent_agency) = ?)")
+        clean_agency = sanitize(agency).upper()
+        params.extend([clean_agency, clean_agency])
     if domain:
-        where_parts.append(f"upper(market_segment) = {sql_literal(sanitize(domain).upper())}")
-    if platform:
-        where_parts.append(f"upper(platform_family) = {sql_literal(sanitize(platform).upper())}")
+        where_parts.append("UPPER(COALESCE(market_segment, '')) = ?")
+        params.append(sanitize(domain).upper())
     if psc:
-        where_parts.append(f"upper(psc) = {sql_literal(sanitize(psc).upper())}")
-
-    where_clause = " AND ".join(where_parts)
+        where_parts.append("UPPER(COALESCE(psc, '')) = ?")
+        params.append(sanitize(psc).upper())
 
     query = f"""
-        SELECT 
-            platform_family AS platform,
-            SUM(spend_amount) AS spend,
-            SUM(contracts) AS contracts
+        SELECT
+            MAX(NULLIF(TRIM(CAST(platform_families AS VARCHAR)), '')) AS platform_families,
+            MAX(TRY_CAST(platform_count AS INTEGER)) AS platform_count,
+            MAX(NULLIF(TRIM(CAST(platform_attribution_status AS VARCHAR)), '')) AS platform_attribution_status,
+            SUM(TRY_CAST(spend_amount AS DOUBLE)) AS observed_value,
+            SUM(TRY_CAST(contracts AS BIGINT)) AS contracts
         FROM v_nsn_summary
-        WHERE {where_clause}
-        GROUP BY 1
-        ORDER BY spend DESC
-        LIMIT 10
+        WHERE {' AND '.join(where_parts)}
     """
-    
+
     try:
-        df = duck_fetch_df(query) 
+        df = duck_fetch_df(query, params)
         if df.empty:
             return []
-            
-        out = []
-        for r in df.to_dict(orient="records"):
-            out.append({
-                "platform": str(r.get("platform")),
-                "spend": float(r.get("spend") or 0.0),
-                "contracts": int(r.get("contracts") or 0)
-            })
-        return out
-        
+
+        row = df.iloc[0]
+        raw_platforms = str(row.get("platform_families") or "").strip()
+        platforms = [value.strip() for value in raw_platforms.split("|") if value.strip()]
+        if platform:
+            selected_platform = sanitize(platform).upper()
+            platforms = [value for value in platforms if value.upper() == selected_platform]
+
+        platform_count = int(row.get("platform_count") or len(platforms) or 0)
+        is_shared = platform_count > 1
+        observed_value = float(row.get("observed_value") or 0.0)
+        contracts = int(row.get("contracts") or 0)
+
+        return [
+            {
+                "platform": value,
+                "spend": None if is_shared else observed_value,
+                "associated_observed_value": observed_value,
+                "contracts": contracts,
+                "platform_count": platform_count,
+                "platform_attribution_status": row.get("platform_attribution_status") or "UNMAPPED",
+                "shared_platform_exposure": is_shared,
+            }
+            for value in platforms[:20]
+        ]
     except Exception as e:
-        logger.error(f"Error in NSN platforms DuckDB: {e}")
+        logger.error(f"Error in NSN platform associations: {e}")
         return []
 
 
