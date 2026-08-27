@@ -2,11 +2,15 @@
 
 ## Status
 
-The production financial view remains `market_intel_gold.ref_company_network`.
-The ETL now creates a non-financial `subcontract_descriptions.parquet` audit
-sidecar containing the source versions, equal-value reports and descriptions
-behind displayed rows requiring additional audit context. The API never
-includes sidecar rows in financial aggregations.
+The description-assisted method was promoted to
+`market_intel_gold.ref_company_network` on 27 August 2026. The public view keeps
+the previous 27-column contract so downstream queries and Parquet schemas do
+not change. `network.parquet`, `profiles.parquet`, `geo.parquet` and
+`cage_locations.parquet` were rebuilt after promotion.
+
+The source-report audit sidecar and expandable UI history remain staged work;
+they are not required by the production financial aggregation and were not
+included in this release.
 
 `ref_company_network_v3` is rejected and cannot be selected through
 `COMPANY_NETWORK_VIEW`. Validation showed that its same-date action rule
@@ -21,25 +25,23 @@ added to prime obligations as though they were separate federal spending.
 ## Implemented layers
 
 1. `dataset_sub_contracts` remains the complete report-level source history.
-2. `ref_company_network` continues to select the financial records used by the
+2. `ref_company_network_report_history_candidate` selects the latest published
+   version of each source report while retaining version counts.
+3. `ref_company_network_action_audit_candidate` removes exact business copies.
+4. `ref_company_network_curated_actions_candidate` applies entity resolution
+   and conservative value controls.
+5. `ref_company_network_description_assisted_candidate` separates supported
+   re-reports from separately described work.
+6. `ref_company_network` exposes the production 27-column contract used by the
    network, company, platform and Data Explorer outputs.
-3. `subcontract_descriptions.parquet` preserves the related source versions,
-   equal-value reports and distinct descriptions for each displayed row.
-4. `/api/explorer/subcontract-descriptions` returns that non-additive audit
-   context on demand.
-5. The Data Explorer identifies whether the displayed value was retained or
-   adjusted, and provides an expandable source-report history.
-6. `/methodology/subcontracts` documents the measure, source, transformations
+7. `/methodology/subcontracts` documents the measure, source, transformations
    and limitations in customer-facing language.
 
-The candidate Athena views remain available for analysis, but none replaces
-the production financial view.
+## Production financial method
 
-## Recommended financial candidate
-
-`ref_company_network_description_assisted_candidate` is the current
-recommendation for final validation. It does not use the rejected v3
-same-date rule. Instead it:
+`ref_company_network_description_assisted_candidate` is the validated upstream
+view used by production. It does not use the rejected v3 same-date rule.
+Instead it:
 
 - retains the latest version of the same source report;
 - removes business-identical copies;
@@ -65,12 +67,12 @@ usable prime ceiling. It is not a replacement amount. The current production
 rule's invented $100 million fallback and ceiling substitution are not part of
 this candidate.
 
-Run `audit_description_assisted_financial_impact.sql` and
-`audit_description_assisted_platform_impact.sql` after creating the candidate.
-Production should not switch until those results and sampled relationships are
-accepted.
+The production promotion was validated with
+`audit_description_assisted_financial_impact.sql`,
+`audit_description_assisted_platform_impact.sql` and selected relationship
+checks before the downstream caches were rebuilt.
 
-### Description-assisted candidate impact
+### Production impact
 
 Athena audit on 27 August 2026:
 
@@ -94,9 +96,9 @@ Change decomposition:
 | Net change | -$132.70B |
 
 The reduction is therefore driven primarily by the extreme-value methodology,
-not by description-assisted deduplication. The current production view contains
+not by description-assisted deduplication. The superseded production view contains
 1,058 substituted rows contributing $18.37B of adjusted value from $40.31T of
-raw reported values. The candidate instead excludes 10,386 reports whose value
+raw reported values. The production method instead excludes 10,386 reports whose value
 exceeds a known prime ceiling or the no-ceiling $2B guardrail.
 
 Key-program comparisons:
@@ -117,9 +119,9 @@ the $13.294B prime ceiling, increasing the displayed value by approximately
 $10.29B. The candidate excludes that raw report rather than substituting a
 larger value.
 
-## Current financial method
+## Superseded financial method
 
-The current view:
+The pre-27 August rollback definition:
 
 - discards zero and negative reported amounts before deduplication;
 - groups by prime PIID, subcontract number, subcontract parent UEI and amount;
