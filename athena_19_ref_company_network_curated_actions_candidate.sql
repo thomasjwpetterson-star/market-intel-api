@@ -89,7 +89,8 @@ WITH parent_candidates AS (
         CASE
             WHEN ss.cage_code IS NOT NULL THEN 'CURRENT_SAM'
             WHEN hs.cage_code IS NOT NULL THEN 'HISTORICAL_SAM'
-            ELSE 'UNRESOLVED'
+            WHEN NULLIF(TRIM(a.subawardee_uei), '') IS NOT NULL THEN 'NO_CAGE_FOUND'
+            ELSE 'NO_UEI_REPORTED'
         END AS sub_cage_resolution,
         hs.source_period AS sub_cage_source_period,
         COALESCE(css.cage_candidate_count, IF(hs.cage_code IS NOT NULL, 1, 0)) AS sub_cage_candidate_count,

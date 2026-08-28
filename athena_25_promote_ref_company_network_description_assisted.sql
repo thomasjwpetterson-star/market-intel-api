@@ -26,5 +26,13 @@ SELECT
     award_key,
     source_report_id,
     source_report_last_modified_date,
-    source_dedup_key
+    source_dedup_key,
+    official_ceiling AS prime_award_control_value,
+    internal_value_treatment,
+    included_in_adjusted_total,
+    source_report_version_count,
+    exact_repeat_count,
+    reported_action_version_count,
+    same_date_description_version_count,
+    equal_value_description_report_count
 FROM "market_intel_gold"."ref_company_network_description_assisted_candidate";

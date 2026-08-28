@@ -330,8 +330,10 @@ def optimize_and_upload():
         df_sum = run_query("""
             SELECT 
                 vendor_name, cage_code, sub_agency, market_segment, platform_family,
+                platform_attribution_status, platform_attribution_source,
                 psc_code, psc_description, CAST(naics_code AS VARCHAR) as naics_code,
-                naics_description, city, state, country, month, year, total_spend, contract_count
+                naics_description, city, state, country, month, year, total_spend,
+                platform_attributed_spend, shared_use_exposure, contract_count
             FROM dashboard_summary_v2
         """)
 
@@ -712,7 +714,7 @@ def optimize_and_upload():
         df_kpis['year'] = df_kpis['year'].astype('int16')
 
     if 'total_spend' in df_kpis.columns:
-        df_kpis['total_spend'] = pd.to_numeric(df_kpis['total_spend'], errors='coerce').fillna(0).astype('float32')
+        df_kpis['total_spend'] = pd.to_numeric(df_kpis['total_spend'], errors='coerce').fillna(0).astype('float64')
 
     if 'contract_count' in df_kpis.columns:
         df_kpis['contract_count'] = pd.to_numeric(df_kpis['contract_count'], errors='coerce').fillna(0).astype('int32')
@@ -723,7 +725,11 @@ def optimize_and_upload():
     
     if not df_sum.empty:
         # 1. Force critical columns to be clean uppercase strings (Not categories yet)
-        text_cols = ['vendor_name', 'platform_family', 'sub_agency', 'market_segment', 'psc_description']
+        text_cols = [
+            'vendor_name', 'platform_family',
+            'platform_attribution_status', 'platform_attribution_source',
+            'sub_agency', 'market_segment', 'psc_description'
+        ]
         for col in text_cols:
             if col in df_sum.columns:
                 df_sum[col] = df_sum[col].astype(str).str.upper().str.strip().replace('NAN', '')
@@ -736,12 +742,20 @@ def optimize_and_upload():
         ).astype(str)
 
         # 3. NOW convert to categories to save RAM
-        cat_cols = ['sub_agency', 'market_segment', 'platform_family', 'psc_code', 'psc_description', 'month', 'naics_code', 'city', 'state']
+        cat_cols = [
+            'sub_agency', 'market_segment', 'platform_family',
+            'platform_attribution_status', 'platform_attribution_source',
+            'psc_code', 'psc_description', 'month', 'naics_code', 'city', 'state'
+        ]
         for col in df_sum.columns:
             if col in cat_cols:
                 df_sum[col] = df_sum[col].astype('category')
 
-        df_sum['total_spend'] = pd.to_numeric(df_sum['total_spend'], errors='coerce').fillna(0).astype('float32')
+        for metric_col in ['total_spend', 'platform_attributed_spend', 'shared_use_exposure']:
+            if metric_col in df_sum.columns:
+                df_sum[metric_col] = pd.to_numeric(
+                    df_sum[metric_col], errors='coerce'
+                ).fillna(0).astype('float64')
         df_sum['year'] = pd.to_numeric(df_sum['year'], errors='coerce').fillna(0).astype('int16')
 
     if not df_geo.empty:
@@ -1091,6 +1105,12 @@ def optimize_and_upload():
                 d.naics_code,
                 d.psc,
                 d.platform_family,
+                d.platform_families,
+                d.platform_count,
+                d.platform_attribution_status,
+                d.platform_attribution_source,
+                d.platform_attributed_spend_amount,
+                d.shared_use_exposure_amount,
                 d.market_segment,
                 d.year,
                 d.nsn,
@@ -1167,10 +1187,16 @@ def optimize_and_upload():
                     description,
                     base_award_description,
                     action_description,
-                    CAST(spend_amount AS REAL) as spend_amount,
+                    CAST(spend_amount AS DOUBLE) as spend_amount,
                     naics_code,
                     psc,
                     UPPER(TRIM(platform_family)) as platform_family,
+                    platform_families,
+                    CAST(platform_count AS INTEGER) as platform_count,
+                    platform_attribution_status,
+                    platform_attribution_source,
+                    CAST(platform_attributed_spend_amount AS DOUBLE) as platform_attributed_spend_amount,
+                    CAST(shared_use_exposure_amount AS DOUBLE) as shared_use_exposure_amount,
                     market_segment,
                     CAST(year AS INTEGER) as year,
                     nsn,
@@ -1279,7 +1305,67 @@ def optimize_and_upload():
                         IF(NULLIF(TRIM(description), '') IS NOT NULL, action_date, NULL)
                     )
                 ) AS latest_action_description,
-                MAX_BY(platform_family, action_date) AS platform_family,
+                CASE
+                    WHEN COUNT(DISTINCT NULLIF(TRIM(platform_family), '')) = 1
+                    THEN MIN(NULLIF(TRIM(platform_family), ''))
+                END AS platform_family,
+                ARRAY_JOIN(
+                    ARRAY_SORT(
+                        ARRAY_DISTINCT(
+                            FILTER(
+                                FLATTEN(
+                                    ARRAY_AGG(
+                                        SPLIT(
+                                            COALESCE(
+                                                NULLIF(TRIM(platform_families), ''),
+                                                NULLIF(TRIM(platform_family), ''),
+                                                ''
+                                            ),
+                                            ' | '
+                                        )
+                                    )
+                                ),
+                                x -> NULLIF(TRIM(x), '') IS NOT NULL
+                            )
+                        )
+                    ),
+                    ' | '
+                ) AS platform_families,
+                CARDINALITY(
+                    ARRAY_DISTINCT(
+                        FILTER(
+                            FLATTEN(
+                                ARRAY_AGG(
+                                    SPLIT(
+                                        COALESCE(
+                                            NULLIF(TRIM(platform_families), ''),
+                                            NULLIF(TRIM(platform_family), ''),
+                                            ''
+                                        ),
+                                        ' | '
+                                    )
+                                )
+                            ),
+                            x -> NULLIF(TRIM(x), '') IS NOT NULL
+                        )
+                    )
+                ) AS platform_count,
+                CASE
+                    WHEN COUNT(DISTINCT NULLIF(TRIM(platform_family), '')) > 1
+                        THEN 'MULTIPLE_AWARD_PLATFORMS'
+                    WHEN COUNT(DISTINCT NULLIF(TRIM(platform_family), '')) = 1
+                     AND SUM(ABS(COALESCE(shared_use_exposure_amount, 0))) > 0
+                        THEN 'MIXED_ATTRIBUTED_AND_SHARED'
+                    WHEN COUNT(DISTINCT NULLIF(TRIM(platform_family), '')) = 1
+                        THEN MAX_BY(platform_attribution_status, action_date)
+                    WHEN SUM(ABS(COALESCE(shared_use_exposure_amount, 0))) > 0
+                        THEN 'SHARED_NIIN_UNALLOCATED'
+                    ELSE 'UNMAPPED'
+                END AS platform_attribution_status,
+                CAST(SUM(COALESCE(platform_attributed_spend_amount, 0)) AS DOUBLE)
+                    AS platform_attributed_spend_amount,
+                CAST(SUM(COALESCE(shared_use_exposure_amount, 0)) AS DOUBLE)
+                    AS shared_use_exposure_amount,
                 MAX_BY(market_segment, action_date) AS market_segment,
                 MAX_BY(tech_type, action_date) AS tech_type,
                 MAX_BY(capability_name, action_date) AS capability_name,

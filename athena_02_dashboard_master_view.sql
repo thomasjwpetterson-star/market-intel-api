@@ -110,7 +110,8 @@ contract_metadata AS (
     FROM "market_intel_silver"."dataset_prime_contracts"
     WHERE contract_award_unique_key IS NOT NULL
     GROUP BY contract_award_unique_key
-)
+),
+resolved_transactions AS (
 SELECT
     t.source_system,
     t.contract_id,
@@ -132,18 +133,19 @@ SELECT
     t.country,
     t.latitude,
     t.longitude,
+    t.location_quality,
     COALESCE(
-        CASE
-            WHEN m.market_segment IS NOT NULL
-             AND TRIM(CAST(m.market_segment AS VARCHAR)) <> ''
-             AND UPPER(TRIM(CAST(m.market_segment AS VARCHAR))) <> 'UNCATEGORIZED'
-            THEN m.market_segment
-        END,
         CASE
             WHEN cm.market_segment IS NOT NULL
              AND TRIM(CAST(cm.market_segment AS VARCHAR)) <> ''
              AND UPPER(TRIM(CAST(cm.market_segment AS VARCHAR))) <> 'UNCATEGORIZED'
             THEN cm.market_segment
+        END,
+        CASE
+            WHEN m.market_segment IS NOT NULL
+             AND TRIM(CAST(m.market_segment AS VARCHAR)) <> ''
+             AND UPPER(TRIM(CAST(m.market_segment AS VARCHAR))) <> 'UNCATEGORIZED'
+            THEN m.market_segment
         END,
         psc_map.mimir_derived_domain,
         fsc_map.mimir_domain,
@@ -151,30 +153,36 @@ SELECT
     ) AS market_segment,
     COALESCE(
         CASE
-            WHEN m.tech_type IS NOT NULL
-             AND TRIM(CAST(m.tech_type AS VARCHAR)) <> ''
-             AND UPPER(TRIM(CAST(m.tech_type AS VARCHAR))) <> 'UNCATEGORIZED'
-            THEN m.tech_type
-        END,
-        CASE
             WHEN cm.tech_type IS NOT NULL
              AND TRIM(CAST(cm.tech_type AS VARCHAR)) <> ''
              AND UPPER(TRIM(CAST(cm.tech_type AS VARCHAR))) <> 'UNCATEGORIZED'
             THEN cm.tech_type
         END,
+        CASE
+            WHEN m.tech_type IS NOT NULL
+             AND TRIM(CAST(m.tech_type AS VARCHAR)) <> ''
+             AND UPPER(TRIM(CAST(m.tech_type AS VARCHAR))) <> 'UNCATEGORIZED'
+            THEN m.tech_type
+        END,
         'Uncategorized'
     ) AS tech_type,
     COALESCE(
-        NULLIF(TRIM(CAST(m.platform_family AS VARCHAR)), ''),
-        NULLIF(TRIM(CAST(cm.platform_family AS VARCHAR)), '')
+        NULLIF(TRIM(CAST(cm.platform_family AS VARCHAR)), ''),
+        CASE
+            WHEN t.source_system = 'DLA'
+             AND t.associated_platform_count = 1
+            THEN NULLIF(TRIM(CAST(t.item_unique_platform_family AS VARCHAR)), '')
+            WHEN t.source_system <> 'DLA'
+            THEN NULLIF(TRIM(CAST(m.platform_family AS VARCHAR)), '')
+        END
     ) AS platform_family,
     COALESCE(
-        NULLIF(TRIM(CAST(m.clean_variant AS VARCHAR)), ''),
-        NULLIF(TRIM(CAST(cm.clean_variant AS VARCHAR)), '')
+        NULLIF(TRIM(CAST(cm.clean_variant AS VARCHAR)), ''),
+        CASE WHEN t.source_system <> 'DLA' THEN NULLIF(TRIM(CAST(m.clean_variant AS VARCHAR)), '') END
     ) AS clean_variant,
     COALESCE(
-        NULLIF(TRIM(CAST(m.capability_name AS VARCHAR)), ''),
-        NULLIF(TRIM(CAST(cm.capability_name AS VARCHAR)), '')
+        NULLIF(TRIM(CAST(cm.capability_name AS VARCHAR)), ''),
+        CASE WHEN t.source_system <> 'DLA' THEN NULLIF(TRIM(CAST(m.capability_name AS VARCHAR)), '') END
     ) AS capability_name,
     t.join_key_mapping AS raw_data_input,
     COALESCE(p.parent_name, COALESCE(t.standardized_vendor_name, t.vendor_name_raw)) AS ultimate_parent_name,
@@ -202,7 +210,45 @@ SELECT
     t.po_item_number,
     t.source_reference_rows,
     t.reference_part_number_count,
-    t.part_number_reference_status
+    t.part_number_reference_status,
+    t.nsn_source_system,
+    t.nsn_derivation_method,
+    t.nsn_resolution_status,
+    COALESCE(
+        NULLIF(TRIM(t.associated_platform_families), ''),
+        NULLIF(TRIM(CAST(cm.platform_family AS VARCHAR)), ''),
+        CASE WHEN t.source_system <> 'DLA' THEN NULLIF(TRIM(CAST(m.platform_family AS VARCHAR)), '') END
+    ) AS platform_families,
+    CASE
+        WHEN NULLIF(TRIM(CAST(cm.platform_family AS VARCHAR)), '') IS NOT NULL THEN 1
+        WHEN t.source_system <> 'DLA'
+         AND NULLIF(TRIM(CAST(m.platform_family AS VARCHAR)), '') IS NOT NULL THEN 1
+        ELSE t.associated_platform_count
+    END AS platform_count,
+    CASE
+        WHEN NULLIF(TRIM(CAST(cm.platform_family AS VARCHAR)), '') IS NOT NULL
+            THEN 'MANUAL_AWARD_MAPPING'
+        WHEN t.source_system = 'DLA'
+         AND t.associated_platform_count = 1
+         AND NULLIF(TRIM(CAST(t.item_unique_platform_family AS VARCHAR)), '') IS NOT NULL
+            THEN 'UNIQUE_NIIN_ATTRIBUTION'
+        WHEN t.source_system = 'DLA' AND t.associated_platform_count > 1
+            THEN 'SHARED_NIIN_UNALLOCATED'
+        WHEN t.source_system <> 'DLA'
+         AND NULLIF(TRIM(CAST(m.platform_family AS VARCHAR)), '') IS NOT NULL
+            THEN 'AWARD_OR_PROGRAM_MAPPING'
+        ELSE 'UNMAPPED'
+    END AS platform_attribution_status,
+    CASE
+        WHEN NULLIF(TRIM(CAST(cm.platform_family AS VARCHAR)), '') IS NOT NULL
+            THEN 'MANUAL_CONTRACT_MAP'
+        WHEN t.source_system = 'DLA' AND t.associated_platform_count >= 1
+            THEN COALESCE(t.platform_attribution_source, 'WSDC_PLATFORM_REFERENCE')
+        WHEN t.source_system <> 'DLA'
+         AND NULLIF(TRIM(CAST(m.platform_family AS VARCHAR)), '') IS NOT NULL
+            THEN 'REPORTED_PROGRAM_OR_PLATFORM_MAP'
+        ELSE NULL
+    END AS platform_attribution_source
 FROM base_transactions t
 LEFT JOIN unique_map m
     ON UPPER(TRIM(t.join_key_mapping)) = m.clean_key
@@ -218,4 +264,17 @@ LEFT JOIN "market_intel_gold"."ref_parent_child" p
 LEFT JOIN contract_metadata d
     ON t.award_key = d.award_key
 LEFT JOIN "market_intel_silver"."ref_naics" n
-    ON CAST(t.naics_code AS VARCHAR) = CAST(n.code AS VARCHAR);
+    ON CAST(t.naics_code AS VARCHAR) = CAST(n.code AS VARCHAR)
+)
+SELECT
+    r.*,
+    CAST(
+        CASE WHEN r.platform_family IS NOT NULL THEN COALESCE(r.spend_amount, 0) ELSE 0 END
+        AS DOUBLE
+    ) AS platform_attributed_spend_amount,
+    CAST(
+        CASE WHEN r.platform_attribution_status = 'SHARED_NIIN_UNALLOCATED'
+             THEN COALESCE(r.spend_amount, 0) ELSE 0 END
+        AS DOUBLE
+    ) AS shared_use_exposure_amount
+FROM resolved_transactions r;

@@ -1932,7 +1932,9 @@ ALLOWED_EXPLORER_COLUMNS = {
     "contract_id", "year", "action_date", "last_action_date", "total_spend", "spend_amount", "contract_count",
     "vendor_cage", "cage_code", "cage", "vendor_name", "sub_agency", "parent_agency", "clean_parent",
     "psc", "psc_code", "psc_description", "naics_code", "naics_description",
-    "platform_family", "platform_families", "platform_count", "platform_attribution_status", "market_segment", "description",
+    "platform_family", "platform_families", "platform_count", "platform_attribution_status",
+    "platform_attribution_source", "platform_attributed_spend_amount", "platform_attributed_spend",
+    "shared_use_exposure_amount", "shared_use_exposure", "market_segment", "description",
     "city", "state", "country", "piid", "idv_piid", "transaction_id",
     "place_of_performance_city", "place_of_performance_state",
     "place_of_performance_country", "place_of_performance_zip",
@@ -4253,6 +4255,59 @@ def get_platform_profile(
         "contract_count": contract_count,
         "top_vendors": top_vendors,
         "top_agencies": top_agencies,
+    }
+
+
+@app.get("/api/platform/shared-exposure")
+def get_platform_shared_exposure(
+    name: str,
+    years: Optional[List[int]] = Query(None),
+):
+    """Return non-additive DLA value for shared-use NIINs associated with a platform."""
+    if not name:
+        return {"platform": name, "shared_use_exposure": 0.0, "niin_count": 0}
+
+    safe_plat = sanitize(name).upper()
+    ys = safe_years(years, min_year=2019, max_year=2200, max_len=50)
+    year_clause = ""
+    params: List[Any] = [safe_plat]
+    if ys:
+        placeholders = ",".join(["?"] * len(ys))
+        year_clause = f"AND TRY_CAST(s.year AS INTEGER) IN ({placeholders})"
+        params.extend(ys)
+
+    query = f"""
+        WITH platform_niins AS (
+            SELECT DISTINCT LPAD(TRIM(CAST(niin AS VARCHAR)), 9, '0') AS niin
+            FROM v_platform_bom
+            WHERE UPPER(TRIM(CAST(platform_family AS VARCHAR))) = ?
+        )
+        SELECT
+            COALESCE(SUM(TRY_CAST(s.spend_amount AS DOUBLE)), 0) AS shared_use_exposure,
+            COUNT(DISTINCT LPAD(TRIM(CAST(s.niin AS VARCHAR)), 9, '0')) AS niin_count
+        FROM v_nsn_summary s
+        INNER JOIN platform_niins p
+            ON LPAD(TRIM(CAST(s.niin AS VARCHAR)), 9, '0') = p.niin
+        WHERE TRY_CAST(s.platform_count AS INTEGER) > 1
+          {year_clause}
+    """
+
+    try:
+        df = duck_fetch_df(query, params)
+    except Exception as exc:
+        logger.error("Failed to fetch shared-use platform exposure: %s", exc)
+        return {"platform": name, "shared_use_exposure": 0.0, "niin_count": 0}
+
+    if df.empty:
+        return {"platform": name, "shared_use_exposure": 0.0, "niin_count": 0}
+
+    row = df.iloc[0]
+    return {
+        "platform": name,
+        "shared_use_exposure": float(row.get("shared_use_exposure", 0) or 0),
+        "niin_count": int(row.get("niin_count", 0) or 0),
+        "additive": False,
+        "basis": "SHARED_USE_NIIN_ASSOCIATION",
     }
 
 
