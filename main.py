@@ -433,6 +433,7 @@ default_origins = [
     "https://mimiradvisors.org",                                         # Your main domain
     "https://www.mimiradvisors.org",
     "http://localhost:3000",                                               # Local development
+    "http://127.0.0.1:3000",                                               # Local development
     "http://localhost:5173"                                                # Local development (Vite)
 ]
 
@@ -1904,7 +1905,6 @@ CONTRACT_AWARD_SYNTHETIC_COLUMNS = {
     "place_of_performance_city", "place_of_performance_state",
     "place_of_performance_country", "place_of_performance_zip",
     "nsn", "niin",
-    "nsn_source_system", "nsn_derivation_method", "nsn_resolution_status",
     "location_quality",
     "psc_code", "psc", "psc_description", "naics_code", "naics_description",
     "base_award_description", "latest_action_description", "source_of_supply",
@@ -1926,14 +1926,13 @@ ALLOWED_EXPLORER_COLUMNS = {
     # Existing revenue-backed / award-backed fields
     "award_key", "transaction_key", "source_system", "modification_number", "awarding_agency_code",
     "po_number", "po_item_number", "source_reference_rows", "reference_part_number_count",
-    "part_number_reference_status", "source_report_id", "source_dedup_key",
-    "nsn_source_system", "nsn_derivation_method", "nsn_resolution_status", "location_quality",
+    "part_number_reference_status", "source_report_id", "source_dedup_key", "location_quality",
     "sub_cage_resolution", "sub_cage_source_period", "sub_cage_candidate_count", "sub_cage_candidates",
     "contract_id", "year", "action_date", "last_action_date", "total_spend", "spend_amount", "contract_count",
     "vendor_cage", "cage_code", "cage", "vendor_name", "sub_agency", "parent_agency", "clean_parent",
     "psc", "psc_code", "psc_description", "naics_code", "naics_description",
-    "platform_family", "platform_families", "platform_count", "platform_attribution_status",
-    "platform_attribution_source", "platform_attributed_spend_amount", "platform_attributed_spend",
+    "platform_family", "platform_families", "platform_count", "is_multi_platform_component",
+    "platform_attributed_spend_amount", "platform_attributed_spend",
     "shared_use_exposure_amount", "shared_use_exposure", "market_segment", "description",
     "city", "state", "country", "piid", "idv_piid", "transaction_id",
     "place_of_performance_city", "place_of_performance_state",
@@ -2080,6 +2079,13 @@ def resolve_explorer_column(table: str, requested_col: str, actual_cols: set) ->
         if alt.lower() in actual_cols:
             return alt.lower()
 
+    return None
+
+
+def multi_platform_component_expr(actual_cols: set) -> Optional[str]:
+    """Customer-facing flag derived from the underlying platform relationship count."""
+    if "platform_count" in actual_cols:
+        return '(COALESCE(TRY_CAST("platform_count" AS INTEGER), 0) > 1)'
     return None
 
 
@@ -2850,6 +2856,12 @@ def build_explorer_query(
         if requested_clean not in ALLOWED_EXPLORER_COLUMNS:
             continue
 
+        if requested_clean == "is_multi_platform_component":
+            flag_expr = multi_platform_component_expr(actual_cols)
+            if flag_expr:
+                select_parts.append(f'{flag_expr} AS "is_multi_platform_component"')
+            continue
+
         actual_col = resolve_explorer_column(table, requested_clean, actual_cols)
         if not actual_col:
             continue
@@ -2930,6 +2942,15 @@ def build_explorer_query(
 
         requested_col = str(col).strip().lower()
         if requested_col not in ALLOWED_EXPLORER_COLUMNS:
+            continue
+
+        if requested_col == "is_multi_platform_component":
+            flag_expr = multi_platform_component_expr(actual_cols)
+            normalised_value = str(val).strip().lower()
+            if flag_expr and normalised_value in {"true", "false"}:
+                where_parts.append(f"{flag_expr} = ?")
+                params.append(normalised_value == "true")
+                has_valid_filter = True
             continue
 
         if (
