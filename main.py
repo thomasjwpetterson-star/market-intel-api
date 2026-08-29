@@ -5078,6 +5078,7 @@ from fastapi import Request, HTTPException, Depends, Response
 import time
 
 RATE_LIMIT_CACHE = {}
+NSN_RATE_LIMIT_CACHE = {}
 MAX_REQUESTS_PER_IP = 3
 RATE_LIMIT_WINDOW_SECONDS = 86400 # 24 hours
 
@@ -5109,6 +5110,28 @@ def check_rate_limit(request: Request):
     # Return the remaining count so the frontend can display it
     remaining = MAX_REQUESTS_PER_IP - RATE_LIMIT_CACHE[client_ip]['count']
     return max(0, remaining)
+
+
+def check_nsn_rate_limit(request: Request):
+    """Keep NSN lookups separate from the company lookup allowance."""
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+
+    for ip in list(NSN_RATE_LIMIT_CACHE.keys()):
+        if now - NSN_RATE_LIMIT_CACHE[ip]["timestamp"] > RATE_LIMIT_WINDOW_SECONDS:
+            del NSN_RATE_LIMIT_CACHE[ip]
+
+    if client_ip in NSN_RATE_LIMIT_CACHE:
+        if NSN_RATE_LIMIT_CACHE[client_ip]["count"] >= MAX_REQUESTS_PER_IP:
+            raise HTTPException(
+                status_code=429,
+                detail="Daily free NSN lookup limit reached. Sign in to continue in the full Mimir platform.",
+            )
+        NSN_RATE_LIMIT_CACHE[client_ip]["count"] += 1
+    else:
+        NSN_RATE_LIMIT_CACHE[client_ip] = {"count": 1, "timestamp": now}
+
+    return max(0, MAX_REQUESTS_PER_IP - NSN_RATE_LIMIT_CACHE[client_ip]["count"])
 
 @app.get("/api/public/company/teaser")
 def get_public_company_teaser(
@@ -7363,6 +7386,178 @@ def get_nsn_contracts(
     except Exception as e:
         logger.error(f"NSN Contracts DuckDB Error: {e}")
         return []
+
+
+@app.get("/api/public/nsn/teaser")
+def get_public_nsn_teaser(
+    request: Request,
+    response: Response,
+    nsn: str,
+):
+    """A deliberately limited public preview of the full NSN workspace."""
+    clean = re.sub(r"[^0-9]", "", str(nsn or ""))
+    if len(clean) not in {8, 9, 13}:
+        raise HTTPException(status_code=400, detail="Enter a valid 13-digit NSN or 9-digit NIIN.")
+
+    remaining_lookups = check_nsn_rate_limit(request)
+    safe_niin = clean.zfill(9) if len(clean) < 9 else clean[-9:]
+    input_fsc = clean[:4] if len(clean) == 13 else ""
+    if remaining_lookups is not None:
+        response.headers["X-RateLimit-Remaining"] = str(remaining_lookups)
+
+    profile = get_nsn_profile(
+        nsn=clean,
+        years=None,
+        agency=None,
+        domain=None,
+        platform=None,
+        psc=None,
+    )
+    if not profile or not profile.get("found"):
+        return {
+            "found": False,
+            "message": "NSN or NIIN not found in the Mimir reference and procurement data.",
+            "remaining_lookups": remaining_lookups,
+        }
+
+    ref_profile = nsn_ref_profile_lookup(safe_niin)
+    supplier_map = nsn_ref_supplier_lookup(safe_niin)
+
+    fsc_code = str(profile.get("fsc_code") or ref_profile.get("fsc_code") or input_fsc or "").strip()
+    if input_fsc and re.fullmatch(r"[0-9]{4}", fsc_code) and input_fsc != fsc_code:
+        return {
+            "found": False,
+            "message": "NSN not found in the Mimir reference and procurement data.",
+            "remaining_lookups": remaining_lookups,
+        }
+
+    has_observed_activity = int(profile.get("total_contracts") or 0) > 0
+    full_nsn_digits = ""
+    if len(clean) == 13:
+        full_nsn_digits = clean
+    elif has_observed_activity and re.fullmatch(r"[0-9]{4}", fsc_code):
+        full_nsn_digits = f"{fsc_code}{safe_niin}"
+    formatted_nsn = (
+        f"{full_nsn_digits[:4]}-{full_nsn_digits[4:6]}-{full_nsn_digits[6:9]}-{full_nsn_digits[9:]}"
+        if len(full_nsn_digits) == 13
+        else None
+    )
+
+    supplier_count = max(
+        int(ref_profile.get("reference_supplier_count") or 0),
+        len(supplier_map),
+    )
+    part_number_count = int(ref_profile.get("reference_part_count") or 0)
+
+    approved_candidates = []
+    for cage, supplier in supplier_map.items():
+        if not supplier.get("is_active_authorized_source"):
+            continue
+        vendor = str(supplier.get("vendor") or "").strip()
+        approved_candidates.append(
+            {
+                "cage": cage,
+                "vendor": vendor if vendor and vendor.upper() not in {"NAN", "NONE", "NULL"} else f"CAGE {cage}",
+                "part_number": next(
+                    (
+                        value.strip()
+                        for value in str(supplier.get("part_numbers") or "").split(",")
+                        if value.strip() and value.strip() != "—"
+                    ),
+                    None,
+                ),
+            }
+        )
+
+    approved_candidates.sort(key=lambda item: (item["vendor"].startswith("CAGE "), item["vendor"]))
+    approved_source = approved_candidates[0] if approved_candidates else None
+
+    platform_rows = get_nsn_platforms(
+        nsn=clean,
+        years=None,
+        agency=None,
+        domain=None,
+        platform=None,
+        psc=None,
+    )
+    platform_names = []
+    for row in platform_rows:
+        platform_name = str(row.get("platform") or "").strip()
+        if platform_name and platform_name not in platform_names:
+            platform_names.append(platform_name)
+
+    platform_count = max(
+        [int(row.get("platform_count") or 0) for row in platform_rows] + [len(platform_names)]
+    )
+
+    recent_contracts = []
+    observed_contract_count = 0
+    try:
+        activity_df = duck_fetch_df(
+            """
+            WITH rolled AS (
+                SELECT
+                    contract_id,
+                    MAX(CAST(last_sold AS VARCHAR)) AS action_date,
+                    MAX(COALESCE(sub_agency, parent_agency)) AS agency,
+                    MAX(vendor) AS vendor_name,
+                    MAX(cage) AS vendor_cage,
+                    SUM(TRY_CAST(total_revenue AS DOUBLE)) AS observed_value
+                FROM v_nsn_supplier_lookup
+                WHERE niin = ?
+                  AND contract_id IS NOT NULL
+                  AND TRIM(CAST(contract_id AS VARCHAR)) <> ''
+                GROUP BY contract_id
+            )
+            SELECT
+                contract_id,
+                action_date,
+                agency,
+                vendor_name,
+                vendor_cage,
+                observed_value,
+                COUNT(*) OVER () AS observed_contract_count
+            FROM rolled
+            ORDER BY action_date DESC NULLS LAST, contract_id
+            LIMIT 3
+            """,
+            [safe_niin],
+        )
+
+        if not activity_df.empty:
+            observed_contract_count = int(activity_df.iloc[0].get("observed_contract_count") or 0)
+            for row in activity_df.to_dict(orient="records"):
+                recent_contracts.append(
+                    {
+                        "contract_id": _clean_optional_value(row.get("contract_id")),
+                        "action_date": _clean_optional_value(row.get("action_date")),
+                        "agency": _clean_optional_value(row.get("agency")),
+                        "vendor_name": _clean_optional_value(row.get("vendor_name")),
+                        "vendor_cage": _clean_optional_value(row.get("vendor_cage")),
+                        "observed_value": float(row.get("observed_value") or 0.0),
+                    }
+                )
+    except Exception:
+        logger.exception("Public NSN activity lookup failed for NIIN=%s", safe_niin)
+
+    return {
+        "found": True,
+        "item_name": profile.get("item_name") or ref_profile.get("item_name") or "Unknown item",
+        "nsn": formatted_nsn,
+        "niin": safe_niin,
+        "fsc_code": fsc_code or None,
+        "associated_part_number_count": part_number_count,
+        "associated_supplier_site_count": supplier_count,
+        "approved_source": approved_source,
+        "approved_sources_hidden": max(0, len(approved_candidates) - (1 if approved_source else 0)),
+        "platforms": platform_names[:2],
+        "platforms_hidden": max(0, platform_count - min(2, len(platform_names))),
+        "is_multi_platform": platform_count > 1,
+        "recent_contracts": recent_contracts,
+        "observed_contract_count": observed_contract_count,
+        "contracts_hidden": max(0, observed_contract_count - len(recent_contracts)),
+        "remaining_lookups": remaining_lookups,
+    }
 
 DEFAULT_TOP_NSN_CACHE = None  # Put this at the top of your file
 # ✅ NEW: Cache to store the default dashboard state in memory
