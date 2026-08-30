@@ -3692,10 +3692,12 @@ def get_dashboard_subsidiaries(
     agency: Optional[str] = None,
     domain: Optional[str] = None,
     platform: Optional[str] = None,
-    psc: Optional[str] = None
+    psc: Optional[str] = None,
+    limit: int = 200,
+    include_meta: bool = False
 ):
     if not parent:
-        return []
+        return {"data": [], "total": 0} if include_meta else []
 
     clean_parent = sanitize(parent)
     loc_map = GLOBAL_CACHE.get("location_map", {}) or {}
@@ -3723,6 +3725,15 @@ def get_dashboard_subsidiaries(
         params.extend([int(y) for y in years])
 
     where_clause = " AND ".join(where_parts)
+    row_limit = max(1, min(int(limit or 200), 200))
+
+    total_df = query_summary_df(
+        where_sql=where_clause,
+        params=params,
+        select_sql="COUNT(DISTINCT cage_code) AS total_count",
+        limit=1
+    )
+    total_count = int(total_df.iloc[0]["total_count"] or 0) if not total_df.empty else 0
 
     # Filter by clean_parent and aggregate by cage + vendor_name
     df = query_summary_df(
@@ -3736,11 +3747,11 @@ def get_dashboard_subsidiaries(
         """,
         group_by_sql="cage_code, vendor_name",
         order_by_sql="total_spend DESC",
-        limit=200
+        limit=row_limit
     )
 
     if df.empty:
-        return []
+        return {"data": [], "total": total_count} if include_meta else []
 
     # Fast vectorized cleanup and mapping
     df["cage"] = df["cage_code"].astype(str).str.strip().str.upper()
@@ -3752,7 +3763,8 @@ def get_dashboard_subsidiaries(
     df["city"] = df["cage"].apply(lambda c: str(loc_map.get(c, {}).get("city", "") or "N/A"))
     df["state"] = df["cage"].apply(lambda c: str(loc_map.get(c, {}).get("state", "") or "N/A"))
 
-    return df[["cage", "name", "total_obligations", "contract_count", "city", "state"]].to_dict(orient="records")
+    rows = df[["cage", "name", "total_obligations", "contract_count", "city", "state"]].to_dict(orient="records")
+    return {"data": rows, "total": total_count} if include_meta else rows
 
 
 
