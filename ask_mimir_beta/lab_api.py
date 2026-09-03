@@ -51,6 +51,7 @@ from beta_controls import (
     TIER_POLICIES,
     normalize_tier,
     sanitize_customer_payload,
+    remove_unsupported_mimir_links,
     validate_answer_citations,
 )
 from platform_supply_chain_store import PlatformSupplyChainStore
@@ -1679,9 +1680,26 @@ def require_evidence_download(request: Request) -> AccessContext:
 def finalize_customer_result(
     result: Dict[str, Any], access: AccessContext, request_id: str
 ) -> Dict[str, Any]:
+    initial_validation = validate_answer_citations(
+        str(result.get("answer") or ""), result.get("tool_trace") or []
+    )
+    removed_links = initial_validation.get("unsupported_mimir_links", [])
+    if removed_links:
+        result = {
+            **result,
+            "answer": remove_unsupported_mimir_links(
+                str(result.get("answer") or ""), initial_validation
+            ),
+        }
     citation_validation = validate_answer_citations(
         str(result.get("answer") or ""), result.get("tool_trace") or []
     )
+    if removed_links:
+        citation_validation["removed_unsupported_mimir_links"] = removed_links
+        citation_validation["warnings"] = [
+            *citation_validation.get("warnings", []),
+            "Unverified Mimir drill-down links were rendered as text.",
+        ]
     if (
         citation_validation["status"] == "fail"
         and os.getenv("ASK_MIMIR_STRICT_CITATIONS", "1") == "1"

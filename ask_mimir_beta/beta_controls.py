@@ -324,6 +324,7 @@ class DataReleaseGuard:
 
 
 MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+MARKDOWN_LINK_WITH_LABEL = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 FORBIDDEN_ANSWER_MARKERS = (
     "source_report_id",
     "source_dedup_key",
@@ -498,3 +499,19 @@ def validate_answer_citations(answer: str, tool_trace: list[Dict[str, Any]]) -> 
         "unsupported_mimir_links": unsupported_mimir_links,
         "warnings": warnings,
     }
+
+
+def remove_unsupported_mimir_links(answer: str, validation: Dict[str, Any]) -> str:
+    """Render an unverified Mimir drill-down as text without discarding the answer."""
+    unsupported = {
+        str(url).strip().rstrip("/")
+        for url in validation.get("unsupported_mimir_links", [])
+    }
+    if not unsupported:
+        return answer
+
+    def replace(match: re.Match[str]) -> str:
+        label, raw_url = match.groups()
+        return label if raw_url.strip().rstrip("/") in unsupported else match.group(0)
+
+    return MARKDOWN_LINK_WITH_LABEL.sub(replace, answer)

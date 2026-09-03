@@ -35,3 +35,11 @@ Create a versioned nomenclature registry with a canonical identifier, display na
 family or parent identifier, source alias, review status and effective dates. Preserve the original
 source label for lineage. Only analyst-approved aliases should alter aggregation; text similarity
 can propose candidates but must not merge them automatically.
+
+## Next upstream task
+
+Build and apply the versioned nomenclature registry before the next metric release. Start by
+correcting `COLUMBIA CLASS SSN` to the Columbia-class SSBN canonical identifier, removing workflow
+statuses from the published dimension, and retaining programs, systems, engines and physical
+platforms with explicit entity types. Rebuild the affected Athena views and all dependent Parquet
+artifacts atomically, then compare record counts and financial totals before promoting the release.
