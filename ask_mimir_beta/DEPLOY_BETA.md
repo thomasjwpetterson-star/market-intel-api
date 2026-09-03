@@ -35,7 +35,9 @@ The main Mimir deployment should also define:
 
 The remaining non-secret environment variables are documented in
 `render.yaml`. The service deliberately forces test identities off and strict
-citation validation on at startup.
+citation validation on at startup. It uses the configured GPT-5.6 model with
+high reasoning effort; tier allowances, rather than lower-quality inference,
+provide the primary cost control.
 
 Current release manifest:
 
