@@ -1767,6 +1767,21 @@ def finalize_customer_result(
     return safe_result
 
 
+NON_BILLABLE_RESPONSE_IDS = frozenset(
+    {
+        "company-site-disambiguation",
+        "award-opportunity-disambiguation",
+        "item-disambiguation",
+        "platform-disambiguation",
+        "out-of-domain",
+    }
+)
+
+
+def result_counts_toward_quota(result: Dict[str, Any]) -> bool:
+    return str(result.get("response_id") or "") not in NON_BILLABLE_RESPONSE_IDS
+
+
 class AskJobManager:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -1838,6 +1853,7 @@ class AskJobManager:
                 request_id,
                 latency_ms=result.get("latency_ms"),
                 estimated_cost_usd=cost,
+                billable=result_counts_toward_quota(result),
             )
             customer_result["access"] = access.public_dict(
                 runtime.beta_state.used_today(access.subject_id)
@@ -3010,6 +3026,7 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
             estimated_cost_usd=(result.get("estimated_cost") or {}).get(
                 "estimated_total_usd"
             ),
+            billable=result_counts_toward_quota(result),
         )
         customer_result["access"] = access.public_dict(
             runtime.beta_state.used_today(access.subject_id)

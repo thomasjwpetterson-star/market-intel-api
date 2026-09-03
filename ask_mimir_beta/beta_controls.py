@@ -189,15 +189,17 @@ class BetaStateStore:
         *,
         latency_ms: float | None,
         estimated_cost_usd: float | None,
+        billable: bool = True,
     ) -> None:
         with self.lock:
             self.connection.execute(
                 """
                 UPDATE query_events
-                SET status='completed', completed_at=?, latency_ms=?, estimated_cost_usd=?
+                SET status=?, completed_at=?, latency_ms=?, estimated_cost_usd=?
                 WHERE request_id=?
                 """,
                 [
+                    "completed" if billable else "completed_unbilled",
                     datetime.now(timezone.utc).isoformat(),
                     latency_ms,
                     estimated_cost_usd,
