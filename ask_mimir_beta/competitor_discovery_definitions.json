@@ -1,0 +1,20 @@
+{
+  "definition_version": "mimir-competitor-discovery-2026-09-v1",
+  "targets": {
+    "eaton_aerospace": {
+      "display_name": "Eaton Aerospace",
+      "site_name_pattern": "^EATON[ -]AERO(SPACE|QUIP)",
+      "affiliate_name_pattern": "(^|[^A-Z])EATON([^A-Z]|$)",
+      "observation_window": "FY2021-FY2025",
+      "scope_note": "The target is the set of CAGE sites whose loaded supplier name identifies Eaton Aerospace or Eaton-Aeroquip. It is not a complete legal-entity ownership graph."
+    }
+  },
+  "capability_groups": {
+    "fluid_conveyance_and_connections": "HOSE|TUBE|TUBING|FITTING|COUPLING|ELBOW|ADAPTER|MANIFOLD",
+    "valves_and_fluid_control": "VALVE|REGULATOR|DAMPENER|ACCUMULATOR|FILTER|STRAINER",
+    "hydraulic_power_and_actuation": "HYDRAULIC|ACTUATOR|CYLINDER|PUMP|MOTOR",
+    "fuel_and_air_systems": "FUEL|PNEUMATIC|AIR BREATHING|BLEED AIR",
+    "electrical_power_and_sensing": "POWER SUPPLY|GENERATOR|BATTERY|SWITCH|SENSOR|TRANSDUCER|DETECTOR"
+  },
+  "non_commercial_name_pattern": "MILITARY (STANDARDS|SPECIFICATIONS)|NAVAL INVENTORY|NAVAIR|NAVSEA|UNITED STATES DEPARTMENT|U S ARMY|US ARMY|DEFENSE LOGISTICS AGENCY"
+}

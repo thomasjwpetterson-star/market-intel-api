@@ -1,0 +1,20 @@
+{
+  "definition_version": "mimir-defined-market-2026-09-v1",
+  "markets": {
+    "army_ground_vehicle_power": {
+      "display_name": "Electrical power and power-management systems across selected U.S. Army ground vehicles",
+      "platforms": [
+        "M1 ABRAMS",
+        "BRADLEY",
+        "STRYKER",
+        "JLTV",
+        "AMPV",
+        "M109 PALADIN"
+      ],
+      "strict_capability_pattern": "POWER SUPPL|POWER CONVERT|POWER DISTRIBUT|POWER MANAG|ELECTRICAL POWER|GENERATOR|ALTERNATOR|BATTER(Y|IES)|INVERTER|VOLTAGE REGULATOR|POWER CONDITION",
+      "broader_reported_pattern": "(^|[^A-Z])ELECTRICAL([^A-Z]|$)",
+      "completed_fiscal_years": [2021, 2022, 2023, 2024, 2025],
+      "scope_note": "The initial peer universe covers six named vehicle families and electrical power, generation, conversion, distribution and storage evidence. M109A7 is represented by the M109 Paladin family; propulsion and driveline-only records are excluded."
+    }
+  }
+}

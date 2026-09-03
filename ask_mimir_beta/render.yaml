@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: ask-mimir-beta
+    runtime: python
+    plan: 1c-2g
+    buildCommand: pip install -r requirements.txt
+    startCommand: python serve.py
+    healthCheckPath: /api/health
+    disk:
+      name: ask-mimir-runtime
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: ASK_MIMIR_RUNTIME_ROOT
+        value: /var/data/ask-mimir
+      - key: ASK_MIMIR_ALLOW_EXTERNAL_EVIDENCE
+        value: "1"
+      - key: ASK_MIMIR_ALLOW_TEST_IDENTITIES
+        value: "0"
+      - key: ASK_MIMIR_STRICT_CITATIONS
+        value: "1"
+      - key: OPENAI_MODEL
+        value: gpt-5.6
+      - key: OPENAI_REASONING_EFFORT
+        value: medium
+      - key: ASK_MIMIR_UPGRADE_URL
+        value: https://www.mimiradvisors.org/dashboard?upgrade=professional
+      - key: AWS_REGION
+        value: us-east-1
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: ASK_MIMIR_MANIFEST_KEY
+        value: ask_mimir/releases/ask-mimir-beta-20260903T061518Z-2dbe8c4bbdd0/runtime_manifest.json
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: ASK_MIMIR_ANONYMOUS_SALT
+        generateValue: true

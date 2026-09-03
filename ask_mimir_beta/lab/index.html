@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ask Mimir Lab</title>
+    <meta name="robots" content="noindex,nofollow" />
+    <link rel="icon" href="/assets/mimir-symbol.png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <img src="/assets/mimir-symbol.png" alt="" />
+          <span class="brand-name"><strong>MIMIR</strong><small>ADVISORS</small></span>
+          <span class="lab-badge">AI LAB</span>
+        </div>
+        <div class="topbar-status">
+          <div id="testTierControl" class="test-tier-control" hidden>
+            <label for="testTier">Test tier</label>
+            <select id="testTier">
+              <option value="public">Public</option>
+              <option value="free">Free</option>
+              <option value="trial">Trial</option>
+              <option value="lite">Lite</option>
+              <option value="professional">Professional</option>
+              <option value="enterprise">Enterprise</option>
+            </select>
+          </div>
+          <div class="allowance-status" id="allowanceStatus">Loading allowance</div>
+          <div class="release-status">
+            <span class="status-dot"></span>
+            <span id="releaseLabel">Loading metric release</span>
+          </div>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="conversation-panel">
+          <div id="emptyState" class="empty-state">
+            <div class="mimir-mark">
+              <span class="orbit orbit-one"></span>
+              <span class="orbit orbit-two"></span>
+              <img src="/assets/mimir-symbol.png" alt="" />
+            </div>
+            <p class="eyebrow">EVIDENCE-LED DEFENSE INTELLIGENCE</p>
+            <h1>Ask Mimir</h1>
+            <p class="intro">Explore a defense supplier, item, platform, program, contract or opportunity, with the supporting evidence kept in view.</p>
+            <div class="prompt-grid">
+              <button data-template="Tell me everything about this defense supplier: " data-placeholder="Enter a company name, CAGE code or location">
+                <strong>Tell me about a defense supplier</strong>
+                <span>Enter a company, site or CAGE code</span>
+              </button>
+              <button data-template="Tell me everything about this NSN, NIIN or part number: " data-placeholder="Enter an NSN, NIIN or part number">
+                <strong>Tell me about an NSN or part number</strong>
+                <span>Enter the item identifier you want to investigate</span>
+              </button>
+              <button data-template="Tell me everything about this defense platform or program: " data-placeholder="Enter a platform or program name">
+                <strong>Tell me about a platform or program</strong>
+                <span>Enter the platform or program you want to explore</span>
+              </button>
+              <button data-template="Tell me everything about this contract or opportunity: " data-placeholder="Enter an award, solicitation or notice identifier">
+                <strong>Tell me about a contract or opportunity</strong>
+                <span>Enter an award, solicitation or notice identifier</span>
+              </button>
+            </div>
+          </div>
+          <div id="messages" class="messages" aria-live="polite"></div>
+
+          <div id="thinking" class="thinking" hidden>
+            <div class="thinking-mark"><img src="/assets/mimir-symbol.png" alt="" /></div>
+            <div><strong id="thinkingTitle">Resolving the question</strong><span id="thinkingDetail">Identifying the company, site and analytical scope</span></div>
+            <time id="thinkingElapsed">0s</time>
+          </div>
+
+          <form id="askForm" class="composer">
+            <textarea id="question" rows="1" placeholder="Ask about a company, platform, program, item, contract or opportunity..." aria-label="Ask Mimir a question"></textarea>
+            <button id="sendButton" type="submit">Ask Mimir</button>
+          </form>
+        </section>
+
+        <aside class="evidence-panel">
+          <div class="evidence-header">
+            <div>
+              <p class="eyebrow">ANSWER SUPPORT</p>
+              <h2>Evidence trail</h2>
+            </div>
+            <span id="evidenceCount">0 calls</span>
+          </div>
+          <div class="evidence-legend">
+            <span><i class="source"></i>Source</span>
+            <span><i class="calculation"></i>Calculation</span>
+            <span><i class="analysis"></i>Analysis</span>
+          </div>
+          <div id="evidenceList" class="evidence-list">
+            <div class="evidence-placeholder">Ask a question to see the scopes, calculations and source records used in the response.</div>
+          </div>
+        </aside>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>
