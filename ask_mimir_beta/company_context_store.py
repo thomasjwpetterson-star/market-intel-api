@@ -199,6 +199,8 @@ class CompanyContextStore:
         selected = matches[: max(1, min(int(limit), 20))]
         for row in selected:
             row.pop("_directory_rank", None)
+            row.pop("context_available", None)
+            row.pop("has_observed_profile", None)
         distinct_site_ids = {
             row["scope_id"] for row in selected if row["scope_type"] == "company_site"
         }
