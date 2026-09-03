@@ -22,6 +22,16 @@ from the main Mimir website while it is being evaluated.
 - `ASK_MIMIR_MANIFEST_KEY`: the exact immutable manifest key printed by
   `publish_runtime_release.py`
 - `ASK_MIMIR_ANONYMOUS_SALT`: a long random value, generated once
+- `ASK_MIMIR_TRUSTED_PROXY_SECRET`: the same random value configured on the
+  main Mimir web application. This allows the main site to pass authenticated
+  subscription tiers to Ask Mimir without trusting browser-supplied headers.
+
+The main Mimir deployment should also define:
+
+- `ASK_MIMIR_API_URL=https://ask-mimir-beta.onrender.com`
+- `ASK_MIMIR_TRUSTED_PROXY_SECRET`: exactly the same value as Render. The
+  existing `MIMIR_EXPORT_PROXY_SECRET` may be reused instead on the main site,
+  because the proxy supports it as a fallback.
 
 The remaining non-secret environment variables are documented in
 `render.yaml`. The service deliberately forces test identities off and strict

@@ -24,6 +24,8 @@ services:
         value: gpt-5.6
       - key: OPENAI_REASONING_EFFORT
         value: medium
+      - key: ASK_MIMIR_MAX_EVIDENCE_RECORDS
+        value: "20"
       - key: ASK_MIMIR_UPGRADE_URL
         value: https://www.mimiradvisors.org/dashboard?upgrade=professional
       - key: AWS_REGION

@@ -884,7 +884,7 @@ TOOLS = [
                 },
                 "fiscal_year": {"type": "integer", "minimum": 2021, "maximum": 2026},
                 "sign": {"type": "string", "enum": ["net", "positive", "negative"]},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 5},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
             },
             "required": [
                 "scope_type",
@@ -1329,6 +1329,10 @@ class LabRuntime:
         )
         self.reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT", "medium")
         self.max_output_tokens = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "6000"))
+        self.max_evidence_records = min(
+            max(int(os.getenv("ASK_MIMIR_MAX_EVIDENCE_RECORDS", "20")), 5),
+            100,
+        )
         audit_path = os.getenv("ASK_MIMIR_AUDIT_LOG")
         self.audit_log = Path(audit_path).resolve() if audit_path else None
 
@@ -2924,7 +2928,7 @@ def generate_answer(
     )
     call_usages: List[Dict[str, Any] | None] = [_usage_dict(response)]
     trace: List[Dict[str, Any]] = []
-    evidence_records_remaining = 5
+    evidence_records_remaining = runtime.max_evidence_records
     for _ in range(8):
         calls = [item for item in response.output if item.type == "function_call"]
         if not calls:
@@ -2944,7 +2948,7 @@ def generate_answer(
                     if evidence_records_remaining <= 0:
                         raise ValueError("the per-answer supporting-record limit has been reached")
                     arguments["limit"] = min(
-                        int(arguments.get("limit", 5)), evidence_records_remaining
+                        int(arguments.get("limit", 10)), evidence_records_remaining
                     )
                 result = runtime.call_tool(call.name, arguments)
                 if call.name == "get_metric_evidence":

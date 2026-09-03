@@ -1136,11 +1136,17 @@ async function submitQuestion(text) {
   startThinking(clean);
   sendButton.disabled = true;
   try {
-    const response = await fetch(apiUrl("/ask/jobs"), {
+    const requestJob = () => fetch(apiUrl("/ask/jobs"), {
       method: "POST",
       headers: betaHeaders(),
       body: JSON.stringify({ messages: state.messages.slice(-12) }),
     });
+    let response = await requestJob();
+    if (response.status === 503) {
+      updateThinking("Waking Ask Mimir", "The evidence service is restarting. Retrying once now.", 8);
+      await new Promise((resolve) => window.setTimeout(resolve, 2500));
+      response = await requestJob();
+    }
     const payload = await response.json();
     if (!response.ok) {
       const detail = typeof payload.detail === "object" ? payload.detail.message : payload.detail;
