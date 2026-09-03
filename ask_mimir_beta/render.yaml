@@ -3,6 +3,7 @@ services:
     name: ask-mimir-beta
     runtime: python
     plan: 1c-2g
+    rootDir: ask_mimir_beta
     buildCommand: pip install -r requirements.txt
     startCommand: python serve.py
     healthCheckPath: /api/health
