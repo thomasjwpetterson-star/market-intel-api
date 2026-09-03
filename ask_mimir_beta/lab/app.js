@@ -1141,11 +1141,17 @@ async function submitQuestion(text) {
       headers: betaHeaders(),
       body: JSON.stringify({ messages: state.messages.slice(-12) }),
     });
-    let response = await requestJob();
-    if (response.status === 503) {
-      updateThinking("Waking Ask Mimir", "The evidence service is restarting. Retrying once now.", 8);
-      await new Promise((resolve) => window.setTimeout(resolve, 2500));
+    let response;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
       response = await requestJob();
+      if (![502, 503, 504].includes(response.status) || attempt === 3) break;
+      const delay = 3000 + attempt * 2000;
+      updateThinking(
+        "Waking Ask Mimir",
+        `The evidence service is restarting. Retrying in ${Math.round(delay / 1000)} seconds.`,
+        8 + attempt * 2,
+      );
+      await new Promise((resolve) => window.setTimeout(resolve, delay));
     }
     const payload = await response.json();
     if (!response.ok) {
