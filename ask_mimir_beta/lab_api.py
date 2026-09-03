@@ -209,6 +209,14 @@ End with a short Evidence used list naming the metric scope(s), fiscal year(s), 
 record counts returned by tools. Do not expose internal implementation details that do not help
 the user understand the evidence.
 
+Whenever the returned evidence contains a customer-facing CAGE, award identifier, platform or
+NSN, hyperlink it to the corresponding Mimir dashboard view. Link CAGE sites to
+https://www.mimiradvisors.org/dashboard?view=COMPANY&cage=<CAGE>, awards to
+https://www.mimiradvisors.org/dashboard?view=AWARDS&award=<AWARD_ID>, platforms to
+https://www.mimiradvisors.org/dashboard?view=PLATFORM&platform=<PLATFORM>, and NSNs or NIINs to
+https://www.mimiradvisors.org/dashboard?view=PARTS&nsn=<NSN_OR_NIIN>. Only link identifiers that
+are present in the tool evidence, and use URL encoding where needed.
+
 When live web research is available, apply this source hierarchy:
 
 {WEB_SOURCE_POLICY_PROMPT}

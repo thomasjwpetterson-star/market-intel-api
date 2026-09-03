@@ -973,6 +973,55 @@ function renderCompetitorDiscoveryEvidence(entry, artifacts = {}) {
   evidenceList.appendChild(details);
 }
 
+function metricScopeLink(result) {
+  const scopeType = String(result.scope_type || "").toLowerCase();
+  const scopeId = result.scope_id;
+  const label = result.scope_name || scopeId || "Metric evidence";
+  if (!scopeId) return escapeHtml(label);
+  if (scopeType === "platform") return dashboardLink(label, "PLATFORM", "platform", scopeId);
+  if (["company", "company_site", "vendor", "vendor_site", "cage"].includes(scopeType)) {
+    return dashboardLink(label, "COMPANY", "cage", scopeId);
+  }
+  return escapeHtml(label);
+}
+
+function renderMetricEvidence(entry) {
+  const result = entry.result || {};
+  const records = result.records || [];
+  const metrics = result.metrics || {};
+  const details = document.createElement("details");
+  details.className = "evidence-card";
+  const value = metrics.net_value_usd ?? metrics.positive_value_usd;
+  details.innerHTML = `
+    <summary>
+      <span class="tool-name">${metricScopeLink(result)}</span>
+      <span class="tool-meta">${escapeHtml(result.measure_type || "Supporting records")}${result.fiscal_year ? ` · FY${escapeHtml(result.fiscal_year)}` : ""}</span>
+    </summary>
+    <div class="evidence-detail"><section class="evidence-section">
+      ${value !== undefined ? `<div class="evidence-row"><strong>${formatMoney(value)}</strong>Observed value for this metric scope</div>` : ""}
+      ${records.slice(0, 12).map((row) => {
+        const award = row.contract_id || row.award_id_piid;
+        const cage = row.vendor_cage || row.cage;
+        const platform = row.platform_family || row.platform;
+        const nsn = row.nsn || row.niin;
+        const title = cage
+          ? dashboardLink(`${row.vendor_name || cage} · CAGE ${cage}`, "COMPANY", "cage", cage)
+          : escapeHtml(row.vendor_name || award || nsn || "Supporting record");
+        const links = [
+          award ? dashboardLink(`Award ${award}`, "AWARDS", "award", award, "evidence-tag") : "",
+          platform ? dashboardLink(platform, "PLATFORM", "platform", platform, "evidence-tag") : "",
+          nsn ? dashboardLink(`NSN ${nsn}`, "PARTS", "nsn", nsn, "evidence-tag") : "",
+        ].filter(Boolean).join("");
+        return `<div class="evidence-row"><strong>${title}</strong>
+          ${formatMoney(row.spend_amount ?? row.value_usd)}${row.action_date ? ` · ${escapeHtml(row.action_date)}` : ""}
+          ${links ? `<br />${links}` : ""}
+        </div>`;
+      }).join("")}
+      ${!records.length && value === undefined ? '<div class="evidence-row">See the calculation details returned for this metric.</div>' : ""}
+    </section></div>`;
+  evidenceList.appendChild(details);
+}
+
 function renderEvidence(trace, answerText = "", artifacts = {}) {
   evidenceList.innerHTML = "";
   evidenceCount.textContent = `${trace.length} ${trace.length === 1 ? "call" : "calls"}`;
@@ -1024,6 +1073,10 @@ function renderEvidence(trace, answerText = "", artifacts = {}) {
     }
     if (entry.tool === "get_competitor_discovery" && entry.result) {
       renderCompetitorDiscoveryEvidence(entry, artifacts);
+      return;
+    }
+    if (["get_metric_observation", "get_metric_evidence"].includes(entry.tool) && entry.result) {
+      renderMetricEvidence(entry);
       return;
     }
     if (entry.tool === "search_award_opportunity_contexts" && entry.result && (artifacts.contract_dossier || artifacts.opportunity_dossier)) {
