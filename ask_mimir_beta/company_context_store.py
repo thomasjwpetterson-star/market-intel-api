@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import threading
 from pathlib import Path
 from typing import Any, Dict, List
+
+import duckdb
 
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONTEXT_DIR = ROOT / "validation-output" / "company-context"
+DEFAULT_DATA_ROOT = Path(
+    "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
+)
 
 
 FOCUS_SECTIONS = {
@@ -71,8 +79,24 @@ FOCUS_SECTIONS = {
 }
 
 
+def _normalize_cage(value: Any) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def _name_pattern(value: Any) -> str:
+    tokens = re.findall(r"[A-Z0-9]+", str(value or "").upper())
+    if not tokens:
+        return ""
+    phrase = r"[^A-Z0-9]+".join(re.escape(token) for token in tokens)
+    return rf"(^|[^A-Z0-9]){phrase}([^A-Z0-9]|$)"
+
+
 class CompanyContextStore:
-    def __init__(self, context_dir: Path = DEFAULT_CONTEXT_DIR) -> None:
+    def __init__(
+        self,
+        context_dir: Path = DEFAULT_CONTEXT_DIR,
+        data_root: Path | None = None,
+    ) -> None:
         self.context_dir = context_dir.resolve()
         manifest_path = self.context_dir / "manifest.json"
         if not manifest_path.exists():
@@ -84,6 +108,18 @@ class CompanyContextStore:
             context = json.loads(path.read_text())
             context["_artifact_path"] = str(path)
             self.contexts.append(context)
+        configured_data_root = data_root or Path(
+            os.getenv("ASK_MIMIR_DATA_ROOT", str(DEFAULT_DATA_ROOT))
+        )
+        self.data_root = configured_data_root.resolve()
+        self.directory_paths = {
+            "profiles": self.data_root / "profiles.parquet",
+            "locations": self.data_root / "cage_locations.parquet",
+        }
+        self.directory_sources = [
+            path for path in self.directory_paths.values() if path.exists()
+        ]
+        self._directory_lock = threading.Lock()
 
     def search(
         self, query: str, scope_type: str | None = None, limit: int = 10
@@ -144,10 +180,25 @@ class CompanyContextStore:
                     "city": representative_site.get("city"),
                     "state": representative_site.get("state"),
                     "option_label": option_label,
+                    "context_available": True,
                 }
             )
-        matches.sort(key=lambda row: (row["scope_type"] != "company_site", row["scope_name"]))
+        if not scope_type or scope_type == "company_site":
+            matches = self._merge_directory_matches(
+                matches,
+                self._directory_search(query, max(limit, 12)),
+            )
+        matches.sort(
+            key=lambda row: (
+                not row.get("context_available", False),
+                row["scope_type"] != "company_site",
+                row.get("_directory_rank", 999),
+                row["scope_name"],
+            )
+        )
         selected = matches[: max(1, min(int(limit), 20))]
+        for row in selected:
+            row.pop("_directory_rank", None)
         distinct_site_ids = {
             row["scope_id"] for row in selected if row["scope_type"] == "company_site"
         }
@@ -176,6 +227,169 @@ class CompanyContextStore:
                 else []
             ),
         }
+
+    def _directory_search(self, query: str, limit: int) -> List[Dict[str, Any]]:
+        paths = self.directory_paths
+        if not paths["profiles"].exists() and not paths["locations"].exists():
+            return []
+        clean_query = str(query or "").strip()
+        cage_query = _normalize_cage(clean_query)
+        cage_is_exact = bool(re.fullmatch(r"[A-Z0-9]{5}", cage_query))
+        name_pattern = _name_pattern(clean_query)
+        if not name_pattern and not cage_is_exact:
+            return []
+
+        rows: Dict[str, Dict[str, Any]] = {}
+        with self._directory_lock, duckdb.connect() as connection:
+            connection.execute("SET preserve_insertion_order=false")
+            connection.execute("SET threads=1")
+            if paths["profiles"].exists():
+                profile_rows = connection.execute(
+                    """
+                    SELECT
+                        UPPER(REGEXP_REPLACE(COALESCE(cage_code, ''), '[^A-Za-z0-9]', '', 'g')) AS cage,
+                        vendor_name,
+                        COALESCE(total_lifetime_spend, 0) AS prime_value,
+                        COALESCE(network_flow_total, 0) AS subcontract_value
+                    FROM read_parquet(?)
+                    WHERE
+                        (? AND UPPER(REGEXP_REPLACE(COALESCE(cage_code, ''), '[^A-Za-z0-9]', '', 'g')) = ?)
+                        OR REGEXP_MATCHES(UPPER(COALESCE(vendor_name, '')), ?)
+                    ORDER BY ABS(COALESCE(total_lifetime_spend, 0))
+                           + ABS(COALESCE(network_flow_total, 0)) DESC
+                    LIMIT ?
+                    """,
+                    [
+                        str(paths["profiles"]),
+                        cage_is_exact,
+                        cage_query,
+                        name_pattern or r"a^",
+                        min(max(int(limit), 1), 40),
+                    ],
+                ).fetchall()
+                for cage, vendor_name, prime_value, subcontract_value in profile_rows:
+                    if not cage or cage in {"UNKNOWN", "UNKNO", "00000"}:
+                        continue
+                    rows[cage] = {
+                        "cage": cage,
+                        "vendor_name": vendor_name,
+                        "has_observed_profile": True,
+                        "observed_value": abs(float(prime_value or 0))
+                        + abs(float(subcontract_value or 0)),
+                    }
+
+            if paths["locations"].exists():
+                location_rows = connection.execute(
+                    """
+                    SELECT
+                        UPPER(REGEXP_REPLACE(COALESCE(cage_code, ''), '[^A-Za-z0-9]', '', 'g')) AS cage,
+                        vendor_name,
+                        city,
+                        state,
+                        cage_status,
+                        UPPER(REGEXP_REPLACE(COALESCE(replacement_cage, ''), '[^A-Za-z0-9]', '', 'g')) AS replacement_cage
+                    FROM read_parquet(?)
+                    WHERE
+                        (? AND UPPER(REGEXP_REPLACE(COALESCE(cage_code, ''), '[^A-Za-z0-9]', '', 'g')) = ?)
+                        OR REGEXP_MATCHES(UPPER(COALESCE(vendor_name, '')), ?)
+                    LIMIT ?
+                    """,
+                    [
+                        str(paths["locations"]),
+                        cage_is_exact,
+                        cage_query,
+                        name_pattern or r"a^",
+                        min(max(int(limit) * 2, 1), 80),
+                    ],
+                ).fetchall()
+                for cage, vendor_name, city, state, cage_status, replacement_cage in location_rows:
+                    if not cage or cage in {"UNKNOWN", "UNKNO", "00000"}:
+                        continue
+                    row = rows.setdefault(
+                        cage,
+                        {
+                            "cage": cage,
+                            "vendor_name": vendor_name,
+                            "has_observed_profile": False,
+                            "observed_value": 0.0,
+                        },
+                    )
+                    row["vendor_name"] = row.get("vendor_name") or vendor_name
+                    row["city"] = city
+                    row["state"] = state
+                    row["cage_status"] = cage_status
+                    row["replacement_cage"] = replacement_cage or None
+
+        # A retired CAGE with a known replacement should not be a default user choice.
+        candidates = [
+            row
+            for row in rows.values()
+            if not (
+                str(row.get("cage_status") or "").upper() == "R"
+                and row.get("replacement_cage")
+            )
+        ]
+        candidates.sort(
+            key=lambda row: (
+                not row.get("has_observed_profile", False),
+                -float(row.get("observed_value") or 0),
+                str(row.get("vendor_name") or ""),
+                row["cage"],
+            )
+        )
+        results = []
+        for directory_rank, row in enumerate(
+            candidates[: min(max(int(limit), 1), 20)]
+        ):
+            name = str(row.get("vendor_name") or f"CAGE {row['cage']}").strip()
+            location = ", ".join(
+                str(value).strip()
+                for value in (row.get("city"), row.get("state"))
+                if str(value or "").strip()
+            )
+            option_label = name
+            if location:
+                option_label += f" - {location}"
+            option_label += f" (CAGE {row['cage']})"
+            results.append(
+                {
+                    "context_id": None,
+                    "scope_type": "company_site",
+                    "scope_id": row["cage"],
+                    "scope_name": name,
+                    "observation_window": None,
+                    "site_count": 1,
+                    "resolved_cages": [row["cage"]],
+                    "city": row.get("city"),
+                    "state": row.get("state"),
+                    "option_label": option_label,
+                    "context_available": False,
+                    "has_observed_profile": row.get("has_observed_profile", False),
+                    "_directory_rank": directory_rank,
+                }
+            )
+        return results
+
+    @staticmethod
+    def _merge_directory_matches(
+        context_matches: List[Dict[str, Any]],
+        directory_matches: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        merged = {
+            (row["scope_type"], str(row["scope_id"]).upper()): row
+            for row in directory_matches
+        }
+        for row in context_matches:
+            key = (row["scope_type"], str(row["scope_id"]).upper())
+            existing = merged.get(key, {})
+            merged[key] = {
+                **existing,
+                **row,
+                "city": row.get("city") or existing.get("city"),
+                "state": row.get("state") or existing.get("state"),
+                "context_available": True,
+            }
+        return list(merged.values())
 
     def get(self, scope_type: str, scope_id: str, focus: str) -> Dict[str, Any]:
         if focus not in FOCUS_SECTIONS:

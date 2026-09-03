@@ -1100,6 +1100,24 @@ def company_site_dossier_cage(messages: List[ChatMessage]) -> str | None:
     return match.group(1).upper()
 
 
+def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
+    text = str(messages[-1].content or "").strip()
+    match = re.search(
+        r"(?:defense\s+supplier|defence\s+supplier|supplier|company)\s*:\s*([^\n?]+)",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    query = match.group(1).strip().rstrip(".")
+    if re.match(r"^CAGE\b", query, re.IGNORECASE) or (
+        re.fullmatch(r"[A-Z0-9]{5}", query, re.IGNORECASE)
+        and any(character.isdigit() for character in query)
+    ):
+        return None
+    return query or None
+
+
 def explicit_item_query(messages: List[ChatMessage]) -> str | None:
     text = " ".join(message.content for message in messages)
     intent = text.lower()
@@ -1250,6 +1268,7 @@ class LabRuntime:
             *self.award_opportunities.paths.values(),
             *self.platform_contexts.paths.values(),
             self.company_contexts.context_dir / "manifest.json",
+            *self.company_contexts.directory_sources,
             self.company_opportunities.opportunity_dir / "manifest.json",
             self.platform_supply_chains.pack_dir / "manifest.json",
             self.program_momentum.pack_path,
@@ -1630,6 +1649,8 @@ def workflow_for_request(request: AskRequest) -> str:
     if explicit_platform_query(request.messages, runtime.platform_contexts):
         return "platform_intelligence"
     if company_site_dossier_cage(request.messages):
+        return "company_site_intelligence"
+    if explicit_company_name_query(request.messages):
         return "company_site_intelligence"
     if company_site_trajectory_cage(request.messages):
         return "company_site_trajectory"
@@ -2104,6 +2125,42 @@ def generate_answer(
     )
     if runtime.mock_mode:
         return runtime.mock_answer(request)
+    started = time.perf_counter()
+    company_query = explicit_company_name_query(request.messages)
+    if company_query:
+        search_arguments = {
+            "query": company_query,
+            "scope_type": None,
+            "limit": 12,
+        }
+        resolution = runtime.call_tool("search_company_contexts", search_arguments)
+        search_trace = {
+            "tool": "search_company_contexts",
+            "arguments": search_arguments,
+            "result": resolution,
+        }
+        if resolution.get("requires_disambiguation"):
+            options = "\n".join(
+                f"- {option}"
+                for option in resolution.get("disambiguation_options", [])
+            )
+            return {
+                "answer": (
+                    f"Which {company_query} site did you mean?\n\n"
+                    f"{options}\n\n"
+                    "Reply with the CAGE code or location."
+                ),
+                "response_id": "company-site-disambiguation",
+                "model": "deterministic-resolution",
+                "release_id": runtime.store.manifest["release_id"],
+                "tool_trace": [search_trace],
+                "answer_artifacts": {"company_resolution": resolution},
+                "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                "response_calls": 0,
+                "usage": None,
+                "usage_by_response": [],
+                "estimated_cost": None,
+            }
     if not os.getenv("OPENAI_API_KEY"):
         raise HTTPException(
             status_code=503,
@@ -2121,7 +2178,6 @@ def generate_answer(
         {"role": message.role, "content": message.content} for message in request.messages
     ]
     client = OpenAI()
-    started = time.perf_counter()
     if is_clearly_out_of_domain(request.messages):
         return {
             "answer": (
