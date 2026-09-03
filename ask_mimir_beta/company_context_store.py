@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -120,6 +121,20 @@ class CompanyContextStore:
             path for path in self.directory_paths.values() if path.exists()
         ]
         self._directory_lock = threading.Lock()
+        self._dynamic_lock = threading.Lock()
+        self._dynamic_builder = None
+        self._dynamic_contexts: Dict[tuple[str, str], Dict[str, Any]] = {}
+        release_identity = os.getenv("ASK_MIMIR_MANIFEST_KEY", "").strip()
+        if not release_identity:
+            release_identity = "|".join(
+                f"{path.name}:{path.stat().st_size}:{path.stat().st_mtime_ns}"
+                for path in self.directory_sources
+            )
+        release_namespace = hashlib.sha256(release_identity.encode()).hexdigest()[:16]
+        cache_root = Path(
+            os.getenv("ASK_MIMIR_CACHE_DIR", str(self.context_dir / ".dynamic-cache"))
+        ).resolve()
+        self.dynamic_cache_dir = cache_root / "company-context" / release_namespace
 
     def search(
         self, query: str, scope_type: str | None = None, limit: int = 10
@@ -331,6 +346,12 @@ class CompanyContextStore:
                 and row.get("replacement_cage")
             )
         ]
+        if not cage_is_exact:
+            profiled_candidates = [
+                row for row in candidates if row.get("has_observed_profile", False)
+            ]
+            if profiled_candidates:
+                candidates = profiled_candidates
         candidates.sort(
             key=lambda row: (
                 not row.get("has_observed_profile", False),
@@ -397,17 +418,7 @@ class CompanyContextStore:
         if focus not in FOCUS_SECTIONS:
             raise ValueError(f"unsupported company context focus: {focus}")
         clean_id = str(scope_id).strip().upper()
-        context = next(
-            (
-                row
-                for row in self.contexts
-                if row["scope"]["scope_type"] == scope_type
-                and str(row["scope"]["scope_id"]).upper() == clean_id
-            ),
-            None,
-        )
-        if context is None:
-            raise KeyError(f"company context was not found: {scope_type}/{scope_id}")
+        context = self.get_raw(scope_type, clean_id)
 
         result = {
             "context_id": context["context_id"],
@@ -429,6 +440,64 @@ class CompanyContextStore:
             },
         }
         return result
+
+    def get_raw(self, scope_type: str, scope_id: str) -> Dict[str, Any]:
+        clean_id = str(scope_id).strip().upper()
+        context = next(
+            (
+                row
+                for row in self.contexts
+                if row["scope"]["scope_type"] == scope_type
+                and str(row["scope"]["scope_id"]).upper() == clean_id
+            ),
+            None,
+        )
+        if context is not None:
+            return context
+        key = (scope_type, clean_id)
+        if key in self._dynamic_contexts:
+            return self._dynamic_contexts[key]
+        if scope_type != "company_site" or not self._directory_search(clean_id, 1):
+            raise KeyError(f"company context was not found: {scope_type}/{scope_id}")
+
+        with self._dynamic_lock:
+            if key in self._dynamic_contexts:
+                return self._dynamic_contexts[key]
+            cached_context = self._read_dynamic_cache(clean_id)
+            if cached_context is not None:
+                self._dynamic_contexts[key] = cached_context
+                return cached_context
+            from company_context import CompanyContextBuilder
+
+            if self._dynamic_builder is None:
+                self._dynamic_builder = CompanyContextBuilder(data_root=self.data_root)
+            context = self._dynamic_builder.build_site(clean_id)
+            self._write_dynamic_cache(clean_id, context)
+            self._dynamic_contexts[key] = context
+            return context
+
+    def _read_dynamic_cache(self, cage: str) -> Dict[str, Any] | None:
+        path = self.dynamic_cache_dir / f"{cage}.json"
+        if not path.exists():
+            return None
+        try:
+            context = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        scope = context.get("scope", {})
+        if (
+            scope.get("scope_type") != "company_site"
+            or str(scope.get("scope_id", "")).upper() != cage
+        ):
+            return None
+        return context
+
+    def _write_dynamic_cache(self, cage: str, context: Dict[str, Any]) -> None:
+        self.dynamic_cache_dir.mkdir(parents=True, exist_ok=True)
+        destination = self.dynamic_cache_dir / f"{cage}.json"
+        temporary = destination.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(context, default=str))
+        temporary.replace(destination)
 
     @staticmethod
     def _compact_section(section: str, value: Any) -> Any:

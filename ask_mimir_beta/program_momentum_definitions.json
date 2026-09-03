@@ -1,0 +1,134 @@
+{
+  "definition_version": "mimir-missile-momentum-universe-2026-09-v1",
+  "programs": [
+    {
+      "program_id": "PAC3_MSE",
+      "display_name": "PAC-3 MSE",
+      "platform_aliases": ["PAC-3 MSE", "PAC-3"],
+      "budget_title_aliases": ["MSE MISSILE"],
+      "opportunity_terms": ["PAC-3 MSE", "PAC3 MSE"],
+      "production_events": [
+        {
+          "event_id": "pac3_accelerated_production_2026",
+          "event_date": "2026-04-10",
+          "signal_strength": 100,
+          "fact": "The Army announced a $4.7 billion contract action supporting accelerated PAC-3 MSE interceptor production.",
+          "publisher": "U.S. Army",
+          "title": "U.S. Army advances accelerated PAC-3 MSE production through contract action",
+          "canonical_url": "https://www.army.mil/article/291670/u_s_army_advances_accelerated_pac_3_mse_production_through_contract_action",
+          "registry_status": "PENDING_MANUAL_APPROVAL"
+        }
+      ]
+    },
+    {
+      "program_id": "PRSM",
+      "display_name": "Precision Strike Missile (PrSM)",
+      "platform_aliases": ["PRECISION STRIKE MISSILE (PRSM)"],
+      "budget_title_aliases": ["PRECISION STRIKE MISSILE (PRSM)"],
+      "opportunity_terms": ["PRECISION STRIKE MISSILE", "PRSM"],
+      "production_events": []
+    },
+    {
+      "program_id": "JASSM_LRASM",
+      "display_name": "JASSM / LRASM family",
+      "platform_aliases": ["JASSM", "LRASM"],
+      "budget_title_aliases": ["JOINT AIR-SURFACE STANDOFF MISSILE", "JOINT AIR-TO-SURFACE STANDOFF MISSILE (JASSM)", "LRASM", "LRASM0"],
+      "opportunity_terms": ["JASSM", "LRASM", "JOINT AIR-SURFACE STANDOFF MISSILE", "LONG RANGE ANTI-SHIP MISSILE"],
+      "production_events": [
+        {
+          "event_id": "jassm_lrasm_engine_capacity_2024",
+          "event_date": "2024-12-23",
+          "signal_strength": 85,
+          "fact": "The Department of Defense awarded $253.7 million to expand Williams International engine capacity for JASSM, LRASM, Tomahawk and other precision-strike weapons.",
+          "publisher": "U.S. Department of Defense",
+          "title": "Department of Defense Awards $253.7 Million to Expand Facilities for Gas Turbine Engine Production",
+          "canonical_url": "https://www.defense.gov/News/Releases/Release/Article/4015691/department-of-defense-awards-2537-million-to-expand-facilities-for-gas-turbine/",
+          "registry_status": "PENDING_MANUAL_APPROVAL"
+        }
+      ]
+    },
+    {
+      "program_id": "GMLRS",
+      "display_name": "GMLRS",
+      "platform_aliases": ["GMLRS/GMLRS AW", "MLRS"],
+      "budget_title_aliases": ["GUIDED MLRS ROCKET (GMLRS)", "GUIDED MULTIPLE-LAUNCH ROCKET SYSTEM (GMLRS)"],
+      "opportunity_terms": ["GMLRS", "GUIDED MULTIPLE LAUNCH ROCKET"],
+      "production_events": []
+    },
+    {
+      "program_id": "AMRAAM",
+      "display_name": "AMRAAM",
+      "platform_aliases": ["AMRAAM", "AMRAAM EPIP - BASIC", "AMRAAM (NAVY)"],
+      "budget_title_aliases": ["AMRAAM", "ADVANCED MEDIUM RANGE AIR-TO-AIR MISSILE (AMRAAM)"],
+      "opportunity_terms": ["AMRAAM", "ADVANCED MEDIUM RANGE AIR-TO-AIR MISSILE"],
+      "production_events": []
+    },
+    {
+      "program_id": "AIM9X",
+      "display_name": "AIM-9X",
+      "platform_aliases": ["AIM-9X", "AIM-9 SIDEWINDER"],
+      "budget_title_aliases": ["TACTICAL AIM MISSILES"],
+      "opportunity_terms": ["AIM-9X", "SIDEWINDER"],
+      "production_events": []
+    },
+    {
+      "program_id": "SM6",
+      "display_name": "Standard Missile family (SM-6 mapped activity)",
+      "platform_aliases": ["SM-6"],
+      "budget_title_aliases": ["STANDARD MISSILE", "STANDARD MISSILE IMPROVEMENTS", "STANDARD MISSILES MODS"],
+      "opportunity_terms": ["SM-6", "STANDARD MISSILE 6", "STANDARD MISSILE-6"],
+      "production_events": []
+    },
+    {
+      "program_id": "STINGER",
+      "display_name": "Stinger",
+      "platform_aliases": ["STINGER"],
+      "budget_title_aliases": ["STINGER MODS"],
+      "opportunity_terms": ["STINGER"],
+      "production_events": []
+    },
+    {
+      "program_id": "TOMAHAWK",
+      "display_name": "Tomahawk",
+      "platform_aliases": ["TACTOM (TACTICAL TOMAHAWK)", "TOMAHAWK"],
+      "budget_title_aliases": ["TOMAHAWK", "TOMAHAWK MODS", "TOMAHAWK SUPPORT EQUIPMENT", "TOMAHAWK AND TOMAHAWK MISSION PLANNING CENTER (TMPC)"],
+      "opportunity_terms": ["TOMAHAWK", "TACTOM"],
+      "production_events": []
+    },
+    {
+      "program_id": "THAAD",
+      "display_name": "THAAD",
+      "platform_aliases": ["THAAD"],
+      "budget_title_aliases": ["THAAD", "TERMINAL HIGH ALTITUDE AREA DEFENSE (THAAD)", "TERMINAL HIGH ALTITUDE AREA DEFENSE (THAAD) RDTE"],
+      "opportunity_terms": ["THAAD", "TERMINAL HIGH ALTITUDE AREA DEFENSE"],
+      "production_events": [
+        {
+          "event_id": "thaad_interceptor_modification_2025",
+          "event_date": "2025-07-28",
+          "signal_strength": 85,
+          "fact": "A $2.06 billion modification increased a THAAD interceptor-production contract to $10.42 billion, with performance extending through 2029.",
+          "publisher": "U.S. Department of Defense",
+          "title": "Contracts for July 28, 2025",
+          "canonical_url": "https://www.defense.gov/News/Contracts/Contract/Article/4257577/",
+          "registry_status": "PENDING_MANUAL_APPROVAL"
+        }
+      ]
+    },
+    {
+      "program_id": "TRIDENT_II",
+      "display_name": "Trident II",
+      "platform_aliases": ["TRIDENT II MISSILE"],
+      "budget_title_aliases": ["TRIDENT II MODS"],
+      "opportunity_terms": ["TRIDENT II", "TRIDENT D5"],
+      "production_events": []
+    },
+    {
+      "program_id": "IRCPS",
+      "display_name": "Conventional Prompt Strike",
+      "platform_aliases": ["INTERMEDIATE RANGE CONVENTIONAL PROMPT STRIKE (IRCPS)"],
+      "budget_title_aliases": ["CONVENTIONAL PROMPT STRIKE (CPS)"],
+      "opportunity_terms": ["CONVENTIONAL PROMPT STRIKE", "IRCPS"],
+      "production_events": []
+    }
+  ]
+}

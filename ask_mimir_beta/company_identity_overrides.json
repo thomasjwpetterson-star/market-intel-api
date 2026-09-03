@@ -1,0 +1,156 @@
+{
+  "version": "mimir-company-identity-2026-09-v2",
+  "parents": [
+    {
+      "parent_id": "CURTISS_WRIGHT_CORPORATION",
+      "parent_name": "CURTISS-WRIGHT CORPORATION",
+      "aliases": [
+        "CURTISS-WRIGHT",
+        "CURTISS WRIGHT",
+        "CURTISS-WRIGHT CORPORATION"
+      ],
+      "review_status": "analyst_seed_for_evaluation",
+      "as_of_date": "2026-08-30",
+      "sources": [
+        {
+          "source_type": "company_facility_directory",
+          "url": "https://curtisswright.com/company/facilities",
+          "retrieved_at": "2026-08-30"
+        },
+        {
+          "source_type": "company_defense_solutions_location_directory",
+          "url": "https://defense-solutions.curtisswright.com/about/company/locations",
+          "retrieved_at": "2026-08-30"
+        }
+      ],
+      "sites": [
+        {"cage": "04808", "official_site_label": "Electro-Mechanical Division - Cheswick", "city": "CHESWICK", "state": "PA"},
+        {"cage": "0UBG9", "official_site_label": "Engineered Pump Division - Bethlehem", "city": "BETHLEHEM", "state": "PA"},
+        {"cage": "21439", "official_site_label": "Engineered Arresting Systems - Aston", "city": "ASTON", "state": "PA"},
+        {"cage": "830R7", "official_site_label": "Fleet Solutions - Chesapeake", "city": "CHESAPEAKE", "state": "VA"},
+        {"cage": "830P9", "official_site_label": "Fleet Solutions - Chula Vista", "city": "CHULA VISTA", "state": "CA"},
+        {"cage": "8FGX3", "official_site_label": "Steam & Air Solutions - Summerville", "city": "SUMMERVILLE", "state": "SC"},
+        {"cage": "95169", "official_site_label": "Target Rock - East Farmingdale", "city": "FARMINGDALE", "state": "NY"},
+        {
+          "cage": "1EGB0",
+          "official_site_label": "Curtiss-Wright Defense Solutions - Newtown",
+          "city": "NEWTOWN",
+          "state": "PA",
+          "official_capability_summary": "Airborne and ground instrumentation, telemetry, high-speed data acquisition, recording, display and control, communications, airborne imaging and network data acquisition.",
+          "official_source_url": "https://defense-solutions.curtisswright.com/about/company/locations/newtown"
+        },
+        {"cage": "1MPM6", "official_site_label": "Curtiss-Wright Defense Solutions - Newtown", "city": "NEWTOWN", "state": "PA"},
+        {"cage": "1RZG3", "official_site_label": "Curtiss-Wright Defense Solutions - Portland", "city": "PORTLAND", "state": "OR"},
+        {"cage": "1BT62", "official_site_label": "Curtiss-Wright Defense Solutions - Santa Clarita", "city": "SANTA CLARITA", "state": "CA"},
+        {"cage": "03972", "official_site_label": "Curtiss-Wright Defense Solutions - Santa Clarita", "city": "SANTA CLARITA", "state": "CA"},
+        {"cage": "1SU81", "official_site_label": "Curtiss-Wright Defense Solutions - Tewksbury", "city": "TEWKSBURY", "state": "MA"},
+        {"cage": "08HA7", "official_site_label": "Curtiss-Wright Defense Solutions - Palmdale", "city": "PALMDALE", "state": "CA"},
+        {"cage": "95210", "official_site_label": "Curtiss-Wright Defense Solutions - East Farmingdale", "city": "FARMINGDALE", "state": "NY"}
+      ]
+    },
+    {
+      "parent_id": "TRANSDIGM_GROUP_INC",
+      "parent_name": "TRANSDIGM GROUP INCORPORATED",
+      "aliases": [
+        "TRANSDIGM",
+        "TRANSDIGM GROUP"
+      ],
+      "review_status": "analyst_seed_for_site_evaluation",
+      "as_of_date": "2026-09-02",
+      "scope_note": "This evaluation bridge establishes the current ownership of CAGE 19645 only; it is not a complete TransDigm facility universe.",
+      "sources": [
+        {
+          "source_type": "sec_subsidiary_disclosure",
+          "url": "https://www.sec.gov/Archives/edgar/data/1260221/000126022125000081/exhibit211tdg202510-k.htm",
+          "retrieved_at": "2026-09-02"
+        },
+        {
+          "source_type": "company_facility_and_capability_page",
+          "url": "https://www.ddc-web.com/en/about/overview/about-us",
+          "retrieved_at": "2026-09-02"
+        }
+      ],
+      "sites": [
+        {
+          "cage": "19645",
+          "official_site_label": "Data Device Corporation - Bohemia",
+          "city": "BOHEMIA",
+          "state": "NY",
+          "official_capability_summary": "High-reliability data bus and connectivity products, motion control, solid-state power controllers, motor drives, transformers and magnetics for aerospace, defense and space applications.",
+          "official_source_url": "https://www.ddc-web.com/en"
+        }
+      ]
+    },
+    {
+      "parent_id": "AEROCORE_LLC",
+      "parent_name": "AEROCORE LLC",
+      "aliases": [
+        "AEROCORE",
+        "AEROCORE LLC"
+      ],
+      "review_status": "analyst_seed_for_site_evaluation",
+      "as_of_date": "2026-09-03",
+      "sources": [
+        {
+          "source_type": "company_site_and_capability_page",
+          "url": "https://www.aerocore.us/Footer/About/about",
+          "retrieved_at": "2026-09-03"
+        },
+        {
+          "source_type": "company_cage_page",
+          "url": "https://www.aerocore.us/Footer/About/cage-code",
+          "retrieved_at": "2026-09-03"
+        }
+      ],
+      "sites": [
+        {
+          "cage": "01Z80",
+          "official_site_label": "AeroCore LLC - Fort Lauderdale",
+          "city": "FORT LAUDERDALE",
+          "state": "FL",
+          "official_capability_summary": "Aviation parts distribution and inventory support for aircraft owners, operators and maintenance organizations.",
+          "official_source_url": "https://www.aerocore.us/"
+        }
+      ]
+    },
+    {
+      "parent_id": "AEROCOREX_LLC",
+      "parent_name": "AEROCOREX LLC",
+      "aliases": [
+        "AEROCORE X",
+        "AEROCOREX",
+        "AEROKOOL X",
+        "AEROCORE GROUP"
+      ],
+      "review_status": "analyst_seed_for_site_evaluation",
+      "as_of_date": "2026-09-03",
+      "sources": [
+        {
+          "source_type": "company_capability_page",
+          "url": "https://aerocorex.com/engineering%2Fmanufacturing",
+          "retrieved_at": "2026-09-03"
+        },
+        {
+          "source_type": "company_capability_page",
+          "url": "https://aerocorex.com/heat-exchanger-recore",
+          "retrieved_at": "2026-09-03"
+        },
+        {
+          "source_type": "company_capability_page",
+          "url": "https://aerocorex.com/capabilities",
+          "retrieved_at": "2026-09-03"
+        }
+      ],
+      "sites": [
+        {
+          "cage": "8HLS2",
+          "official_site_label": "AeroCore X - Oklahoma City",
+          "city": "OKLAHOMA CITY",
+          "state": "OK",
+          "official_capability_summary": "Aerospace engineering, heat-exchanger MRO and re-core, component redesign, testing and small-quantity manufacturing for military and commercial aircraft.",
+          "official_source_url": "https://aerocorex.com/"
+        }
+      ]
+    }
+  ]
+}

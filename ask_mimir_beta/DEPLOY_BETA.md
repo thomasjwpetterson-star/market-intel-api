@@ -29,7 +29,7 @@ citation validation on at startup.
 
 Current release manifest:
 
-`ask_mimir/releases/ask-mimir-beta-20260903T061518Z-2dbe8c4bbdd0/runtime_manifest.json`
+`ask_mimir/releases/ask-mimir-beta-20260903T194432Z-025c940cbda3/runtime_manifest.json`
 
 ## Release check
 

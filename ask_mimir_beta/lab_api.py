@@ -1082,6 +1082,22 @@ def company_site_trajectory_cage(messages: List[ChatMessage]) -> str | None:
 def company_site_dossier_cage(messages: List[ChatMessage]) -> str | None:
     text = " ".join(message.content for message in messages)
     match = re.search(r"\bCAGE\s*[:#-]?\s*([A-Z0-9]{5})\b", text, re.IGNORECASE)
+    if not match and len(messages) > 1:
+        bare_cage = re.fullmatch(
+            r"\s*([A-Z0-9]{5})\s*",
+            str(messages[-1].content or ""),
+            re.IGNORECASE,
+        )
+        has_company_prompt = any(
+            re.search(
+                r"(?:defense\s+supplier|defence\s+supplier|supplier|company)\s*:",
+                str(message.content or ""),
+                re.IGNORECASE,
+            )
+            for message in messages[:-1]
+        )
+        if bare_cage and has_company_prompt:
+            match = bare_cage
     if not match:
         return None
     intent = text.lower()
@@ -2009,10 +2025,12 @@ def company_evidence_export(scope_type: str, scope_id: str, request: Request) ->
     if scope_type not in {"company_site", "company_parent"}:
         raise HTTPException(status_code=400, detail="Unsupported company scope type")
     try:
+        context = runtime.company_contexts.get_raw(scope_type, scope_id)
         payload = build_company_evidence_zip(
             scope_type,
             scope_id,
             runtime.company_contexts.context_dir,
+            context=context,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

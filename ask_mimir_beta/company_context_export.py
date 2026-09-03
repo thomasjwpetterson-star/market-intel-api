@@ -54,8 +54,9 @@ def build_company_evidence_zip(
     scope_type: str,
     scope_id: str,
     context_dir: Path = DEFAULT_CONTEXT_DIR,
+    context: Dict[str, Any] | None = None,
 ) -> bytes:
-    context = _load_context(scope_type, scope_id, context_dir)
+    context = context or _load_context(scope_type, scope_id, context_dir)
     product = context.get("product_and_part_evidence", {})
     relationships = context.get("reported_subcontract_relationships", {})
     locations = context.get("location_footprint", {})
