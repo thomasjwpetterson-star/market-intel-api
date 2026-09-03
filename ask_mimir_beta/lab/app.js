@@ -1024,7 +1024,7 @@ async function submitQuestion(text) {
       result.answer,
       result.answer_artifacts || {},
     );
-    releaseLabel.textContent = `${result.release_id} · ${result.model}`;
+    releaseLabel.textContent = "Evidence release current";
   } catch (error) {
     const message = `I could not complete that request. ${error.message}`;
     state.messages.push({ role: "assistant", content: message });
@@ -1061,7 +1061,7 @@ document.querySelectorAll("[data-template]").forEach((button) => {
 fetch("/api/health")
   .then((response) => response.json())
   .then((health) => {
-    releaseLabel.textContent = `${health.release_id} · FY${health.analysis_fy} release`;
+    releaseLabel.textContent = `FY${health.analysis_fy} evidence release`;
     if (health.mock_mode) releaseLabel.textContent += " · local evidence mock";
     else if (!health.openai_configured) releaseLabel.textContent += " · API key required";
     else if (!health.external_evidence_allowed) releaseLabel.textContent += " · outbound evidence locked";

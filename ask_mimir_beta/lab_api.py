@@ -89,6 +89,12 @@ Keep these measures distinct:
 - attributed platform value; and
 - shared-use NIIN exposure.
 
+Use PSC codes and descriptions as broad government product and service classifications when
+available. They can support technology-category summaries, comparable-award discovery and demand
+segmentation. A shared PSC alone does not establish equivalent capability, qualification, platform
+content or direct competition. Prefer exact NIIN, part, component, award-description and observed
+supplier-relationship evidence for specific claims.
+
 Never request or compare a metric without choosing its measure_type. Use prime_obligations for
 prime-contract action value and dla_procurement_value for DLA line economics.
 
@@ -1607,7 +1613,7 @@ class LabRuntime:
 
 
 runtime = LabRuntime()
-app = FastAPI(title="Ask Mimir Lab", docs_url="/api/docs", redoc_url=None)
+app = FastAPI(title="Ask Mimir", docs_url="/api/docs", redoc_url=None)
 app.mount("/assets", StaticFiles(directory=LAB_DIR / "assets"), name="assets")
 
 

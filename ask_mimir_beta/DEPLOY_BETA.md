@@ -1,7 +1,7 @@
-# Ask Mimir hidden beta deployment
+# Ask Mimir standalone deployment
 
-Deploy this directory as a separate Render web service. Do not add a link from
-the main Mimir website while the beta is being evaluated.
+Deploy this directory as a separate Render web service. It can remain unlinked
+from the main Mimir website while it is being evaluated.
 
 ## Render service
 

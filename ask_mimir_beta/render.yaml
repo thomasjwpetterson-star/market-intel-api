@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: ask-mimir-beta
+    name: ask-mimir
     runtime: python
     plan: 1c-2g
     rootDir: ask_mimir_beta

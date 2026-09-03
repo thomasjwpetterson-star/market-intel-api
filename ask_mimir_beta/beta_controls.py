@@ -25,7 +25,7 @@ class TierPolicy:
 
 
 TIER_POLICIES: Dict[str, TierPolicy] = {
-    "public": TierPolicy("public", "Public preview", 1, False),
+    "public": TierPolicy("public", "Guest access", 1, False),
     "free": TierPolicy("free", "Free", 3, False),
     "trial": TierPolicy("trial", "Trial", 20, False),
     "lite": TierPolicy("lite", "Lite", 20, False),

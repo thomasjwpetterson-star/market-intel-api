@@ -65,14 +65,17 @@ class PlatformContextStore:
             SELECT DISTINCT TRIM(platform_family) AS platform_family
             FROM read_parquet(?)
             WHERE platform_family IS NOT NULL AND TRIM(platform_family) <> ''
+              AND UPPER(TRIM(platform_family)) NOT IN ('UNMAPPED', 'REVIEW NEEDED')
             UNION
             SELECT DISTINCT TRIM(platform_family)
             FROM read_parquet(?)
             WHERE platform_family IS NOT NULL AND TRIM(platform_family) <> ''
+              AND UPPER(TRIM(platform_family)) NOT IN ('UNMAPPED', 'REVIEW NEEDED')
             UNION
             SELECT DISTINCT TRIM(platform_family)
             FROM read_parquet(?)
             WHERE platform_family IS NOT NULL AND TRIM(platform_family) <> ''
+              AND UPPER(TRIM(platform_family)) NOT IN ('UNMAPPED', 'REVIEW NEEDED')
             ORDER BY 1
             """,
             [
@@ -81,7 +84,14 @@ class PlatformContextStore:
                 str(self.paths["network"]),
             ],
         ).fetchall()
-        return [row[0] for row in rows]
+        catalog: Dict[str, str] = {}
+        for row in rows:
+            platform = row[0]
+            normalized = _normalize(platform)
+            current = catalog.get(normalized)
+            if current is None or (platform == platform.upper() and current != current.upper()):
+                catalog[normalized] = platform
+        return sorted(catalog.values(), key=_normalize)
 
     def search(self, query: str, limit: int = 15) -> Dict[str, Any]:
         clean = str(query or "").strip()
@@ -98,6 +108,10 @@ class PlatformContextStore:
             "VIRGINIA CLASS": "VIRGINIA CLASS (SSN 774)",
             "DDG 51": "DDG-51 ARLEIGH BURKE",
             "FORD CLASS": "FORD CLASS CARRIER",
+            "COLUMBIA": "COLUMBIA CLASS SSBN",
+            "COLUMBIA CLASS": "COLUMBIA CLASS SSBN",
+            "COLOMBIA": "COLUMBIA CLASS SSBN",
+            "COLOMBIA CLASS": "COLUMBIA CLASS SSBN",
         }
         if not exact and normalized in aliases and aliases[normalized] in self.platforms:
             exact = [aliases[normalized]]
