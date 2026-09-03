@@ -22,6 +22,55 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def manifest_fingerprint(manifest: Dict[str, Any]) -> str:
+    payload = json.dumps(
+        {
+            "release_id": manifest.get("release_id"),
+            "files": manifest.get("files", []),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def verified_release_is_ready(
+    runtime_root: Path,
+    manifest: Dict[str, Any],
+    marker_path: Path,
+) -> bool:
+    try:
+        marker = json.loads(marker_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if marker.get("manifest_fingerprint") != manifest_fingerprint(manifest):
+        return False
+    for entry in manifest.get("files", []):
+        destination = (runtime_root / entry["local_path"]).resolve()
+        if runtime_root.resolve() not in destination.parents:
+            return False
+        if not destination.exists() or destination.stat().st_size != int(entry["size"]):
+            return False
+    return True
+
+
+def write_verified_release_marker(
+    marker_path: Path,
+    manifest: Dict[str, Any],
+) -> None:
+    temporary = marker_path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "release_id": manifest["release_id"],
+                "manifest_fingerprint": manifest_fingerprint(manifest),
+            },
+            sort_keys=True,
+        )
+    )
+    temporary.replace(marker_path)
+
+
 def _download_verified(
     s3: Any,
     bucket: str,
@@ -73,8 +122,11 @@ def bootstrap() -> Dict[str, Any]:
     if not manifest.get("release_id") or not manifest.get("files"):
         raise RuntimeError("Ask Mimir runtime manifest is incomplete")
 
-    for entry in manifest["files"]:
-        _download_verified(s3, bucket, entry, runtime_root)
+    marker_path = runtime_root / ".verified-release.json"
+    if not verified_release_is_ready(runtime_root, manifest, marker_path):
+        for entry in manifest["files"]:
+            _download_verified(s3, bucket, entry, runtime_root)
+        write_verified_release_marker(marker_path, manifest)
 
     final_manifest = runtime_root / "runtime_manifest.json"
     manifest_path.replace(final_manifest)

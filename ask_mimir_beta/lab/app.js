@@ -7,6 +7,18 @@ const state = {
 };
 localStorage.setItem("askMimirTestSubject", state.subject);
 
+const API_ROOT = window.location.pathname.startsWith("/ask-mimir")
+  ? "/api/ask-mimir"
+  : "/api";
+
+function apiUrl(path) {
+  const value = String(path || "");
+  const suffix = value.startsWith("/api/")
+    ? value.slice(4)
+    : value.startsWith("/") ? value : `/${value}`;
+  return `${API_ROOT}${suffix}`;
+}
+
 const emptyState = document.getElementById("emptyState");
 const messagesEl = document.getElementById("messages");
 const form = document.getElementById("askForm");
@@ -16,30 +28,66 @@ const thinking = document.getElementById("thinking");
 const thinkingTitle = document.getElementById("thinkingTitle");
 const thinkingDetail = document.getElementById("thinkingDetail");
 const thinkingElapsed = document.getElementById("thinkingElapsed");
+const thinkingProgress = document.getElementById("thinkingProgress");
 const evidenceList = document.getElementById("evidenceList");
 const evidenceCount = document.getElementById("evidenceCount");
+const evidencePanel = document.getElementById("evidencePanel");
+const mobileEvidenceToggle = document.getElementById("mobileEvidenceToggle");
 const releaseLabel = document.getElementById("releaseLabel");
 const allowanceStatus = document.getElementById("allowanceStatus");
 const testTierControl = document.getElementById("testTierControl");
 const testTier = document.getElementById("testTier");
 let thinkingTimer = null;
+let thinkingStartedAt = 0;
+let currentThinkingStage = "";
+let currentThinkingDetail = "";
+
+const LONG_RUNNING_UPDATES = [
+  "Reviewing the strongest available evidence",
+  "Connecting suppliers, awards, items and programs",
+  "Checking figures against the evidence trail",
+  "Preparing links for further investigation",
+];
+
+mobileEvidenceToggle.addEventListener("click", () => {
+  const open = evidencePanel.classList.toggle("mobile-open");
+  mobileEvidenceToggle.setAttribute("aria-expanded", String(open));
+  mobileEvidenceToggle.textContent = open ? "Close" : "Evidence";
+});
 
 function startThinking(promptText = "") {
-  const started = Date.now();
+  thinkingStartedAt = Date.now();
+  currentThinkingStage = "Submitting the question";
+  currentThinkingDetail = "Waiting for the evidence workflow to begin";
   thinking.hidden = false;
-  thinkingTitle.textContent = "Submitting the question";
-  thinkingDetail.textContent = "Waiting for the evidence workflow to begin";
+  thinkingTitle.textContent = currentThinkingStage;
+  thinkingDetail.textContent = currentThinkingDetail;
+  thinkingProgress.style.width = "2%";
   const update = () => {
-    const elapsed = Math.floor((Date.now() - started) / 1000);
+    const elapsed = Math.floor((Date.now() - thinkingStartedAt) / 1000);
     thinkingElapsed.textContent = `${elapsed}s`;
+    if (elapsed >= 12) {
+      const index = Math.floor((elapsed - 12) / 10) % LONG_RUNNING_UPDATES.length;
+      thinkingDetail.textContent = LONG_RUNNING_UPDATES[index];
+    }
   };
   update();
   thinkingTimer = window.setInterval(update, 1000);
 }
 
-function updateThinking(stage, detail) {
-  thinkingTitle.textContent = stage || "Working through the evidence";
-  thinkingDetail.textContent = detail || "Checking the records supporting the answer";
+function updateThinking(stage, detail, percent) {
+  const nextStage = stage || "Working through the evidence";
+  const nextDetail = detail || "Checking the records supporting the answer";
+  if (nextStage !== currentThinkingStage || nextDetail !== currentThinkingDetail) {
+    currentThinkingStage = nextStage;
+    currentThinkingDetail = nextDetail;
+    thinkingTitle.textContent = nextStage;
+    thinkingDetail.textContent = nextDetail;
+    thinkingStartedAt = Date.now();
+  }
+  if (Number.isFinite(Number(percent))) {
+    thinkingProgress.style.width = `${Math.min(Math.max(Number(percent), 2), 100)}%`;
+  }
 }
 
 function betaHeaders() {
@@ -60,6 +108,7 @@ function stopThinking() {
   if (thinkingTimer) window.clearInterval(thinkingTimer);
   thinkingTimer = null;
   thinking.hidden = true;
+  thinkingProgress.style.width = "0%";
 }
 
 function escapeHtml(value) {
@@ -223,7 +272,7 @@ function addFeedbackControls(article, payload) {
     const reason = rating === "accurate"
       ? null
       : window.prompt("What should we review? A short note is enough.") || null;
-    const response = await fetch("/api/feedback", {
+    const response = await fetch(apiUrl("/feedback"), {
       method: "POST",
       headers: betaHeaders(),
       body: JSON.stringify({
@@ -239,6 +288,55 @@ function addFeedbackControls(article, payload) {
     }
   });
   article.appendChild(feedback);
+}
+
+function clarificationChoices(payload) {
+  const artifacts = payload?.answer_artifacts || {};
+  if (payload?.response_id === "company-site-disambiguation") {
+    const resolution = artifacts.company_resolution || {};
+    const offered = new Set(resolution.disambiguation_options || []);
+    return (resolution.matches || [])
+      .filter((row) => row.scope_type === "company_site" && offered.has(row.option_label))
+      .map((row) => ({
+        label: row.option_label,
+        prompt: `Tell me everything about this defense supplier site: CAGE ${row.scope_id}`,
+      }));
+  }
+  if (payload?.response_id === "award-opportunity-disambiguation") {
+    return (artifacts.record_resolution?.matches || []).map((row) => ({
+      label: row.option_label,
+      prompt: `Tell me everything about this ${row.record_type}: ${row.record_id}`,
+    }));
+  }
+  if (payload?.response_id === "item-disambiguation") {
+    return (artifacts.item_resolution?.matches || []).map((row) => ({
+      label: row.option_label,
+      prompt: `Tell me everything about this NIIN: ${row.niin}`,
+    }));
+  }
+  if (payload?.response_id === "platform-disambiguation") {
+    return (artifacts.platform_resolution?.matches || []).map((row) => ({
+      label: row.option_label,
+      prompt: `Tell me everything about this defense platform or program: ${row.platform_id}`,
+    }));
+  }
+  return [];
+}
+
+function addClarificationControls(article, payload) {
+  const choices = clarificationChoices(payload);
+  if (!choices.length) return;
+  const controls = document.createElement("div");
+  controls.className = "clarification-options";
+  controls.setAttribute("aria-label", "Choose a matching record");
+  choices.forEach((choice) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = choice.label;
+    button.addEventListener("click", () => submitQuestion(choice.prompt));
+    controls.appendChild(button);
+  });
+  article.appendChild(controls);
 }
 
 function compactResult(entry) {
@@ -432,7 +530,7 @@ function renderPlatformSupplyChainEvidence(entry) {
   if (state.entitlement?.can_download_evidence) {
     const download = document.createElement("a");
     download.className = "evidence-download";
-    download.href = `/api/evidence/platform-supply-chain/${encodeURIComponent(result.scope?.platform_id || "CH-53K")}.zip`;
+    download.href = apiUrl(`/evidence/platform-supply-chain/${encodeURIComponent(result.scope?.platform_id || "CH-53K")}.zip`);
     download.textContent = "Download CSV evidence pack";
     evidenceList.appendChild(download);
   }
@@ -571,7 +669,7 @@ function renderCompanyEvidence(entry, artifacts = {}) {
   if (pack.download_url) {
     const download = document.createElement("a");
     download.className = "evidence-download";
-    download.href = pack.download_url;
+    download.href = apiUrl(pack.download_url);
     download.textContent = "Download CSV evidence pack";
     evidenceList.appendChild(download);
   }
@@ -622,7 +720,7 @@ function renderUniversalPlatformEvidence(entry, artifacts = {}) {
   if (pack.download_url) {
     const download = document.createElement("a");
     download.className = "evidence-download";
-    download.href = pack.download_url;
+    download.href = apiUrl(pack.download_url);
     download.textContent = "Download CSV evidence pack";
     evidenceList.appendChild(download);
   }
@@ -685,7 +783,7 @@ function renderItemEvidence(entry, artifacts = {}) {
   if (pack.download_url) {
     const download = document.createElement("a");
     download.className = "evidence-download";
-    download.href = pack.download_url;
+    download.href = apiUrl(pack.download_url);
     download.textContent = "Download CSV evidence pack";
     evidenceList.appendChild(download);
   }
@@ -735,7 +833,7 @@ function renderAwardOpportunityEvidence(entry, artifacts = {}) {
   if (pack.download_url) {
     const download = document.createElement("a");
     download.className = "evidence-download";
-    download.href = pack.download_url;
+    download.href = apiUrl(pack.download_url);
     download.textContent = "Download CSV evidence pack";
     evidenceList.appendChild(download);
   }
@@ -821,7 +919,7 @@ function renderCompetitivePositionEvidence(entry, artifacts = {}) {
   if (pack.download_url) {
     const download = document.createElement("a");
     download.className = "evidence-download";
-    download.href = pack.download_url;
+    download.href = apiUrl(pack.download_url);
     download.textContent = "Download CSV evidence pack";
     evidenceList.appendChild(download);
   }
@@ -854,7 +952,7 @@ function renderCompetitorDiscoveryEvidence(entry, artifacts = {}) {
   if (pack.download_url) {
     const download = document.createElement("a");
     download.className = "evidence-download";
-    download.href = pack.download_url;
+    download.href = apiUrl(pack.download_url);
     download.textContent = "Download CSV evidence pack";
     evidenceList.appendChild(download);
   }
@@ -985,7 +1083,7 @@ async function submitQuestion(text) {
   startThinking(clean);
   sendButton.disabled = true;
   try {
-    const response = await fetch("/api/ask/jobs", {
+    const response = await fetch(apiUrl("/ask/jobs"), {
       method: "POST",
       headers: betaHeaders(),
       body: JSON.stringify({ messages: state.messages.slice(-12) }),
@@ -999,15 +1097,15 @@ async function submitQuestion(text) {
     updateAllowance(payload.access);
     let job = payload;
     while (!["completed", "failed"].includes(job.status)) {
-      updateThinking(job.stage, job.detail);
+      updateThinking(job.stage, job.detail, job.percent);
       await new Promise((resolve) => window.setTimeout(resolve, 700));
-      const statusResponse = await fetch(`/api/ask/jobs/${encodeURIComponent(job.request_id)}`, {
+      const statusResponse = await fetch(apiUrl(`/ask/jobs/${encodeURIComponent(job.request_id)}`), {
         headers: betaHeaders(),
       });
       job = await statusResponse.json();
       if (!statusResponse.ok) throw new Error(job.detail || "The Ask Mimir job could not be read.");
     }
-    updateThinking(job.stage, job.detail);
+    updateThinking(job.stage, job.detail, job.percent);
     if (job.status === "failed") throw new Error(job.error || job.detail);
     const result = job.result;
     updateAllowance(result.access);
@@ -1018,6 +1116,7 @@ async function submitQuestion(text) {
       result.tool_trace || [],
       result.answer_artifacts || {},
     );
+    addClarificationControls(article, result);
     addFeedbackControls(article, result);
     renderEvidence(
       result.tool_trace || [],
@@ -1058,17 +1157,17 @@ document.querySelectorAll("[data-template]").forEach((button) => {
   });
 });
 
-fetch("/api/health")
+fetch(apiUrl("/health"))
   .then((response) => response.json())
   .then((health) => {
-    releaseLabel.textContent = `FY${health.analysis_fy} evidence release`;
+    releaseLabel.textContent = "Current evidence release";
     if (health.mock_mode) releaseLabel.textContent += " · local evidence mock";
     else if (!health.openai_configured) releaseLabel.textContent += " · API key required";
     else if (!health.external_evidence_allowed) releaseLabel.textContent += " · outbound evidence locked";
   })
   .catch(() => { releaseLabel.textContent = "Metric release unavailable"; });
 
-fetch("/api/beta/policy", { headers: betaHeaders() })
+fetch(apiUrl("/beta/policy"), { headers: betaHeaders() })
   .then((response) => response.json())
   .then((policy) => {
     updateAllowance(policy.current_access);
@@ -1082,7 +1181,7 @@ fetch("/api/beta/policy", { headers: betaHeaders() })
 testTier.addEventListener("change", async () => {
   state.tier = testTier.value;
   localStorage.setItem("askMimirTestTier", state.tier);
-  const response = await fetch("/api/beta/policy", { headers: betaHeaders() });
+  const response = await fetch(apiUrl("/beta/policy"), { headers: betaHeaders() });
   if (response.ok) {
     const policy = await response.json();
     updateAllowance(policy.current_access);

@@ -16,6 +16,7 @@
           <span class="brand-name"><strong>MIMIR</strong><small>ADVISORS</small></span>
         </div>
         <div class="topbar-status">
+          <button id="mobileEvidenceToggle" class="mobile-evidence-toggle" type="button" aria-expanded="false" aria-controls="evidencePanel">Evidence</button>
           <div id="testTierControl" class="test-tier-control" hidden>
             <label for="testTier">Test tier</label>
             <select id="testTier">
@@ -30,7 +31,7 @@
           <div class="allowance-status" id="allowanceStatus">Loading allowance</div>
           <div class="release-status">
             <span class="status-dot"></span>
-            <span id="releaseLabel">Loading metric release</span>
+            <span id="releaseLabel">Loading evidence release</span>
           </div>
         </div>
       </header>
@@ -69,7 +70,11 @@
 
           <div id="thinking" class="thinking" hidden>
             <div class="thinking-mark"><img src="/assets/mimir-symbol.png" alt="" /></div>
-            <div><strong id="thinkingTitle">Resolving the question</strong><span id="thinkingDetail">Identifying the company, site and analytical scope</span></div>
+            <div class="thinking-copy">
+              <strong id="thinkingTitle">Resolving the question</strong>
+              <span id="thinkingDetail">Identifying the company, site and analytical scope</span>
+              <div class="thinking-track" aria-hidden="true"><i id="thinkingProgress"></i></div>
+            </div>
             <time id="thinkingElapsed">0s</time>
           </div>
 
@@ -79,7 +84,7 @@
           </form>
         </section>
 
-        <aside class="evidence-panel">
+        <aside id="evidencePanel" class="evidence-panel">
           <div class="evidence-header">
             <div>
               <p class="eyebrow">ANSWER SUPPORT</p>

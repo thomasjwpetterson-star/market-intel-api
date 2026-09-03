@@ -40,3 +40,5 @@ services:
         sync: false
       - key: ASK_MIMIR_ANONYMOUS_SALT
         generateValue: true
+      - key: ASK_MIMIR_TRUSTED_PROXY_SECRET
+        sync: false
