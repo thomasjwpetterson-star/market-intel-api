@@ -544,6 +544,12 @@ evidence lanes distinct: net prime obligations on directly mapped awards; Mimir-
 subcontract value; attributed DLA procurement value for single-platform NIINs; and shared-use NIIN
 exposure, which is associated with this platform but not allocated to it.
 
+Lead with the time-bounded totals supplied in financial_totals. For direct-award recipient tables,
+normally omit rows below 0.5% of the platform's observed prime obligations unless a small row provides
+uniquely material technical or program evidence. Do not let incidental travel, meeting or administrative
+awards distract from the principal procurement picture. State the FY2021-FY2026 year-to-date window for
+reported subcontract values as well as prime and DLA figures.
+
 Do not call every direct government recipient a prime contractor for the whole platform. Distinguish
 the platform prime or system integrator when the evidence establishes it, other direct award
 recipients, reported subcontractor sites and DLA item suppliers. A reported subcontract description
@@ -562,10 +568,36 @@ https://www.mimiradvisors.org/dashboard?view=AWARDS&award=<CONTRACT_ID>, the pla
 https://www.mimiradvisors.org/dashboard?view=PLATFORM&platform=<PLATFORM>, and NSNs to
 https://www.mimiradvisors.org/dashboard?view=PARTS&nsn=<NSN>. Use supplied public opportunity URLs.
 Never expose internal keys, hashes, file paths or ingestion identifiers.
+Never print a calculation version, release name, compatibility statement, internal pack status or phrases
+such as "the dossier supplied". Do not tell the customer that a curated layer was or was not supplied.
+Describe the strongest supported evidence directly, without generic defensive disclaimers or lists of data
+the pack does not contain.
 
 State the completed fiscal-year window for financial comparisons and identify the partial year
 separately. Finish with Evidence used and mention the downloadable evidence pack. Keep the standard
 answer below 1,300 words.
+
+When using web research, apply this source hierarchy:
+{WEB_SOURCE_POLICY_PROMPT}
+""".strip()
+
+ARTICLE_ANALYSIS_PROMPT = f"""
+You are Ask Mimir, an evidence-led US defense-market research assistant. The user has supplied a news
+article URL or pasted article text and wants the implications for the defense industrial base.
+
+Retrieve and verify the article with web search where a URL or identifiable publication is supplied. Then
+use the available Mimir tools to resolve every material company, CAGE site, award, opportunity, platform,
+program, NSN or NIIN needed for the analysis. Separate: what the article reports; what Mimir's observed
+contracting and supply-chain records show; and the resulting analytical implications. Focus on affected
+programs, supplier sites, capabilities, incumbent positions, capacity, competition and procurement signals.
+Time-bound every financial figure and do not add prime, subcontract and DLA measures together.
+
+Use authoritative government and first-party sources for factual confirmation, with reputable defense
+trade reporting as secondary evidence. Hyperlink CAGE sites, awards, platforms and NSNs to their relevant
+Mimir dashboard views, and link public web claims to their sources. Never expose internal keys, hashes,
+release names, calculation versions, file paths or ingestion identifiers. Avoid generic caveats; state only
+limitations that materially change the conclusion. End with concise implications and an Evidence used
+section. Keep the standard answer below 1,300 words.
 
 When using web research, apply this source hierarchy:
 {WEB_SOURCE_POLICY_PROMPT}
@@ -985,6 +1017,15 @@ def is_supported_platform_supply_chain_request(messages: List[ChatMessage]) -> b
         )
     )
     return has_platform and has_supply_chain_intent
+
+
+def is_article_analysis_request(messages: List[ChatMessage]) -> bool:
+    text = "\n".join(message.content for message in messages if message.role == "user")
+    lowered = text.lower()
+    return bool(re.search(r"https?://\S+", text)) or (
+        any(term in lowered for term in ("analyse this", "analyze this", "news article", "article text"))
+        and len(text) >= 80
+    )
 
 
 def explicit_platform_query(
@@ -1670,6 +1711,8 @@ app.mount("/assets", StaticFiles(directory=LAB_DIR / "assets"), name="assets")
 
 
 def workflow_for_request(request: AskRequest) -> str:
+    if is_article_analysis_request(request.messages):
+        return "news_article_implications"
     if is_eaton_competitor_request(request.messages):
         return "competitor_discovery"
     if is_ground_vehicle_power_position_request(request.messages):
@@ -2045,7 +2088,7 @@ def platform_supply_chain_evidence_export(platform_id: str, request: Request) ->
 def universal_platform_evidence_export(platform_id: str, request: Request) -> StreamingResponse:
     require_evidence_download(request)
     try:
-        context = runtime.platform_contexts.get(platform_id)
+        context = runtime.platform_contexts.get_export_context(platform_id, limit=5000)
         payload = build_platform_context_zip(context)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -2272,6 +2315,92 @@ def generate_answer(
             "usage_by_response": [],
             "estimated_cost": None,
         }
+    if is_article_analysis_request(request.messages):
+        emit_progress(progress, "Reading the article", "Verifying the report and resolving the entities it names", 24)
+        article_tools = [*TOOLS, {"type": "web_search", "search_context_size": "medium"}]
+        response = client.responses.create(
+            model=runtime.model,
+            instructions=ARTICLE_ANALYSIS_PROMPT,
+            input=input_items,
+            tools=article_tools,
+            tool_choice="auto",
+            parallel_tool_calls=False,
+            reasoning={"effort": runtime.reasoning_effort},
+            max_output_tokens=min(runtime.max_output_tokens, 10000),
+            store=False,
+        )
+        call_usages: List[Dict[str, Any] | None] = [_usage_dict(response)]
+        trace: List[Dict[str, Any]] = []
+        evidence_records_remaining = runtime.max_evidence_records
+        for _ in range(8):
+            calls = [item for item in response.output if item.type == "function_call"]
+            if not calls:
+                break
+            input_items.extend(response.output)
+            outputs = []
+            for call in calls:
+                arguments = json.loads(call.arguments)
+                emit_progress(
+                    progress,
+                    "Connecting Mimir evidence",
+                    f"Checking {call.name.replace('_', ' ')}",
+                    min(42 + len(trace) * 6, 76),
+                )
+                try:
+                    if call.name == "get_metric_evidence":
+                        if evidence_records_remaining <= 0:
+                            raise ValueError("the per-answer supporting-record limit has been reached")
+                        arguments["limit"] = min(
+                            int(arguments.get("limit", 10)), evidence_records_remaining
+                        )
+                    tool_result = runtime.call_tool(call.name, arguments)
+                    if call.name == "get_metric_evidence":
+                        evidence_records_remaining -= len(tool_result.get("records", []))
+                    trace.append({"tool": call.name, "arguments": arguments, "result": tool_result})
+                    output = json.dumps(tool_result, default=str)
+                except Exception as exc:
+                    error = {"error": str(exc), "tool": call.name, "arguments": arguments}
+                    trace.append(error)
+                    output = json.dumps(error)
+                outputs.append({"type": "function_call_output", "call_id": call.call_id, "output": output})
+            input_items.extend(outputs)
+            emit_progress(progress, "Assessing the implications", "Reconciling the article with Mimir's records", 80)
+            response = client.responses.create(
+                model=runtime.model,
+                instructions=ARTICLE_ANALYSIS_PROMPT,
+                input=input_items,
+                tools=article_tools,
+                tool_choice="auto",
+                parallel_tool_calls=False,
+                reasoning={"effort": runtime.reasoning_effort},
+                max_output_tokens=min(runtime.max_output_tokens, 10000),
+                store=False,
+            )
+            call_usages.append(_usage_dict(response))
+        answer_text = complete_response_text(response)
+        usage = aggregate_usage(call_usages)
+        result = {
+            "answer": answer_text,
+            "response_id": response.id,
+            "model": runtime.model,
+            "release_id": runtime.store.manifest["release_id"],
+            "answer_artifacts": {"article_analysis": True},
+            "tool_trace": trace,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "response_calls": len(call_usages),
+            "usage": usage,
+            "usage_by_response": call_usages,
+            "estimated_cost": estimate_usage_cost(runtime.model, usage),
+        }
+        runtime.write_audit_record(
+            {
+                "run_id": str(uuid.uuid4()),
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "request_messages": [message.model_dump() for message in request.messages],
+                **result,
+            }
+        )
+        return result
     if is_eaton_competitor_request(request.messages):
         arguments = {"target_id": "eaton_aerospace", "limit": 15}
         emit_progress(

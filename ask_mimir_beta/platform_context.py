@@ -16,6 +16,8 @@ DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
 COMPLETED_FISCAL_YEARS = tuple(range(2021, 2026))
+OBSERVATION_WINDOW = "FY2021-FY2026 year to date"
+EVIDENCE_EXPORT_ROW_LIMIT = 5000
 
 
 def _rows(cursor: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
@@ -175,6 +177,19 @@ class PlatformContextStore:
         opportunities = self._opportunities(resolved)
         top_awards = self._top_awards(resolved)
         component_categories = self._component_categories(resolved)
+        financial_totals = self._financial_totals(resolved, annual)
+        prime_total = abs(float(financial_totals["net_prime_obligations_usd"] or 0))
+        subcontract_total = abs(float(financial_totals["mimir_modelled_reported_subcontract_value_usd"] or 0))
+        for row in direct_recipients:
+            row["share_of_platform_prime_obligations_pct"] = (
+                abs(float(row.get("net_prime_obligations_usd") or 0)) / prime_total * 100
+                if prime_total else 0
+            )
+        for row in reported_suppliers:
+            row["share_of_reported_subcontract_value_pct"] = (
+                abs(float(row.get("mimir_modelled_reported_subcontract_value_usd") or 0))
+                / subcontract_total * 100 if subcontract_total else 0
+            )
         fingerprint_input = {
             "platform": resolved,
             "annual": annual,
@@ -193,6 +208,7 @@ class PlatformContextStore:
                 "display_name": resolved,
                 "completed_fiscal_years": list(COMPLETED_FISCAL_YEARS),
                 "partial_fiscal_year": 2026,
+                "observation_window": OBSERVATION_WINDOW,
             },
             "annual_activity": annual,
             "direct_award_recipients": direct_recipients,
@@ -202,12 +218,18 @@ class PlatformContextStore:
             "top_prime_awards": top_awards,
             "current_opportunities": opportunities,
             "coverage": {
-                "direct_award_recipient_sites": len(direct_recipients),
-                "reported_supplier_sites": len(reported_suppliers),
+                "direct_award_recipient_sites": self._available_count(direct_recipients),
+                "direct_award_recipient_sites_loaded": len(direct_recipients),
+                "reported_supplier_sites": self._available_count(reported_suppliers),
+                "reported_supplier_sites_loaded": len(reported_suppliers),
                 "associated_niins": items["associated_niin_count"],
+                "item_relationships_loaded": len(items["top_items"]),
+                "prime_awards": self._available_count(top_awards),
+                "prime_awards_loaded": len(top_awards),
                 "open_or_loaded_opportunities": len(opportunities),
                 "component_proof_status": "CURATED_WHEN_AVAILABLE_OTHERWISE_REPORTED_DESCRIPTION_OR_ITEM_REFERENCE",
             },
+            "financial_totals": financial_totals,
             "methodology": {
                 "direct_award_lane": "Prime obligations on awards mapped directly to this platform or program.",
                 "reported_supplier_lane": "Mimir-modelled reported subcontract value on mapped prime awards; kept separate from prime obligations.",
@@ -222,6 +244,30 @@ class PlatformContextStore:
         }
         self._cache[resolved] = context
         return context
+
+    @staticmethod
+    def _available_count(rows: List[Dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        return int(rows[0].get("total_available") or len(rows))
+
+    def get_export_context(
+        self, platform_id: str, limit: int = EVIDENCE_EXPORT_ROW_LIMIT
+    ) -> Dict[str, Any]:
+        """Build expanded evidence only when a customer requests the download."""
+        base = self.get(platform_id)
+        resolved = base["scope"]["platform_id"]
+        row_limit = min(max(int(limit), 1), EVIDENCE_EXPORT_ROW_LIMIT)
+        expanded = {
+            **base,
+            "direct_award_recipients": self._direct_award_recipients(resolved, row_limit),
+            "reported_supplier_sites": self._reported_supplier_sites(resolved, row_limit),
+            "reported_component_categories": self._component_categories(resolved, row_limit),
+            "item_and_component_evidence": self._item_evidence(resolved, row_limit),
+            "top_prime_awards": self._top_awards(resolved, row_limit),
+            "export_row_limit_per_table": row_limit,
+        }
+        return expanded
 
     def answer_projection(self, platform_id: str) -> Dict[str, Any]:
         context = self.get(platform_id)
@@ -242,8 +288,18 @@ class PlatformContextStore:
                 "sample_prime_contract_ids": (row.get("sample_prime_contract_ids") or [])[:4],
                 "reported_descriptions": (row.get("reported_descriptions") or [])[:4],
             })
+        customer_context = {
+            key: value
+            for key, value in context.items()
+            if key not in {"calculation_version", "generated_at", "evidence_fingerprint"}
+        }
+        customer_context["coverage"] = {
+            key: value
+            for key, value in context["coverage"].items()
+            if key != "component_proof_status"
+        }
         return {
-            **context,
+            **customer_context,
             "direct_award_recipients": direct,
             "reported_supplier_sites": suppliers,
             "reported_component_categories": context["reported_component_categories"][:12],
@@ -302,7 +358,7 @@ class PlatformContextStore:
             },
         }
 
-    def _direct_award_recipients(self, platform: str) -> List[Dict[str, Any]]:
+    def _direct_award_recipients(self, platform: str, limit: int = 100) -> List[Dict[str, Any]]:
         return _rows(
             self.connection.execute(
                 """
@@ -326,21 +382,22 @@ class PlatformContextStore:
                     MAX(SUBSTR(t.action_date,1,10)) AS latest_action_date,
                     LIST_SLICE(LIST_DISTINCT(LIST(t.contract_id) FILTER (WHERE t.contract_id IS NOT NULL)),1,8) AS sample_contract_ids,
                     LIST_SLICE(LIST_DISTINCT(LIST(t.base_award_description) FILTER (WHERE t.base_award_description IS NOT NULL)),1,6) AS sample_award_descriptions,
-                    LIST_SLICE(LIST_DISTINCT(LIST(CONCAT_WS(', ', NULLIF(t.place_of_performance_city,''), NULLIF(t.place_of_performance_state,''), NULLIF(t.place_of_performance_country,''))) FILTER (WHERE NULLIF(t.place_of_performance_city,'') IS NOT NULL)),1,8) AS observed_places_of_performance
+                    LIST_SLICE(LIST_DISTINCT(LIST(CONCAT_WS(', ', NULLIF(t.place_of_performance_city,''), NULLIF(t.place_of_performance_state,''), NULLIF(t.place_of_performance_country,''))) FILTER (WHERE NULLIF(t.place_of_performance_city,'') IS NOT NULL)),1,8) AS observed_places_of_performance,
+                    COUNT(*) OVER () AS total_available
                 FROM read_parquet(?) t
                 LEFT JOIN locations l ON UPPER(TRIM(t.vendor_cage)) = l.cage
                 WHERE t.source_system = 'USA_SPENDING'
-                  AND t.year BETWEEN 2021 AND 2025
+                  AND t.year BETWEEN 2021 AND 2026
                   AND t.platform_family = ?
                 GROUP BY t.vendor_cage
                 ORDER BY ABS(net_prime_obligations_usd) DESC
-                LIMIT 100
+                LIMIT ?
                 """,
-                [str(self.paths["locations"]), str(self.paths["transactions"]), platform],
+                [str(self.paths["locations"]), str(self.paths["transactions"]), platform, limit],
             )
         )
 
-    def _reported_supplier_sites(self, platform: str) -> List[Dict[str, Any]]:
+    def _reported_supplier_sites(self, platform: str, limit: int = 250) -> List[Dict[str, Any]]:
         return _rows(
             self.connection.execute(
                 """
@@ -365,23 +422,24 @@ class PlatformContextStore:
                     LIST_SLICE(LIST_DISTINCT(LIST(n.prime_name) FILTER (WHERE n.prime_name IS NOT NULL)),1,8) AS reported_prime_names,
                     LIST_SLICE(LIST_DISTINCT(LIST(n.prime_cage) FILTER (WHERE n.prime_cage IS NOT NULL)),1,8) AS reported_prime_cages,
                     LIST_SLICE(LIST_DISTINCT(LIST(n.contract_id) FILTER (WHERE n.contract_id IS NOT NULL)),1,8) AS sample_prime_contract_ids,
-                    LIST_SLICE(LIST_DISTINCT(LIST(n.description) FILTER (WHERE n.description IS NOT NULL)),1,8) AS reported_descriptions
+                    LIST_SLICE(LIST_DISTINCT(LIST(n.description) FILTER (WHERE n.description IS NOT NULL)),1,8) AS reported_descriptions,
+                    COUNT(*) OVER () AS total_available
                 FROM read_parquet(?) n
                 LEFT JOIN locations l ON UPPER(TRIM(n.sub_cage)) = l.cage
                 WHERE n.platform_family = ?
-                  AND n.year BETWEEN 2021 AND 2025
+                  AND n.year BETWEEN 2021 AND 2026
                   AND n.sub_cage IS NOT NULL
                   AND UPPER(TRIM(n.sub_cage)) NOT IN ('','UNKNOWN','UNKNO')
                 GROUP BY n.sub_cage
                 HAVING SUM(COALESCE(n.subaward_value,0)) <> 0
                 ORDER BY ABS(mimir_modelled_reported_subcontract_value_usd) DESC
-                LIMIT 250
+                LIMIT ?
                 """,
-                [str(self.paths["locations"]), str(self.paths["network"]), platform],
+                [str(self.paths["locations"]), str(self.paths["network"]), platform, limit],
             )
         )
 
-    def _component_categories(self, platform: str) -> List[Dict[str, Any]]:
+    def _component_categories(self, platform: str, limit: int = 100) -> List[Dict[str, Any]]:
         return _rows(
             self.connection.execute(
                 """
@@ -391,20 +449,21 @@ class PlatformContextStore:
                     COUNT(*) AS selected_report_count,
                     COUNT(DISTINCT sub_cage) AS supplier_site_count,
                     LIST_SLICE(LIST_DISTINCT(LIST(sub_name) FILTER (WHERE sub_name IS NOT NULL)),1,8) AS suppliers,
-                    LIST_SLICE(LIST_DISTINCT(LIST(contract_id) FILTER (WHERE contract_id IS NOT NULL)),1,6) AS sample_prime_contract_ids
+                    LIST_SLICE(LIST_DISTINCT(LIST(contract_id) FILTER (WHERE contract_id IS NOT NULL)),1,6) AS sample_prime_contract_ids,
+                    COUNT(*) OVER () AS total_available
                 FROM read_parquet(?)
-                WHERE platform_family = ? AND year BETWEEN 2021 AND 2025
+                WHERE platform_family = ? AND year BETWEEN 2021 AND 2026
                   AND description IS NOT NULL AND TRIM(description) <> ''
                 GROUP BY description
                 HAVING SUM(COALESCE(subaward_value,0)) <> 0
                 ORDER BY ABS(mimir_modelled_reported_subcontract_value_usd) DESC
-                LIMIT 100
+                LIMIT ?
                 """,
-                [str(self.paths["network"]), platform],
+                [str(self.paths["network"]), platform, limit],
             )
         )
 
-    def _item_evidence(self, platform: str) -> Dict[str, Any]:
+    def _item_evidence(self, platform: str, limit: int = 100) -> Dict[str, Any]:
         associated_count = self.connection.execute(
             "SELECT COUNT(DISTINCT LPAD(TRIM(niin),9,'0')) FROM read_parquet(?) WHERE platform_family = ?",
             [str(self.paths["platform_bom"]), platform],
@@ -423,7 +482,7 @@ class PlatformContextStore:
                            SUM(COALESCE(shared_use_exposure_amount,0)) AS shared_use_niin_exposure_usd,
                            MAX(SUBSTR(action_date,1,10)) AS latest_observed_date
                     FROM read_parquet(?)
-                    WHERE source_system='DLA' AND year BETWEEN 2021 AND 2025
+                    WHERE source_system='DLA' AND year BETWEEN 2021 AND 2026
                       AND (platform_family=? OR LIST_CONTAINS(STR_SPLIT(COALESCE(platform_families,''),' | '),?))
                     GROUP BY 1
                 )
@@ -437,12 +496,12 @@ class PlatformContextStore:
                 LEFT JOIN platform_value v ON b.niin=v.niin
                 ORDER BY ABS(COALESCE(v.attributed_dla_procurement_value_usd,0))
                        + ABS(COALESCE(v.shared_use_niin_exposure_usd,0)) DESC
-                LIMIT 100
+                LIMIT ?
                 """,
                 [
                     str(self.paths["platform_bom"]), platform,
                     str(self.paths["transactions"]), platform, platform,
-                    str(self.paths["item_profiles"]),
+                    str(self.paths["item_profiles"]), limit,
                 ],
             )
         )
@@ -461,7 +520,7 @@ class PlatformContextStore:
                        MAX(platform_families) AS platform_families,
                        COUNT(DISTINCT contract_id) AS contract_count
                 FROM read_parquet(?)
-                WHERE year BETWEEN 2021 AND 2025
+                WHERE year BETWEEN 2021 AND 2026
                   AND (platform_family = ? OR LIST_CONTAINS(STR_SPLIT(COALESCE(platform_families,''),' | '),?))
                 GROUP BY niin,cage
                 HAVING SUM(total_revenue) <> 0
@@ -474,11 +533,11 @@ class PlatformContextStore:
                 FROM supplier_values s
                 LEFT JOIN locations l ON UPPER(TRIM(s.cage))=l.cage
                 ORDER BY ABS(attributed_dla_procurement_value_usd) + ABS(shared_use_niin_exposure_usd) DESC
-                LIMIT 100
+                LIMIT ?
                 """,
                 [
                     str(self.paths["item_suppliers"]), platform, platform,
-                    str(self.paths["locations"]),
+                    str(self.paths["locations"]), limit,
                 ],
             )
         )
@@ -489,7 +548,7 @@ class PlatformContextStore:
             "financial_treatment": "Single-platform attributed value and shared-use NIIN exposure remain separate.",
         }
 
-    def _top_awards(self, platform: str) -> List[Dict[str, Any]]:
+    def _top_awards(self, platform: str, limit: int = 100) -> List[Dict[str, Any]]:
         return _rows(
             self.connection.execute(
                 """
@@ -498,17 +557,40 @@ class PlatformContextStore:
                        COUNT(*) AS action_count, MIN(SUBSTR(action_date,1,10)) AS first_action_date,
                        MAX(SUBSTR(action_date,1,10)) AS latest_action_date,
                        MAX(place_of_performance_city) AS place_of_performance_city,
-                       MAX(place_of_performance_state) AS place_of_performance_state
+                       MAX(place_of_performance_state) AS place_of_performance_state,
+                       COUNT(*) OVER () AS total_available
                 FROM read_parquet(?)
-                WHERE source_system='USA_SPENDING' AND year BETWEEN 2021 AND 2025
+                WHERE source_system='USA_SPENDING' AND year BETWEEN 2021 AND 2026
                   AND platform_family = ?
                 GROUP BY contract_id,vendor_name,vendor_cage,base_award_description
                 ORDER BY ABS(net_prime_obligations_usd) DESC
-                LIMIT 100
+                LIMIT ?
                 """,
-                [str(self.paths["transactions"]), platform],
+                [str(self.paths["transactions"]), platform, limit],
             )
         )
+
+    def _financial_totals(self, platform: str, annual: Dict[str, Any]) -> Dict[str, Any]:
+        totals = {
+            "observation_window": OBSERVATION_WINDOW,
+            "net_prime_obligations_usd": 0.0,
+            "attributed_dla_procurement_value_usd": 0.0,
+            "shared_use_niin_exposure_usd": 0.0,
+        }
+        for row in annual.get("records", []):
+            totals["net_prime_obligations_usd"] += float(row.get("net_prime_obligations_usd") or 0)
+            totals["attributed_dla_procurement_value_usd"] += float(row.get("attributed_dla_procurement_value_usd") or 0)
+            totals["shared_use_niin_exposure_usd"] += float(row.get("shared_use_niin_exposure_usd") or 0)
+        subcontract_total = self.connection.execute(
+            """
+            SELECT SUM(COALESCE(n.subaward_value, 0))
+            FROM read_parquet(?) n
+            WHERE n.year BETWEEN 2021 AND 2026 AND n.platform_family = ?
+            """,
+            [str(self.paths["network"]), platform],
+        ).fetchone()[0]
+        totals["mimir_modelled_reported_subcontract_value_usd"] = float(subcontract_total or 0)
+        return totals
 
     def _opportunities(self, platform: str) -> List[Dict[str, Any]]:
         pattern = f"%{platform}%"

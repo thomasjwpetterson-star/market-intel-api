@@ -150,10 +150,6 @@ class CompanyOpportunityStore:
                     ),
                     "selected_action_count": row.get("selected_action_count"),
                     "latest_observed_date": row.get("latest_observed_date"),
-                    "source_report_ids": row.get("source_report_ids", []),
-                    "source_report_last_modified_dates": row.get(
-                        "source_report_last_modified_dates", []
-                    ),
                     "matching_descriptions": [
                         str(description)[:140]
                         for description in row.get("matching_descriptions", [])[:1]

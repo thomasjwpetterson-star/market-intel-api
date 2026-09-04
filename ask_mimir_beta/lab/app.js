@@ -343,11 +343,10 @@ function compactResult(entry) {
   if (entry.error) return entry;
   const result = entry.result || {};
   if (entry.tool === "search_metric_scopes") {
-    return { release_id: result.release_id, matches: result.matches };
+    return { matches: result.matches };
   }
   if (entry.tool === "get_metric_evidence") {
     return {
-      release_id: result.release_id,
       scope_type: result.scope_type,
       scope_id: result.scope_id,
       measure_type: result.measure_type,
@@ -425,11 +424,10 @@ function candidateEvidenceCard(candidate, horizonLabel) {
     const section = document.createElement("section");
     section.className = "evidence-section";
     section.innerHTML = `<h4>Reported subcontract relationships</h4>${relationships.map((row) => {
-      const reports = (row.source_report_ids || []).map((id) => `<span class="evidence-tag">Report ${escapeHtml(id)}</span>`).join("");
       return `<div class="evidence-row">
         <strong>${escapeHtml(row.incumbent_name || row.incumbent_cage || "Supplier")}</strong>
         ${escapeHtml((row.prime_names || []).join(", "))} · ${formatMoney(row.mimir_modelled_subcontract_value_usd)} Mimir-modelled reported value · ${escapeHtml(row.latest_observed_date || "date unavailable")}<br />
-        ${escapeHtml((row.matching_descriptions || []).join(" · "))}<br />${reports}
+        ${escapeHtml((row.matching_descriptions || []).join(" · "))}
       </div>`;
     }).join("")}`;
     body.appendChild(section);
@@ -681,7 +679,7 @@ function renderCompanyEvidence(entry, artifacts = {}) {
   details.innerHTML = `
     <summary>
       <span class="tool-name">Company evidence scope</span>
-      <span class="tool-meta">${escapeHtml(scope.scope_name || scope.scope_id || "Company")} · ${escapeHtml(scope.observation_window || "Current evidence release")}</span>
+      <span class="tool-meta">${escapeHtml(scope.scope_name || scope.scope_id || "Company")} · ${escapeHtml(scope.observation_window || "Observation window not stated")}</span>
     </summary>
     <div class="evidence-detail"><section class="evidence-section">
       ${sites.map((site) => `<div class="evidence-row">
@@ -1231,7 +1229,7 @@ async function submitQuestion(text) {
       result.answer,
       result.answer_artifacts || {},
     );
-    releaseLabel.textContent = "Evidence release current";
+    releaseLabel.textContent = "Evidence ready";
   } catch (error) {
     const message = `I could not complete that request. ${error.message}`;
     state.messages.push({ role: "assistant", content: message });
@@ -1268,12 +1266,12 @@ document.querySelectorAll("[data-template]").forEach((button) => {
 fetch(apiUrl("/health"))
   .then((response) => response.json())
   .then((health) => {
-    releaseLabel.textContent = "Current evidence release";
-    if (health.mock_mode) releaseLabel.textContent += " · local evidence mock";
+    releaseLabel.textContent = "Evidence ready";
+    if (health.mock_mode) releaseLabel.textContent += " · local test mode";
     else if (!health.openai_configured) releaseLabel.textContent += " · API key required";
     else if (!health.external_evidence_allowed) releaseLabel.textContent += " · outbound evidence locked";
   })
-  .catch(() => { releaseLabel.textContent = "Metric release unavailable"; });
+  .catch(() => { releaseLabel.textContent = "Evidence temporarily unavailable"; });
 
 fetch(apiUrl("/beta/policy"), { headers: betaHeaders() })
   .then((response) => response.json())
