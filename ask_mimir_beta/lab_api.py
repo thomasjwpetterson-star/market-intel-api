@@ -585,19 +585,59 @@ ARTICLE_ANALYSIS_PROMPT = f"""
 You are Ask Mimir, an evidence-led US defense-market research assistant. The user has supplied a news
 article URL or pasted article text and wants the implications for the defense industrial base.
 
-Retrieve and verify the article with web search where a URL or identifiable publication is supplied. Then
-use the available Mimir tools to resolve every material company, CAGE site, award, opportunity, platform,
-program, NSN or NIIN needed for the analysis. Separate: what the article reports; what Mimir's observed
-contracting and supply-chain records show; and the resulting analytical implications. Focus on affected
-programs, supplier sites, capabilities, incumbent positions, capacity, competition and procurement signals.
-Time-bound every financial figure and do not add prime, subcontract and DLA measures together.
+You have one Mimir evidence-retrieval round. Request all independent tools you need in parallel. First verify
+the article, then prioritize the exact award, named company and affected site. Only
+retrieve a platform, item, competitor or budget context when the article makes it material to the question.
+For company-directory searches, query the company or legal name alone and use company_site scope; do not mix
+the company name with a product, capability or spelled-out location. Use the returned city/state to select the
+relevant CAGE, then retrieve all relevant matching site contexts in parallel when the location has more than
+one plausible CAGE. A company search with exactly one site match includes its article_implications context in
+the search result, so do not request that context again. When the article concerns an acquired business or a
+site whose registered entity may retain a predecessor name, search both the current company and the supported
+predecessor or acquired-business name in the same round. Treat that name as a retrieval alias, not automatic
+proof that every historical site relationship belongs to the current parent.
+
+Separate what the article reports, what Mimir's observed contracting and supply-chain records show, and the
+resulting implications. Treat a contract described by the source as awarded or in production as a firm award.
+Call an amount a ceiling, maximum or potential value only when the source does. Do not repeatedly discount an
+announced award because its obligation schedule, option structure or delivery profile is not yet public, and
+do not replace the announced contract value with an observed-obligations figure.
+For award date, instrument type, amount, quantity, system power, place of performance and completion date,
+prefer the exact official announcement and the awardee's exact announcement. If sources conflict, report only
+the details on which those exact sources agree or explain the conflict briefly. Never import more specific
+terms, quantities or dates from a different contract or program. Every such web-sourced detail must carry an
+inline Markdown link to the exact supporting page; omit an unsupported detail rather than citing a generic
+contracts index or naming an unlinked source.
+
+Name a work or production location only when the article, an official award notice, a first-party source or a
+Mimir award place-of-performance field supports it. A registered CAGE location or nearby company site does not
+prove that award work occurs there. If the evidence only identifies the closest observed site, say that briefly
+without presenting it as the production location.
+
+When Mimir resolves an affected site, prioritize its observed incoming prime-customer routes and reported
+downstream subcontract relationships. Name the companies, descriptions, time period and value where available,
+while keeping them separate from suppliers explicitly tied to the new award. Omit empty evidence lanes.
+Do not add generic lists of possible supplier categories, analogous programs or similar applications. Do not
+include budget lines or FYDP material unless the user explicitly asks for budget or future-program analysis.
+Do not compare the new award with earlier programs, alternative suppliers or competing systems unless the
+article's main implication cannot be explained without that comparison.
+Keep the implications to the three to five consequences most directly supported by the award and site evidence.
+Do not add generic technology constraints, mission limitations or acquisition caveats merely to balance the
+answer. If observed site relationships are available, present the most recent useful examples compactly and
+say only that they are existing site relationships rather than suppliers confirmed on the new award.
+
+Do not narrate internal lookup failures, dataset lag, missing curated records, acquisition-system speculation,
+or lists of fields that are not available. State a limitation only when it changes the conclusion. Time-bound
+every Mimir financial figure and do not add prime, subcontract and DLA measures together.
 
 Use authoritative government and first-party sources for factual confirmation, with reputable defense
-trade reporting as secondary evidence. Hyperlink CAGE sites, awards, platforms and NSNs to their relevant
-Mimir dashboard views, and link public web claims to their sources. Never expose internal keys, hashes,
-release names, calculation versions, file paths or ingestion identifiers. Avoid generic caveats; state only
-limitations that materially change the conclusion. End with concise implications and an Evidence used
-section. Keep the standard answer below 1,300 words.
+trade reporting as secondary evidence. Use only www.mimiradvisors.org for Mimir links: CAGE sites at
+https://www.mimiradvisors.org/dashboard?view=COMPANY&cage=<CAGE>, awards at
+https://www.mimiradvisors.org/dashboard?view=AWARDS&award=<CONTRACT_ID>, platforms at
+https://www.mimiradvisors.org/dashboard?view=PLATFORM&platform=<PLATFORM>, and NSNs at
+https://www.mimiradvisors.org/dashboard?view=PARTS&nsn=<NSN>. Link public web claims to their sources.
+Never expose internal keys, hashes, release names, calculation versions, file paths or ingestion identifiers.
+End with concise implications and an Evidence used section. Keep the standard answer below 800 words.
 
 When using web research, apply this source hierarchy:
 {WEB_SOURCE_POLICY_PROMPT}
@@ -777,6 +817,7 @@ TOOLS = [
                         "full_dossier",
                         "supply_chain",
                         "opportunity_discovery",
+                        "article_implications",
                     ],
                 },
             },
@@ -2415,22 +2456,22 @@ def generate_answer(
         }
     if is_article_analysis_request(request.messages):
         emit_progress(progress, "Reading the article", "Verifying the report and resolving the entities it names", 24)
-        article_tools = [*TOOLS, {"type": "web_search", "search_context_size": "medium"}]
+        article_tools = [*TOOLS, {"type": "web_search", "search_context_size": "low"}]
         response = client.responses.create(
             model=runtime.model,
             instructions=ARTICLE_ANALYSIS_PROMPT,
             input=input_items,
             tools=article_tools,
             tool_choice="auto",
-            parallel_tool_calls=False,
+            parallel_tool_calls=True,
             reasoning={"effort": runtime.reasoning_effort},
-            max_output_tokens=min(runtime.max_output_tokens, 10000),
+            max_output_tokens=min(runtime.max_output_tokens, 6000),
             store=False,
         )
         call_usages: List[Dict[str, Any] | None] = [_usage_dict(response)]
         trace: List[Dict[str, Any]] = []
         evidence_records_remaining = runtime.max_evidence_records
-        for _ in range(8):
+        for _ in range(1):
             calls = [item for item in response.output if item.type == "function_call"]
             if not calls:
                 break
@@ -2452,6 +2493,23 @@ def generate_answer(
                             int(arguments.get("limit", 10)), evidence_records_remaining
                         )
                     tool_result = runtime.call_tool(call.name, arguments)
+                    if call.name == "search_company_contexts":
+                        matches = tool_result.get("matches", [])
+                        if (
+                            len(matches) == 1
+                            and matches[0].get("scope_type") == "company_site"
+                        ):
+                            tool_result = {
+                                **tool_result,
+                                "resolved_context": runtime.call_tool(
+                                    "get_company_context",
+                                    {
+                                        "scope_type": "company_site",
+                                        "scope_id": matches[0]["scope_id"],
+                                        "focus": "article_implications",
+                                    },
+                                ),
+                            }
                     if call.name == "get_metric_evidence":
                         evidence_records_remaining -= len(tool_result.get("records", []))
                     trace.append({"tool": call.name, "arguments": arguments, "result": tool_result})
@@ -2469,9 +2527,9 @@ def generate_answer(
                 input=input_items,
                 tools=article_tools,
                 tool_choice="auto",
-                parallel_tool_calls=False,
+                parallel_tool_calls=True,
                 reasoning={"effort": runtime.reasoning_effort},
-                max_output_tokens=min(runtime.max_output_tokens, 10000),
+                max_output_tokens=min(runtime.max_output_tokens, 6000),
                 store=False,
             )
             call_usages.append(_usage_dict(response))
@@ -2482,7 +2540,7 @@ def generate_answer(
             input_items,
             call_usages,
             progress,
-            min(runtime.max_output_tokens, 10000),
+            min(runtime.max_output_tokens, 6000),
         )
         usage = aggregate_usage(call_usages)
         result = {

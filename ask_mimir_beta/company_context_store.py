@@ -21,6 +21,15 @@ DEFAULT_DATA_ROOT = Path(
 
 
 FOCUS_SECTIONS = {
+    "article_implications": [
+        "identity",
+        "observed_financials",
+        "annual_activity",
+        "capability_evidence",
+        "reported_subcontract_relationships",
+        "top_awards",
+        "evidence_index",
+    ],
     "profile": [
         "identity",
         "observed_financials",
