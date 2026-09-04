@@ -1171,14 +1171,28 @@ def company_site_dossier_cage(messages: List[ChatMessage]) -> str | None:
 
 def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     text = str(messages[-1].content or "").strip()
-    match = re.search(
+    patterns = (
         r"(?:defense\s+supplier|defence\s+supplier|supplier|company)\s*:\s*([^\n?]+)",
-        text,
-        re.IGNORECASE,
+        r"what\s+does\s+(.+?)\s+supply(?:\s|\?|$)",
+        r"which\s+(?:defense|defence)?\s*platforms\s+does\s+(.+?)\s+support(?:\s|\?|$)",
+        r"what\s+does\s+(.+?)(?:'s|’s)\s+.+?\s+facility\s+manufacture(?:\s|\?|$)",
+        r"which\s+programs\s+does\s+(.+?)(?:'s|’s)\s+.+?\s+(?:site|facility)\s+support(?:\s|\?|$)",
+        r"who\s+are\s+(.+?)(?:'s|’s)\s+largest\s+(?:defense|defence)\s+customers",
+        r"which\s+prime\s+contractors\s+buy\s+from\s+(.+?)(?:\?|$)",
+        r"what\s+are\s+(.+?)(?:'s|’s)\s+largest\s+visible\s+(?:defense|defence)\s+positions",
+        r"how\s+has\s+(.+?)(?:'s|’s)\s+(?:defense|defence)\s+activity\s+changed",
+        r"which\s+cage\s+codes\s+are\s+associated\s+with\s+(.+?)(?:\?|$)",
+        r"which\s+facilities\s+belong\s+to\s+(.+?)(?:\s+and\s+what|\?|$)",
+        r"what\s+evidence\s+do\s+you\s+have\s+that\s+(.+?)\s+supplies\s+",
+        r"(?:give\s+me\s+)?(?:a\s+)?concise\s+(?:defense|defence)[-\s]+market\s+profile\s+of\s+(.+?)(?:\?|$)",
+    )
+    match = next(
+        (candidate for pattern in patterns if (candidate := re.search(pattern, text, re.IGNORECASE))),
+        None,
     )
     if not match:
         return None
-    query = match.group(1).strip().rstrip(".")
+    query = match.group(1).strip().rstrip(".?")
     if re.match(r"^CAGE\b", query, re.IGNORECASE) or (
         re.fullmatch(r"[A-Z0-9]{5}", query, re.IGNORECASE)
         and any(character.isdigit() for character in query)
@@ -2228,8 +2242,67 @@ def complete_response_text(response: Any) -> str:
         )
     answer = str(getattr(response, "output_text", "") or "").strip()
     if not answer:
+        fragments: List[str] = []
+        for item in getattr(response, "output", []) or []:
+            if getattr(item, "type", None) != "message":
+                continue
+            for content in getattr(item, "content", []) or []:
+                if getattr(content, "type", None) != "output_text":
+                    continue
+                fragment = str(getattr(content, "text", "") or "").strip()
+                if fragment:
+                    fragments.append(fragment)
+        answer = "\n\n".join(fragments).strip()
+    if not answer:
         raise HTTPException(status_code=502, detail="The model returned no answer.")
     return answer
+
+
+def finalize_response(
+    client: OpenAI,
+    response: Any,
+    instructions: str,
+    input_items: List[Any],
+    call_usages: List[Dict[str, Any] | None],
+    progress: Callable[[str, str, int], None] | None,
+    max_output_tokens: int,
+) -> tuple[Any, str]:
+    """Return model text, forcing a no-tools synthesis when evidence gathering ends silently."""
+    try:
+        return response, complete_response_text(response)
+    except HTTPException as exc:
+        if exc.status_code != 502 or exc.detail != "The model returned no answer.":
+            raise
+
+    emit_progress(
+        progress,
+        "Writing the answer",
+        "Synthesizing the evidence already gathered",
+        88,
+    )
+    synthesis_input = list(input_items)
+    output = list(getattr(response, "output", []) or [])
+    if not any(getattr(item, "type", None) == "function_call" for item in output):
+        synthesis_input.extend(output)
+    synthesis_input.append(
+        {
+            "role": "user",
+            "content": (
+                "Return the final answer now using the evidence already gathered. "
+                "Do not request or call another tool. Answer the user's original question directly."
+            ),
+        }
+    )
+    final_response = client.responses.create(
+        model=runtime.model,
+        instructions=instructions,
+        input=synthesis_input,
+        reasoning={"effort": runtime.reasoning_effort},
+        max_output_tokens=max_output_tokens,
+        store=False,
+    )
+    call_usages.append(_usage_dict(final_response))
+    return final_response, complete_response_text(final_response)
 
 
 def generate_answer(
@@ -2245,6 +2318,7 @@ def generate_answer(
     if runtime.mock_mode:
         return runtime.mock_answer(request)
     started = time.perf_counter()
+    resolved_company_scope: Dict[str, Any] | None = None
     company_query = explicit_company_name_query(request.messages)
     if company_query:
         search_arguments = {
@@ -2258,7 +2332,31 @@ def generate_answer(
             "arguments": search_arguments,
             "result": resolution,
         }
-        if resolution.get("requires_disambiguation"):
+        matches = list(resolution.get("matches", []))
+        latest_question = str(request.messages[-1].content or "").upper()
+        location_matches = [
+            row
+            for row in matches
+            if row.get("scope_type") == "company_site"
+            and any(
+                str(value or "").strip().upper() in latest_question
+                for value in (row.get("city"), row.get("state"))
+                if len(str(value or "").strip()) >= 3
+            )
+        ]
+        site_specific = bool(
+            re.search(r"\b(?:SITE|FACILITY|LOCATION|CAGE)\b", latest_question)
+        )
+        parent_matches = [
+            row for row in matches if row.get("scope_type") == "company_parent"
+        ]
+        if len(location_matches) == 1:
+            resolved_company_scope = location_matches[0]
+        elif not site_specific and len(parent_matches) == 1:
+            resolved_company_scope = parent_matches[0]
+        elif len(matches) == 1:
+            resolved_company_scope = matches[0]
+        elif resolution.get("requires_disambiguation"):
             options = "\n".join(
                 f"- {option}"
                 for option in resolution.get("disambiguation_options", [])
@@ -2377,7 +2475,15 @@ def generate_answer(
                 store=False,
             )
             call_usages.append(_usage_dict(response))
-        answer_text = complete_response_text(response)
+        response, answer_text = finalize_response(
+            client,
+            response,
+            ARTICLE_ANALYSIS_PROMPT,
+            input_items,
+            call_usages,
+            progress,
+            min(runtime.max_output_tokens, 10000),
+        )
         usage = aggregate_usage(call_usages)
         result = {
             "answer": answer_text,
@@ -2586,8 +2692,17 @@ def generate_answer(
                 max_output_tokens=min(runtime.max_output_tokens, 9000),
                 store=False,
             )
-            answer_text = complete_response_text(response)
-            usage = aggregate_usage([_usage_dict(response)])
+            call_usages = [_usage_dict(response)]
+            response, answer_text = finalize_response(
+                client,
+                response,
+                AWARD_OPPORTUNITY_PROMPT,
+                input_items,
+                call_usages,
+                progress,
+                min(runtime.max_output_tokens, 9000),
+            )
+            usage = aggregate_usage(call_usages)
             record_type = resolved["record_type"]
             record_id = resolved["record_id"]
             result = {
@@ -2604,9 +2719,9 @@ def generate_answer(
                 },
                 "tool_trace": trace,
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-                "response_calls": 1,
+                "response_calls": len(call_usages),
                 "usage": usage,
-                "usage_by_response": [_usage_dict(response)],
+                "usage_by_response": call_usages,
                 "estimated_cost": estimate_usage_cost(runtime.model, usage),
             }
             runtime.write_audit_record(
@@ -2674,8 +2789,17 @@ def generate_answer(
                 max_output_tokens=min(runtime.max_output_tokens, 9000),
                 store=False,
             )
-            answer_text = complete_response_text(response)
-            usage = aggregate_usage([_usage_dict(response)])
+            call_usages = [_usage_dict(response)]
+            response, answer_text = finalize_response(
+                client,
+                response,
+                UNIVERSAL_PLATFORM_PROMPT,
+                input_items,
+                call_usages,
+                progress,
+                min(runtime.max_output_tokens, 10000),
+            )
+            usage = aggregate_usage(call_usages)
             result = {
                 "answer": answer_text,
                 "response_id": response.id,
@@ -2690,9 +2814,9 @@ def generate_answer(
                 },
                 "tool_trace": trace,
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-                "response_calls": 1,
+                "response_calls": len(call_usages),
                 "usage": usage,
-                "usage_by_response": [_usage_dict(response)],
+                "usage_by_response": call_usages,
                 "estimated_cost": estimate_usage_cost(runtime.model, usage),
             }
             runtime.write_audit_record(
@@ -2864,10 +2988,20 @@ def generate_answer(
         return result
 
     dossier_cage = company_site_dossier_cage(request.messages)
-    if dossier_cage:
+    dossier_scope_type = (
+        str(resolved_company_scope.get("scope_type"))
+        if resolved_company_scope
+        else "company_site"
+    )
+    dossier_scope_id = (
+        str(resolved_company_scope.get("scope_id"))
+        if resolved_company_scope
+        else dossier_cage
+    )
+    if dossier_scope_id:
         arguments = {
-            "scope_type": "company_site",
-            "scope_id": dossier_cage,
+            "scope_type": dossier_scope_type,
+            "scope_id": dossier_scope_id,
             "focus": "full_dossier",
         }
         try:
@@ -2901,8 +3035,17 @@ def generate_answer(
                 max_output_tokens=min(runtime.max_output_tokens, 9000),
                 store=False,
             )
-            answer_text = complete_response_text(response)
-            usage = aggregate_usage([_usage_dict(response)])
+            call_usages = [_usage_dict(response)]
+            response, answer_text = finalize_response(
+                client,
+                response,
+                COMPANY_SITE_DOSSIER_PROMPT,
+                input_items,
+                call_usages,
+                progress,
+                min(runtime.max_output_tokens, 9000),
+            )
+            usage = aggregate_usage(call_usages)
             result = {
                 "answer": answer_text,
                 "response_id": response.id,
@@ -2913,15 +3056,15 @@ def generate_answer(
                     "evidence_pack": {
                         "format": "zip",
                         "download_url": (
-                            f"/api/evidence/company/company_site/{dossier_cage}.zip"
+                            f"/api/evidence/company/{dossier_scope_type}/{dossier_scope_id}.zip"
                         ),
                     },
                 },
                 "tool_trace": trace,
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-                "response_calls": 1,
+                "response_calls": len(call_usages),
                 "usage": usage,
-                "usage_by_response": [_usage_dict(response)],
+                "usage_by_response": call_usages,
                 "estimated_cost": estimate_usage_cost(runtime.model, usage),
             }
             runtime.write_audit_record(
@@ -3130,7 +3273,15 @@ def generate_answer(
             store=False,
         )
         call_usages.append(_usage_dict(response))
-    answer_text = complete_response_text(response)
+    response, answer_text = finalize_response(
+        client,
+        response,
+        SYSTEM_PROMPT,
+        input_items,
+        call_usages,
+        progress,
+        runtime.max_output_tokens,
+    )
     total_usage = aggregate_usage(call_usages)
     result = {
         "answer": answer_text,

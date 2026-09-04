@@ -154,6 +154,13 @@ class PlatformContextStore:
             "TRIDENT II": "TRIDENT II MISSILE",
             "TOMAHAWK": "TACTOM (TACTICAL TOMAHAWK)",
             "ABRAMS": "M1 ABRAMS",
+            "VIRGINIA CLASS": "VIRGINIA CLASS (SSN 774)",
+            "DDG 51": "DDG-51 ARLEIGH BURKE",
+            "FORD CLASS": "FORD CLASS CARRIER",
+            "COLUMBIA": "COLUMBIA CLASS SSBN",
+            "COLUMBIA CLASS": "COLUMBIA CLASS SSBN",
+            "COLOMBIA": "COLUMBIA CLASS SSBN",
+            "COLOMBIA CLASS": "COLUMBIA CLASS SSBN",
         }
         for alias, platform in aliases.items():
             if f" {alias} " in normalized and platform in self.platforms:
