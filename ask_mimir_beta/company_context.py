@@ -28,7 +28,7 @@ DEFAULT_FYDP_BUDGET_FILE = (
     / "dod_fydp_budget_facts.parquet"
 )
 DEFAULT_OUTPUT_DIR = ROOT / "validation-output" / "company-context"
-DEFAULT_FISCAL_YEARS = [2021, 2022, 2023, 2024, 2025]
+DEFAULT_FISCAL_YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
 
 
 SOURCE_FILES = {
@@ -218,13 +218,17 @@ class CompanyContextBuilder:
             "context_id": context_id,
             "evidence_fingerprint": evidence_fingerprint,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "calculation_version": "mimir-company-context-2026-09-v4",
+            "calculation_version": "mimir-company-context-2026-09-v5",
             "scope": {
                 "scope_type": scope_type,
                 "scope_id": scope_id,
                 "scope_name": scope_name,
                 "fiscal_years": years,
-                "observation_window": f"FY{years[0]}-FY{years[-1]}",
+                "observation_window": (
+                    f"FY{years[0]}-FY{years[-1]} year to date"
+                    if years[-1] == 2026
+                    else f"FY{years[0]}-FY{years[-1]}"
+                ),
             },
             "identity": {
                 "sites": sites,
@@ -947,6 +951,9 @@ class CompanyContextBuilder:
                     MAX(s.psc_description) AS psc_description,
                     SUM(t.spend_amount) AS net_value_usd,
                     COUNT(DISTINCT t.award_key) AS distinct_awards,
+                    MIN(t.year) AS first_fiscal_year,
+                    MAX(t.year) AS latest_fiscal_year,
+                    MIN(TRY_CAST(t.action_date AS DATE)) AS first_action_date,
                     MAX(TRY_CAST(t.action_date AS DATE)) AS latest_action_date
                 FROM read_parquet(?) t
                 LEFT JOIN (
@@ -977,7 +984,9 @@ class CompanyContextBuilder:
                     naics_code,
                     MAX(naics_description) AS naics_description,
                     SUM(total_spend) AS net_value_usd,
-                    SUM(contract_count) AS action_count
+                    SUM(contract_count) AS action_count,
+                    MIN(year) AS first_fiscal_year,
+                    MAX(year) AS latest_fiscal_year
                 FROM read_parquet(?)
                 WHERE cage_code IN ({placeholders(cages)})
                   AND year IN ({placeholders(years)})
@@ -999,6 +1008,9 @@ class CompanyContextBuilder:
                     CAST(NULL AS VARCHAR) AS psc_description,
                     SUM(spend_amount) AS net_value_usd,
                     COUNT(DISTINCT award_key) AS distinct_awards,
+                    MIN(year) AS first_fiscal_year,
+                    MAX(year) AS latest_fiscal_year,
+                    MIN(TRY_CAST(action_date AS DATE)) AS first_action_date,
                     MAX(TRY_CAST(action_date AS DATE)) AS latest_action_date
                 FROM read_parquet(?)
                 WHERE vendor_cage IN ({placeholders(cages)})
@@ -1018,7 +1030,9 @@ class CompanyContextBuilder:
                     naics_code,
                     CAST(NULL AS VARCHAR) AS naics_description,
                     SUM(spend_amount) AS net_value_usd,
-                    COUNT(DISTINCT transaction_key) AS action_count
+                    COUNT(DISTINCT transaction_key) AS action_count,
+                    MIN(year) AS first_fiscal_year,
+                    MAX(year) AS latest_fiscal_year
                 FROM read_parquet(?)
                 WHERE vendor_cage IN ({placeholders(cages)})
                   AND year IN ({placeholders(years)})

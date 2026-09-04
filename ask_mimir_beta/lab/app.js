@@ -712,6 +712,34 @@ function renderCompanyEvidence(entry, artifacts = {}) {
       </section></div>`;
     evidenceList.appendChild(awardDetails);
   }
+
+  const primeCustomerRoutes = result.reported_subcontract_relationships?.as_subcontractor_to || [];
+  if (primeCustomerRoutes.length) {
+    const routeDetails = document.createElement("details");
+    routeDetails.className = "evidence-card";
+    routeDetails.innerHTML = `
+      <summary>
+        <span class="tool-name">Prime customer routes</span>
+        <span class="tool-meta">${primeCustomerRoutes.length} reported relationships in this answer context</span>
+      </summary>
+      <div class="evidence-detail"><section class="evidence-section">
+        ${primeCustomerRoutes.slice(0, 12).map((route) => {
+          const primeLabel = route.prime_name || route.reported_prime_parent || route.prime_cage || "Prime customer";
+          const title = route.prime_cage
+            ? dashboardLink(`${primeLabel} · CAGE ${route.prime_cage}`, "COMPANY", "cage", route.prime_cage)
+            : escapeHtml(primeLabel);
+          const location = [route.registered_city, route.registered_state].filter(Boolean).join(", ");
+          const period = [route.first_observed_date, route.latest_observed_date].filter(Boolean).join(" to ");
+          return `<div class="evidence-row">
+            <strong>${title}</strong>
+            ${location ? `${escapeHtml(location)}<br />` : ""}
+            ${formatMoney(route.mimir_modelled_subcontract_value_usd)} Mimir-modelled reported subcontract value
+            ${period ? ` · ${escapeHtml(period)}` : ""}
+          </div>`;
+        }).join("")}
+      </section></div>`;
+    evidenceList.appendChild(routeDetails);
+  }
 }
 
 function renderUniversalPlatformEvidence(entry, artifacts = {}) {
@@ -1160,6 +1188,21 @@ async function submitQuestion(text) {
       throw new Error(detail || "Ask Mimir could not complete the request.");
     }
     updateAllowance(payload.access);
+    if (window.location.pathname.startsWith("/ask-mimir")) {
+      void fetch("/api/activity", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event_type: "ask_mimir_query",
+          event_label: clean.slice(0, 500),
+          metadata: {
+            workflow: payload.workflow || null,
+            request_id: payload.request_id || null,
+          },
+        }),
+        keepalive: true,
+      }).catch(() => {});
+    }
     let job = payload;
     while (!["completed", "failed"].includes(job.status)) {
       updateThinking(job.stage, job.detail, job.percent);

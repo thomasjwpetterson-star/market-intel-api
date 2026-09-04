@@ -409,6 +409,10 @@ do not write phrases such as "not company revenue", "not site revenue", "non-add
 equivalent disclaimer. Apply the supplied NIIN-level financial grain and shared-use platform treatment silently;
 only explain those calculation rules if the user asks about methodology.
 
+Every PSC or NAICS value must also be time-bounded. State the fiscal-year window beside a grouped capability
+summary, or use the first and latest fiscal years supplied on an individual row. Never present an observed
+value without identifying the period over which it was calculated.
+
 Include registered locations for material prime-customer CAGEs where supplied, while keeping them distinct
 from prime-award place of performance and reported subaward location. Use source-reported descriptions as
 the evidence for capability wording. For product coverage, lead with all associated NIINs and part-number
@@ -1328,7 +1332,7 @@ class LabRuntime:
             os.getenv("ASK_MIMIR_ALLOW_EXTERNAL_EVIDENCE", "0") == "1"
         )
         self.reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT", "medium")
-        self.max_output_tokens = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "6000"))
+        self.max_output_tokens = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "10000"))
         self.max_evidence_records = min(
             max(int(os.getenv("ASK_MIMIR_MAX_EVIDENCE_RECORDS", "20")), 5),
             100,
@@ -1704,6 +1708,14 @@ def access_from_request(request: Request) -> AccessContext:
             tier=requested_tier,
             authenticated=requested_tier != "public",
         )
+    if requested_subject and requested_tier != "public":
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Signed-in Ask Mimir access could not be verified. The website and "
+                "Ask Mimir proxy configuration do not match."
+            ),
+        )
 
     client_host = request.client.host if request.client else "unknown"
     user_agent = request.headers.get("user-agent", "unknown")
@@ -1938,6 +1950,7 @@ def health() -> Dict[str, Any]:
         "mock_mode": runtime.mock_mode,
         "release_binding_id": runtime.release_guard.release_binding_id,
         "test_identities_enabled": os.getenv("ASK_MIMIR_ALLOW_TEST_IDENTITIES", "0") == "1",
+        "trusted_proxy_configured": bool(os.getenv("ASK_MIMIR_TRUSTED_PROXY_SECRET")),
     }
 
 
@@ -2159,6 +2172,23 @@ def emit_progress(
         callback(stage, detail, percent)
 
 
+def complete_response_text(response: Any) -> str:
+    if getattr(response, "status", None) == "incomplete":
+        details = getattr(response, "incomplete_details", None)
+        reason = getattr(details, "reason", None) or "response limit"
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "The model reached its response limit before completing the answer "
+                f"({reason}). Your allowance has been restored; please retry."
+            ),
+        )
+    answer = str(getattr(response, "output_text", "") or "").strip()
+    if not answer:
+        raise HTTPException(status_code=502, detail="The model returned no answer.")
+    return answer
+
+
 def generate_answer(
     request: AskRequest,
     progress: Callable[[str, str, int], None] | None = None,
@@ -2277,14 +2307,13 @@ def generate_answer(
             instructions=COMPETITOR_DISCOVERY_PROMPT,
             input=input_items,
             reasoning={"effort": runtime.reasoning_effort},
-            max_output_tokens=min(runtime.max_output_tokens, 4600),
+            max_output_tokens=min(runtime.max_output_tokens, 9000),
             store=False,
         )
-        if not response.output_text:
-            raise HTTPException(status_code=502, detail="The model returned no answer.")
+        answer_text = complete_response_text(response)
         usage = aggregate_usage([_usage_dict(response)])
         result = {
-            "answer": response.output_text,
+            "answer": answer_text,
             "response_id": response.id,
             "model": runtime.model,
             "release_id": runtime.store.manifest["release_id"],
@@ -2346,14 +2375,13 @@ def generate_answer(
             instructions=COMPETITIVE_POSITION_PROMPT,
             input=input_items,
             reasoning={"effort": runtime.reasoning_effort},
-            max_output_tokens=min(runtime.max_output_tokens, 4200),
+            max_output_tokens=min(runtime.max_output_tokens, 9000),
             store=False,
         )
-        if not response.output_text:
-            raise HTTPException(status_code=502, detail="The model returned no answer.")
+        answer_text = complete_response_text(response)
         usage = aggregate_usage([_usage_dict(response)])
         result = {
-            "answer": response.output_text,
+            "answer": answer_text,
             "response_id": response.id,
             "model": runtime.model,
             "release_id": runtime.store.manifest["release_id"],
@@ -2426,16 +2454,15 @@ def generate_answer(
                 instructions=AWARD_OPPORTUNITY_PROMPT,
                 input=input_items,
                 reasoning={"effort": runtime.reasoning_effort},
-                max_output_tokens=min(runtime.max_output_tokens, 4200),
+                max_output_tokens=min(runtime.max_output_tokens, 9000),
                 store=False,
             )
-            if not response.output_text:
-                raise HTTPException(status_code=502, detail="The model returned no answer.")
+            answer_text = complete_response_text(response)
             usage = aggregate_usage([_usage_dict(response)])
             record_type = resolved["record_type"]
             record_id = resolved["record_id"]
             result = {
-                "answer": response.output_text,
+                "answer": answer_text,
                 "response_id": response.id,
                 "model": runtime.model,
                 "release_id": runtime.store.manifest["release_id"],
@@ -2515,14 +2542,13 @@ def generate_answer(
                 instructions=ITEM_DOSSIER_PROMPT,
                 input=input_items,
                 reasoning={"effort": runtime.reasoning_effort},
-                max_output_tokens=min(runtime.max_output_tokens, 3800),
+                max_output_tokens=min(runtime.max_output_tokens, 9000),
                 store=False,
             )
-            if not response.output_text:
-                raise HTTPException(status_code=502, detail="The model returned no answer.")
+            answer_text = complete_response_text(response)
             usage = aggregate_usage([_usage_dict(response)])
             result = {
-                "answer": response.output_text,
+                "answer": answer_text,
                 "response_id": response.id,
                 "model": runtime.model,
                 "release_id": runtime.store.manifest["release_id"],
@@ -2614,14 +2640,13 @@ def generate_answer(
                 input=input_items,
                 tools=[{"type": "web_search", "search_context_size": "low"}],
                 reasoning={"effort": runtime.reasoning_effort},
-                max_output_tokens=min(runtime.max_output_tokens, 6000),
+                max_output_tokens=min(runtime.max_output_tokens, 10000),
                 store=False,
             )
-            if not response.output_text:
-                raise HTTPException(status_code=502, detail="The model returned no answer.")
+            answer_text = complete_response_text(response)
             usage = aggregate_usage([_usage_dict(response)])
             result = {
-                "answer": response.output_text,
+                "answer": answer_text,
                 "response_id": response.id,
                 "model": runtime.model,
                 "release_id": runtime.store.manifest["release_id"],
@@ -2679,14 +2704,13 @@ def generate_answer(
             instructions=PLATFORM_SUPPLY_CHAIN_PROMPT,
             input=input_items,
             reasoning={"effort": runtime.reasoning_effort},
-            max_output_tokens=min(runtime.max_output_tokens, 3800),
+            max_output_tokens=min(runtime.max_output_tokens, 9000),
             store=False,
         )
-        if not response.output_text:
-            raise HTTPException(status_code=502, detail="The model returned no answer.")
+        answer_text = complete_response_text(response)
         usage = aggregate_usage([_usage_dict(response)])
         result = {
-            "answer": response.output_text,
+            "answer": answer_text,
             "response_id": response.id,
             "model": runtime.model,
             "release_id": runtime.store.manifest["release_id"],
@@ -2745,14 +2769,13 @@ def generate_answer(
                 instructions=COMPANY_SITE_DOSSIER_PROMPT,
                 input=input_items,
                 reasoning={"effort": runtime.reasoning_effort},
-                max_output_tokens=min(runtime.max_output_tokens, 3800),
+                max_output_tokens=min(runtime.max_output_tokens, 9000),
                 store=False,
             )
-            if not response.output_text:
-                raise HTTPException(status_code=502, detail="The model returned no answer.")
+            answer_text = complete_response_text(response)
             usage = aggregate_usage([_usage_dict(response)])
             result = {
-                "answer": response.output_text,
+                "answer": answer_text,
                 "response_id": response.id,
                 "model": runtime.model,
                 "release_id": runtime.store.manifest["release_id"],
@@ -2819,14 +2842,13 @@ def generate_answer(
                 instructions=COMPANY_SITE_TRAJECTORY_PROMPT,
                 input=input_items,
                 reasoning={"effort": runtime.reasoning_effort},
-                max_output_tokens=min(runtime.max_output_tokens, 3200),
+                max_output_tokens=min(runtime.max_output_tokens, 8000),
                 store=False,
             )
-            if not response.output_text:
-                raise HTTPException(status_code=502, detail="The model returned no answer.")
+            answer_text = complete_response_text(response)
             usage = aggregate_usage([_usage_dict(response)])
             result = {
-                "answer": response.output_text,
+                "answer": answer_text,
                 "response_id": response.id,
                 "model": runtime.model,
                 "release_id": runtime.store.manifest["release_id"],
@@ -2881,14 +2903,13 @@ def generate_answer(
                 }
             ],
             reasoning={"effort": runtime.reasoning_effort},
-            max_output_tokens=min(runtime.max_output_tokens, 6000),
+            max_output_tokens=min(runtime.max_output_tokens, 10000),
             store=False,
         )
-        if not response.output_text:
-            raise HTTPException(status_code=502, detail="The model returned no answer.")
+        answer_text = complete_response_text(response)
         usage = aggregate_usage([_usage_dict(response)])
         result = {
-            "answer": response.output_text,
+            "answer": answer_text,
             "response_id": response.id,
             "model": runtime.model,
             "release_id": runtime.store.manifest["release_id"],
@@ -2980,11 +3001,10 @@ def generate_answer(
             store=False,
         )
         call_usages.append(_usage_dict(response))
-    if not response.output_text:
-        raise HTTPException(status_code=502, detail="The model returned no answer.")
+    answer_text = complete_response_text(response)
     total_usage = aggregate_usage(call_usages)
     result = {
-        "answer": response.output_text,
+        "answer": answer_text,
         "response_id": response.id,
         "model": runtime.model,
         "release_id": runtime.store.manifest["release_id"],

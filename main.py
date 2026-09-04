@@ -5126,6 +5126,9 @@ def check_rate_limit(request: Request):
 
 def check_nsn_rate_limit(request: Request):
     """Keep NSN lookups separate from the company lookup allowance."""
+    if "Authorization" in request.headers:
+        return None
+
     client_ip = request.client.host if request.client else "unknown"
     now = time.time()
 

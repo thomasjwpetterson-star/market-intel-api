@@ -26,6 +26,8 @@ services:
         value: high
       - key: ASK_MIMIR_MAX_EVIDENCE_RECORDS
         value: "20"
+      - key: OPENAI_MAX_OUTPUT_TOKENS
+        value: "10000"
       - key: ASK_MIMIR_UPGRADE_URL
         value: https://www.mimiradvisors.org/dashboard?upgrade=professional
       - key: AWS_REGION
@@ -33,7 +35,7 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.8
       - key: ASK_MIMIR_MANIFEST_KEY
-        value: ask_mimir/releases/ask-mimir-beta-20260903T194432Z-025c940cbda3/runtime_manifest.json
+        value: ask_mimir/releases/ask-mimir-beta-20260904T020155Z-80c24d03b284/runtime_manifest.json
       - key: OPENAI_API_KEY
         sync: false
       - key: AWS_ACCESS_KEY_ID
