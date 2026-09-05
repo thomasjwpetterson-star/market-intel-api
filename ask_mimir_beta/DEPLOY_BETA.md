@@ -41,7 +41,7 @@ provide the primary cost control.
 
 Current release manifest:
 
-`ask_mimir/releases/ask-mimir-beta-20260903T194432Z-025c940cbda3/runtime_manifest.json`
+`ask_mimir/releases/ask-mimir-beta-20260905T214238Z-109d9a1c5bd9/runtime_manifest.json`
 
 ## Release check
 
