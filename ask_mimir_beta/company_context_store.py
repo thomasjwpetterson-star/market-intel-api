@@ -159,7 +159,11 @@ class CompanyContextStore:
         self._dynamic_builder = None
         self._dynamic_contexts: Dict[tuple[str, str], Dict[str, Any]] = {}
         self._dynamic_groups: Dict[str, Dict[str, Any]] = {}
-        release_identity = os.getenv("ASK_MIMIR_MANIFEST_KEY", "").strip()
+        release_identity = os.getenv("ASK_MIMIR_RELEASE_ID", "").strip()
+        if not release_identity:
+            release_identity = os.getenv("ASK_MIMIR_PINNED_MANIFEST_KEY", "").strip()
+        if not release_identity:
+            release_identity = os.getenv("ASK_MIMIR_MANIFEST_KEY", "").strip()
         if not release_identity:
             release_identity = "|".join(
                 f"{path.name}:{path.stat().st_size}:{path.stat().st_mtime_ns}"

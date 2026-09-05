@@ -12,6 +12,26 @@ import boto3
 
 
 DEFAULT_BUCKET = "a-and-d-intel-lake-newaccount"
+DEFAULT_CURRENT_MANIFEST_KEY = "ask_mimir/runtime/current_manifest.json"
+
+
+def selected_manifest_key() -> str:
+    """Follow the current release by default, with an explicit rollback pin."""
+    follow_current = os.getenv("ASK_MIMIR_FOLLOW_CURRENT_RELEASE", "1").strip() != "0"
+    if follow_current:
+        return os.getenv(
+            "ASK_MIMIR_CURRENT_MANIFEST_KEY",
+            DEFAULT_CURRENT_MANIFEST_KEY,
+        ).strip()
+
+    pinned_key = os.getenv("ASK_MIMIR_PINNED_MANIFEST_KEY", "").strip()
+    if not pinned_key:
+        pinned_key = os.getenv("ASK_MIMIR_MANIFEST_KEY", "").strip()
+    if not pinned_key:
+        raise RuntimeError(
+            "ASK_MIMIR_PINNED_MANIFEST_KEY is required when current-release following is disabled"
+        )
+    return pinned_key
 
 
 def file_sha256(path: Path) -> str:
@@ -93,7 +113,11 @@ def _download_verified(
 
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     temporary.unlink(missing_ok=True)
-    s3.download_file(bucket, entry["s3_key"], str(temporary))
+    extra_args = {}
+    if entry.get("s3_version_id"):
+        extra_args["VersionId"] = entry["s3_version_id"]
+    download_kwargs = {"ExtraArgs": extra_args} if extra_args else {}
+    s3.download_file(bucket, entry["s3_key"], str(temporary), **download_kwargs)
     if temporary.stat().st_size != expected_size:
         temporary.unlink(missing_ok=True)
         raise RuntimeError(f"Size mismatch for {entry['s3_key']}")
@@ -111,9 +135,9 @@ def bootstrap() -> Dict[str, Any]:
     runtime_root.mkdir(parents=True, exist_ok=True)
 
     bucket = os.getenv("ASK_MIMIR_BUCKET", DEFAULT_BUCKET)
-    manifest_key = os.getenv("ASK_MIMIR_MANIFEST_KEY", "").strip()
+    manifest_key = selected_manifest_key()
     if not manifest_key:
-        raise RuntimeError("ASK_MIMIR_MANIFEST_KEY is required")
+        raise RuntimeError("Ask Mimir runtime manifest key is empty")
 
     s3 = boto3.client("s3", region_name=os.getenv("AWS_REGION", "us-east-1"))
     manifest_path = runtime_root / "runtime_manifest.json.tmp"
@@ -134,6 +158,7 @@ def bootstrap() -> Dict[str, Any]:
     data_root = runtime_root / "data"
     artifact_root = runtime_root / "artifacts"
     os.environ["ASK_MIMIR_DATA_ROOT"] = str(data_root)
+    os.environ["ASK_MIMIR_RELEASE_ID"] = str(manifest["release_id"])
     os.environ["ASK_MIMIR_RELEASE_DIR"] = str(artifact_root / "metric-release")
     os.environ["ASK_MIMIR_TRANSACTIONS"] = str(data_root / "transactions.parquet")
     os.environ["ASK_MIMIR_COMPANY_CONTEXT_DIR"] = str(artifact_root / "company-context")

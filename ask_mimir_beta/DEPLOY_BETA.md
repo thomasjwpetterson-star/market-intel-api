@@ -19,8 +19,6 @@ from the main Mimir website while it is being evaluated.
 - `OPENAI_API_KEY`: the OpenAI API project key used by Ask Mimir
 - `AWS_ACCESS_KEY_ID`: read-only access to the Mimir artifact bucket
 - `AWS_SECRET_ACCESS_KEY`: matching AWS secret
-- `ASK_MIMIR_MANIFEST_KEY`: the exact immutable manifest key printed by
-  `publish_runtime_release.py`
 - `ASK_MIMIR_ANONYMOUS_SALT`: a long random value, generated once
 - `ASK_MIMIR_TRUSTED_PROXY_SECRET`: the same random value configured on the
   main Mimir web application. This allows the main site to pass authenticated
@@ -39,9 +37,33 @@ citation validation on at startup. It uses the configured GPT-5.6 model with
 high reasoning effort; tier allowances, rather than lower-quality inference,
 provide the primary cost control.
 
-Current release manifest:
+The service follows this stable manifest pointer by default:
 
-`ask_mimir/releases/ask-mimir-beta-20260905T214238Z-109d9a1c5bd9/runtime_manifest.json`
+`ask_mimir/runtime/current_manifest.json`
+
+Each publication first writes an immutable release manifest, including the
+exact S3 version ID and SHA-256 hash of every serving file. It updates the
+stable pointer only after the complete release has been validated and
+published. No Render environment variable changes are required for routine
+data refreshes.
+
+For automatic activation after publication, copy the service's secret Deploy
+Hook URL from its Render Settings page and set it as
+`ASK_MIMIR_RENDER_DEPLOY_HOOK_URL` in the environment that runs
+`publish_runtime_release.py`. The publisher updates the current pointer and
+then triggers a Render restart/deploy.
+
+Publish a validated release from the API repository with:
+
+```bash
+cd /Users/tompetterson/Documents/my-saas-projects/market-intel-api
+ASK_MIMIR_RENDER_DEPLOY_HOOK_URL="<private Render deploy hook>" \
+  venv/bin/python ask_mimir_beta/publish_runtime_release.py \
+  --profile new-account
+```
+
+To roll back, set `ASK_MIMIR_FOLLOW_CURRENT_RELEASE=0` and set
+`ASK_MIMIR_PINNED_MANIFEST_KEY` to a previously published immutable manifest.
 
 ## Release check
 
