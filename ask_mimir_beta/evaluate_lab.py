@@ -50,6 +50,14 @@ def score_result(case: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]
         checks.append({"check": f"required tool: {tool}", "passed": tool in tools})
     for term in case.get("required_answer_terms", []):
         checks.append({"check": f"required answer term: {term}", "passed": term.lower() in answer.lower()})
+    any_terms = case.get("required_any_answer_terms", [])
+    if any_terms:
+        checks.append(
+            {
+                "check": f"contains at least one of: {', '.join(any_terms)}",
+                "passed": any(term.lower() in answer.lower() for term in any_terms),
+            }
+        )
     if case.get("require_mimir_link"):
         checks.append(
             {

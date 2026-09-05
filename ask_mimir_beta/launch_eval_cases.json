@@ -1,9 +1,10 @@
 [
   {
     "case_id": "tomahawk_suppliers",
-    "question": "Who supplies Tomahawk?",
+    "question": "Who supplies the Tomahawk missile?",
     "required_tools": ["search_platform_contexts", "get_platform_context"],
     "required_answer_terms": ["Tomahawk", "CAGE"],
+    "required_any_answer_terms": ["Pontiac", "Boulder", "East Camden", "Clearwater", "Huntsville"],
     "required_scope_type": "platform",
     "require_mimir_link": true,
     "require_financial_period": true,
@@ -14,6 +15,7 @@
     "question": "What does each major Tomahawk supplier provide?",
     "required_tools": ["search_platform_contexts", "get_platform_context"],
     "required_answer_terms": ["Tomahawk", "CAGE"],
+    "required_any_answer_terms": ["Pontiac", "Boulder", "East Camden", "Clearwater", "Huntsville"],
     "required_scope_type": "platform",
     "require_mimir_link": true,
     "require_financial_period": true,
@@ -142,6 +144,13 @@
     "required_tools": [],
     "required_answer_terms": ["program"],
     "forbidden_answer_terms": ["pack_id", "ranking_universe"]
+  },
+  {
+    "case_id": "contract_announcement_analysis",
+    "question": "What does this contract announcement mean for the industrial base? https://www.defensenews.com/industry/techwatch/2026/09/03/us-army-launches-laser-production-with-465m-contract-award/",
+    "required_tools": [],
+    "required_answer_terms": ["laser", "award"],
+    "forbidden_answer_terms": ["model returned no answer", "the dossier", "release `"]
   },
   {
     "case_id": "production_increase_beneficiaries",
