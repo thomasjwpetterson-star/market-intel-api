@@ -4,6 +4,9 @@
     "question": "Who supplies Tomahawk?",
     "required_tools": ["search_platform_contexts", "get_platform_context"],
     "required_answer_terms": ["Tomahawk", "CAGE"],
+    "required_scope_type": "platform",
+    "require_mimir_link": true,
+    "require_financial_period": true,
     "forbidden_answer_terms": ["Which Who supplies", "year-to-date"]
   },
   {
@@ -11,6 +14,9 @@
     "question": "What does each major Tomahawk supplier provide?",
     "required_tools": ["search_platform_contexts", "get_platform_context"],
     "required_answer_terms": ["Tomahawk", "CAGE"],
+    "required_scope_type": "platform",
+    "require_mimir_link": true,
+    "require_financial_period": true,
     "forbidden_answer_terms": ["one contract", "year-to-date"]
   },
   {
@@ -18,6 +24,9 @@
     "question": "Which Tomahawk suppliers have the largest mapped subcontract positions?",
     "required_tools": ["search_platform_contexts", "get_platform_context"],
     "required_answer_terms": ["FY2021", "CAGE"],
+    "required_scope_type": "platform",
+    "require_mimir_link": true,
+    "require_financial_period": true,
     "forbidden_answer_terms": ["recipient count", "site-level HHI"]
   },
   {
@@ -36,6 +45,9 @@
     },
     "required_tools": ["search_platform_contexts", "get_platform_context"],
     "required_answer_terms": ["Tomahawk", "CAGE"],
+    "required_scope_type": "platform",
+    "require_mimir_link": true,
+    "require_financial_period": true,
     "forbidden_answer_terms": ["N0001923F2616 is the complete list"]
   },
   {
@@ -43,6 +55,8 @@
     "question": "How concentrated is the Tomahawk supplier base?",
     "required_tools": ["search_platform_contexts", "get_platform_context"],
     "required_answer_terms": ["supplier", "reported subcontract"],
+    "required_scope_type": "platform",
+    "require_financial_period": true,
     "forbidden_answer_terms": ["effective recipient count", "site-level HHI"]
   },
   {
@@ -79,5 +93,93 @@
     "required_tools": ["search_platform_contexts", "get_platform_context"],
     "required_answer_terms": ["Tomahawk", "award"],
     "forbidden_answer_terms": ["source_report_id", "source_dedup_key"]
+  },
+  {
+    "case_id": "honeywell_clearwater_platforms",
+    "question": "Which platforms does Honeywell Clearwater support?",
+    "required_tools": ["search_company_contexts", "get_company_context"],
+    "required_answer_terms": ["Clearwater", "CAGE"],
+    "forbidden_answer_terms": ["current parent resolution", "not a general representation"]
+  },
+  {
+    "case_id": "company_defense_business",
+    "question": "Tell me about AeroVironment's US defence business.",
+    "required_tools": ["search_company_contexts"],
+    "required_answer_terms": ["AeroVironment"],
+    "forbidden_answer_terms": ["current parent resolution", "company revenue"]
+  },
+  {
+    "case_id": "company_largest_positions",
+    "question": "What are Boeing's largest visible defence positions?",
+    "required_tools": ["search_company_contexts"],
+    "required_answer_terms": ["Boeing"],
+    "forbidden_answer_terms": ["manually combining", "valid answer requires"]
+  },
+  {
+    "case_id": "company_change_since_fy2021",
+    "question": "How has CAGE 19645's missile-program exposure changed since FY2021?",
+    "required_tools": ["search_company_contexts", "get_company_context"],
+    "required_answer_terms": ["19645", "FY2021"],
+    "forbidden_answer_terms": ["release `", "evidence-index records"]
+  },
+  {
+    "case_id": "missile_antenna_suppliers",
+    "question": "Find suppliers of missile antennas.",
+    "required_tools": [],
+    "required_answer_terms": ["supplier"],
+    "forbidden_answer_terms": ["raw SQL", "the dossier"]
+  },
+  {
+    "case_id": "similar_companies",
+    "question": "Find companies similar to Eaton Aerospace and explain why.",
+    "required_tools": ["search_company_contexts"],
+    "required_answer_terms": ["Eaton"],
+    "forbidden_answer_terms": ["current parent resolution", "release `"]
+  },
+  {
+    "case_id": "capability_program_fit",
+    "question": "Which programs could be relevant to a company supplying ruggedized power conversion equipment?",
+    "required_tools": [],
+    "required_answer_terms": ["program"],
+    "forbidden_answer_terms": ["pack_id", "ranking_universe"]
+  },
+  {
+    "case_id": "production_increase_beneficiaries",
+    "question": "Which suppliers would benefit if Tomahawk production increased?",
+    "required_tools": ["search_platform_contexts", "get_platform_context"],
+    "required_answer_terms": ["Tomahawk", "supplier"],
+    "forbidden_answer_terms": ["one contract", "the dossier"]
+  },
+  {
+    "case_id": "award_significance",
+    "question": "How significant is contract N0001923F2616 relative to historical Tomahawk activity?",
+    "required_tools": ["search_award_opportunity_contexts"],
+    "required_answer_terms": ["N0001923F2616", "Tomahawk"],
+    "forbidden_answer_terms": ["release `", "loaded records"]
+  },
+  {
+    "case_id": "underlying_contracts",
+    "question": "Show me the underlying contracts and public records for Tomahawk.",
+    "required_tools": ["search_platform_contexts", "get_platform_context"],
+    "required_answer_terms": ["Tomahawk", "contract"],
+    "forbidden_answer_terms": ["source_dedup_key", "source_report_id"]
+  },
+  {
+    "case_id": "export_supporting_evidence",
+    "messages": [
+      {"role": "user", "content": "Who supplies Tomahawk?"},
+      {"role": "assistant", "content": "Tomahawk has a mapped program-wide supplier base."},
+      {"role": "user", "content": "Export the companies and supporting evidence."}
+    ],
+    "active_scope": {
+      "scope_type": "platform",
+      "scope_id": "TOMAHAWK",
+      "scope_name": "Tomahawk missile family",
+      "resolved_cages": [],
+      "group_kind": "platform_or_program"
+    },
+    "required_tools": ["search_platform_contexts", "get_platform_context"],
+    "required_answer_terms": ["Tomahawk", "evidence"],
+    "forbidden_answer_terms": ["internal", "source_dedup_key"]
   }
 ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -39,10 +40,43 @@ def score_result(case: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]
     answer = str(result.get("answer") or "")
     tools = [entry.get("tool") for entry in result.get("tool_trace", []) if entry.get("tool")]
     checks: List[Dict[str, Any]] = []
+    checks.append(
+        {
+            "check": "answer is present",
+            "passed": bool(answer.strip()) and "model returned no answer" not in answer.lower(),
+        }
+    )
     for tool in case.get("required_tools", []):
         checks.append({"check": f"required tool: {tool}", "passed": tool in tools})
     for term in case.get("required_answer_terms", []):
         checks.append({"check": f"required answer term: {term}", "passed": term.lower() in answer.lower()})
+    if case.get("require_mimir_link"):
+        checks.append(
+            {
+                "check": "contains a drill-through Mimir link",
+                "passed": "mimiradvisors.org/dashboard?" in answer.lower(),
+            }
+        )
+    if case.get("require_financial_period") and re.search(r"[$£€]\s*[\d.]", answer):
+        checks.append(
+            {
+                "check": "financial values state an observation period",
+                "passed": bool(re.search(r"\bFY\s?20\d{2}|\bFY20\d{2}|fiscal year|selected period", answer, re.I)),
+            }
+        )
+    expected_scope = case.get("required_scope_type")
+    if expected_scope:
+        resolved_scope = (
+            result.get("active_scope")
+            or result.get("resolved_scope")
+            or {"scope_type": result.get("scope_type")}
+        )
+        checks.append(
+            {
+                "check": f"resolved scope type: {expected_scope}",
+                "passed": resolved_scope.get("scope_type") == expected_scope,
+            }
+        )
     forbidden_terms = [
         "pack_id",
         "ranking_universe",
@@ -50,6 +84,10 @@ def score_result(case: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]
         "release `",
         "the dossier",
         "platform supply-chain pack",
+        "mimir-company-context-",
+        "mimir-platform-context-",
+        '"release_id"',
+        '"pack_id"',
         *case.get("forbidden_answer_terms", []),
     ]
     for term in forbidden_terms:
