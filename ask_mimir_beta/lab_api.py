@@ -536,11 +536,12 @@ evidence lanes distinct: net prime obligations on directly mapped awards; Mimir-
 subcontract value; attributed DLA procurement value for single-platform NIINs; and shared-use NIIN
 exposure, which is associated with this platform but not allocated to it.
 
-Lead with the time-bounded totals supplied in financial_totals. For direct-award recipient tables,
+Lead with the time-bounded totals supplied in financial_totals. Every financial value in prose or a
+table must carry its fiscal-year period. For direct-award recipient tables,
 normally omit rows below 0.5% of the platform's observed prime obligations unless a small row provides
 uniquely material technical or program evidence. Do not let incidental travel, meeting or administrative
-awards distract from the principal procurement picture. State the FY2021-FY2026 year-to-date window for
-reported subcontract values as well as prime and DLA figures.
+awards distract from the principal procurement picture. Use the observation window supplied in the
+platform scope for reported subcontract values, prime obligations and DLA procurement figures.
 
 Do not call every direct government recipient a prime contractor for the whole platform. Distinguish
 the platform prime or system integrator when the evidence establishes it, other direct award
@@ -549,6 +550,18 @@ supports bounded capability language. An exact component-to-platform claim requi
 curated_platform_supply_chain layer or an authoritative platform-specific public source. Where no
 curated layer exists, say what the reported description shows without upgrading it into a precise
 component claim.
+
+Treat a named missile family as the program-wide scope represented by included_platform_records. Do not
+silently narrow Tomahawk to one Tactical Tomahawk award or one variant. A follow-up asking for the full
+supplier list, largest mapped subcontract positions, supplier-base concentration or important facilities
+continues to use the same platform scope unless the user names a different award or platform. For supplier
+answers, include CAGE and city/state whenever supplied. Use reported_descriptions to state what each site
+appears to provide in concise functional language.
+
+For concentration questions, analyze the reported supplier-site distribution in
+reported_supplier_concentration and the component/source evidence separately. Do not use concentration
+among direct government award recipients as the answer to supply-base concentration. Express the top-one,
+top-five or top-ten supplier share in plain English; do not lead with HHI or effective-recipient-count jargon.
 
 If curated_platform_supply_chain is present, use it as the strongest component-proof layer and keep
 broader family references separate. Otherwise, use authoritative government and first-party web
@@ -561,7 +574,8 @@ https://www.mimiradvisors.org/dashboard?view=PLATFORM&platform=<PLATFORM>, and N
 https://www.mimiradvisors.org/dashboard?view=PARTS&nsn=<NSN>. Use supplied public opportunity URLs.
 Never expose internal keys, hashes, file paths or ingestion identifiers.
 Never print a calculation version, release name, compatibility statement, internal pack status or phrases
-such as "the dossier supplied". Do not tell the customer that a curated layer was or was not supplied.
+such as "the dossier supplied", "the loaded records" or "the platform pack". Do not tell the customer that
+a curated layer was or was not supplied.
 Describe the strongest supported evidence directly, without generic defensive disclaimers or lists of data
 the pack does not contain.
 
@@ -1064,7 +1078,7 @@ def is_article_analysis_request(messages: List[ChatMessage]) -> bool:
 def explicit_platform_query(
     messages: List[ChatMessage], store: PlatformContextStore
 ) -> str | None:
-    text = " ".join(message.content for message in messages)
+    text = str(messages[-1].content or "").strip()
     intent = text.lower()
     if not any(
         term in intent
@@ -1083,6 +1097,30 @@ def explicit_platform_query(
     if guided:
         return guided.group(1).strip()
     return None
+
+
+def platform_follow_up_intent(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "full list of suppliers",
+            "all suppliers",
+            "each supplier",
+            "major supplier",
+            "largest share",
+            "largest mapped subcontract",
+            "supplier base",
+            "how concentrated",
+            "which facilities",
+            "what do they provide",
+            "supporting evidence",
+            "underlying contracts",
+            "underlying records",
+            "export the companies",
+            "export the suppliers",
+        )
+    )
 
 
 def is_clearly_out_of_domain(messages: List[ChatMessage]) -> bool:
@@ -1208,6 +1246,13 @@ def company_site_dossier_cage(messages: List[ChatMessage]) -> str | None:
 
 def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     text = str(messages[-1].content or "").strip()
+    if re.match(
+        r"^(?:who\s+supplies|what\s+does\s+each\s+.+?\s+supplier|"
+        r"which\s+.+?\s+suppliers|how\s+concentrated\s+is\s+the\s+.+?\s+supplier\s+base)",
+        text,
+        re.IGNORECASE,
+    ):
+        return None
     if re.fullmatch(r"[A-Z0-9]{5}", text, re.IGNORECASE) and any(
         character.isdigit() for character in text
     ):
@@ -1357,7 +1402,7 @@ class ChatMessage(BaseModel):
 
 
 class ActiveScope(BaseModel):
-    scope_type: str = Field(pattern="^(company_parent|company_site)$")
+    scope_type: str = Field(pattern="^(company_parent|company_site|platform)$")
     scope_id: str = Field(min_length=1, max_length=200)
     scope_name: Optional[str] = Field(default=None, max_length=300)
     resolved_cages: List[str] = Field(default_factory=list, max_length=250)
@@ -1861,11 +1906,21 @@ def workflow_for_request(request: AskRequest) -> str:
         return "item_intelligence"
     if explicit_platform_query(request.messages, runtime.platform_contexts):
         return "platform_intelligence"
+    if (
+        request.active_scope
+        and request.active_scope.scope_type == "platform"
+        and platform_follow_up_intent(request.messages[-1].content)
+    ):
+        return "platform_intelligence"
     if company_site_dossier_cage(request.messages):
         return "company_site_intelligence"
     if explicit_company_name_query(request.messages):
         return "company_site_intelligence"
-    if request.active_scope and company_follow_up_intent(request.messages[-1].content):
+    if (
+        request.active_scope
+        and request.active_scope.scope_type in {"company_parent", "company_site"}
+        and company_follow_up_intent(request.messages[-1].content)
+    ):
         return "company_site_intelligence"
     if company_site_trajectory_cage(request.messages):
         return "company_site_trajectory"
@@ -1927,6 +1982,8 @@ def sanitize_answer_text(answer: str) -> str:
         r"^\s*Release\s*:",
         r"^\s*Calculation version\s*:",
         r"^\s*Evidence-index records\s*:",
+        r"^\s*(?:The\s+)?platform supply-chain pack (?:was|is) unavailable",
+        r"^\s*Comparable .* in the dossier",
         r"^\s*Current parent resolution is not assigned",
         r"^\s*No current parent is resolved",
     )
@@ -1948,6 +2005,20 @@ def sanitize_answer_text(answer: str) -> str:
         cleaned,
         flags=re.IGNORECASE,
     )
+    cleaned = re.sub(
+        r"\s*(?:This answer is|The answer is)?\s*compatible with (?:the )?[^.]*?dossier[^.]*\.",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*(?:under|from|in)\s+release\s+`?[-A-Za-z0-9_.]+`?\.?",
+        ".",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\bthe dossier\b", "the evidence", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bthe loaded records\b", "the available records", cleaned, flags=re.IGNORECASE)
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
@@ -2480,6 +2551,7 @@ def generate_answer(
     if (
         not company_query
         and request.active_scope
+        and request.active_scope.scope_type in {"company_parent", "company_site"}
         and company_follow_up_intent(request.messages[-1].content)
     ):
         resolved_company_scope = request.active_scope.model_dump()
@@ -3005,7 +3077,7 @@ def generate_answer(
             response, answer_text = finalize_response(
                 client,
                 response,
-                UNIVERSAL_PLATFORM_PROMPT,
+                ITEM_DOSSIER_PROMPT,
                 input_items,
                 call_usages,
                 progress,
@@ -3042,6 +3114,13 @@ def generate_answer(
             return result
 
     platform_query = explicit_platform_query(request.messages, runtime.platform_contexts)
+    if (
+        not platform_query
+        and request.active_scope
+        and request.active_scope.scope_type == "platform"
+        and platform_follow_up_intent(request.messages[-1].content)
+    ):
+        platform_query = request.active_scope.scope_id
     if platform_query:
         emit_progress(progress, "Resolving the platform", "Matching the platform or program universe", 24)
         search_arguments = {"query": platform_query, "limit": 15}
@@ -3070,7 +3149,12 @@ def generate_answer(
             }
         resolved_platform = resolution.get("resolved_platform_id")
         if resolved_platform:
-            arguments = {"platform_id": resolved_platform}
+            latest_platform_question = str(request.messages[-1].content or "")
+            supplier_limit = 180 if platform_follow_up_intent(latest_platform_question) else 50
+            arguments = {
+                "platform_id": resolved_platform,
+                "supplier_limit": supplier_limit,
+            }
             pack = runtime.call_tool("get_platform_context", arguments)
             emit_progress(progress, "Assembling platform evidence", "Separating awards, suppliers, components and opportunities", 46)
             trace = [
@@ -3108,8 +3192,17 @@ def generate_answer(
                 max_output_tokens=min(runtime.max_output_tokens, 10000),
                 store=False,
             )
-            answer_text = complete_response_text(response)
-            usage = aggregate_usage([_usage_dict(response)])
+            call_usages = [_usage_dict(response)]
+            response, answer_text = finalize_response(
+                client,
+                response,
+                UNIVERSAL_PLATFORM_PROMPT,
+                input_items,
+                call_usages,
+                progress,
+                min(runtime.max_output_tokens, 10000),
+            )
+            usage = aggregate_usage(call_usages)
             result = {
                 "answer": answer_text,
                 "response_id": response.id,
@@ -3124,9 +3217,9 @@ def generate_answer(
                 },
                 "tool_trace": trace,
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-                "response_calls": 1,
+                "response_calls": len(call_usages),
                 "usage": usage,
-                "usage_by_response": [_usage_dict(response)],
+                "usage_by_response": call_usages,
                 "estimated_cost": estimate_usage_cost(runtime.model, usage),
             }
             runtime.write_audit_record(

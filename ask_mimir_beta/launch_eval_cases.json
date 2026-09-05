@@ -1,0 +1,83 @@
+[
+  {
+    "case_id": "tomahawk_suppliers",
+    "question": "Who supplies Tomahawk?",
+    "required_tools": ["search_platform_contexts", "get_platform_context"],
+    "required_answer_terms": ["Tomahawk", "CAGE"],
+    "forbidden_answer_terms": ["Which Who supplies", "year-to-date"]
+  },
+  {
+    "case_id": "tomahawk_supplier_roles",
+    "question": "What does each major Tomahawk supplier provide?",
+    "required_tools": ["search_platform_contexts", "get_platform_context"],
+    "required_answer_terms": ["Tomahawk", "CAGE"],
+    "forbidden_answer_terms": ["one contract", "year-to-date"]
+  },
+  {
+    "case_id": "tomahawk_largest_subcontract_positions",
+    "question": "Which Tomahawk suppliers have the largest mapped subcontract positions?",
+    "required_tools": ["search_platform_contexts", "get_platform_context"],
+    "required_answer_terms": ["FY2021", "CAGE"],
+    "forbidden_answer_terms": ["recipient count", "site-level HHI"]
+  },
+  {
+    "case_id": "tomahawk_follow_up_full_list",
+    "messages": [
+      {"role": "user", "content": "Who supplies Tomahawk?"},
+      {"role": "assistant", "content": "Tomahawk has a mapped supplier base."},
+      {"role": "user", "content": "Can you give me the full list of suppliers?"}
+    ],
+    "active_scope": {
+      "scope_type": "platform",
+      "scope_id": "TOMAHAWK",
+      "scope_name": "Tomahawk missile family",
+      "resolved_cages": [],
+      "group_kind": "platform_or_program"
+    },
+    "required_tools": ["search_platform_contexts", "get_platform_context"],
+    "required_answer_terms": ["Tomahawk", "CAGE"],
+    "forbidden_answer_terms": ["N0001923F2616 is the complete list"]
+  },
+  {
+    "case_id": "tomahawk_concentration",
+    "question": "How concentrated is the Tomahawk supplier base?",
+    "required_tools": ["search_platform_contexts", "get_platform_context"],
+    "required_answer_terms": ["supplier", "reported subcontract"],
+    "forbidden_answer_terms": ["effective recipient count", "site-level HHI"]
+  },
+  {
+    "case_id": "honeywell_clearwater_supply",
+    "question": "What does Honeywell Clearwater supply?",
+    "required_tools": ["search_company_contexts", "get_company_context"],
+    "required_answer_terms": ["Clearwater", "CAGE"],
+    "forbidden_answer_terms": ["current parent resolution"]
+  },
+  {
+    "case_id": "aerojet_east_camden_programs",
+    "question": "Which programs does Aerojet Rocketdyne's East Camden site support?",
+    "required_tools": ["search_company_contexts", "get_company_context"],
+    "required_answer_terms": ["East Camden", "CAGE"],
+    "forbidden_answer_terms": ["current parent resolution"]
+  },
+  {
+    "case_id": "company_platform_evidence",
+    "question": "Show the evidence that L3Harris supplies C-130.",
+    "required_tools": ["search_company_contexts"],
+    "required_answer_terms": ["L3Harris"],
+    "forbidden_answer_terms": ["release `"]
+  },
+  {
+    "case_id": "compare_missile_supplier_bases",
+    "question": "Compare the Tomahawk and JASSM supplier bases.",
+    "required_tools": ["search_platform_contexts"],
+    "required_answer_terms": ["Tomahawk", "JASSM"],
+    "forbidden_answer_terms": ["the dossier"]
+  },
+  {
+    "case_id": "source_trace",
+    "question": "Where did the mapped Tomahawk subcontract value come from? Show me the underlying records.",
+    "required_tools": ["search_platform_contexts", "get_platform_context"],
+    "required_answer_terms": ["Tomahawk", "award"],
+    "forbidden_answer_terms": ["source_report_id", "source_dedup_key"]
+  }
+]
