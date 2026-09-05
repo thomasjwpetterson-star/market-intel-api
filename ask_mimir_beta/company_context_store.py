@@ -101,6 +101,31 @@ def _name_pattern(value: Any) -> str:
     return rf"(^|[^A-Z0-9]){phrase}([^A-Z0-9]|$)"
 
 
+def _name_patterns(value: Any) -> str:
+    """Match a company name even when a city or legal suffix follows it."""
+    tokens = re.findall(r"[A-Z0-9]+", str(value or "").upper())
+    while tokens and tokens[0] in {"THE", "A", "AN"}:
+        tokens.pop(0)
+    if not tokens:
+        return ""
+    generic_single_tokens = {
+        "ADVANCED", "AMERICAN", "COMPANY", "CORPORATION", "DATA", "DEFENSE",
+        "GENERAL", "GLOBAL", "GROUP", "INTERNATIONAL", "SYSTEMS", "TECHNOLOGIES",
+    }
+    variants = []
+    for end in range(len(tokens), 0, -1):
+        candidate = tokens[:end]
+        if len(candidate) == 1 and candidate[0] in generic_single_tokens:
+            continue
+        variants.append(_name_pattern(" ".join(candidate)))
+    return "|".join(pattern for pattern in variants if pattern)
+
+
+def _group_id(label: str, cages: List[str]) -> str:
+    digest = hashlib.sha256("|".join([label.upper(), *sorted(cages)]).encode()).hexdigest()
+    return f"OBSERVED_{digest[:20].upper()}"
+
+
 class CompanyContextStore:
     def __init__(
         self,
@@ -133,6 +158,7 @@ class CompanyContextStore:
         self._dynamic_lock = threading.Lock()
         self._dynamic_builder = None
         self._dynamic_contexts: Dict[tuple[str, str], Dict[str, Any]] = {}
+        self._dynamic_groups: Dict[str, Dict[str, Any]] = {}
         release_identity = os.getenv("ASK_MIMIR_MANIFEST_KEY", "").strip()
         if not release_identity:
             release_identity = "|".join(
@@ -207,11 +233,18 @@ class CompanyContextStore:
                     "context_available": True,
                 }
             )
-        if not scope_type or scope_type == "company_site":
+        if not scope_type or scope_type in {"company_site", "company_parent"}:
+            directory_matches = self._directory_search(query, max(limit, 500))
             matches = self._merge_directory_matches(
                 matches,
-                self._directory_search(query, max(limit, 12)),
+                directory_matches if scope_type != "company_parent" else [],
             )
+            if scope_type != "company_site" and not any(
+                row["scope_type"] == "company_parent" for row in matches
+            ):
+                group = self._observed_group_match(query, directory_matches)
+                if group:
+                    matches = self._merge_directory_matches(matches, [group])
         matches.sort(
             key=lambda row: (
                 not row.get("context_available", False),
@@ -220,7 +253,19 @@ class CompanyContextStore:
                 row["scope_name"],
             )
         )
-        selected = matches[: max(1, min(int(limit), 20))]
+        total_site_matches = len(
+            {row["scope_id"] for row in matches if row["scope_type"] == "company_site"}
+        )
+        selected = matches[: max(1, min(int(limit), 100))]
+        if not any(row["scope_type"] == "company_parent" for row in selected):
+            parent_match = next(
+                (row for row in matches if row["scope_type"] == "company_parent"), None
+            )
+            if parent_match:
+                if len(selected) >= max(1, min(int(limit), 100)):
+                    selected[-1] = parent_match
+                else:
+                    selected.append(parent_match)
         for row in selected:
             row.pop("_directory_rank", None)
             row.pop("context_available", None)
@@ -242,6 +287,9 @@ class CompanyContextStore:
         return {
             "query": query,
             "matches": selected,
+            "total_site_matches": total_site_matches,
+            "options_shown": min(len(site_options), 6),
+            "has_more_site_matches": total_site_matches > 6,
             "requires_disambiguation": requires_disambiguation,
             "disambiguation_options": (
                 (
@@ -261,7 +309,8 @@ class CompanyContextStore:
         clean_query = str(query or "").strip()
         cage_query = _normalize_cage(clean_query)
         cage_is_exact = bool(re.fullmatch(r"[A-Z0-9]{5}", cage_query))
-        name_pattern = _name_pattern(clean_query)
+        name_pattern = _name_patterns(clean_query)
+        full_name_pattern = _name_pattern(clean_query)
         if not name_pattern and not cage_is_exact:
             return []
 
@@ -290,7 +339,7 @@ class CompanyContextStore:
                         cage_is_exact,
                         cage_query,
                         name_pattern or r"a^",
-                        min(max(int(limit), 1), 40),
+                        min(max(int(limit), 1), 500),
                     ],
                 ).fetchall()
                 for cage, vendor_name, prime_value, subcontract_value in profile_rows:
@@ -313,7 +362,7 @@ class CompanyContextStore:
                         city,
                         state,
                         cage_status,
-                        UPPER(REGEXP_REPLACE(COALESCE(replacement_cage, ''), '[^A-Za-z0-9]', '', 'g')) AS replacement_cage
+                        UPPER(REGEXP_REPLACE(COALESCE(CAST(replacement_cage AS VARCHAR), ''), '[^A-Za-z0-9]', '', 'g')) AS replacement_cage
                     FROM read_parquet(?)
                     WHERE
                         (? AND UPPER(REGEXP_REPLACE(COALESCE(cage_code, ''), '[^A-Za-z0-9]', '', 'g')) = ?)
@@ -325,7 +374,7 @@ class CompanyContextStore:
                         cage_is_exact,
                         cage_query,
                         name_pattern or r"a^",
-                        min(max(int(limit) * 2, 1), 80),
+                        min(max(int(limit) * 2, 1), 1000),
                     ],
                 ).fetchall()
                 for cage, vendor_name, city, state, cage_status, replacement_cage in location_rows:
@@ -356,11 +405,28 @@ class CompanyContextStore:
             )
         ]
         if not cage_is_exact:
-            profiled_candidates = [
-                row for row in candidates if row.get("has_observed_profile", False)
-            ]
-            if profiled_candidates:
-                candidates = profiled_candidates
+            exact_company_name_match = bool(full_name_pattern) and any(
+                re.search(
+                    full_name_pattern,
+                    str(row.get("vendor_name") or "").upper(),
+                )
+                for row in candidates
+            )
+            if not exact_company_name_match:
+                location_candidates = [
+                    row
+                    for row in candidates
+                    if any(
+                        len(str(value or "").strip()) >= 4
+                        and re.search(
+                            rf"\b{re.escape(str(value).strip().upper())}\b",
+                            clean_query.upper(),
+                        )
+                        for value in (row.get("city"), row.get("state"))
+                    )
+                ]
+                if location_candidates:
+                    candidates = location_candidates
         candidates.sort(
             key=lambda row: (
                 not row.get("has_observed_profile", False),
@@ -371,7 +437,7 @@ class CompanyContextStore:
         )
         results = []
         for directory_rank, row in enumerate(
-            candidates[: min(max(int(limit), 1), 20)]
+            candidates[: min(max(int(limit), 1), 500)]
         ):
             name = str(row.get("vendor_name") or f"CAGE {row['cage']}").strip()
             location = ", ".join(
@@ -401,6 +467,83 @@ class CompanyContextStore:
                 }
             )
         return results
+
+    def _observed_group_match(
+        self, query: str, directory_matches: List[Dict[str, Any]]
+    ) -> Dict[str, Any] | None:
+        sites = [row for row in directory_matches if row["scope_type"] == "company_site"]
+        if len(sites) < 2:
+            return None
+        all_cages = sorted({str(row["scope_id"]).upper() for row in sites})
+        cages = sorted(
+            {
+                str(row["scope_id"]).upper()
+                for row in sites
+                if row.get("has_observed_profile")
+            }
+        ) or all_cages
+        location_keys = {
+            (str(row.get("city") or "").upper(), str(row.get("state") or "").upper())
+            for row in sites
+        }
+        one_location = len(location_keys) == 1 and next(iter(location_keys))[0]
+        query_label = re.sub(r"\s+", " ", str(query or "").strip()).rstrip(".?")
+        if one_location:
+            city, state = next(iter(location_keys))
+            query_label = re.sub(
+                rf"\b{re.escape(city)}\b(?:\s*,?\s*{re.escape(state)})?",
+                "",
+                query_label,
+                flags=re.IGNORECASE,
+            ).strip(" ,- ")
+            scope_name = f"{query_label} - {city.title()}, {state}"
+            option_label = f"{scope_name} facility ({len(all_cages)} CAGE codes)"
+            group_kind = "co_located_facility"
+        else:
+            scope_name = query_label
+            option_label = f"{scope_name} - company-wide ({len(all_cages)} CAGE sites)"
+            group_kind = "observed_company_group"
+        scope_id = _group_id(scope_name, all_cages)
+        self._dynamic_groups[scope_id] = {
+            "scope_name": scope_name,
+            "cages": cages,
+            "identity_sites": [dict(row) for row in sites],
+            "group_kind": group_kind,
+        }
+        return {
+            "context_id": None,
+            "scope_type": "company_parent",
+            "scope_id": scope_id,
+            "scope_name": scope_name,
+            "observation_window": None,
+            "site_count": len(all_cages),
+            "resolved_cages": cages,
+            "city": sites[0].get("city") if one_location else None,
+            "state": sites[0].get("state") if one_location else None,
+            "option_label": option_label,
+            "context_available": False,
+            "group_kind": group_kind,
+        }
+
+    def register_group(
+        self,
+        *,
+        scope_id: str,
+        scope_name: str,
+        cages: List[str],
+        group_kind: str = "observed_company_group",
+    ) -> None:
+        clean_id = str(scope_id or "").strip().upper()
+        clean_cages = sorted({_normalize_cage(cage) for cage in cages if _normalize_cage(cage)})
+        if not clean_id or not clean_cages:
+            return
+        identity_sites = self._directory_search(scope_name, 500)
+        self._dynamic_groups[clean_id] = {
+            "scope_name": str(scope_name or clean_id).strip(),
+            "cages": clean_cages,
+            "identity_sites": identity_sites,
+            "group_kind": group_kind,
+        }
 
     @staticmethod
     def _merge_directory_matches(
@@ -466,13 +609,16 @@ class CompanyContextStore:
         key = (scope_type, clean_id)
         if key in self._dynamic_contexts:
             return self._dynamic_contexts[key]
-        if scope_type != "company_site" or not self._directory_search(clean_id, 1):
+        group = self._dynamic_groups.get(clean_id)
+        if scope_type == "company_parent" and group:
+            pass
+        elif scope_type != "company_site" or not self._directory_search(clean_id, 1):
             raise KeyError(f"company context was not found: {scope_type}/{scope_id}")
 
         with self._dynamic_lock:
             if key in self._dynamic_contexts:
                 return self._dynamic_contexts[key]
-            cached_context = self._read_dynamic_cache(clean_id)
+            cached_context = self._read_dynamic_cache(scope_type, clean_id)
             if cached_context is not None:
                 self._dynamic_contexts[key] = cached_context
                 return cached_context
@@ -480,13 +626,22 @@ class CompanyContextStore:
 
             if self._dynamic_builder is None:
                 self._dynamic_builder = CompanyContextBuilder(data_root=self.data_root)
-            context = self._dynamic_builder.build_site(clean_id)
-            self._write_dynamic_cache(clean_id, context)
+            if scope_type == "company_parent" and group:
+                context = self._dynamic_builder.build_group(
+                    scope_id=clean_id,
+                    scope_name=group["scope_name"],
+                    cages=group["cages"],
+                    group_kind=group["group_kind"],
+                    identity_sites=group.get("identity_sites", []),
+                )
+            else:
+                context = self._dynamic_builder.build_site(clean_id)
+            self._write_dynamic_cache(scope_type, clean_id, context)
             self._dynamic_contexts[key] = context
             return context
 
-    def _read_dynamic_cache(self, cage: str) -> Dict[str, Any] | None:
-        path = self.dynamic_cache_dir / f"{cage}.json"
+    def _read_dynamic_cache(self, scope_type: str, scope_id: str) -> Dict[str, Any] | None:
+        path = self.dynamic_cache_dir / f"{scope_type}-{scope_id}.json"
         if not path.exists():
             return None
         try:
@@ -495,15 +650,17 @@ class CompanyContextStore:
             return None
         scope = context.get("scope", {})
         if (
-            scope.get("scope_type") != "company_site"
-            or str(scope.get("scope_id", "")).upper() != cage
+            scope.get("scope_type") != scope_type
+            or str(scope.get("scope_id", "")).upper() != scope_id
         ):
             return None
         return context
 
-    def _write_dynamic_cache(self, cage: str, context: Dict[str, Any]) -> None:
+    def _write_dynamic_cache(
+        self, scope_type: str, scope_id: str, context: Dict[str, Any]
+    ) -> None:
         self.dynamic_cache_dir.mkdir(parents=True, exist_ok=True)
-        destination = self.dynamic_cache_dir / f"{cage}.json"
+        destination = self.dynamic_cache_dir / f"{scope_type}-{scope_id}.json"
         temporary = destination.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(context, default=str))
         temporary.replace(destination)
@@ -511,26 +668,30 @@ class CompanyContextStore:
     @staticmethod
     def _compact_section(section: str, value: Any) -> Any:
         if section == "identity" and isinstance(value, dict):
-            return {**value, "sites": value.get("sites", [])[:20]}
+            return {**value, "sites": value.get("sites", [])[:500]}
         if section == "site_financials" and isinstance(value, list):
             return value[:15]
         if section == "capability_evidence" and isinstance(value, dict):
+            psc_rows = [row for row in value.get("psc", []) if row.get("psc_description")]
+            naics_rows = [
+                row for row in value.get("naics", []) if row.get("naics_description")
+            ]
             return {
                 **value,
-                "psc": value.get("psc", [])[:6],
-                "naics": value.get("naics", [])[:4],
-                "dla_items": value.get("dla_items", [])[:5],
-                "prime_award_descriptions": value.get("prime_award_descriptions", [])[:6],
+                "psc": psc_rows[:10],
+                "naics": naics_rows[:8],
+                "dla_items": value.get("dla_items", [])[:10],
+                "prime_award_descriptions": value.get("prime_award_descriptions", [])[:10],
                 "reported_subaward_descriptions": value.get(
                     "reported_subaward_descriptions", []
-                )[:5],
+                )[:10],
             }
         if section == "location_footprint" and isinstance(value, dict):
             return {
                 **value,
                 "registered_or_contracting_sites": value.get(
                     "registered_or_contracting_sites", []
-                )[:20],
+                )[:500],
                 "prime_award_places_of_performance": value.get(
                     "prime_award_places_of_performance", []
                 )[:8],

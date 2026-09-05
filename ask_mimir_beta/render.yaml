@@ -35,7 +35,7 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.8
       - key: ASK_MIMIR_MANIFEST_KEY
-        value: ask_mimir/releases/ask-mimir-beta-20260904T020155Z-80c24d03b284/runtime_manifest.json
+        value: ask_mimir/releases/ask-mimir-beta-20260905T011359Z-170486902055/runtime_manifest.json
       - key: OPENAI_API_KEY
         sync: false
       - key: AWS_ACCESS_KEY_ID

@@ -37,10 +37,11 @@ SOURCE_FILES = {
     "geo": "geo.parquet",
     "network": "network.parquet",
     "summary": "summary.parquet",
+    "classifications": "classification_reference.parquet",
     "opportunities": "opportunities.parquet",
     "nsn_reference": "nsn_cage_reference.parquet",
 }
-OPTIONAL_SOURCE_FILES = {"summary"}
+OPTIONAL_SOURCE_FILES = {"summary", "classifications"}
 
 
 def file_sha256(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -184,6 +185,56 @@ class CompanyContextBuilder:
             }
         return context
 
+    def build_group(
+        self,
+        *,
+        scope_id: str,
+        scope_name: str,
+        cages: Sequence[str],
+        group_kind: str,
+        identity_sites: Sequence[Dict[str, Any]] = (),
+        fiscal_years: Sequence[int] = DEFAULT_FISCAL_YEARS,
+    ) -> Dict[str, Any]:
+        clean_cages = sorted({clean_cage(cage) for cage in cages if clean_cage(cage)})
+        if not clean_cages:
+            raise ValueError("a company group requires at least one CAGE")
+        context = self._build_context(
+            scope_type="company_parent",
+            scope_id=scope_id,
+            scope_name=scope_name,
+            cages=clean_cages,
+            fiscal_years=fiscal_years,
+            site_definitions=[],
+        )
+        context["identity"]["scope_kind"] = group_kind
+        if identity_sites:
+            existing = {
+                clean_cage(site.get("cage")): site
+                for site in context["identity"].get("sites", [])
+            }
+            for source in identity_sites:
+                cage = clean_cage(source.get("cage") or source.get("scope_id"))
+                if not cage:
+                    continue
+                target = existing.setdefault(
+                    cage,
+                    {
+                        "cage": cage,
+                        "vendor_name": source.get("vendor_name")
+                        or source.get("scope_name")
+                        or cage,
+                    },
+                )
+                for key in ("city", "state"):
+                    if not target.get(key) and source.get(key):
+                        target[key] = source[key]
+            context["identity"]["sites"] = sorted(
+                existing.values(), key=lambda row: str(row.get("cage") or "")
+            )
+            context["identity"]["matched_site_count"] = len(existing)
+            context["identity"]["site_count"] = len(existing)
+        return context
+
     def _build_context(
         self,
         *,
@@ -224,11 +275,7 @@ class CompanyContextBuilder:
                 "scope_id": scope_id,
                 "scope_name": scope_name,
                 "fiscal_years": years,
-                "observation_window": (
-                    f"FY{years[0]}-FY{years[-1]} year to date"
-                    if years[-1] == 2026
-                    else f"FY{years[0]}-FY{years[-1]}"
-                ),
+                "observation_window": f"FY{years[0]}-FY{years[-1]} observed records",
             },
             "identity": {
                 "sites": sites,
@@ -877,9 +924,8 @@ class CompanyContextBuilder:
                 "official_capability_summary"
             )
             row["official_source_url"] = definition.get("official_source_url")
-            row["parent_membership_method"] = (
-                "analyst-reviewed company facility bridge" if definition else "not assigned"
-            )
+            if definition:
+                row["parent_membership_method"] = "analyst-reviewed company facility bridge"
         return rows
 
     def _financial_summary(
@@ -998,6 +1044,69 @@ class CompanyContextBuilder:
             naics_rows = rows_as_dicts(
                 self.connection.execute(
                     naics_query, [str(self.paths["summary"]), *cages, *years]
+                )
+            )
+        elif self.paths["classifications"].exists():
+            psc_query = f"""
+                SELECT
+                    t.source_system,
+                    t.psc,
+                    MAX(c.description) AS psc_description,
+                    SUM(t.spend_amount) AS net_value_usd,
+                    COUNT(DISTINCT t.award_key) AS distinct_awards,
+                    MIN(t.year) AS first_fiscal_year,
+                    MAX(t.year) AS latest_fiscal_year,
+                    MIN(TRY_CAST(t.action_date AS DATE)) AS first_action_date,
+                    MAX(TRY_CAST(t.action_date AS DATE)) AS latest_action_date
+                FROM read_parquet(?) t
+                LEFT JOIN read_parquet(?) c
+                  ON c.classification_type = 'PSC' AND t.psc = c.code
+                WHERE t.vendor_cage IN ({placeholders(cages)})
+                  AND t.year IN ({placeholders(years)})
+                  AND t.psc IS NOT NULL AND TRIM(t.psc) <> ''
+                GROUP BY 1, 2
+                ORDER BY ABS(net_value_usd) DESC
+                LIMIT 20
+            """
+            psc_rows = rows_as_dicts(
+                self.connection.execute(
+                    psc_query,
+                    [
+                        str(self.paths["transactions"]),
+                        str(self.paths["classifications"]),
+                        *cages,
+                        *years,
+                    ],
+                )
+            )
+            naics_query = f"""
+                SELECT
+                    t.naics_code,
+                    MAX(c.description) AS naics_description,
+                    SUM(t.spend_amount) AS net_value_usd,
+                    COUNT(DISTINCT t.transaction_key) AS action_count,
+                    MIN(t.year) AS first_fiscal_year,
+                    MAX(t.year) AS latest_fiscal_year
+                FROM read_parquet(?) t
+                LEFT JOIN read_parquet(?) c
+                  ON c.classification_type = 'NAICS' AND t.naics_code = c.code
+                WHERE t.source_system = 'USA_SPENDING'
+                  AND t.vendor_cage IN ({placeholders(cages)})
+                  AND t.year IN ({placeholders(years)})
+                  AND t.naics_code IS NOT NULL AND TRIM(t.naics_code) <> ''
+                GROUP BY 1
+                ORDER BY ABS(net_value_usd) DESC
+                LIMIT 15
+            """
+            naics_rows = rows_as_dicts(
+                self.connection.execute(
+                    naics_query,
+                    [
+                        str(self.paths["transactions"]),
+                        str(self.paths["classifications"]),
+                        *cages,
+                        *years,
+                    ],
                 )
             )
         else:
