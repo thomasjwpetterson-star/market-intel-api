@@ -423,7 +423,7 @@ the evidence for capability wording. For product coverage, lead with all associa
 references, then separately identify the subset for which the CAGE is a current active authorized source.
 Summarize other active authorized sources where they materially explain competition. Treat broad labels such
 as "COMMON MISSILE SYSTEMS" as a market or system-family grouping, not as a discrete platform. Use fiscal
-years for recency and describe the latest year as the latest loaded FY2026 records rather than "year to date".
+years for recency and describe the latest year as the latest FY2026 records rather than "year to date".
 
 Finish with one concise "Evidence used" section naming useful public award IDs, NIIN/NSN examples and source
 types. Never print release names, calculation versions, evidence-index record counts, context IDs, hashes,
@@ -2018,6 +2018,9 @@ def sanitize_answer_text(answer: str) -> str:
         flags=re.IGNORECASE,
     )
     cleaned = re.sub(r"\bthe dossier\b", "the evidence", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:this|that) dossier\b", "this analysis", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bdossier\b", "analysis", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bloaded FY(?=\s?20\d{2})", "FY", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bthe loaded records\b", "the available records", cleaned, flags=re.IGNORECASE)
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
