@@ -28,6 +28,8 @@ class CompanyParentResolutionTests(unittest.TestCase):
                         ('44444', 'THE BOEING COMPANY', 'THE BOEING', 'BOEINGUEI001', 500.0, 50.0),
                         ('55555', 'BELL BOEING JOINT PROJECT OFFICE', 'BELL BOEING JOINT PROJECT OFFICE', 'BELLBOEING01', 100.0, 10.0),
                         ('66666', 'CURTISS-WRIGHT CONTROLS, INC.', 'CURTISS-WRIGHT CORPORATION', 'CURTISSUEI1', 300.0, 30.0),
+                        ('77777', 'MOOG INC.', 'MOOG INC.', 'MOOGUEI0001', 400.0, 40.0),
+                        ('88888', 'MOOG INC.', 'MOOG INC.', 'MOOGUEI0002', 350.0, 35.0),
                         ('9EME1', 'CURTISS VILLAGE OF', 'CURTISS VILLAGE OF', 'CURTISSVILL1', 1.0, 0.0)
                     ) AS t(
                         cage_code,
@@ -67,6 +69,8 @@ class CompanyParentResolutionTests(unittest.TestCase):
                     ('44444', 'THE BOEING COMPANY', 'ARLINGTON', 'VA', 'A', NULL),
                     ('55555', 'BELL BOEING JOINT PROJECT OFFICE', 'AMARILLO', 'TX', 'A', NULL),
                     ('66666', 'CURTISS-WRIGHT CONTROLS, INC.', 'ASHBURN', 'VA', 'A', NULL),
+                    ('77777', 'MOOG INC.', 'BLACKSBURG', 'VA', 'A', NULL),
+                    ('88888', 'MOOG INC.', 'EAST AURORA', 'NY', 'A', NULL),
                     ('9EME1', 'CURTISS VILLAGE OF', 'CURTISS', 'WI', 'A', NULL)
                 ) AS t(cage_code, vendor_name, city, state, cage_status, replacement_cage)
             ) TO ? (FORMAT PARQUET)
@@ -141,6 +145,20 @@ class CompanyParentResolutionTests(unittest.TestCase):
             )
             self.assertEqual(parent["scope_name"], "CURTISS-WRIGHT CORPORATION")
             self.assertEqual(parent["resolved_cages"], ["66666"])
+
+    def test_location_follow_up_resolves_only_within_active_company_cages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            result = store.resolve_site_reference(
+                ["77777", "88888"],
+                "Which platforms does the Blacksburg site support?",
+                parent_name="MOOG INC.",
+            )
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result["scope_type"], "company_site")
+            self.assertEqual(result["scope_id"], "77777")
+            self.assertEqual(result["city"], "BLACKSBURG")
 
 
 if __name__ == "__main__":

@@ -119,6 +119,14 @@ class BetaStateStore:
             );
             """
         )
+        self.connection.execute(
+            """
+            UPDATE query_events
+            SET status = 'failed_refunded', completed_at = ?
+            WHERE status IN ('reserved', 'running')
+            """,
+            [datetime.now(timezone.utc).isoformat()],
+        )
         self.connection.commit()
 
     def used_today(self, subject_id: str) -> int:

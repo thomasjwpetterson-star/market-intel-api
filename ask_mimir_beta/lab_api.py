@@ -401,6 +401,13 @@ platform relationships. A repeated and specific description can support a bounde
 Do not let the largest contract erase other demonstrated product or repair/manufacturing lines. Every PSC
 or NAICS code shown to a customer must include its description; omit an unexplained code.
 
+The site_capability_evidence section is keyed by CAGE and is the primary evidence for assigning work to a
+particular facility. Use its recurring descriptions, mapped platforms, customer routes, item examples and
+reported places of performance to describe the work associated with each site. Do not claim that the record
+lacks site-specific detail when these fields support a clear bounded description. For a company-wide facility
+question, cover every material site returned rather than replacing site-level evidence with a single corporate
+capability summary.
+
 Use short headings and compact bullets. Link company/CAGE references
 to https://www.mimiradvisors.org/dashboard?view=COMPANY&cage=<CAGE>, awards to
 https://www.mimiradvisors.org/dashboard?view=AWARDS&award=<AWARD_ID>, platforms to
@@ -421,7 +428,9 @@ for opportunities or future demand.
 
 Include registered locations for material prime-customer CAGEs where supplied, while keeping them distinct
 from prime-award place of performance and reported subaward location. Use source-reported descriptions as
-the evidence for capability wording. For product coverage, lead with all associated NIINs and part-number
+the evidence for capability wording. Where the place of performance matches or materially clarifies a site,
+state it directly. Do not repeat a generic warning about CAGE addresses and manufacturing locations unless a
+specific mismatch changes the interpretation. For product coverage, lead with all associated NIINs and part-number
 references, then separately identify the subset for which the CAGE is a current active authorized source.
 Summarize other active authorized sources where they materially explain competition. Treat broad labels such
 as "COMMON MISSILE SYSTEMS" as a market or system-family grouping, not as a discrete platform. Use fiscal
@@ -1274,6 +1283,7 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     ):
         return None
     patterns = (
+        r"what\s+(?:defense|defence)\s+work\s+is\s+carried\s+out\s+at\s+(.+?)\s+(?:facilities|sites)(?:\?|\.|$)",
         r"(?:tell\s+me\s+about|give\s+me\s+(?:an?\s+)?)\s*(.+?)(?:'s|’s)\s+(?:us\s+)?(?:defense|defence)\s+business(?:\?|\.|$)",
         r"(?:defense\s+supplier|defence\s+supplier|supplier|company)\s*:\s*([^\n?]+)",
         r"what\s+does\s+(.+?)\s+supply(?:\s|\?|$)",
@@ -1356,6 +1366,7 @@ def company_wide_intent(text: str) -> bool:
             "largest visible defense positions",
             "which cage codes",
             "which facilities belong",
+            "work is carried out at",
             "concise defence-market profile",
             "concise defense-market profile",
         )
@@ -1435,6 +1446,10 @@ class ActiveScope(BaseModel):
     scope_name: Optional[str] = Field(default=None, max_length=300)
     resolved_cages: List[str] = Field(default_factory=list, max_length=250)
     group_kind: Optional[str] = Field(default=None, max_length=80)
+    parent_scope_id: Optional[str] = Field(default=None, max_length=200)
+    parent_scope_name: Optional[str] = Field(default=None, max_length=300)
+    parent_resolved_cages: List[str] = Field(default_factory=list, max_length=250)
+    parent_group_kind: Optional[str] = Field(default=None, max_length=80)
 
 
 class AskRequest(BaseModel):
@@ -2588,8 +2603,33 @@ def generate_answer(
     started = time.perf_counter()
     resolved_company_scope: Dict[str, Any] | None = None
     company_query = explicit_company_name_query(request.messages)
+    latest_question = str(request.messages[-1].content or "")
+    active_company_cages = []
+    active_company_name = None
+    if request.active_scope:
+        if request.active_scope.parent_resolved_cages:
+            active_company_cages = request.active_scope.parent_resolved_cages
+            active_company_name = request.active_scope.parent_scope_name
+        elif request.active_scope.scope_type == "company_parent":
+            active_company_cages = request.active_scope.resolved_cages
+            active_company_name = request.active_scope.scope_name
+    if (
+        request.active_scope
+        and request.active_scope.scope_type in {"company_parent", "company_site"}
+        and active_company_cages
+        and re.search(r"\b(?:SITE|FACILITY|LOCATION)\b", latest_question, re.IGNORECASE)
+    ):
+        scoped_site = runtime.company_contexts.resolve_site_reference(
+            active_company_cages,
+            latest_question,
+            parent_name=active_company_name,
+        )
+        if scoped_site:
+            resolved_company_scope = scoped_site
+            company_query = None
     if (
         not company_query
+        and not resolved_company_scope
         and request.active_scope
         and request.active_scope.scope_type in {"company_parent", "company_site"}
         and company_follow_up_intent(request.messages[-1].content)

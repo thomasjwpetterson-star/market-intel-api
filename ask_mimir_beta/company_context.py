@@ -214,7 +214,7 @@ class CompanyContextBuilder:
             }
             for source in identity_sites:
                 cage = clean_cage(source.get("cage") or source.get("scope_id"))
-                if not cage:
+                if not cage or cage not in clean_cages:
                     continue
                 target = existing.setdefault(
                     cage,
@@ -261,6 +261,7 @@ class CompanyContextBuilder:
         )
         product_evidence = self._product_and_part_evidence(cages, years)
         capability_evidence = self._capability_evidence(cages, years)
+        site_capability_evidence = self._site_capability_evidence(cages, years)
         top_awards = self._top_awards(cages, years)
         network_context = self._network_context(cages, years)
         platform_exposure = self._platform_exposure(cages, years)
@@ -269,7 +270,7 @@ class CompanyContextBuilder:
             "context_id": context_id,
             "evidence_fingerprint": evidence_fingerprint,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "calculation_version": "mimir-company-context-2026-09-v5",
+            "calculation_version": "mimir-company-context-2026-09-v6",
             "scope": {
                 "scope_type": scope_type,
                 "scope_id": scope_id,
@@ -290,6 +291,7 @@ class CompanyContextBuilder:
             "observed_financials": self._financial_summary(cages, years),
             "annual_activity": self._annual_activity(cages, years),
             "site_financials": self._site_financials(cages, years),
+            "site_capability_evidence": site_capability_evidence,
             "location_footprint": self._location_footprint(cages, years, sites),
             "capability_evidence": capability_evidence,
             "product_and_part_evidence": product_evidence,
@@ -985,6 +987,111 @@ class CompanyContextBuilder:
                 query, [str(self.paths["transactions"]), *cages, *years]
             )
         )
+
+    def _site_capability_evidence(
+        self, cages: Sequence[str], years: Sequence[int]
+    ) -> List[Dict[str, Any]]:
+        transaction_query = f"""
+            WITH grouped AS (
+                SELECT
+                    vendor_cage AS cage,
+                    source_system,
+                    COALESCE(
+                        NULLIF(TRIM(base_award_description), ''),
+                        NULLIF(TRIM(description), '')
+                    ) AS reported_description,
+                    SUM(spend_amount) AS observed_value_usd,
+                    COUNT(DISTINCT award_key) AS distinct_awards,
+                    ARRAY_SLICE(
+                        ARRAY_AGG(DISTINCT contract_id ORDER BY contract_id), 1, 3
+                    ) AS sample_contract_ids,
+                    MODE(NULLIF(TRIM(platform_family), '')) AS platform_family,
+                    MODE(NULLIF(TRIM(place_of_performance_city), '')) AS place_of_performance_city,
+                    MODE(NULLIF(TRIM(place_of_performance_state), '')) AS place_of_performance_state,
+                    MODE(NULLIF(TRIM(nsn), '')) AS sample_nsn
+                FROM read_parquet(?)
+                WHERE vendor_cage IN ({placeholders(cages)})
+                  AND year IN ({placeholders(years)})
+                GROUP BY 1, 2, 3
+            ), ranked AS (
+                SELECT
+                    *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY cage, source_system
+                        ORDER BY ABS(observed_value_usd) DESC, reported_description
+                    ) AS evidence_rank
+                FROM grouped
+                WHERE reported_description IS NOT NULL
+            )
+            SELECT * EXCLUDE (evidence_rank)
+            FROM ranked
+            WHERE evidence_rank <= 3
+            ORDER BY cage, source_system, ABS(observed_value_usd) DESC
+        """
+        subcontract_query = f"""
+            WITH grouped AS (
+                SELECT
+                    sub_cage AS cage,
+                    NULLIF(TRIM(description), '') AS reported_description,
+                    SUM(subaward_value) AS observed_value_usd,
+                    COUNT(DISTINCT source_dedup_key) AS selected_report_count,
+                    ARRAY_SLICE(
+                        ARRAY_AGG(DISTINCT contract_id ORDER BY contract_id), 1, 3
+                    ) AS sample_prime_contract_ids,
+                    MODE(NULLIF(TRIM(prime_name), '')) AS prime_customer,
+                    MODE(NULLIF(TRIM(platform_family), '')) AS platform_family,
+                    MODE(NULLIF(TRIM(sub_city), '')) AS reported_location_city,
+                    MODE(NULLIF(TRIM(sub_state), '')) AS reported_location_state
+                FROM read_parquet(?)
+                WHERE sub_cage IN ({placeholders(cages)})
+                  AND year IN ({placeholders(years)})
+                GROUP BY 1, 2
+            ), ranked AS (
+                SELECT
+                    *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY cage
+                        ORDER BY ABS(observed_value_usd) DESC, reported_description
+                    ) AS evidence_rank
+                FROM grouped
+                WHERE reported_description IS NOT NULL
+            )
+            SELECT * EXCLUDE (evidence_rank)
+            FROM ranked
+            WHERE evidence_rank <= 4
+            ORDER BY cage, ABS(observed_value_usd) DESC
+        """
+        transaction_rows = rows_as_dicts(
+            self.connection.execute(
+                transaction_query,
+                [str(self.paths["transactions"]), *cages, *years],
+            )
+        )
+        subcontract_rows = rows_as_dicts(
+            self.connection.execute(
+                subcontract_query,
+                [str(self.paths["network"]), *cages, *years],
+            )
+        )
+        by_cage = {
+            cage: {
+                "cage": cage,
+                "prime_award_and_dla_examples": [],
+                "reported_subcontract_examples": [],
+            }
+            for cage in cages
+        }
+        for row in transaction_rows:
+            by_cage.setdefault(row["cage"], {"cage": row["cage"]})
+            by_cage[row["cage"]].setdefault(
+                "prime_award_and_dla_examples", []
+            ).append(row)
+        for row in subcontract_rows:
+            by_cage.setdefault(row["cage"], {"cage": row["cage"]})
+            by_cage[row["cage"]].setdefault(
+                "reported_subcontract_examples", []
+            ).append(row)
+        return list(by_cage.values())
 
     def _capability_evidence(
         self, cages: Sequence[str], years: Sequence[int]

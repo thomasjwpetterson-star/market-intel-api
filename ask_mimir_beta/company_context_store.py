@@ -8,7 +8,7 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 import duckdb
 
@@ -18,6 +18,7 @@ DEFAULT_CONTEXT_DIR = ROOT / "validation-output" / "company-context"
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
+DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v6"
 
 
 FOCUS_SECTIONS = {
@@ -35,6 +36,7 @@ FOCUS_SECTIONS = {
         "observed_financials",
         "annual_activity",
         "site_financials",
+        "site_capability_evidence",
         "location_footprint",
         "capability_evidence",
         "product_and_part_evidence",
@@ -51,6 +53,7 @@ FOCUS_SECTIONS = {
         "observed_financials",
         "annual_activity",
         "site_financials",
+        "site_capability_evidence",
         "location_footprint",
         "capability_evidence",
         "product_and_part_evidence",
@@ -67,6 +70,7 @@ FOCUS_SECTIONS = {
     "supply_chain": [
         "identity",
         "annual_activity",
+        "site_capability_evidence",
         "capability_evidence",
         "platform_exposure",
         "missile_program_trajectory",
@@ -77,6 +81,7 @@ FOCUS_SECTIONS = {
         "identity",
         "observed_financials",
         "annual_activity",
+        "site_capability_evidence",
         "capability_evidence",
         "platform_exposure",
         "missile_program_trajectory",
@@ -202,7 +207,9 @@ class CompanyContextStore:
                 f"{path.name}:{path.stat().st_size}:{path.stat().st_mtime_ns}"
                 for path in self.directory_sources
             )
-        release_namespace = hashlib.sha256(release_identity.encode()).hexdigest()[:16]
+        release_namespace = hashlib.sha256(
+            f"{DYNAMIC_CONTEXT_SCHEMA_VERSION}|{release_identity}".encode()
+        ).hexdigest()[:16]
         cache_root = Path(
             os.getenv("ASK_MIMIR_CACHE_DIR", str(self.context_dir / ".dynamic-cache"))
         ).resolve()
@@ -345,6 +352,96 @@ class CompanyContextStore:
                 if requires_disambiguation
                 else []
             ),
+        }
+
+    def resolve_site_reference(
+        self,
+        cages: Sequence[str],
+        text: str,
+        *,
+        parent_name: str | None = None,
+    ) -> Dict[str, Any] | None:
+        """Resolve a location phrase only within the active company scope."""
+        locations_path = self.directory_paths["locations"]
+        clean_cages = sorted(
+            {_normalize_cage(cage) for cage in cages if _normalize_cage(cage)}
+        )
+        if not locations_path.exists() or not clean_cages:
+            return None
+
+        placeholders = ",".join("?" for _ in clean_cages)
+        with self._directory_lock, duckdb.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    UPPER(REGEXP_REPLACE(COALESCE(cage_code, ''), '[^A-Za-z0-9]', '', 'g')) AS cage,
+                    MODE(vendor_name) AS vendor_name,
+                    MODE(city) AS city,
+                    MODE(state) AS state
+                FROM read_parquet(?)
+                WHERE UPPER(REGEXP_REPLACE(COALESCE(cage_code, ''), '[^A-Za-z0-9]', '', 'g'))
+                      IN ({placeholders})
+                GROUP BY 1
+                """,
+                [str(locations_path), *clean_cages],
+            ).fetchall()
+
+        question = str(text or "").upper()
+        matches = []
+        for cage, vendor_name, city, state in rows:
+            city_text = str(city or "").strip().upper()
+            if len(city_text) < 3 or not re.search(
+                rf"\b{re.escape(city_text)}\b", question
+            ):
+                continue
+            matches.append(
+                {
+                    "context_id": None,
+                    "scope_type": "company_site",
+                    "scope_id": cage,
+                    "scope_name": str(vendor_name or f"CAGE {cage}").strip(),
+                    "observation_window": None,
+                    "site_count": 1,
+                    "resolved_cages": [cage],
+                    "city": city,
+                    "state": state,
+                    "option_label": (
+                        f"{vendor_name or cage} - "
+                        f"{', '.join(value for value in (city, state) if value)} "
+                        f"(CAGE {cage})"
+                    ),
+                }
+            )
+
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) < 2:
+            return None
+
+        matched_cages = sorted({row["scope_id"] for row in matches})
+        city = matches[0].get("city")
+        state = matches[0].get("state")
+        location = ", ".join(value for value in (city, state) if value)
+        scope_name = f"{parent_name or matches[0]['scope_name']} - {location}"
+        scope_id = _group_id(scope_name, matched_cages)
+        self._dynamic_groups[scope_id] = {
+            "scope_name": scope_name,
+            "cages": matched_cages,
+            "identity_sites": matches,
+            "group_kind": "co_located_facility",
+        }
+        return {
+            "context_id": None,
+            "scope_type": "company_parent",
+            "scope_id": scope_id,
+            "scope_name": scope_name,
+            "observation_window": None,
+            "site_count": len(matched_cages),
+            "resolved_cages": matched_cages,
+            "city": city,
+            "state": state,
+            "option_label": f"{scope_name} facility ({len(matched_cages)} CAGE codes)",
+            "group_kind": "co_located_facility",
         }
 
     def _directory_search(self, query: str, limit: int) -> List[Dict[str, Any]]:
@@ -718,17 +815,22 @@ class CompanyContextStore:
         sites = [row for row in directory_matches if row["scope_type"] == "company_site"]
         if len(sites) < 2:
             return None
-        all_cages = sorted({str(row["scope_id"]).upper() for row in sites})
         cages = sorted(
             {
                 str(row["scope_id"]).upper()
                 for row in sites
                 if row.get("has_observed_profile")
             }
-        ) or all_cages
+        )
+        if not cages:
+            return None
+        cage_set = set(cages)
+        scoped_sites = [
+            row for row in sites if str(row["scope_id"]).upper() in cage_set
+        ]
         location_keys = {
             (str(row.get("city") or "").upper(), str(row.get("state") or "").upper())
-            for row in sites
+            for row in scoped_sites
         }
         one_location = len(location_keys) == 1 and next(iter(location_keys))[0]
         query_label = re.sub(r"\s+", " ", str(query or "").strip()).rstrip(".?")
@@ -741,17 +843,17 @@ class CompanyContextStore:
                 flags=re.IGNORECASE,
             ).strip(" ,- ")
             scope_name = f"{query_label} - {city.title()}, {state}"
-            option_label = f"{scope_name} facility ({len(all_cages)} CAGE codes)"
+            option_label = f"{scope_name} facility ({len(cages)} CAGE codes)"
             group_kind = "co_located_facility"
         else:
             scope_name = query_label
-            option_label = f"{scope_name} - company-wide ({len(all_cages)} CAGE sites)"
+            option_label = f"{scope_name} - company-wide ({len(cages)} CAGE sites)"
             group_kind = "observed_company_group"
-        scope_id = _group_id(scope_name, all_cages)
+        scope_id = _group_id(scope_name, cages)
         self._dynamic_groups[scope_id] = {
             "scope_name": scope_name,
             "cages": cages,
-            "identity_sites": [dict(row) for row in sites],
+            "identity_sites": [dict(row) for row in scoped_sites],
             "group_kind": group_kind,
         }
         return {
@@ -760,7 +862,7 @@ class CompanyContextStore:
             "scope_id": scope_id,
             "scope_name": scope_name,
             "observation_window": None,
-            "site_count": len(all_cages),
+            "site_count": len(cages),
             "resolved_cages": cages,
             "city": sites[0].get("city") if one_location else None,
             "state": sites[0].get("state") if one_location else None,
@@ -920,6 +1022,8 @@ class CompanyContextStore:
             return {**value, "sites": value.get("sites", [])[:500]}
         if section == "site_financials" and isinstance(value, list):
             return value[:15]
+        if section == "site_capability_evidence" and isinstance(value, list):
+            return value[:40]
         if section == "capability_evidence" and isinstance(value, dict):
             psc_rows = [row for row in value.get("psc", []) if row.get("psc_description")]
             naics_rows = [
