@@ -126,6 +126,39 @@ def _group_id(label: str, cages: List[str]) -> str:
     return f"OBSERVED_{digest[:20].upper()}"
 
 
+def _reported_parent_id(parent_name: str) -> str:
+    digest = hashlib.sha256(parent_name.strip().upper().encode()).hexdigest()
+    return f"PARENT_{digest[:20].upper()}"
+
+
+def _parent_display_name(parent_name: Any) -> str:
+    clean = re.sub(r"\s+", " ", str(parent_name or "").strip()).upper()
+    return {
+        "THE BOEING": "THE BOEING COMPANY",
+    }.get(clean, clean)
+
+
+def _company_name_core(value: Any) -> str:
+    tokens = re.findall(r"[A-Z0-9]+", str(value or "").upper())
+    while tokens and tokens[0] == "THE":
+        tokens.pop(0)
+    legal_suffixes = {
+        "CO",
+        "COMPANY",
+        "CORP",
+        "CORPORATION",
+        "INC",
+        "INCORPORATED",
+        "LLC",
+        "LP",
+        "LTD",
+        "PLC",
+    }
+    while tokens and tokens[-1] in legal_suffixes:
+        tokens.pop()
+    return " ".join(tokens)
+
+
 class CompanyContextStore:
     def __init__(
         self,
@@ -246,6 +279,14 @@ class CompanyContextStore:
             if scope_type != "company_site" and not any(
                 row["scope_type"] == "company_parent" for row in matches
             ):
+                reported_parent_matches = self._reported_parent_matches(query)
+                matches = self._merge_directory_matches(
+                    matches,
+                    reported_parent_matches,
+                )
+            if scope_type != "company_site" and not any(
+                row["scope_type"] == "company_parent" for row in matches
+            ):
                 group = self._observed_group_match(query, directory_matches)
                 if group:
                     matches = self._merge_directory_matches(matches, [group])
@@ -323,17 +364,42 @@ class CompanyContextStore:
             connection.execute("SET preserve_insertion_order=false")
             connection.execute("SET threads=1")
             if paths["profiles"].exists():
+                profile_columns = {
+                    column[0]
+                    for column in connection.execute(
+                        "SELECT * FROM read_parquet(?) LIMIT 0",
+                        [str(paths["profiles"])],
+                    ).description
+                }
+                parent_name_select = (
+                    "ultimate_parent_name"
+                    if "ultimate_parent_name" in profile_columns
+                    else "CAST(NULL AS VARCHAR)"
+                )
+                parent_uei_select = (
+                    "ultimate_parent_uei"
+                    if "ultimate_parent_uei" in profile_columns
+                    else "CAST(NULL AS VARCHAR)"
+                )
+                parent_name_filter = (
+                    "OR REGEXP_MATCHES(UPPER(COALESCE(ultimate_parent_name, '')), ?)"
+                    if "ultimate_parent_name" in profile_columns
+                    else ""
+                )
                 profile_rows = connection.execute(
-                    """
+                    f"""
                     SELECT
                         UPPER(REGEXP_REPLACE(COALESCE(cage_code, ''), '[^A-Za-z0-9]', '', 'g')) AS cage,
                         vendor_name,
                         COALESCE(total_lifetime_spend, 0) AS prime_value,
-                        COALESCE(network_flow_total, 0) AS subcontract_value
+                        COALESCE(network_flow_total, 0) AS subcontract_value,
+                        {parent_name_select} AS ultimate_parent_name,
+                        {parent_uei_select} AS ultimate_parent_uei
                     FROM read_parquet(?)
                     WHERE
                         (? AND UPPER(REGEXP_REPLACE(COALESCE(cage_code, ''), '[^A-Za-z0-9]', '', 'g')) = ?)
                         OR REGEXP_MATCHES(UPPER(COALESCE(vendor_name, '')), ?)
+                        {parent_name_filter}
                     ORDER BY ABS(COALESCE(total_lifetime_spend, 0))
                            + ABS(COALESCE(network_flow_total, 0)) DESC
                     LIMIT ?
@@ -343,10 +409,18 @@ class CompanyContextStore:
                         cage_is_exact,
                         cage_query,
                         name_pattern or r"a^",
+                        *([name_pattern or r"a^"] if parent_name_filter else []),
                         min(max(int(limit), 1), 500),
                     ],
                 ).fetchall()
-                for cage, vendor_name, prime_value, subcontract_value in profile_rows:
+                for (
+                    cage,
+                    vendor_name,
+                    prime_value,
+                    subcontract_value,
+                    ultimate_parent_name,
+                    ultimate_parent_uei,
+                ) in profile_rows:
                     if not cage or cage in {"UNKNOWN", "UNKNO", "00000"}:
                         continue
                     rows[cage] = {
@@ -355,6 +429,8 @@ class CompanyContextStore:
                         "has_observed_profile": True,
                         "observed_value": abs(float(prime_value or 0))
                         + abs(float(subcontract_value or 0)),
+                        "ultimate_parent_name": ultimate_parent_name,
+                        "ultimate_parent_uei": ultimate_parent_uei,
                     }
 
             if paths["locations"].exists():
@@ -467,10 +543,159 @@ class CompanyContextStore:
                     "option_label": option_label,
                     "context_available": False,
                     "has_observed_profile": row.get("has_observed_profile", False),
+                    "ultimate_parent_name": row.get("ultimate_parent_name"),
+                    "ultimate_parent_uei": row.get("ultimate_parent_uei"),
                     "_directory_rank": directory_rank,
                 }
             )
         return results
+
+    def _reported_parent_matches(self, query: str) -> List[Dict[str, Any]]:
+        profiles_path = self.directory_paths["profiles"]
+        if not profiles_path.exists():
+            return []
+        clean_query = str(query or "").strip()
+        parent_pattern = _name_patterns(clean_query)
+        exact_parent_uei = re.sub(r"[^A-Z0-9]", "", clean_query.upper())
+        if not parent_pattern and not exact_parent_uei:
+            return []
+
+        with self._directory_lock, duckdb.connect() as connection:
+            connection.execute("SET preserve_insertion_order=false")
+            connection.execute("SET threads=1")
+            profile_columns = {
+                column[0]
+                for column in connection.execute(
+                    "SELECT * FROM read_parquet(?) LIMIT 0",
+                    [str(profiles_path)],
+                ).description
+            }
+            required = {"ultimate_parent_name", "ultimate_parent_uei"}
+            if not required.issubset(profile_columns):
+                return []
+
+            parent_rows = connection.execute(
+                """
+                WITH matched_parents AS (
+                    SELECT
+                        ultimate_parent_name,
+                        SUM(
+                            ABS(COALESCE(total_lifetime_spend, 0))
+                            + ABS(COALESCE(network_flow_total, 0))
+                        ) AS observed_value
+                    FROM read_parquet(?)
+                    WHERE NULLIF(TRIM(ultimate_parent_name), '') IS NOT NULL
+                      AND (
+                          REGEXP_MATCHES(UPPER(ultimate_parent_name), ?)
+                          OR UPPER(REGEXP_REPLACE(COALESCE(ultimate_parent_uei, ''), '[^A-Za-z0-9]', '', 'g')) = ?
+                      )
+                    GROUP BY ultimate_parent_name
+                    ORDER BY observed_value DESC, ultimate_parent_name
+                    LIMIT 10
+                )
+                SELECT ultimate_parent_name, observed_value
+                FROM matched_parents
+                ORDER BY observed_value DESC, ultimate_parent_name
+                """,
+                [str(profiles_path), parent_pattern or r"a^", exact_parent_uei],
+            ).fetchall()
+
+            query_core = _company_name_core(clean_query)
+            exact_name_rows = [
+                row
+                for row in parent_rows
+                if _company_name_core(_parent_display_name(row[0])) == query_core
+            ]
+            if exact_name_rows:
+                parent_rows = exact_name_rows
+
+            results: List[Dict[str, Any]] = []
+            for parent_rank, (parent_name, _observed_value) in enumerate(parent_rows):
+                parent_filter = (
+                    "UPPER(TRIM(COALESCE(p.ultimate_parent_name, ''))) = UPPER(TRIM(?))"
+                )
+                parent_value = str(parent_name)
+
+                location_join = ""
+                location_select = "CAST(NULL AS VARCHAR) AS city, CAST(NULL AS VARCHAR) AS state"
+                parameters: List[Any] = [str(profiles_path)]
+                if self.directory_paths["locations"].exists():
+                    location_join = """
+                        LEFT JOIN read_parquet(?) l
+                          ON UPPER(REGEXP_REPLACE(COALESCE(p.cage_code, ''), '[^A-Za-z0-9]', '', 'g'))
+                           = UPPER(REGEXP_REPLACE(COALESCE(l.cage_code, ''), '[^A-Za-z0-9]', '', 'g'))
+                    """
+                    location_select = "l.city, l.state"
+                    parameters.append(str(self.directory_paths["locations"]))
+                parameters.append(parent_value)
+                site_rows = connection.execute(
+                    f"""
+                    SELECT
+                        UPPER(REGEXP_REPLACE(COALESCE(p.cage_code, ''), '[^A-Za-z0-9]', '', 'g')) AS cage,
+                        p.vendor_name,
+                        {location_select},
+                        COALESCE(p.total_lifetime_spend, 0) AS prime_value,
+                        COALESCE(p.network_flow_total, 0) AS subcontract_value
+                    FROM read_parquet(?) p
+                    {location_join}
+                    WHERE {parent_filter}
+                    ORDER BY ABS(COALESCE(p.total_lifetime_spend, 0))
+                           + ABS(COALESCE(p.network_flow_total, 0)) DESC,
+                             p.vendor_name,
+                             p.cage_code
+                    """,
+                    parameters,
+                ).fetchall()
+
+                sites = []
+                for cage, vendor_name, city, state, prime_value, subcontract_value in site_rows:
+                    if not cage or cage in {"UNKNOWN", "UNKNO", "00000"}:
+                        continue
+                    sites.append(
+                        {
+                            "cage": cage,
+                            "scope_id": cage,
+                            "scope_type": "company_site",
+                            "scope_name": vendor_name or f"CAGE {cage}",
+                            "vendor_name": vendor_name,
+                            "city": city,
+                            "state": state,
+                            "has_observed_profile": True,
+                            "observed_value": abs(float(prime_value or 0))
+                            + abs(float(subcontract_value or 0)),
+                            "ultimate_parent_name": parent_name,
+                        }
+                    )
+                cages = sorted({site["cage"] for site in sites})
+                if not cages:
+                    continue
+                scope_name = _parent_display_name(parent_name)
+                scope_id = _reported_parent_id(scope_name)
+                self._dynamic_groups[scope_id] = {
+                    "scope_name": scope_name,
+                    "cages": cages,
+                    "identity_sites": sites,
+                    "group_kind": "reported_ultimate_parent",
+                    "parent_name": scope_name,
+                }
+                results.append(
+                    {
+                        "context_id": None,
+                        "scope_type": "company_parent",
+                        "scope_id": scope_id,
+                        "scope_name": scope_name,
+                        "observation_window": None,
+                        "site_count": len(cages),
+                        "resolved_cages": cages,
+                        "city": None,
+                        "state": None,
+                        "option_label": f"{scope_name} - company-wide ({len(cages)} CAGE sites)",
+                        "context_available": False,
+                        "group_kind": "reported_ultimate_parent",
+                        "_directory_rank": parent_rank,
+                    }
+                )
+            return results
 
     def _observed_group_match(
         self, query: str, directory_matches: List[Dict[str, Any]]
@@ -638,6 +863,11 @@ class CompanyContextStore:
                     group_kind=group["group_kind"],
                     identity_sites=group.get("identity_sites", []),
                 )
+                if group.get("parent_name"):
+                    context["identity"]["parent_resolution"] = {
+                        "parent_name": group["parent_name"],
+                        "method": "reported ultimate-parent relationship",
+                    }
             else:
                 context = self._dynamic_builder.build_site(clean_id)
             self._write_dynamic_cache(scope_type, clean_id, context)

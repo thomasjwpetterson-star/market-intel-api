@@ -383,6 +383,42 @@ def optimize_and_upload():
         print("   ↩️ Skipping profiles.parquet")
         df_profiles = pd.DataFrame()
     else:
+        print("   🔗 Fetching governed ultimate-parent relationships...")
+        df_parent_profiles = run_query("""
+            WITH ranked_parent_relationships AS (
+                SELECT
+                    LPAD(
+                        UPPER(REGEXP_REPLACE(TRIM(child_cage), '[^A-Za-z0-9]', '')),
+                        5,
+                        '0'
+                    ) AS cage_code,
+                    NULLIF(TRIM(parent_name), '') AS ultimate_parent_name,
+                    NULLIF(TRIM(parent_uei), '') AS ultimate_parent_uei,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY LPAD(
+                            UPPER(REGEXP_REPLACE(TRIM(child_cage), '[^A-Za-z0-9]', '')),
+                            5,
+                            '0'
+                        )
+                        ORDER BY
+                            COALESCE(last_seen, '') DESC,
+                            COALESCE(transaction_count, 0) DESC,
+                            COALESCE(parent_name, '') ASC
+                    ) AS parent_rank
+                FROM "market_intel_gold"."ref_parent_child"
+                WHERE child_cage IS NOT NULL
+                  AND TRIM(child_cage) <> ''
+                  AND parent_name IS NOT NULL
+                  AND TRIM(parent_name) <> ''
+            )
+            SELECT
+                cage_code,
+                ultimate_parent_name,
+                ultimate_parent_uei
+            FROM ranked_parent_relationships
+            WHERE parent_rank = 1
+        """)
+
         summary_source = os.path.join(TEMP_DIR, "profiles_summary_source.parquet")
         s3.download_file(BUCKET_NAME, f"{CACHE_PREFIX}summary.parquet", summary_source)
         profile_con = duckdb.connect()
@@ -601,6 +637,12 @@ def optimize_and_upload():
             how="outer",
             suffixes=("_award", "_network"),
         )
+        df_profiles = df_profiles.merge(
+            df_parent_profiles,
+            on="cage_code",
+            how="left",
+            validate="one_to_one",
+        )
 
         award_present = df_profiles["award_present"].notna()
         network_present = df_profiles["network_present"].notna()
@@ -631,10 +673,18 @@ def optimize_and_upload():
             df_profiles[column] = df_profiles[column].fillna(0)
 
         df_profiles["top_naics_codes"] = df_profiles["top_naics_codes"].fillna("")
+        df_profiles["ultimate_parent_name"] = df_profiles[
+            "ultimate_parent_name"
+        ].fillna("")
+        df_profiles["ultimate_parent_uei"] = df_profiles[
+            "ultimate_parent_uei"
+        ].fillna("")
         df_profiles = df_profiles[
             [
                 "cage_code",
                 "vendor_name",
+                "ultimate_parent_name",
+                "ultimate_parent_uei",
                 "total_lifetime_spend",
                 "total_contracts",
                 "last_active_year",
