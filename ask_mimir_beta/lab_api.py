@@ -204,9 +204,9 @@ Source evidence - what the underlying public records show.
 Mimir calculation - formula, scope, period and result.
 Mimir analysis - a cautious interpretation that does not masquerade as source data.
 
-End with a short Evidence used list naming the metric scope(s), fiscal year(s), release ID and
-record counts returned by tools. Do not expose internal implementation details that do not help
-the user understand the evidence.
+End with a short Evidence used list naming the public source types, material award or item
+identifiers and fiscal years. Never expose release IDs, calculation versions, record counts or
+other internal implementation details.
 
 Whenever the returned evidence contains a customer-facing CAGE, award identifier, platform or
 NSN, hyperlink it to the corresponding Mimir dashboard view. Link CAGE sites to
@@ -424,6 +424,15 @@ references, then separately identify the subset for which the CAGE is a current 
 Summarize other active authorized sources where they materially explain competition. Treat broad labels such
 as "COMMON MISSILE SYSTEMS" as a market or system-family grouping, not as a discrete platform. Use fiscal
 years for recency and describe the latest year as the latest FY2026 records rather than "year to date".
+Do not rank COMMON MISSILE SYSTEMS beside named platforms or link it as though it were one. Where the
+underlying evidence does not resolve a named missile program, label the residual grouping "Missile systems
+(multiple programs)" and keep it separate from named-platform exposure.
+
+Every dollar value, including values grouped by PSC, NAICS, customer, platform or capability, must state the
+fiscal-year period it covers in the heading, table label or immediately adjacent sentence. Do not let a
+follow-up question silently narrow a company-wide or site-wide scope to one contract merely because a prior
+answer cited that contract. Use the full active company scope unless the latest user message explicitly names
+an award identifier.
 
 Finish with one concise "Evidence used" section naming useful public award IDs, NIIN/NSN examples and source
 types. Never print release names, calculation versions, evidence-index record counts, context IDs, hashes,
@@ -557,6 +566,11 @@ supplier list, largest mapped subcontract positions, supplier-base concentration
 continues to use the same platform scope unless the user names a different award or platform. For supplier
 answers, include CAGE and city/state whenever supplied. Use reported_descriptions to state what each site
 appears to provide in concise functional language.
+
+For any platform follow-up, retain the active program-wide scope even when a prior answer cited individual
+contract IDs. A previous citation is evidence, not a scope selection. Only narrow to one award when the
+latest user message explicitly names its identifier. State the fiscal-year period beside every obligation,
+reported subcontract or DLA procurement value.
 
 For concentration questions, analyze the reported supplier-site distribution in
 reported_supplier_concentration and the component/source evidence separately. Do not use concentration
@@ -1108,6 +1122,14 @@ def platform_follow_up_intent(text: str) -> bool:
             "all suppliers",
             "each supplier",
             "major supplier",
+            "major 1st tier",
+            "major first tier",
+            "major first-tier",
+            "1st tier supplier",
+            "first tier supplier",
+            "first-tier supplier",
+            "tier 1 supplier",
+            "tier-one supplier",
             "largest share",
             "largest mapped subcontract",
             "supplier base",
@@ -1362,7 +1384,10 @@ def company_follow_up_intent(text: str) -> bool:
 
 
 def explicit_item_query(messages: List[ChatMessage]) -> str | None:
-    text = " ".join(message.content for message in messages)
+    # An identifier quoted in an earlier assistant answer must not hijack a later
+    # company or platform follow-up. Explicit scope changes come from the user's
+    # latest message only.
+    text = str(messages[-1].content or "")
     intent = text.lower()
     if not any(term in intent for term in ("nsn", "niin", "part number", "part no", "item")):
         return None
@@ -1380,7 +1405,9 @@ def explicit_item_query(messages: List[ChatMessage]) -> str | None:
 
 
 def explicit_award_or_opportunity_query(messages: List[ChatMessage]) -> str | None:
-    text = " ".join(message.content for message in messages)
+    # Prior answers routinely cite contract IDs. Only route to the bounded award
+    # workflow when the user explicitly names an award in the latest message.
+    text = str(messages[-1].content or "")
     intent = text.lower()
     if not any(term in intent for term in ("contract", "award", "solicitation", "opportunity", "notice")):
         return None
@@ -1982,6 +2009,8 @@ def sanitize_answer_text(answer: str) -> str:
         r"^\s*Release\s*:",
         r"^\s*Calculation version\s*:",
         r"^\s*Evidence-index records\s*:",
+        r"^\s*Contract dossiers?\s*:\s*release\b",
+        r"^\s*[^\n:]{0,40}\s*:\s*release\s+`?mimir[-_A-Za-z0-9.]*`?\s*$",
         r"^\s*(?:The\s+)?platform supply-chain pack (?:was|is) unavailable",
         r"^\s*Comparable .* in the dossier",
         r"^\s*Current parent resolution is not assigned",
@@ -2014,6 +2043,13 @@ def sanitize_answer_text(answer: str) -> str:
     cleaned = re.sub(
         r"\s*(?:under|from|in)\s+release\s+`?[-A-Za-z0-9_.]+`?\.?",
         ".",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*(?:contract dossiers?|calculation|analysis|evidence)?\s*:?\s*"
+        r"release\s+`?mimir[-_A-Za-z0-9.]*`?\.?",
+        "",
         cleaned,
         flags=re.IGNORECASE,
     )

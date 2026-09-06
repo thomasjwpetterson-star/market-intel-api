@@ -190,5 +190,45 @@
     "required_tools": ["search_platform_contexts", "get_platform_context"],
     "required_answer_terms": ["Tomahawk", "evidence"],
     "forbidden_answer_terms": ["internal", "source_dedup_key"]
+  },
+  {
+    "case_id": "tomahawk_first_tier_follow_up_ignores_prior_award_citation",
+    "messages": [
+      {"role": "user", "content": "Who supplies the Tomahawk missile?"},
+      {"role": "assistant", "content": "One supporting record is contract N0001920C0004 for JMEWS."},
+      {"role": "user", "content": "Who are the major 1st Tier suppliers?"}
+    ],
+    "active_scope": {
+      "scope_type": "platform",
+      "scope_id": "TOMAHAWK",
+      "scope_name": "Tomahawk missile family",
+      "resolved_cages": [],
+      "group_kind": "platform_or_program"
+    },
+    "required_tools": ["search_platform_contexts", "get_platform_context"],
+    "required_answer_terms": ["Tomahawk", "supplier"],
+    "required_scope_type": "platform",
+    "require_financial_period": true,
+    "forbidden_answer_terms": ["Major first-tier suppliers on the JMEWS award", "Contract dossiers: release", "mimir-contract-opportunity"]
+  },
+  {
+    "case_id": "company_platform_follow_up_ignores_prior_award_citation",
+    "messages": [
+      {"role": "user", "content": "Tell me about Honeywell's US defence business."},
+      {"role": "assistant", "content": "A supporting record is contract FA820625F0006."},
+      {"role": "user", "content": "Which platforms appear most important to it?"}
+    ],
+    "active_scope": {
+      "scope_type": "company_parent",
+      "scope_id": "observed-group-honeywell",
+      "scope_name": "Honeywell",
+      "resolved_cages": ["99193", "09128", "0BFA5"],
+      "group_kind": "observed_company_group"
+    },
+    "required_tools": ["get_company_context"],
+    "required_answer_terms": ["Honeywell", "platform"],
+    "required_scope_type": "company_parent",
+    "require_financial_period": true,
+    "forbidden_answer_terms": ["Under contract FA820625F0006", "Contract dossiers: release", "mimir-contract-opportunity"]
   }
 ]
