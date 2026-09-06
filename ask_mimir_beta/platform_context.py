@@ -25,11 +25,46 @@ PLATFORM_GROUPS = {
         "TACTOM (TACTICAL TOMAHAWK)",
         "BGM-109 TOMAHAWK",
     ),
+    "PATRIOT AIR DEFENSE SYSTEM": (
+        "PATRIOT",
+        "PAC-3",
+        "PAC-3 MSE",
+    ),
 }
 
 PLATFORM_DISPLAY_NAMES = {
     "TOMAHAWK": "Tomahawk missile family",
+    "PATRIOT AIR DEFENSE SYSTEM": "Patriot air defense system",
 }
+
+PLATFORM_ALIASES = {
+    "GMLRS": "GMLRS/GMLRS AW",
+    "MLRS": "GMLRS/GMLRS AW",
+    "TRIDENT II": "TRIDENT II MISSILE",
+    "TOMAHAWK": "TOMAHAWK",
+    "TOMAHAWK MISSILE": "TOMAHAWK",
+    "TOMAHAWK MISSILE FAMILY": "TOMAHAWK",
+    "TACTOM": "TOMAHAWK",
+    "TACTICAL TOMAHAWK": "TOMAHAWK",
+    "BGM 109 TOMAHAWK": "TOMAHAWK",
+    "PATRIOT": "PATRIOT AIR DEFENSE SYSTEM",
+    "PATRIOT AIR DEFENSE": "PATRIOT AIR DEFENSE SYSTEM",
+    "PATRIOT AIR DEFENSE SYSTEM": "PATRIOT AIR DEFENSE SYSTEM",
+    "PATRIOT AIR DEFENCE": "PATRIOT AIR DEFENSE SYSTEM",
+    "PATRIOT AIR DEFENCE SYSTEM": "PATRIOT AIR DEFENSE SYSTEM",
+    "ABRAMS": "M1 ABRAMS",
+    "VIRGINIA CLASS": "VIRGINIA CLASS (SSN 774)",
+    "DDG 51": "DDG-51 ARLEIGH BURKE",
+    "FORD CLASS": "FORD CLASS CARRIER",
+    "COLUMBIA": "COLUMBIA CLASS SSBN",
+    "COLUMBIA CLASS": "COLUMBIA CLASS SSBN",
+    "COLOMBIA": "COLUMBIA CLASS SSBN",
+    "COLOMBIA CLASS": "COLUMBIA CLASS SSBN",
+}
+
+# Tomahawk aliases are intentionally collapsed into one family. Patriot retains
+# its component program labels so a PAC-3-specific query can stay PAC-3-specific.
+COLLAPSED_PLATFORM_GROUPS = {"TOMAHAWK"}
 
 
 def _rows(cursor: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
@@ -107,7 +142,8 @@ class PlatformContextStore:
                 catalog[normalized] = platform
         grouped_members = {
             _normalize(member)
-            for members in PLATFORM_GROUPS.values()
+            for group, members in PLATFORM_GROUPS.items()
+            if group in COLLAPSED_PLATFORM_GROUPS
             for member in members
         }
         platforms = [
@@ -123,28 +159,10 @@ class PlatformContextStore:
         normalized = _normalize(clean)
         if not normalized:
             return {"query": clean, "matches": [], "requires_disambiguation": False}
-        exact = [platform for platform in self.platforms if _normalize(platform) == normalized]
-        aliases = {
-            "GMLRS": "GMLRS/GMLRS AW",
-            "MLRS": "GMLRS/GMLRS AW",
-            "TRIDENT II": "TRIDENT II MISSILE",
-            "TOMAHAWK": "TOMAHAWK",
-            "TOMAHAWK MISSILE": "TOMAHAWK",
-            "TOMAHAWK MISSILE FAMILY": "TOMAHAWK",
-            "TACTOM": "TOMAHAWK",
-            "TACTICAL TOMAHAWK": "TOMAHAWK",
-            "BGM 109 TOMAHAWK": "TOMAHAWK",
-            "ABRAMS": "M1 ABRAMS",
-            "VIRGINIA CLASS": "VIRGINIA CLASS (SSN 774)",
-            "DDG 51": "DDG-51 ARLEIGH BURKE",
-            "FORD CLASS": "FORD CLASS CARRIER",
-            "COLUMBIA": "COLUMBIA CLASS SSBN",
-            "COLUMBIA CLASS": "COLUMBIA CLASS SSBN",
-            "COLOMBIA": "COLUMBIA CLASS SSBN",
-            "COLOMBIA CLASS": "COLUMBIA CLASS SSBN",
-        }
-        if not exact and normalized in aliases and aliases[normalized] in self.platforms:
-            exact = [aliases[normalized]]
+        alias_target = PLATFORM_ALIASES.get(normalized)
+        exact = [alias_target] if alias_target in self.platforms else []
+        if not exact:
+            exact = [platform for platform in self.platforms if _normalize(platform) == normalized]
         if exact:
             matches = exact
             match_type = "EXACT"
@@ -172,32 +190,35 @@ class PlatformContextStore:
 
     def mentions(self, text: str) -> List[str]:
         normalized = f" {_normalize(text)} "
+        alias_matches = [
+            target
+            for alias, target in sorted(
+                PLATFORM_ALIASES.items(), key=lambda item: len(item[0]), reverse=True
+            )
+            if f" {alias} " in normalized and target in self.platforms
+        ]
+        grouped_alias_matches = [
+            target for target in alias_matches if target in PLATFORM_GROUPS
+        ]
+        if grouped_alias_matches:
+            return list(dict.fromkeys(grouped_alias_matches))
+
         matches = []
         for platform in self.platforms:
             candidate = _normalize(platform)
             if len(candidate) >= 3 and f" {candidate} " in normalized:
                 matches.append(platform)
-        aliases = {
-            "GMLRS": "GMLRS/GMLRS AW",
-            "TRIDENT II": "TRIDENT II MISSILE",
-            "TOMAHAWK": "TOMAHAWK",
-            "TOMAHAWK MISSILE": "TOMAHAWK",
-            "TACTOM": "TOMAHAWK",
-            "TACTICAL TOMAHAWK": "TOMAHAWK",
-            "BGM 109 TOMAHAWK": "TOMAHAWK",
-            "ABRAMS": "M1 ABRAMS",
-            "VIRGINIA CLASS": "VIRGINIA CLASS (SSN 774)",
-            "DDG 51": "DDG-51 ARLEIGH BURKE",
-            "FORD CLASS": "FORD CLASS CARRIER",
-            "COLUMBIA": "COLUMBIA CLASS SSBN",
-            "COLUMBIA CLASS": "COLUMBIA CLASS SSBN",
-            "COLOMBIA": "COLUMBIA CLASS SSBN",
-            "COLOMBIA CLASS": "COLUMBIA CLASS SSBN",
-        }
-        for alias, platform in aliases.items():
-            if f" {alias} " in normalized and platform in self.platforms:
-                matches.append(platform)
-        return sorted(set(matches), key=len, reverse=True)
+        matches.extend(alias_matches)
+        ordered = sorted(set(matches), key=lambda value: len(_normalize(value)), reverse=True)
+        return [
+            platform
+            for platform in ordered
+            if not any(
+                _normalize(platform) != _normalize(other)
+                and f" {_normalize(platform)} " in f" {_normalize(other)} "
+                for other in ordered
+            )
+        ]
 
     def get(self, platform_id: str) -> Dict[str, Any]:
         resolution = self.search(platform_id)
@@ -218,25 +239,23 @@ class PlatformContextStore:
         top_awards = self._top_awards(resolved)
         component_categories = self._component_categories(resolved)
         financial_totals = self._financial_totals(resolved, annual)
-        prime_total = abs(float(financial_totals["net_prime_obligations_usd"] or 0))
-        subcontract_total = abs(float(financial_totals["mimir_modelled_reported_subcontract_value_usd"] or 0))
+        prime_total = float(financial_totals["positive_prime_obligations_usd"] or 0)
+        positive_supplier_values = [
+            max(float(row.get("mimir_modelled_reported_subcontract_value_usd") or 0), 0)
+            for row in reported_suppliers
+        ]
+        subcontract_total = sum(positive_supplier_values)
         for row in direct_recipients:
             row["share_of_platform_prime_obligations_pct"] = (
-                abs(float(row.get("net_prime_obligations_usd") or 0)) / prime_total * 100
+                float(row.get("positive_prime_obligations_usd") or 0) / prime_total * 100
                 if prime_total else 0
             )
         for row in reported_suppliers:
             row["share_of_reported_subcontract_value_pct"] = (
-                abs(float(row.get("mimir_modelled_reported_subcontract_value_usd") or 0))
+                max(float(row.get("mimir_modelled_reported_subcontract_value_usd") or 0), 0)
                 / subcontract_total * 100 if subcontract_total else 0
             )
-        positive_supplier_values = sorted(
-            (
-                max(float(row.get("mimir_modelled_reported_subcontract_value_usd") or 0), 0)
-                for row in reported_suppliers
-            ),
-            reverse=True,
-        )
+        positive_supplier_values = sorted(positive_supplier_values, reverse=True)
         positive_supplier_total = sum(positive_supplier_values)
         supplier_concentration = {
             "supplier_site_count": len(reported_suppliers),
@@ -303,7 +322,7 @@ class PlatformContextStore:
             "reported_supplier_concentration": supplier_concentration,
             "methodology": {
                 "direct_award_lane": "Prime obligations on awards mapped directly to this platform or program.",
-                "reported_supplier_lane": "Mimir-modelled reported subcontract value on mapped prime awards; kept separate from prime obligations.",
+                "reported_supplier_lane": "Mimir-modelled reported first-tier subcontract value on mapped prime awards; kept separate from prime obligations.",
                 "item_lane": "NIIN relationships mapped through the WSDC/platform bridge. Attributed procurement and shared-use exposure are reported separately.",
                 "component_rule": "Reported descriptions support bounded capability language. Exact component claims require a platform-specific government or first-party source.",
                 "opportunity_rule": "Opportunity matches are research leads based on the platform or program name in the loaded notice text.",
@@ -475,7 +494,7 @@ class PlatformContextStore:
                   AND t.year BETWEEN 2021 AND 2026
                   AND t.platform_family IN (SELECT UNNEST(?))
                 GROUP BY t.vendor_cage
-                ORDER BY ABS(net_prime_obligations_usd) DESC
+                ORDER BY positive_prime_obligations_usd DESC, net_prime_obligations_usd DESC
                 LIMIT ?
                 """,
                 [str(self.paths["locations"]), str(self.paths["transactions"]), members, limit],
@@ -500,6 +519,10 @@ class PlatformContextStore:
                     MAX(n.sub_country) AS country,
                     MAX(l.location_quality) AS location_quality,
                     SUM(COALESCE(n.subaward_value,0)) AS mimir_modelled_reported_subcontract_value_usd,
+                    SUM(CASE WHEN COALESCE(n.subaward_value,0) > 0 THEN n.subaward_value ELSE 0 END)
+                        AS positive_mimir_modelled_reported_subcontract_value_usd,
+                    SUM(CASE WHEN COALESCE(n.subaward_value,0) < 0 THEN n.subaward_value ELSE 0 END)
+                        AS negative_mimir_modelled_reported_subcontract_value_usd,
                     SUM(COALESCE(n.subaward_value_raw,0)) AS source_reported_value_usd,
                     COUNT(*) AS selected_report_count,
                     COUNT(DISTINCT n.contract_id) AS prime_award_count,
@@ -518,7 +541,7 @@ class PlatformContextStore:
                   AND UPPER(TRIM(n.sub_cage)) NOT IN ('','UNKNOWN','UNKNO')
                 GROUP BY n.sub_cage
                 HAVING SUM(COALESCE(n.subaward_value,0)) <> 0
-                ORDER BY ABS(mimir_modelled_reported_subcontract_value_usd) DESC
+                ORDER BY mimir_modelled_reported_subcontract_value_usd DESC
                 LIMIT ?
                 """,
                 [str(self.paths["locations"]), str(self.paths["network"]), members, limit],
@@ -647,6 +670,8 @@ class PlatformContextStore:
                 """
                 SELECT contract_id, vendor_name AS recipient_name, vendor_cage AS recipient_cage,
                        base_award_description, SUM(spend_amount) AS net_prime_obligations_usd,
+                       SUM(CASE WHEN spend_amount > 0 THEN spend_amount ELSE 0 END)
+                           AS positive_prime_obligations_usd,
                        COUNT(*) AS action_count, MIN(SUBSTR(action_date,1,10)) AS first_action_date,
                        MAX(SUBSTR(action_date,1,10)) AS latest_action_date,
                        MAX(place_of_performance_city) AS place_of_performance_city,
@@ -656,7 +681,7 @@ class PlatformContextStore:
                 WHERE source_system='USA_SPENDING' AND year BETWEEN 2021 AND 2026
                   AND platform_family IN (SELECT UNNEST(?))
                 GROUP BY contract_id,vendor_name,vendor_cage,base_award_description
-                ORDER BY ABS(net_prime_obligations_usd) DESC
+                ORDER BY positive_prime_obligations_usd DESC, net_prime_obligations_usd DESC
                 LIMIT ?
                 """,
                 [str(self.paths["transactions"]), members, limit],
@@ -667,11 +692,15 @@ class PlatformContextStore:
         totals = {
             "observation_window": OBSERVATION_WINDOW,
             "net_prime_obligations_usd": 0.0,
+            "positive_prime_obligations_usd": 0.0,
+            "prime_deobligations_usd": 0.0,
             "attributed_dla_procurement_value_usd": 0.0,
             "shared_use_niin_exposure_usd": 0.0,
         }
         for row in annual.get("records", []):
             totals["net_prime_obligations_usd"] += float(row.get("net_prime_obligations_usd") or 0)
+            totals["positive_prime_obligations_usd"] += float(row.get("positive_prime_obligations_usd") or 0)
+            totals["prime_deobligations_usd"] += float(row.get("prime_deobligations_usd") or 0)
             totals["attributed_dla_procurement_value_usd"] += float(row.get("attributed_dla_procurement_value_usd") or 0)
             totals["shared_use_niin_exposure_usd"] += float(row.get("shared_use_niin_exposure_usd") or 0)
         members = self._platform_members(platform)
