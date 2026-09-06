@@ -1274,6 +1274,7 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     ):
         return None
     patterns = (
+        r"(?:tell\s+me\s+about|give\s+me\s+(?:an?\s+)?)\s*(.+?)(?:'s|’s)\s+(?:us\s+)?(?:defense|defence)\s+business(?:\?|\.|$)",
         r"(?:defense\s+supplier|defence\s+supplier|supplier|company)\s*:\s*([^\n?]+)",
         r"what\s+does\s+(.+?)\s+supply(?:\s|\?|$)",
         r"which\s+(?:defense|defence)?\s*platforms\s+does\s+(.+?)\s+support(?:\s|\?|$)",

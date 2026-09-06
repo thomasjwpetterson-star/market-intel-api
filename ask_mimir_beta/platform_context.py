@@ -29,6 +29,7 @@ PLATFORM_GROUPS = {
         "PATRIOT",
         "PAC-3",
         "PAC-3 MSE",
+        "LTAMDS",
     ),
 }
 

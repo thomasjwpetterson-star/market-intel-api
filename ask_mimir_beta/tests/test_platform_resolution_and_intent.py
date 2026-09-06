@@ -12,6 +12,7 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             "PAC-3 MSE",
             "PATRIOT",
             "PATRIOT AIR DEFENSE SYSTEM",
+            "LTAMDS",
             "TOMAHAWK",
         ]
 
@@ -22,6 +23,12 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
     def test_pac3_mse_remains_independently_queryable(self):
         result = self.store.search("PAC-3 MSE")
         self.assertEqual(result["resolved_platform_id"], "PAC-3 MSE")
+
+    def test_patriot_umbrella_includes_the_new_radar(self):
+        self.assertEqual(
+            self.store._platform_members("PATRIOT AIR DEFENSE SYSTEM"),
+            ["PATRIOT", "PAC-3", "PAC-3 MSE", "LTAMDS"],
+        )
 
     def test_pac3_mse_mention_does_not_also_return_pac3(self):
         result = self.store.mentions("Who supplies PAC-3 MSE?")

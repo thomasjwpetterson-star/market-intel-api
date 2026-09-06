@@ -485,6 +485,21 @@ class CompanyContextStore:
             )
         ]
         if not cage_is_exact:
+            query_name_tokens = re.findall(r"[A-Z0-9]+", clean_query.upper())
+            full_company_matches = [
+                row
+                for row in candidates
+                if full_name_pattern
+                and any(
+                    re.search(full_name_pattern, str(value or "").upper())
+                    for value in (
+                        row.get("vendor_name"),
+                        row.get("ultimate_parent_name"),
+                    )
+                )
+            ]
+            if len(query_name_tokens) >= 2 and full_company_matches:
+                candidates = full_company_matches
             exact_company_name_match = bool(full_name_pattern) and any(
                 re.search(
                     full_name_pattern,

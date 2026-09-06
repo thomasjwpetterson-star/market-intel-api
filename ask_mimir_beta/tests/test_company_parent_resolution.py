@@ -26,7 +26,9 @@ class CompanyParentResolutionTests(unittest.TestCase):
                         ('22222', 'ALLIEDSIGNAL AVIONICS', 'HONEYWELL INTERNATIONAL INC.', 'HONEYWELLUEI2', 200.0, 20.0),
                         ('33333', 'ONTIC ENGINEERING', 'ONTIC ENGINEERING', 'ONTICUEI0001', 50.0, 5.0),
                         ('44444', 'THE BOEING COMPANY', 'THE BOEING', 'BOEINGUEI001', 500.0, 50.0),
-                        ('55555', 'BELL BOEING JOINT PROJECT OFFICE', 'BELL BOEING JOINT PROJECT OFFICE', 'BELLBOEING01', 100.0, 10.0)
+                        ('55555', 'BELL BOEING JOINT PROJECT OFFICE', 'BELL BOEING JOINT PROJECT OFFICE', 'BELLBOEING01', 100.0, 10.0),
+                        ('66666', 'CURTISS-WRIGHT CONTROLS, INC.', 'CURTISS-WRIGHT CORPORATION', 'CURTISSUEI1', 300.0, 30.0),
+                        ('9EME1', 'CURTISS VILLAGE OF', 'CURTISS VILLAGE OF', 'CURTISSVILL1', 1.0, 0.0)
                     ) AS t(
                         cage_code,
                         vendor_name,
@@ -63,7 +65,9 @@ class CompanyParentResolutionTests(unittest.TestCase):
                     ('22222', 'ALLIEDSIGNAL AVIONICS', 'CLEARWATER', 'FL', 'A', NULL),
                     ('33333', 'ONTIC ENGINEERING', 'CHATSWORTH', 'CA', 'A', NULL),
                     ('44444', 'THE BOEING COMPANY', 'ARLINGTON', 'VA', 'A', NULL),
-                    ('55555', 'BELL BOEING JOINT PROJECT OFFICE', 'AMARILLO', 'TX', 'A', NULL)
+                    ('55555', 'BELL BOEING JOINT PROJECT OFFICE', 'AMARILLO', 'TX', 'A', NULL),
+                    ('66666', 'CURTISS-WRIGHT CONTROLS, INC.', 'ASHBURN', 'VA', 'A', NULL),
+                    ('9EME1', 'CURTISS VILLAGE OF', 'CURTISS', 'WI', 'A', NULL)
                 ) AS t(cage_code, vendor_name, city, state, cage_status, replacement_cage)
             ) TO ? (FORMAT PARQUET)
             """,
@@ -120,6 +124,23 @@ class CompanyParentResolutionTests(unittest.TestCase):
                 row for row in result["matches"] if row["scope_type"] == "company_site"
             ]
             self.assertEqual([row["scope_id"] for row in sites], ["11111"])
+
+    def test_multi_token_company_name_does_not_fall_back_to_a_weak_first_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            result = store.search("Curtiss-Wright", limit=10)
+
+            self.assertNotIn(
+                "9EME1",
+                [row["scope_id"] for row in result["matches"]],
+            )
+            parent = next(
+                row
+                for row in result["matches"]
+                if row["scope_type"] == "company_parent"
+            )
+            self.assertEqual(parent["scope_name"], "CURTISS-WRIGHT CORPORATION")
+            self.assertEqual(parent["resolved_cages"], ["66666"])
 
 
 if __name__ == "__main__":
