@@ -27,6 +27,13 @@ from company_opportunity_store import CompanyOpportunityStore
 from competitive_position import CompetitivePositionStore
 from competitive_position_export import build_competitive_position_zip
 from competitor_discovery import CompetitorDiscoveryStore
+from capability_discovery import CapabilityDiscoveryStore, resolve_capability
+from geographic_market import (
+    StateIndustrialBaseStore,
+    is_geographic_market_request,
+    resolve_state,
+    state_market_follow_up_intent,
+)
 from competitor_discovery_export import build_competitor_discovery_zip
 from metric_store import MetricStore
 from platform_supply_chain_export import build_customer_evidence_zip
@@ -685,10 +692,64 @@ the stated period; it is not automatically a complete bill of material. Describe
 coverage positively and concisely. Never call a platform's first-tier base concentrated merely
 because few reported sites are present when the evidence coverage itself is sparse.
 
+When coverage.reported_supplier_lane_is_sparse is true, do not use the reported supplier rows as
+an overview of the complete supplier base. State the reported first-tier count and value briefly,
+then use the NIIN count, DLA recipient-site count and authoritative web sources to describe the wider
+industrial footprint. For Stryker and similar cases, a small reported first-tier lane alongside
+thousands of associated NIINs is a reporting-coverage finding, not evidence of a small supply chain.
+
 Do not add generic caveats that measures are non-additive. Explain an overlap risk only when the
 answer actually combines measures that can contain the same underlying procurement activity.
 
 When using web research, apply this source hierarchy:
+{WEB_SOURCE_POLICY_PROMPT}
+""".strip()
+
+CAPABILITY_DISCOVERY_PROMPT = f"""
+You are Ask Mimir, an evidence-led US defense-market research assistant. The final user message is
+followed by a defined capability-market evidence set.
+
+Answer the requested supplier search directly. Lead with a compact table containing supplier site,
+CAGE, city/state, evidence status, matching NIIN count, example items, associated platforms and the
+FY2021-FY2026 observed procurement value when present. Describe a company as authorized according
+to DLA when active_authorized_niin_count is positive. Describe it as an observed procurement source
+when observed_procurement_niin_count is positive. Do not turn either status into a claim that the
+company manufactured every listed item.
+
+The aircraft-braking definition is deliberately narrow: FSC 1630 plus brake, braking or anti-skid
+item descriptions. This supports a military-aircraft-braking supplier universe and avoids vehicle,
+industrial or administrative brake records. Prioritize specialist wheel-and-brake companies and
+sites with both authorized-source and observed-procurement evidence. Platform associations can
+show where the matched items are used, but do not allocate a multi-platform item's value to one
+aircraft.
+
+Use authoritative government and first-party sources to confirm the current role of the most
+material specialist suppliers where useful. Hyperlink every CAGE and cited NIIN to Mimir. Keep the
+answer below 1,000 words. Do not narrate internal data plumbing, release names, source-resolution
+rules or generic cautions about company revenue and non-additivity.
+
+When using web research, apply this source hierarchy:
+{WEB_SOURCE_POLICY_PROMPT}
+""".strip()
+
+STATE_INDUSTRIAL_BASE_PROMPT = f"""
+You are Ask Mimir, an evidence-led US defense-market research assistant. The final user message is
+followed by a state-level defense-industrial-base evidence set.
+
+Give a commercially useful overview of the named state. Lead with the scale of observed activity
+for FY2021-FY2026, then identify the most important company facilities and explain why they matter.
+Use separate columns for prime obligations, DLA procurement and Mimir-modelled reported subcontract
+value; do not add those lanes together. Include CAGE, city and material mapped platforms or customer
+routes. Importance should reflect financial scale, contract or item breadth, program relevance and
+facility role, rather than company name alone.
+
+Registered facilities and places of performance answer different questions. Use the registered-site
+ranking for companies and facilities located in the state. Use the place-of-performance section to
+identify substantial work performed in the state when it adds useful context. Do not discuss parent
+resolution mechanics, explain how multiple CAGEs should be combined, or recite routine caveats. Keep
+the answer below 1,100 words and hyperlink CAGE sites, platforms and material awards to Mimir.
+
+When web research materially improves a facility-role description, apply this source hierarchy:
 {WEB_SOURCE_POLICY_PROMPT}
 """.strip()
 
@@ -1131,6 +1192,48 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "type": "function",
+        "name": "search_capability_markets",
+        "description": "Resolve a supported market-wide defense capability search to its evidence definition.",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "get_capability_market",
+        "description": "Return CAGE-site suppliers supported by exact item, DLA source, procurement, platform and location evidence for a defined capability.",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "capability_id": {"type": "string", "enum": ["aircraft_braking"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+            "required": ["capability_id", "limit"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "get_state_industrial_base",
+        "description": "Return time-bounded facility, prime, DLA, reported subcontract and place-of-performance evidence for one US state.",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "state_code": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 75},
+            },
+            "required": ["state_code", "limit"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -1554,7 +1657,7 @@ class ChatMessage(BaseModel):
 
 class ActiveScope(BaseModel):
     scope_type: str = Field(
-        pattern="^(company_parent|company_site|platform|platform_comparison)$"
+        pattern="^(company_parent|company_site|platform|platform_comparison|state_market)$"
     )
     scope_id: str = Field(min_length=1, max_length=200)
     scope_name: Optional[str] = Field(default=None, max_length=300)
@@ -1670,6 +1773,14 @@ class LabRuntime:
                 )
             )
         )
+        data_root = Path(
+            os.getenv(
+                "ASK_MIMIR_DATA_ROOT",
+                "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data",
+            )
+        )
+        self.capability_discovery = CapabilityDiscoveryStore(data_root)
+        self.state_industrial_base = StateIndustrialBaseStore(data_root)
         release_sources = {
             self.store.primitives,
             self.store.components_file,
@@ -1686,6 +1797,8 @@ class LabRuntime:
             *self.competitive_position.paths.values(),
             self.competitor_discovery.definitions_path,
             *self.competitor_discovery.paths.values(),
+            *self.capability_discovery.paths.values(),
+            *self.state_industrial_base.paths.values(),
         }
         self.release_guard = DataReleaseGuard(
             str(self.store.manifest["release_id"]), release_sources
@@ -1784,6 +1897,8 @@ class LabRuntime:
             "get_metric_observation",
             "get_competitive_position",
             "get_competitor_discovery",
+            "get_capability_market",
+            "get_state_industrial_base",
         }
         cache_key = None
         if name in cacheable:
@@ -1837,6 +1952,12 @@ class LabRuntime:
             result = self.competitive_position.get(**arguments)
         elif name == "get_competitor_discovery":
             result = self.competitor_discovery.get(**arguments)
+        elif name == "search_capability_markets":
+            return self.capability_discovery.search(**arguments)
+        elif name == "get_capability_market":
+            result = self.capability_discovery.get(**arguments)
+        elif name == "get_state_industrial_base":
+            result = self.state_industrial_base.get(**arguments)
         elif name == "get_metric_evidence":
             with self.lock:
                 return self.store.evidence(
@@ -2059,6 +2180,14 @@ app.mount("/assets", StaticFiles(directory=LAB_DIR / "assets"), name="assets")
 def workflow_for_request(request: AskRequest) -> str:
     if is_article_analysis_request(request.messages):
         return "news_article_implications"
+    if is_geographic_market_request(request.messages[-1].content):
+        return "state_industrial_base"
+    if (
+        request.active_scope
+        and request.active_scope.scope_type == "state_market"
+        and state_market_follow_up_intent(request.messages[-1].content)
+    ):
+        return "state_industrial_base"
     if is_eaton_competitor_request(request.messages):
         return "competitor_discovery"
     if is_ground_vehicle_power_position_request(request.messages):
@@ -2161,6 +2290,9 @@ def sanitize_answer_text(answer: str) -> str:
         r"^\s*Comparable .* in the dossier",
         r"^\s*Current parent resolution is not assigned",
         r"^\s*No current parent is resolved",
+        r"^\s*Source-reported .+ resolved to .+ parent data",
+        r"^\s*Multiple CAGEs? .+ (?:should|must) be treated",
+        r"^\s*(?:This|These|The figures?|The values?) .+ not (?:company|supplier) revenue",
     )
     lines = [
         line
@@ -2176,6 +2308,18 @@ def sanitize_answer_text(answer: str) -> str:
     )
     cleaned = re.sub(
         r"\s*These measures are non-additive[^.]*\.",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*Multiple CAGEs? for one corporate family[^.]*\.",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*Source-reported [^.]+ resolved to [^.]+ in (?:the )?(?:available|current) parent data\.?",
         "",
         cleaned,
         flags=re.IGNORECASE,
@@ -2758,9 +2902,11 @@ def generate_answer(
     resolved_company_scope: Dict[str, Any] | None = None
     company_query = explicit_company_name_query(request.messages)
     latest_question = str(request.messages[-1].content or "")
+    capability_id = resolve_capability(latest_question)
     if (
         is_open_capability_discovery_request(latest_question)
         and not runtime.platform_contexts.mentions(latest_question)
+        and not capability_id
     ):
         return {
             "answer": (
@@ -3108,6 +3254,158 @@ def generate_answer(
             }
         )
         return result
+
+    state_code = resolve_state(latest_question)
+    if (
+        not state_code
+        and request.active_scope
+        and request.active_scope.scope_type == "state_market"
+        and state_market_follow_up_intent(latest_question)
+    ):
+        state_code = request.active_scope.scope_id.upper()
+    if state_code and (
+        is_geographic_market_request(latest_question)
+        or (
+            request.active_scope
+            and request.active_scope.scope_type == "state_market"
+            and state_market_follow_up_intent(latest_question)
+        )
+    ):
+        arguments = {"state_code": state_code, "limit": 40}
+        emit_progress(
+            progress,
+            "Mapping the state industrial base",
+            "Ranking facilities, contract activity and work performed in the state",
+            42,
+        )
+        pack = runtime.call_tool("get_state_industrial_base", arguments)
+        trace = [
+            {"tool": "get_state_industrial_base", "arguments": arguments, "result": pack}
+        ]
+        state_input = [
+            {"role": "user", "content": latest_question},
+            {
+                "role": "user",
+                "content": "MIMIR STATE INDUSTRIAL-BASE EVIDENCE\n" + json.dumps(pack, default=str),
+            },
+        ]
+        emit_progress(
+            progress,
+            "Preparing the state overview",
+            "Comparing facility scale, programs and customer routes",
+            68,
+        )
+        response = client.responses.create(
+            model=runtime.model,
+            instructions=STATE_INDUSTRIAL_BASE_PROMPT,
+            input=state_input,
+            tools=[{"type": "web_search", "search_context_size": "low"}],
+            reasoning={"effort": runtime.reasoning_effort},
+            max_output_tokens=min(runtime.max_output_tokens, 9000),
+            store=False,
+        )
+        call_usages = [_usage_dict(response)]
+        response, answer_text = finalize_response(
+            client,
+            response,
+            STATE_INDUSTRIAL_BASE_PROMPT,
+            state_input,
+            call_usages,
+            progress,
+            min(runtime.max_output_tokens, 9000),
+        )
+        usage = aggregate_usage(call_usages)
+        result = {
+            "answer": answer_text,
+            "response_id": response.id,
+            "model": runtime.model,
+            "release_id": runtime.store.manifest["release_id"],
+            "answer_artifacts": {"state_industrial_base": pack},
+            "tool_trace": trace,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "response_calls": len(call_usages),
+            "usage": usage,
+            "usage_by_response": call_usages,
+            "estimated_cost": estimate_usage_cost(runtime.model, usage),
+        }
+        runtime.write_audit_record(
+            {
+                "run_id": str(uuid.uuid4()),
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "request_messages": [message.model_dump() for message in request.messages],
+                **result,
+            }
+        )
+        return result
+
+    if capability_id and is_open_capability_discovery_request(latest_question):
+        arguments = {"capability_id": capability_id, "limit": 30}
+        emit_progress(
+            progress,
+            "Defining the capability market",
+            "Matching exact item classes, sources, procurement and aircraft platforms",
+            42,
+        )
+        pack = runtime.call_tool("get_capability_market", arguments)
+        trace = [
+            {"tool": "get_capability_market", "arguments": arguments, "result": pack}
+        ]
+        capability_input = [
+            {"role": "user", "content": latest_question},
+            {
+                "role": "user",
+                "content": "MIMIR CAPABILITY-MARKET EVIDENCE\n" + json.dumps(pack, default=str),
+            },
+        ]
+        emit_progress(
+            progress,
+            "Preparing the supplier view",
+            "Comparing authorized sources, observed procurement and platform use",
+            68,
+        )
+        response = client.responses.create(
+            model=runtime.model,
+            instructions=CAPABILITY_DISCOVERY_PROMPT,
+            input=capability_input,
+            tools=[{"type": "web_search", "search_context_size": "low"}],
+            reasoning={"effort": runtime.reasoning_effort},
+            max_output_tokens=min(runtime.max_output_tokens, 9000),
+            store=False,
+        )
+        call_usages = [_usage_dict(response)]
+        response, answer_text = finalize_response(
+            client,
+            response,
+            CAPABILITY_DISCOVERY_PROMPT,
+            capability_input,
+            call_usages,
+            progress,
+            min(runtime.max_output_tokens, 9000),
+        )
+        usage = aggregate_usage(call_usages)
+        result = {
+            "answer": answer_text,
+            "response_id": response.id,
+            "model": runtime.model,
+            "release_id": runtime.store.manifest["release_id"],
+            "answer_artifacts": {"capability_market": pack},
+            "tool_trace": trace,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "response_calls": len(call_usages),
+            "usage": usage,
+            "usage_by_response": call_usages,
+            "estimated_cost": estimate_usage_cost(runtime.model, usage),
+        }
+        runtime.write_audit_record(
+            {
+                "run_id": str(uuid.uuid4()),
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "request_messages": [message.model_dump() for message in request.messages],
+                **result,
+            }
+        )
+        return result
+
     if is_eaton_competitor_request(request.messages):
         arguments = {"target_id": "eaton_aerospace", "limit": 15}
         emit_progress(

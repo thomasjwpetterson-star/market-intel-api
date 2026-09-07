@@ -258,6 +258,14 @@ class PlatformContextStore:
             )
         positive_supplier_values = sorted(positive_supplier_values, reverse=True)
         positive_supplier_total = sum(positive_supplier_values)
+        observed_dla_recipient_sites = int(items.get("observed_dla_recipient_site_count") or 0)
+        reported_supplier_lane_is_sparse = (
+            len(reported_suppliers) < 10
+            and (
+                int(items.get("associated_niin_count") or 0) >= 100
+                or observed_dla_recipient_sites >= 25
+            )
+        )
         supplier_concentration = {
             "supplier_site_count": len(reported_suppliers),
             "positive_reported_subcontract_value_usd": positive_supplier_total,
@@ -312,12 +320,20 @@ class PlatformContextStore:
                 "direct_award_recipient_sites_loaded": len(direct_recipients),
                 "reported_supplier_sites": self._available_count(reported_suppliers),
                 "reported_supplier_sites_loaded": len(reported_suppliers),
+                "observed_dla_recipient_sites": observed_dla_recipient_sites,
                 "associated_niins": items["associated_niin_count"],
                 "item_relationships_loaded": len(items["top_items"]),
                 "prime_awards": self._available_count(top_awards),
                 "prime_awards_loaded": len(top_awards),
                 "open_or_loaded_opportunities": len(opportunities),
                 "component_proof_status": "CURATED_WHEN_AVAILABLE_OTHERWISE_REPORTED_DESCRIPTION_OR_ITEM_REFERENCE",
+                "reported_supplier_lane_is_sparse": reported_supplier_lane_is_sparse,
+                "reported_supplier_coverage_note": (
+                    "Reported first-tier coverage is partial for this platform. Use the reported "
+                    "supplier lane together with the wider NIIN and DLA procurement evidence."
+                    if reported_supplier_lane_is_sparse
+                    else "Reported first-tier coverage is broad enough for an observed supplier-base summary."
+                ),
             },
             "financial_totals": financial_totals,
             "reported_supplier_concentration": supplier_concentration,
@@ -721,7 +737,9 @@ class PlatformContextStore:
                            MAX(location_quality) AS location_quality
                     FROM read_parquet(?) GROUP BY 1
                 )
-                SELECT s.*, l.city, l.state, l.location_quality
+                SELECT s.*, l.city, l.state, l.location_quality,
+                       COUNT(*) OVER () AS total_available,
+                       COUNT(DISTINCT s.cage) OVER () AS total_supplier_sites
                 FROM supplier_values s
                 LEFT JOIN locations l ON UPPER(TRIM(s.cage))=l.cage
                 ORDER BY ABS(attributed_dla_procurement_value_usd) + ABS(shared_use_niin_exposure_usd) DESC
@@ -735,6 +753,9 @@ class PlatformContextStore:
         )
         return {
             "associated_niin_count": associated_count,
+            "observed_dla_recipient_site_count": int(
+                suppliers[0].get("total_supplier_sites") or 0
+            ) if suppliers else 0,
             "top_items": top_items,
             "top_item_supplier_sites": suppliers,
             "financial_treatment": "Single-platform attributed value and shared-use NIIN exposure remain separate.",

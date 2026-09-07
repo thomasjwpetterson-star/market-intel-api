@@ -154,6 +154,13 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             )
         )
 
+    def test_aircraft_braking_discovery_is_detected(self):
+        self.assertTrue(
+            is_open_capability_discovery_request(
+                "Find US manufacturers that supply braking systems or brake components to military aircraft."
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

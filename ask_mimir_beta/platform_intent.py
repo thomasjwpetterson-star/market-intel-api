@@ -245,6 +245,8 @@ def is_open_capability_discovery_request(text: str) -> bool:
             "find suppliers",
             "which manufacturers",
             "which suppliers",
+            "which us manufacturers",
+            "which us suppliers",
             "companies supplying",
             "manufacturers with",
             "suppliers with",
@@ -266,6 +268,9 @@ def is_open_capability_discovery_request(text: str) -> bool:
             "machining",
             "composites",
             "energetics",
+            "brake",
+            "brakes",
+            "braking",
         )
     )
     return has_discovery and has_capability

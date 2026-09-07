@@ -1,0 +1,101 @@
+[
+  {
+    "case_id": "stryker_supplier_overview",
+    "question": "Give me an overview of the supplier base supporting the Stryker family of vehicles.",
+    "expected_workflow": "platform_intelligence",
+    "minimum_values": {
+      "coverage.associated_niins": 1000,
+      "coverage.observed_dla_recipient_sites": 20,
+      "financial_totals.net_prime_obligations_usd": 1000000
+    },
+    "required_values": {
+      "coverage.reported_supplier_lane_is_sparse": true
+    },
+    "required_preview_terms": ["Stryker", "FY2021-FY2026", "partial"]
+  },
+  {
+    "case_id": "stryker_supplier_paraphrase",
+    "question": "Who are the main suppliers across the Stryker vehicle family?",
+    "expected_workflow": "platform_intelligence",
+    "required_values": {
+      "coverage.reported_supplier_lane_is_sparse": true
+    }
+  },
+  {
+    "case_id": "aircraft_braking_suppliers",
+    "question": "Find US manufacturers that supply braking systems or brake components to military aircraft.",
+    "expected_workflow": "capability_discovery",
+    "minimum_values": {
+      "coverage.commercial_supplier_sites": 20,
+      "coverage.supplier_sites_with_active_authorized_items": 10,
+      "coverage.supplier_sites_with_observed_procurement": 5
+    },
+    "required_preview_terms": ["Goodrich", "Meggitt", "CAGE", "Troy", "Akron"]
+  },
+  {
+    "case_id": "aircraft_braking_paraphrase",
+    "question": "Which US suppliers have evidence of military-aircraft brake or anti-skid content?",
+    "expected_workflow": "capability_discovery",
+    "minimum_values": {
+      "coverage.commercial_supplier_sites": 20
+    }
+  },
+  {
+    "case_id": "alabama_industrial_base",
+    "question": "Give me an overview of the defence industrial base in Alabama.",
+    "expected_workflow": "state_industrial_base",
+    "minimum_values": {
+      "coverage.registered_facilities_with_observed_activity": 20,
+      "state_totals.net_prime_obligations_at_registered_facilities_usd": 1000000000,
+      "coverage.place_of_performance_recipients": 10
+    },
+    "required_preview_terms": ["Alabama", "FY2021-FY2026", "CAGE"]
+  },
+  {
+    "case_id": "alabama_importance_follow_up",
+    "messages": [
+      {"role": "user", "content": "Give me an overview of the defence industrial base in Alabama."},
+      {"role": "assistant", "content": "Alabama has a broad observed defense footprint."},
+      {"role": "user", "content": "Which defence companies and facilities appear most important in the state?"}
+    ],
+    "active_scope": {
+      "scope_type": "state_market",
+      "scope_id": "AL",
+      "scope_name": "Alabama defense industrial base",
+      "resolved_cages": [],
+      "group_kind": "state_market"
+    },
+    "expected_workflow": "state_industrial_base",
+    "minimum_values": {
+      "coverage.registered_facilities_with_observed_activity": 20
+    }
+  },
+  {
+    "case_id": "rotorcraft_supplier_comparison",
+    "question": "Compare the supplier bases of the UH-60 Black Hawk and CH-47 Chinook.",
+    "expected_workflow": "platform_comparison",
+    "minimum_values": {
+      "overlap_counts.exact_cage_site_overlap": 20
+    },
+    "required_preview_terms": ["UH-60", "CH-47", "shared CAGE"]
+  },
+  {
+    "case_id": "tomahawk_supplier_overview",
+    "question": "Who supplies the Tomahawk missile?",
+    "expected_workflow": "platform_intelligence",
+    "minimum_values": {
+      "coverage.reported_supplier_sites": 10,
+      "coverage.associated_niins": 10
+    },
+    "required_preview_terms": ["Tomahawk", "FY2021-FY2026"]
+  },
+  {
+    "case_id": "b52_outlook_evidence",
+    "question": "What is the outlook for the B-52 modernization program over the next five years?",
+    "expected_workflow": "platform_intelligence",
+    "minimum_values": {
+      "coverage.prime_awards": 1
+    },
+    "required_preview_terms": ["B-52", "FY2021-FY2026"]
+  }
+]
