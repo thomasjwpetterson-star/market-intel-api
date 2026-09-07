@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import itertools
 import json
 import re
 import zipfile
@@ -13,6 +14,7 @@ from typing import Any, Dict, Iterable, List
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONTEXT_DIR = ROOT / "validation-output" / "company-context"
+EVIDENCE_EXPORT_ROW_LIMIT = 5000
 
 
 def _text(value: Any) -> Any:
@@ -30,7 +32,7 @@ def _write_csv(
     stream = io.StringIO(newline="")
     writer = csv.DictWriter(stream, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
-    for row in rows:
+    for row in itertools.islice(rows, EVIDENCE_EXPORT_ROW_LIMIT):
         writer.writerow({key: _text(row.get(key)) for key in fieldnames})
     archive.writestr(name, stream.getvalue().encode("utf-8-sig"))
 
@@ -76,12 +78,57 @@ def build_company_evidence_zip(
             budget_rows.append(
                 {
                     "program": program.get("program_name"),
+                    "relationship_basis": (
+                        "Included because this company scope has observed reported "
+                        "subcontract activity linked to the program."
+                    ),
                     "observed_site_reported_subcontract_value_usd": program.get(
                         "observed_site_reported_subcontract_value_usd"
                     ),
                     **row,
                 }
             )
+
+    identity_by_cage = {
+        str(site.get("cage") or "").strip().upper(): site
+        for site in context.get("identity", {}).get("sites", [])
+    }
+    capability_platform_rows = []
+    for site in context.get("site_capability_evidence", []):
+        identity = identity_by_cage.get(str(site.get("cage") or "").upper(), {})
+        site_fields = {
+            "cage": site.get("cage"),
+            "site_name": identity.get("vendor_name"),
+            "registered_city": identity.get("city"),
+            "registered_state": identity.get("state"),
+        }
+        for evidence_lane, key in (
+            ("Prime award and DLA activity", "prime_award_and_dla_examples"),
+            ("Reported subcontract activity", "reported_subaward_examples"),
+        ):
+            for row in site.get(key, []):
+                capability_platform_rows.append(
+                    {
+                        **site_fields,
+                        "evidence_lane": evidence_lane,
+                        "platform_family": row.get("platform_family"),
+                        "reported_description": row.get("reported_description"),
+                        "observed_value_usd": row.get("observed_value_usd")
+                        or row.get("mimir_modelled_reported_subcontract_value_usd"),
+                        "distinct_awards": row.get("distinct_awards"),
+                        "prime_customer": row.get("prime_customer")
+                        or row.get("prime_name"),
+                        "sample_contract_ids": row.get("sample_contract_ids")
+                        or row.get("sample_prime_contract_ids")
+                        or row.get("contract_ids"),
+                        "observed_place_of_performance_city": row.get(
+                            "place_of_performance_city"
+                        ),
+                        "observed_place_of_performance_state": row.get(
+                            "place_of_performance_state"
+                        ),
+                    }
+                )
 
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -118,7 +165,19 @@ def build_company_evidence_zip(
         )
         _write_csv(
             archive,
-            "04_platform_exposure.csv",
+            "04_site_capability_platforms.csv",
+            capability_platform_rows,
+            [
+                "cage", "site_name", "registered_city", "registered_state",
+                "evidence_lane", "platform_family", "reported_description",
+                "observed_value_usd", "distinct_awards", "prime_customer",
+                "sample_contract_ids", "observed_place_of_performance_city",
+                "observed_place_of_performance_state",
+            ],
+        )
+        _write_csv(
+            archive,
+            "05_platform_exposure.csv",
             context.get("platform_exposure", []),
             [
                 "evidence_layer", "platform_family", "observed_value_usd",
@@ -127,7 +186,7 @@ def build_company_evidence_zip(
         )
         _write_csv(
             archive,
-            "05_niin_procurement.csv",
+            "06_niin_procurement.csv",
             product.get("niin_financial_observations", []),
             [
                 "niin", "nsn", "description", "dla_procurement_value_usd",
@@ -137,7 +196,7 @@ def build_company_evidence_zip(
         )
         _write_csv(
             archive,
-            "06_part_number_references.csv",
+            "07_part_number_references.csv",
             product.get("part_number_references", []),
             [
                 "niin", "nsn", "cage", "part_number", "description", "supplier_status",
@@ -148,7 +207,7 @@ def build_company_evidence_zip(
         )
         _write_csv(
             archive,
-            "07_authorized_source_context.csv",
+            "08_authorized_source_context.csv",
             product.get("qualified_source_context", {}).get("items", []),
             [
                 "niin", "nsn", "description", "acquisition_advice_code",
@@ -159,7 +218,7 @@ def build_company_evidence_zip(
         )
         _write_csv(
             archive,
-            "08_locations.csv",
+            "09_locations.csv",
             location_rows,
             [
                 "location_type", "cage", "vendor_name", "city", "state", "country",
@@ -170,10 +229,11 @@ def build_company_evidence_zip(
         )
         _write_csv(
             archive,
-            "09_forward_program_funding.csv",
+            "10_linked_program_outlook.csv",
             budget_rows,
             [
-                "program", "component", "budget_line_item", "budget_line_item_title",
+                "program", "relationship_basis", "component", "budget_line_item",
+                "budget_line_item_title",
                 "fiscal_year", "funding_status", "measure_type", "amount_usd", "quantity",
                 "source_document_title", "source_page_number", "source_landing_page",
                 "source_download_url", "source_locator",
@@ -182,7 +242,7 @@ def build_company_evidence_zip(
         )
         _write_csv(
             archive,
-            "10_public_evidence_links.csv",
+            "11_public_evidence_links.csv",
             context.get("evidence_index", {}).get("records", []),
             ["evidence_type", "record_id", "title", "public_url", "supports"],
         )
@@ -194,9 +254,12 @@ def build_company_evidence_zip(
                 f"Scope: {scope['scope_name']} ({scope['scope_type']} {scope['scope_id']})\n"
                 f"Observation window: {scope['observation_window']}\n"
                 f"Calculation version: {context['calculation_version']}\n\n"
+                f"Each CSV is limited to {EVIDENCE_EXPORT_ROW_LIMIT:,} records.\n"
                 "Prime obligations, DLA procurement value and Mimir-modelled reported "
                 "subcontract value are presented as separate measures. DLA financial value is "
-                "reported at NIIN/CAGE level; part-number records describe reference relationships.\n"
+                "reported at NIIN/CAGE level; part-number records describe reference relationships. "
+                "Linked-program outlook rows are included only where the company scope has observed "
+                "reported subcontract activity associated with that program.\n"
             ),
         )
     return output.getvalue()

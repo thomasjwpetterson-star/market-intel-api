@@ -79,6 +79,7 @@ from beta_controls import (
     TIER_POLICIES,
     normalize_tier,
     sanitize_customer_payload,
+    remove_unsafe_and_internal_answer_content,
     remove_unsupported_mimir_links,
     validate_answer_citations,
 )
@@ -427,6 +428,9 @@ Answer for the resolved scope. For an exact CAGE, state the registered location.
 show every CAGE at that location as separate evidence beneath one facility heading. For a company-wide
 scope, combine the financial view but keep the material CAGE sites distinct. Do not discuss whether parent
 resolution is assigned, reviewed or complete.
+
+For a company-wide scope, describe the identity count as the "resolved CAGE sites with observed activity"
+in the current Mimir company scope. Do not call that count the company's complete registration footprint.
 
 Start with a concise identity and commercial-position summary. Follow it with a compact table of material
 sites containing company/site name, CAGE, city/state and the principal supported capabilities at that site.
@@ -788,6 +792,11 @@ Answer at the market level rather than substituting one platform. Start with the
 the most observed activity, then identify the material prime-recipient and reported supplier sites.
 Keep prime obligations, Mimir-modelled reported subcontract value and DLA procurement as separate
 measures. Every financial figure must include the FY2021-FY2026 observation window.
+
+Use annual_activity to describe direction and changing activity across fiscal years. Treat FY2026
+as a partial observed year. Use capability_activity, including PSC/FSC descriptions, to identify
+the technologies and services with the strongest visible activity; do not reduce a broad market to
+one familiar platform or one award.
 
 For a market-outlook question, distinguish procurement and sustainment activity already visible in
 Mimir from forward production, modernization and budget signals found in authoritative government
@@ -1950,7 +1959,7 @@ class LabRuntime:
             os.getenv("ASK_MIMIR_ALLOW_EXTERNAL_EVIDENCE", "0") == "1"
         )
         self.reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT", "medium")
-        self.max_output_tokens = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "10000"))
+        self.max_output_tokens = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "14000"))
         self.max_evidence_records = min(
             max(int(os.getenv("ASK_MIMIR_MAX_EVIDENCE_RECORDS", "20")), 5),
             100,
@@ -2564,6 +2573,18 @@ def finalize_customer_result(
             *citation_validation.get("warnings", []),
             "Unverified Mimir drill-down links were rendered as text.",
         ]
+    if citation_validation.get("forbidden_markers") or citation_validation.get(
+        "unsafe_links"
+    ):
+        result = {
+            **result,
+            "answer": remove_unsafe_and_internal_answer_content(
+                str(result.get("answer") or ""), citation_validation
+            ),
+        }
+        citation_validation = validate_answer_citations(
+            str(result.get("answer") or ""), result.get("tool_trace") or []
+        )
     if (
         citation_validation["status"] == "fail"
         and os.getenv("ASK_MIMIR_STRICT_CITATIONS", "1") == "1"
@@ -2870,7 +2891,9 @@ def company_evidence_export(scope_type: str, scope_id: str, request: Request) ->
     if scope_type not in {"company_site", "company_parent"}:
         raise HTTPException(status_code=400, detail="Unsupported company scope type")
     try:
-        context = runtime.company_contexts.get_raw(scope_type, scope_id)
+        context = runtime.company_contexts.get_export_context(
+            scope_type, scope_id, limit=5000
+        )
         payload = build_company_evidence_zip(
             scope_type,
             scope_id,
@@ -3014,11 +3037,18 @@ def finalize_response(
     progress: Callable[[str, str, int], None] | None,
     max_output_tokens: int,
 ) -> tuple[Any, str]:
-    """Return model text, forcing a no-tools synthesis when evidence gathering ends silently."""
+    """Return model text, retrying once when synthesis is empty or hits its limit."""
+    retry_reason = ""
     try:
         return response, complete_response_text(response)
     except HTTPException as exc:
-        if exc.status_code != 502 or exc.detail != "The model returned no answer.":
+        if exc.status_code != 502:
+            raise
+        if exc.detail == "The model returned no answer.":
+            retry_reason = "empty response"
+        elif "response limit" in str(exc.detail).lower():
+            retry_reason = "response limit"
+        else:
             raise
 
     emit_progress(
@@ -3029,14 +3059,18 @@ def finalize_response(
     )
     synthesis_input = list(input_items)
     output = list(getattr(response, "output", []) or [])
-    if not any(getattr(item, "type", None) == "function_call" for item in output):
+    if retry_reason == "empty response" and not any(
+        getattr(item, "type", None) == "function_call" for item in output
+    ):
         synthesis_input.extend(output)
     synthesis_input.append(
         {
             "role": "user",
             "content": (
                 "Return the final answer now using the evidence already gathered. "
-                "Do not request or call another tool. Answer the user's original question directly."
+                "Do not request or call another tool. Answer the user's original question directly. "
+                "Keep the complete answer under 900 words, prioritize the most material evidence, "
+                "and do not end mid-sentence or mid-table."
             ),
         }
     )
@@ -3044,8 +3078,8 @@ def finalize_response(
         model=runtime.model,
         instructions=instructions,
         input=synthesis_input,
-        reasoning={"effort": runtime.reasoning_effort},
-        max_output_tokens=max_output_tokens,
+        reasoning={"effort": "medium" if retry_reason == "response limit" else runtime.reasoning_effort},
+        max_output_tokens=max(max_output_tokens, 12000),
         store=False,
     )
     call_usages.append(_usage_dict(final_response))
@@ -3594,7 +3628,7 @@ def generate_answer(
             and state_market_follow_up_intent(latest_question)
         )
     ):
-        arguments = {"state_code": state_code, "limit": 40}
+        arguments = {"state_code": state_code, "limit": 24}
         emit_progress(
             progress,
             "Mapping the state industrial base",
@@ -3624,7 +3658,7 @@ def generate_answer(
             input=state_input,
             tools=[{"type": "web_search", "search_context_size": "low"}],
             reasoning={"effort": runtime.reasoning_effort},
-            max_output_tokens=min(runtime.max_output_tokens, 9000),
+            max_output_tokens=min(runtime.max_output_tokens, 12000),
             store=False,
         )
         call_usages = [_usage_dict(response)]
@@ -3635,7 +3669,7 @@ def generate_answer(
             state_input,
             call_usages,
             progress,
-            min(runtime.max_output_tokens, 9000),
+            min(runtime.max_output_tokens, 12000),
         )
         usage = aggregate_usage(call_usages)
         result = {

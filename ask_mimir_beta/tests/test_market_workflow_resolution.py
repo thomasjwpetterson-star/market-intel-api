@@ -1,5 +1,9 @@
 import unittest
 
+from beta_controls import (
+    remove_unsafe_and_internal_answer_content,
+    validate_answer_citations,
+)
 from capability_discovery import capability_market_follow_up_intent, resolve_capability
 from geographic_market import (
     is_geographic_market_request,
@@ -81,6 +85,27 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
                 "Which companies appear most important across the market?"
             )
         )
+
+    def test_ground_vehicle_market_resolves(self):
+        self.assertEqual(
+            resolve_market_segment(
+                "What is happening in the US military ground vehicle market?"
+            ),
+            "US_MILITARY_GROUND_VEHICLES",
+        )
+
+    def test_internal_identifier_is_removed_without_discarding_answer(self):
+        answer = (
+            "The leading supplier is supported by source_report_id 123. "
+            "[Local evidence](http://localhost:3000/private)"
+        )
+        validation = validate_answer_citations(answer, [])
+        cleaned = remove_unsafe_and_internal_answer_content(answer, validation)
+        final_validation = validate_answer_citations(cleaned, [])
+        self.assertIn("leading supplier", cleaned)
+        self.assertNotIn("source_report_id", cleaned)
+        self.assertNotIn("localhost", cleaned)
+        self.assertEqual(final_validation["status"], "pass")
 
 
 if __name__ == "__main__":

@@ -538,3 +538,30 @@ def remove_unsupported_mimir_links(answer: str, validation: Dict[str, Any]) -> s
         return label if raw_url.strip().rstrip("/") in unsupported else match.group(0)
 
     return MARKDOWN_LINK_WITH_LABEL.sub(replace, answer)
+
+
+def remove_unsafe_and_internal_answer_content(
+    answer: str, validation: Dict[str, Any]
+) -> str:
+    """Preserve a useful answer while removing non-public implementation details."""
+    unsafe = {
+        str(url).strip().rstrip("/")
+        for url in validation.get("unsafe_links", [])
+    }
+
+    def replace_link(match: re.Match[str]) -> str:
+        label, raw_url = match.groups()
+        return label if raw_url.strip().rstrip("/") in unsafe else match.group(0)
+
+    cleaned = MARKDOWN_LINK_WITH_LABEL.sub(replace_link, str(answer or ""))
+    replacements = {
+        "source_report_id": "public source record identifier",
+        "source_dedup_key": "source record",
+        "transaction_key": "contract action identifier",
+        "internal_value_treatment": "value treatment",
+    }
+    for marker in validation.get("forbidden_markers", []):
+        replacement = replacements.get(str(marker).lower(), "")
+        cleaned = re.sub(re.escape(str(marker)), replacement, cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(?:s3://|file://|/Users/|local_data/)[^\s)`\]]+", "", cleaned, flags=re.IGNORECASE)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()

@@ -1105,6 +1105,18 @@ class CompanyContextStore:
             self._dynamic_contexts[key] = context
             return context
 
+    def get_export_context(
+        self, scope_type: str, scope_id: str, limit: int = 5000
+    ) -> Dict[str, Any]:
+        """Return expanded download evidence while preserving compact answer contexts."""
+        context = self.get_raw(scope_type, scope_id)
+        from company_context import CompanyContextBuilder
+
+        with self._dynamic_lock:
+            if self._dynamic_builder is None:
+                self._dynamic_builder = CompanyContextBuilder(data_root=self.data_root)
+            return self._dynamic_builder.build_export_context(context, limit)
+
     def _read_dynamic_cache(self, scope_type: str, scope_id: str) -> Dict[str, Any] | None:
         path = self.dynamic_cache_dir / f"{scope_type}-{scope_id}.json"
         if not path.exists():

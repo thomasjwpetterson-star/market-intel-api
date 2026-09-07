@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -1557,8 +1558,9 @@ class CompanyContextBuilder:
         )
 
     def _network_context(
-        self, cages: Sequence[str], years: Sequence[int]
+        self, cages: Sequence[str], years: Sequence[int], limit: int = 15
     ) -> Dict[str, Any]:
+        row_limit = min(max(int(limit), 1), 5000)
         upstream_query = f"""
             WITH relationships AS (
                 SELECT
@@ -1588,7 +1590,7 @@ class CompanyContextBuilder:
             FROM relationships r
             LEFT JOIN prime_sites p ON r.prime_cage = p.cage_code
             ORDER BY ABS(r.mimir_modelled_subcontract_value_usd) DESC
-            LIMIT 15
+            LIMIT {row_limit}
         """
         downstream_query = f"""
             SELECT
@@ -1606,7 +1608,7 @@ class CompanyContextBuilder:
               AND year IN ({placeholders(years)})
             GROUP BY sub_cage
             ORDER BY ABS(mimir_modelled_subcontract_value_usd) DESC
-            LIMIT 15
+            LIMIT {row_limit}
         """
         return {
             "as_subcontractor_to": rows_as_dicts(
@@ -1632,8 +1634,9 @@ class CompanyContextBuilder:
         }
 
     def _top_awards(
-        self, cages: Sequence[str], years: Sequence[int]
+        self, cages: Sequence[str], years: Sequence[int], limit: int = 15
     ) -> List[Dict[str, Any]]:
+        row_limit = min(max(int(limit), 1), 5000)
         query = f"""
             SELECT
                 award_key,
@@ -1655,13 +1658,58 @@ class CompanyContextBuilder:
               AND year IN ({placeholders(years)})
             GROUP BY 1
             ORDER BY ABS(net_prime_obligations_usd) DESC
-            LIMIT 15
+            LIMIT {row_limit}
         """
         return rows_as_dicts(
             self.connection.execute(
                 query, [str(self.paths["transactions"]), *cages, *years]
             )
         )
+
+    def build_export_context(
+        self, context: Dict[str, Any], limit: int = 5000
+    ) -> Dict[str, Any]:
+        """Expand customer-download tables without enlarging the model prompt."""
+        row_limit = min(max(int(limit), 1), 5000)
+        expanded = copy.deepcopy(context)
+        scope = expanded.get("scope", {})
+        cages = [
+            str(cage).strip().upper()
+            for cage in expanded.get("identity", {}).get("resolved_cages", [])
+            if str(cage or "").strip()
+        ]
+        years = [int(year) for year in scope.get("fiscal_years", [])]
+        if not cages or not years:
+            expanded["export_row_limit_per_table"] = row_limit
+            return expanded
+
+        expanded["top_awards"] = self._top_awards(cages, years, row_limit)
+        expanded["reported_subcontract_relationships"] = self._network_context(
+            cages, years, row_limit
+        )
+        if not expanded.get("site_capability_evidence"):
+            expanded["site_capability_evidence"] = self._site_capability_evidence(
+                cages, years
+            )
+        product = expanded.get("product_and_part_evidence", {})
+        product["niin_financial_observations"] = list(
+            product.get("niin_financial_observations", [])
+        )[:row_limit]
+        product["part_number_references"] = list(
+            product.get("part_number_references", [])
+        )[:row_limit]
+        qualified = product.get("qualified_source_context", {})
+        qualified["items"] = list(qualified.get("items", []))[:row_limit]
+        product["qualified_source_context"] = qualified
+        expanded["product_and_part_evidence"] = product
+        expanded["evidence_index"] = self._evidence_index(
+            expanded.get("identity", {}).get("sites", []),
+            expanded["top_awards"],
+            product,
+            expanded.get("capability_evidence", {}),
+        )
+        expanded["export_row_limit_per_table"] = row_limit
+        return expanded
 
     @staticmethod
     def _evidence_index(
