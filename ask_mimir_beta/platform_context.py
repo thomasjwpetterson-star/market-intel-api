@@ -511,6 +511,26 @@ class PlatformContextStore:
                     SELECT UPPER(TRIM(cage_code)) AS cage, MAX(vendor_name) AS location_name,
                            MAX(city) AS city, MAX(state) AS state, MAX(location_quality) AS location_quality
                     FROM read_parquet(?) GROUP BY 1
+                ), supplier_platforms AS (
+                    SELECT
+                        UPPER(TRIM(sub_cage)) AS cage,
+                        LIST_SLICE(
+                            LIST_DISTINCT(
+                                LIST(platform_family) FILTER (
+                                    WHERE platform_family IS NOT NULL AND TRIM(platform_family) <> ''
+                                )
+                            ),
+                            1,
+                            30
+                        ) AS mapped_platforms
+                    FROM read_parquet(?)
+                    WHERE year BETWEEN 2021 AND 2026
+                      AND UPPER(TRIM(COALESCE(platform_family, ''))) NOT IN (
+                          '', 'UNMAPPED', 'REVIEW NEEDED'
+                      )
+                      AND sub_cage IS NOT NULL
+                      AND UPPER(TRIM(sub_cage)) NOT IN ('','UNKNOWN','UNKNO')
+                    GROUP BY 1
                 )
                 SELECT
                     n.sub_cage AS cage,
@@ -533,9 +553,11 @@ class PlatformContextStore:
                     LIST_SLICE(LIST_DISTINCT(LIST(n.prime_cage) FILTER (WHERE n.prime_cage IS NOT NULL)),1,8) AS reported_prime_cages,
                     LIST_SLICE(LIST_DISTINCT(LIST(n.contract_id) FILTER (WHERE n.contract_id IS NOT NULL)),1,8) AS sample_prime_contract_ids,
                     LIST_SLICE(LIST_DISTINCT(LIST(n.description) FILTER (WHERE n.description IS NOT NULL)),1,8) AS reported_descriptions,
+                    ANY_VALUE(sp.mapped_platforms) AS mapped_platforms,
                     COUNT(*) OVER () AS total_available
                 FROM read_parquet(?) n
                 LEFT JOIN locations l ON UPPER(TRIM(n.sub_cage)) = l.cage
+                LEFT JOIN supplier_platforms sp ON UPPER(TRIM(n.sub_cage)) = sp.cage
                 WHERE n.platform_family IN (SELECT UNNEST(?))
                   AND n.year BETWEEN 2021 AND 2026
                   AND n.sub_cage IS NOT NULL
@@ -545,7 +567,13 @@ class PlatformContextStore:
                 ORDER BY mimir_modelled_reported_subcontract_value_usd DESC
                 LIMIT ?
                 """,
-                [str(self.paths["locations"]), str(self.paths["network"]), members, limit],
+                [
+                    str(self.paths["locations"]),
+                    str(self.paths["network"]),
+                    str(self.paths["network"]),
+                    members,
+                    limit,
+                ],
             )
         )
 

@@ -68,6 +68,27 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             platform_follow_up_intent("Rank the suppliers by visible or mapped activity.")
         )
 
+    def test_general_conclusions_do_not_inherit_a_prior_specialist_lens(self):
+        self.assertEqual(
+            platform_answer_mode("What are the three most important conclusions?"),
+            "platform_conclusions",
+        )
+        self.assertTrue(
+            platform_follow_up_intent("What are the three most important conclusions?")
+        )
+
+    def test_cross_program_dependency_question_has_a_distinct_mode(self):
+        self.assertEqual(
+            platform_answer_mode("Which suppliers create cross-program dependencies?"),
+            "supplier_cross_program",
+        )
+
+    def test_alternative_source_question_has_a_distinct_mode(self):
+        self.assertEqual(
+            platform_answer_mode("Which suppliers have the fewest alternative sources?"),
+            "supplier_source_depth",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -408,6 +408,13 @@ lacks site-specific detail when these fields support a clear bounded description
 question, cover every material site returned rather than replacing site-level evidence with a single corporate
 capability summary.
 
+When asked how important one facility is to the wider company, compare that facility with the other resolved
+sites using the complete company scope: financial activity, breadth of capabilities, platform exposure,
+customer routes and item evidence. Do not replace that comparison with an unrelated citywide company search.
+When asked what to investigate next in commercial due diligence, keep the active company or facility scope and
+tie each proposed investigation to a specific gap, concentration, contract, customer, platform or capability
+already visible in its evidence.
+
 Use short headings and compact bullets. Link company/CAGE references
 to https://www.mimiradvisors.org/dashboard?view=COMPANY&cage=<CAGE>, awards to
 https://www.mimiradvisors.org/dashboard?view=AWARDS&award=<AWARD_ID>, platforms to
@@ -566,6 +573,14 @@ Answer for the resolved platform or program. Follow requested_answer_mode exactl
 - supplier_concentration: assess the reported supplier-site value distribution and component source
   depth. Do not substitute concentration among direct government recipients.
 - supplier_facilities: identify the principal production or support sites and their evidenced roles.
+- supplier_cross_program: identify which material supplier sites also appear on other mapped platforms
+  or programs. Keep the current platform relationship and the other mapped relationships distinct.
+- supplier_source_depth: distinguish high-value positions with limited evidenced source depth from
+  lower-value items that merely have one observed recipient. Do not call an item sole-source unless
+  authoritative source-status evidence establishes it.
+- platform_conclusions: synthesize the three most material conclusions from the full active platform
+  scope. Weight conclusions by financial significance, supplier dependency and evidence strength;
+  do not revive a specialist market lens from an earlier question unless the latest question asks for it.
 - platform_overview: provide a compact summary table, then cover observed procurement trajectory,
   direct award recipients, reported supplier sites, components or capabilities, major awards and
   current opportunities.
@@ -590,10 +605,11 @@ platform scope for reported subcontract values, prime obligations and DLA procur
 Do not call every direct government recipient a prime contractor for the whole platform. Distinguish
 the platform prime or system integrator when the evidence establishes it, other direct award
 recipients, reported subcontractor sites and DLA item suppliers. A reported subcontract description
-supports bounded capability language. An exact component-to-platform claim requires either the
-curated_platform_supply_chain layer or an authoritative platform-specific public source. Where no
-curated layer exists, say what the reported description shows without upgrading it into a precise
-component claim.
+supports bounded capability language. When that description is generic, actively seek an authoritative
+platform-specific government or first-party source that connects the same company or site to a more
+specific role. Use that source to enrich the role only when the company, site and platform align. If the
+component remains unclear, still state the evidenced platform and customer relationship; a generic
+description does not erase the mapped platform relationship.
 
 Treat a named missile family as the program-wide scope represented by included_platform_records. Do not
 silently narrow Tomahawk to one Tactical Tomahawk award or one variant. A follow-up asking for the full
@@ -1176,7 +1192,7 @@ def is_program_momentum_request(messages: List[ChatMessage]) -> bool:
 
 
 def is_ground_vehicle_power_position_request(messages: List[ChatMessage]) -> bool:
-    text = " ".join(message.content for message in messages).lower()
+    text = str(messages[-1].content or "").lower()
     has_market = any(
         term in text
         for term in (
@@ -1202,7 +1218,7 @@ def is_ground_vehicle_power_position_request(messages: List[ChatMessage]) -> boo
 
 
 def is_eaton_competitor_request(messages: List[ChatMessage]) -> bool:
-    text = " ".join(message.content for message in messages).lower()
+    text = str(messages[-1].content or "").lower()
     return "eaton" in text and any(
         term in text for term in ("competitor", "competes", "peer", "compared with")
     )
@@ -1283,6 +1299,8 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     ):
         return None
     patterns = (
+        r"(?:give\s+me\s+an?\s+overview\s+of|an?\s+overview\s+of|overview\s+of)\s+(.+?)(?:'s|’s)\s+(?:us\s+)?(?:defense|defence)\s+(?:business|activity)(?:\s+in\s+.+?)?(?:\?|\.|$)",
+        r"(?:tell\s+me\s+about|give\s+me\s+an?\s+overview\s+of)\s+(.+?)(?:'s|’s)\s+(?:defense|defence)\s+activity(?:\s+in\s+.+?)?(?:\?|\.|$)",
         r"what\s+(?:defense|defence)\s+work\s+is\s+carried\s+out\s+at\s+(.+?)\s+(?:facilities|sites)(?:\?|\.|$)",
         r"(?:tell\s+me\s+about|give\s+me\s+(?:an?\s+)?)\s*(.+?)(?:'s|’s)\s+(?:us\s+)?(?:defense|defence)\s+business(?:\?|\.|$)",
         r"(?:defense\s+supplier|defence\s+supplier|supplier|company)\s*:\s*([^\n?]+)",
@@ -1313,7 +1331,10 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
         lowered = text.lower().strip(" .?")
         short_scope_reply = (
             len(text.split()) <= 5
-            or lowered in {"parent wide", "parent-wide", "company wide", "company-wide", "corporation wide", "corporation-wide"}
+            or lowered in {
+                "all", "all of them", "both", "parent wide", "parent-wide",
+                "company wide", "company-wide", "corporation wide", "corporation-wide",
+            }
         )
         if not short_scope_reply:
             return None
@@ -1330,7 +1351,11 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
                 break
         if not prior_query:
             return None
-        query = prior_query if "wide" in lowered else f"{prior_query} {text}"
+        query = (
+            prior_query
+            if "wide" in lowered or lowered in {"all", "all of them", "both"}
+            else f"{prior_query} {text}"
+        )
     if query.lower() in {"it", "them", "they", "their", "this company", "this site"}:
         return None
     if re.match(r"^CAGE\b", query, re.IGNORECASE) or (
@@ -1343,6 +1368,8 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
 
 def company_wide_intent(text: str) -> bool:
     lowered = str(text or "").lower()
+    if lowered.strip(" .?") in {"all", "all of them", "both"}:
+        return True
     return any(
         phrase in lowered
         for phrase in (
@@ -1391,6 +1418,19 @@ def company_follow_up_intent(text: str) -> bool:
             "capabilities",
             "awards",
             "contracts",
+            "how important",
+            "wider us defence footprint",
+            "wider us defense footprint",
+            "wider defence footprint",
+            "wider defense footprint",
+            "investigate next",
+            "due diligence",
+            "this facility",
+            "the facility",
+            "commercial importance",
+            "most important conclusions",
+            "key conclusions",
+            "main conclusions",
         )
     )
 
@@ -2617,6 +2657,41 @@ def generate_answer(
         request.active_scope
         and request.active_scope.scope_type in {"company_parent", "company_site"}
         and active_company_cages
+        and request.active_scope.parent_resolved_cages
+        and any(
+            phrase in latest_question.lower()
+            for phrase in (
+                "wider footprint",
+                "wider us defence footprint",
+                "wider us defense footprint",
+                "rest of the company",
+                "company-wide comparison",
+                "company wide comparison",
+            )
+        )
+    ):
+        resolved_company_scope = {
+            "scope_type": "company_parent",
+            "scope_id": request.active_scope.parent_scope_id
+            or request.active_scope.scope_id,
+            "scope_name": request.active_scope.parent_scope_name
+            or request.active_scope.scope_name,
+            "resolved_cages": request.active_scope.parent_resolved_cages,
+            "group_kind": request.active_scope.parent_group_kind
+            or "observed_company_group",
+        }
+        runtime.company_contexts.register_group(
+            scope_id=str(resolved_company_scope["scope_id"]),
+            scope_name=str(resolved_company_scope["scope_name"]),
+            cages=list(resolved_company_scope["resolved_cages"]),
+            group_kind=str(resolved_company_scope["group_kind"]),
+        )
+        company_query = None
+    if (
+        request.active_scope
+        and request.active_scope.scope_type in {"company_parent", "company_site"}
+        and active_company_cages
+        and not resolved_company_scope
         and re.search(r"\b(?:SITE|FACILITY|LOCATION)\b", latest_question, re.IGNORECASE)
     ):
         scoped_site = runtime.company_contexts.resolve_site_reference(
@@ -2692,8 +2767,34 @@ def generate_answer(
         ]
         if len(location_matches) == 1:
             resolved_company_scope = location_matches[0]
-        elif len(location_matches) > 1 and len(location_parent_matches) == 1:
-            resolved_company_scope = location_parent_matches[0]
+        elif len(location_matches) > 1:
+            location_cages = {
+                str(row.get("scope_id") or "").upper()
+                for row in location_matches
+            }
+            containing_parent = max(
+                parent_matches,
+                key=lambda row: len(
+                    location_cages.intersection(
+                        str(cage).upper()
+                        for cage in row.get("resolved_cages", [])
+                    )
+                ),
+                default=None,
+            )
+            if containing_parent and not location_cages.intersection(
+                str(cage).upper()
+                for cage in containing_parent.get("resolved_cages", [])
+            ):
+                containing_parent = None
+            if containing_parent:
+                resolved_company_scope = runtime.company_contexts.resolve_site_reference(
+                    containing_parent.get("resolved_cages", []),
+                    latest_question,
+                    parent_name=str(containing_parent.get("scope_name") or company_query),
+                )
+            if not resolved_company_scope and len(location_parent_matches) == 1:
+                resolved_company_scope = location_parent_matches[0]
         elif company_wide_intent(latest_question) and len(parent_matches) == 1:
             resolved_company_scope = parent_matches[0]
         elif len(matches) == 1:

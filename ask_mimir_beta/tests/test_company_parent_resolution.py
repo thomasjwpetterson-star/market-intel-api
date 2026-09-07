@@ -30,7 +30,13 @@ class CompanyParentResolutionTests(unittest.TestCase):
                         ('66666', 'CURTISS-WRIGHT CONTROLS, INC.', 'CURTISS-WRIGHT CORPORATION', 'CURTISSUEI1', 300.0, 30.0),
                         ('77777', 'MOOG INC.', 'MOOG INC.', 'MOOGUEI0001', 400.0, 40.0),
                         ('88888', 'MOOG INC.', 'MOOG INC.', 'MOOGUEI0002', 350.0, 35.0),
-                        ('9EME1', 'CURTISS VILLAGE OF', 'CURTISS VILLAGE OF', 'CURTISSVILL1', 1.0, 0.0)
+                        ('9EME1', 'CURTISS VILLAGE OF', 'CURTISS VILLAGE OF', 'CURTISSVILL1', 1.0, 0.0),
+                        ('W1111', 'WOODWARD, INC.', NULL, NULL, 600.0, 60.0),
+                        ('W2222', 'WOODWARD HRT, INC.', NULL, NULL, 500.0, 50.0),
+                        ('W3333', 'WOODWARD COUNTY', NULL, NULL, 20.0, 2.0),
+                        ('C1111', 'ROCKWELL COLLINS, INC.', NULL, NULL, 700.0, 70.0),
+                        ('C2222', 'COLLINS AEROSPACE, INC.', NULL, NULL, 650.0, 65.0),
+                        ('C3333', 'COLLINS CONSULTING, INC.', NULL, NULL, 30.0, 3.0)
                     ) AS t(
                         cage_code,
                         vendor_name,
@@ -72,6 +78,12 @@ class CompanyParentResolutionTests(unittest.TestCase):
                     ('77777', 'MOOG INC.', 'BLACKSBURG', 'VA', 'A', NULL),
                     ('88888', 'MOOG INC.', 'EAST AURORA', 'NY', 'A', NULL),
                     ('9EME1', 'CURTISS VILLAGE OF', 'CURTISS', 'WI', 'A', NULL)
+                    ,('W1111', 'WOODWARD, INC.', 'FORT COLLINS', 'CO', 'A', NULL)
+                    ,('W2222', 'WOODWARD HRT, INC.', 'SKOKIE', 'IL', 'A', NULL)
+                    ,('W3333', 'WOODWARD COUNTY', 'WOODWARD', 'OK', 'A', NULL)
+                    ,('C1111', 'ROCKWELL COLLINS, INC.', 'CEDAR RAPIDS', 'IA', 'A', NULL)
+                    ,('C2222', 'COLLINS AEROSPACE, INC.', 'CEDAR RAPIDS', 'IA', 'A', NULL)
+                    ,('C3333', 'COLLINS CONSULTING, INC.', 'CEDAR RAPIDS', 'IA', 'A', NULL)
                 ) AS t(cage_code, vendor_name, city, state, cage_status, replacement_cage)
             ) TO ? (FORMAT PARQUET)
             """,
@@ -159,6 +171,37 @@ class CompanyParentResolutionTests(unittest.TestCase):
             self.assertEqual(result["scope_type"], "company_site")
             self.assertEqual(result["scope_id"], "77777")
             self.assertEqual(result["city"], "BLACKSBURG")
+
+    def test_reviewed_woodward_group_excludes_unrelated_surname_entities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            result = store.search("Woodward", limit=20)
+
+            scopes = {row["scope_id"] for row in result["matches"]}
+            self.assertIn("W1111", scopes)
+            self.assertIn("W2222", scopes)
+            self.assertNotIn("W3333", scopes)
+            parent = next(
+                row for row in result["matches"] if row["scope_type"] == "company_parent"
+            )
+            self.assertEqual(parent["resolved_cages"], ["W1111", "W2222"])
+
+    def test_reviewed_collins_group_and_city_scope_exclude_unrelated_firms(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            result = store.search("Collins Aerospace", limit=20)
+
+            parent = next(
+                row for row in result["matches"] if row["scope_type"] == "company_parent"
+            )
+            self.assertEqual(parent["resolved_cages"], ["C1111", "C2222"])
+            facility = store.resolve_site_reference(
+                parent["resolved_cages"],
+                "Collins Aerospace in Cedar Rapids, Iowa",
+                parent_name=parent["scope_name"],
+            )
+            self.assertEqual(facility["resolved_cages"], ["C1111", "C2222"])
+            self.assertNotIn("C3333", facility["resolved_cages"])
 
 
 if __name__ == "__main__":

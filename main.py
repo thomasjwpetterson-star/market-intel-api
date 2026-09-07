@@ -5596,7 +5596,8 @@ def get_company_network(
                     "FROM network_source",
                     f"FROM read_parquet('{str(net_path)}')"
                 )
-                return conn.execute(final_sql, params).fetchdf().to_dict(orient="records")
+                result_df = conn.execute(final_sql, params).fetchdf()
+                return df_sanitize_for_json(result_df).to_dict(orient="records")
         except Exception as e:
             logger.error(f"Network query failed: {e}")
             return []

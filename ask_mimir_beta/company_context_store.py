@@ -18,7 +18,24 @@ DEFAULT_CONTEXT_DIR = ROOT / "validation-output" / "company-context"
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
-DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v6"
+DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v7"
+
+
+# Reviewed trading-name aliases prevent common surnames from sweeping unrelated
+# legal entities into an automatically generated company-wide scope.
+REVIEWED_COMPANY_ALIASES = {
+    "WOODWARD": ("WOODWARD", "WOODWARD HRT", "WOODWARD FST"),
+    "COLLINS AEROSPACE": (
+        "COLLINS AEROSPACE",
+        "ROCKWELL COLLINS",
+        "COLLINS ELBIT VISION SYSTEMS",
+    ),
+    "ROCKWELL COLLINS": (
+        "COLLINS AEROSPACE",
+        "ROCKWELL COLLINS",
+        "COLLINS ELBIT VISION SYSTEMS",
+    ),
+}
 
 
 FOCUS_SECTIONS = {
@@ -164,6 +181,19 @@ def _company_name_core(value: Any) -> str:
     return " ".join(tokens)
 
 
+def _reviewed_company_aliases(value: Any) -> tuple[str, ...]:
+    return REVIEWED_COMPANY_ALIASES.get(_company_name_core(value), ())
+
+
+def _matches_reviewed_company_alias(value: Any, aliases: Sequence[str]) -> bool:
+    core = _company_name_core(value)
+    return any(
+        core == alias
+        or (len(alias.split()) > 1 and core.startswith(f"{alias} "))
+        for alias in aliases
+    )
+
+
 class CompanyContextStore:
     def __init__(
         self,
@@ -221,6 +251,7 @@ class CompanyContextStore:
         clean_query = str(query or "").strip().upper()
         if not clean_query:
             return {"matches": []}
+        reviewed_aliases = _reviewed_company_aliases(query)
         matches = []
         for context in self.contexts:
             scope = context["scope"]
@@ -277,14 +308,35 @@ class CompanyContextStore:
                     "context_available": True,
                 }
             )
+        if reviewed_aliases:
+            matches = [
+                row
+                for row in matches
+                if row.get("scope_type") == "company_site"
+                and _matches_reviewed_company_alias(
+                    row.get("scope_name"), reviewed_aliases
+                )
+            ]
         if not scope_type or scope_type in {"company_site", "company_parent"}:
-            directory_matches = self._directory_search(query, max(limit, 500))
+            if reviewed_aliases:
+                directory_matches_by_cage: Dict[str, Dict[str, Any]] = {}
+                for alias in reviewed_aliases:
+                    for row in self._directory_search(alias, max(limit, 500)):
+                        if _matches_reviewed_company_alias(
+                            row.get("scope_name"), reviewed_aliases
+                        ):
+                            directory_matches_by_cage[str(row["scope_id"])] = row
+                directory_matches = list(directory_matches_by_cage.values())
+            else:
+                directory_matches = self._directory_search(query, max(limit, 500))
             matches = self._merge_directory_matches(
                 matches,
                 directory_matches if scope_type != "company_parent" else [],
             )
-            if scope_type != "company_site" and not any(
-                row["scope_type"] == "company_parent" for row in matches
+            if (
+                not reviewed_aliases
+                and scope_type != "company_site"
+                and not any(row["scope_type"] == "company_parent" for row in matches)
             ):
                 reported_parent_matches = self._reported_parent_matches(query)
                 matches = self._merge_directory_matches(
@@ -883,7 +935,15 @@ class CompanyContextStore:
         clean_cages = sorted({_normalize_cage(cage) for cage in cages if _normalize_cage(cage)})
         if not clean_id or not clean_cages:
             return
-        identity_sites = self._directory_search(scope_name, 500)
+        existing = self._dynamic_groups.get(clean_id, {})
+        identity_sites = list(existing.get("identity_sites", []))
+        if not identity_sites:
+            allowed_cages = set(clean_cages)
+            identity_sites = [
+                row
+                for row in self._directory_search(scope_name, 500)
+                if _normalize_cage(row.get("scope_id")) in allowed_cages
+            ]
         self._dynamic_groups[clean_id] = {
             "scope_name": str(scope_name or clean_id).strip(),
             "cages": clean_cages,
