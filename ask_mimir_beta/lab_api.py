@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -38,6 +39,10 @@ from award_opportunity_export import (
     build_award_opportunity_evidence_zip,
 )
 from platform_context import PlatformContextStore
+from platform_comparison import (
+    build_platform_comparison,
+    comparison_answer_projection,
+)
 from platform_context_export import (
     build_platform_context_zip,
     platform_context_filename,
@@ -58,7 +63,10 @@ from beta_controls import (
 from platform_supply_chain_store import PlatformSupplyChainStore
 from program_momentum_store import ProgramMomentumStore
 from platform_intent import (
+    is_open_capability_discovery_request,
     platform_answer_mode,
+    platform_comparison_answer_mode,
+    platform_comparison_follow_up_intent,
     platform_follow_up_intent,
     platform_follow_up_retains_scope,
 )
@@ -82,6 +90,9 @@ You are Ask Mimir, an evidence-led US defense-market research assistant.
 Use the available tools before making any quantitative statement. Never invent a company,
 program, award, supplier relationship, value, rank, price or source. Answer with the strongest
 supported evidence available and mention a gap only when it materially changes the conclusion.
+If the available tools cannot retrieve the right market universe or the evidence cannot support
+the requested comparison, say that Ask Mimir cannot currently answer it reliably. Never substitute
+a familiar platform, cached example or narrower award for the user's requested scope.
 
 Ask Mimir is scoped to the defense industrial base, government acquisition, national-security
 supply chains and adjacent dual-use markets. For a clearly unrelated request, decline briefly and
@@ -669,6 +680,60 @@ State the completed fiscal-year window for financial comparisons and identify th
 separately. Finish with Evidence used and mention the downloadable evidence pack. Keep the standard
 answer below 1,300 words.
 
+The reported supplier lane reflects the supplier relationships observed in the source records for
+the stated period; it is not automatically a complete bill of material. Describe the observed
+coverage positively and concisely. Never call a platform's first-tier base concentrated merely
+because few reported sites are present when the evidence coverage itself is sparse.
+
+Do not add generic caveats that measures are non-additive. Explain an overlap risk only when the
+answer actually combines measures that can contain the same underlying procurement activity.
+
+When using web research, apply this source hierarchy:
+{WEB_SOURCE_POLICY_PROMPT}
+""".strip()
+
+PLATFORM_COMPARISON_PROMPT = f"""
+You are Ask Mimir, an evidence-led US defense-market research assistant. The final user message is
+followed by a deterministic comparison of two or more mapped platforms or programs.
+
+Follow requested_answer_mode exactly:
+- supplier_base_comparison: compare the observed first-tier supplier sites, specific component or
+  capability evidence, site breadth and material reported positions. Do not infer that one platform
+  has more avionics, structures, materials or another technology merely because its available
+  descriptions happen to use that label more often.
+- comparison_overlap: lead with exact shared CAGE sites, then identify shared organizations operating
+  through different sites. State the evidenced role on each platform. Enrich generic reported roles
+  with authoritative government or first-party sources when company, site and platform align.
+- comparison_cross_program_exposure: begin with the suppliers evidenced on the compared platforms.
+  Use their mapped_platforms to identify material relationships with other named platforms or
+  programs, especially the market named by the user. Do not replace them with unrelated recipients
+  from a generic portfolio.
+- comparison_conclusions: draw conclusions from the full comparison and its preceding scope. Emphasize
+  material shared suppliers, industrial dependencies, customer routes and component evidence.
+
+The unit for first-tier comparison is the reported supplier CAGE site. Keep different CAGE sites
+separate even when they share a company name. Prime or system-integrator dominance is normal program
+structure and is not evidence that the underlying supplier base is concentrated. Do not compare
+prime-recipient percentages as though they measured first-tier concentration.
+
+Assess dependency at the narrowest supported component level. A broad label such as aircraft systems,
+structures, avionics, propulsion-related equipment or non-production support is not a valid source-depth
+unit. Identify the engine, gearbox, actuator, rotor-system part, electronic assembly or service where
+the evidence permits. If it does not, report the relationship without inventing the component.
+
+Every financial value must carry its fiscal-year period. Do not add routine disclaimers about identical
+configurations, interchangeability, company revenue or non-additivity. Explain a distinction only when
+it materially affects the requested comparison. If the evidence cannot support a requested ranking or
+comparative conclusion, say so plainly and provide the narrower supported finding instead.
+
+Hyperlink CAGE sites, awards, platforms and NIINs to their corresponding Mimir dashboard views. Never
+expose internal release names, file paths, hashes, keys or implementation terminology. Finish with a
+short Evidence used section. Keep the standard answer below 1,300 words.
+
+For supplier_base_comparison, use web research for up to five of the largest material supplier sites
+whose reported role is generic, prioritizing official government and supplier sources. Add a narrower
+role only when the source clearly aligns with the company or site and the named platform.
+
 When using web research, apply this source hierarchy:
 {WEB_SOURCE_POLICY_PROMPT}
 """.strip()
@@ -1185,6 +1250,27 @@ def explicit_platform_query(
     return None
 
 
+def explicit_platform_comparison(
+    messages: List[ChatMessage], store: PlatformContextStore
+) -> List[str]:
+    """Return named comparison platforms from the latest question."""
+    text = str(messages[-1].content or "").strip()
+    lowered = text.lower()
+    if not any(
+        term in lowered
+        for term in (
+            "compare",
+            "comparison",
+            "both",
+            "between",
+            "overlap",
+            "shared supplier",
+        )
+    ):
+        return []
+    return store.mentions(text)[:4]
+
+
 def is_clearly_out_of_domain(messages: List[ChatMessage]) -> bool:
     text = " ".join(message.content for message in messages).lower()
     defense_terms = (
@@ -1467,7 +1553,9 @@ class ChatMessage(BaseModel):
 
 
 class ActiveScope(BaseModel):
-    scope_type: str = Field(pattern="^(company_parent|company_site|platform)$")
+    scope_type: str = Field(
+        pattern="^(company_parent|company_site|platform|platform_comparison)$"
+    )
     scope_id: str = Field(min_length=1, max_length=200)
     scope_name: Optional[str] = Field(default=None, max_length=300)
     resolved_cages: List[str] = Field(default_factory=list, max_length=250)
@@ -1476,6 +1564,7 @@ class ActiveScope(BaseModel):
     parent_scope_name: Optional[str] = Field(default=None, max_length=300)
     parent_resolved_cages: List[str] = Field(default_factory=list, max_length=250)
     parent_group_kind: Optional[str] = Field(default=None, max_length=80)
+    compared_platform_ids: List[str] = Field(default_factory=list, max_length=4)
 
 
 class AskRequest(BaseModel):
@@ -1687,6 +1776,7 @@ class LabRuntime:
             "explain_program_momentum",
             "get_platform_supply_chain",
             "get_platform_context",
+            "compare_platform_contexts",
             "get_company_context",
             "get_company_opportunity_candidates",
             "get_item_context",
@@ -1715,6 +1805,10 @@ class LabRuntime:
             return self.platform_contexts.search(**arguments)
         elif name == "get_platform_context":
             result = self.platform_contexts.answer_projection(**arguments)
+        elif name == "compare_platform_contexts":
+            result = build_platform_comparison(
+                self.platform_contexts, arguments["platform_ids"]
+            )
         elif name == "search_company_contexts":
             return self.company_contexts.search(**arguments)
         elif name == "get_company_context":
@@ -1973,6 +2067,14 @@ def workflow_for_request(request: AskRequest) -> str:
         return "contract_or_opportunity"
     if explicit_item_query(request.messages):
         return "item_intelligence"
+    if explicit_platform_comparison(request.messages, runtime.platform_contexts):
+        return "platform_comparison"
+    if (
+        request.active_scope
+        and request.active_scope.scope_type == "platform_comparison"
+        and platform_comparison_follow_up_intent(request.messages[-1].content)
+    ):
+        return "platform_comparison"
     if (
         request.active_scope
         and request.active_scope.scope_type == "platform"
@@ -1995,6 +2097,8 @@ def workflow_for_request(request: AskRequest) -> str:
         return "company_site_trajectory"
     if is_program_momentum_request(request.messages):
         return "program_momentum"
+    if is_open_capability_discovery_request(request.messages[-1].content):
+        return "capability_discovery"
     if is_clearly_out_of_domain(request.messages):
         return "out_of_domain"
     return "general_defense_research"
@@ -2100,6 +2204,29 @@ def sanitize_answer_text(answer: str) -> str:
     cleaned = re.sub(r"\bdossier\b", "analysis", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bloaded FY(?=\s?20\d{2})", "FY", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bthe loaded records\b", "the available records", cleaned, flags=re.IGNORECASE)
+    route_parameters = {
+        "cage": ("COMPANY", "cage"),
+        "supplier": ("COMPANY", "cage"),
+        "platform": ("PLATFORM", "platform"),
+        "award": ("AWARDS", "award"),
+        "nsn": ("PARTS", "nsn"),
+    }
+
+    def normalize_short_link(match: re.Match[str]) -> str:
+        route, identifier = match.groups()
+        view, parameter = route_parameters[route.lower().rstrip("s")]
+        target = (
+            "https://www.mimiradvisors.org/dashboard?"
+            f"view={view}&{parameter}={quote(identifier.strip(), safe='')}"
+        )
+        return f"]({target})"
+
+    cleaned = re.sub(
+        r"\]\(/(cages?|suppliers?|platforms?|awards?|nsns?)/([^\)]+)\)",
+        normalize_short_link,
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
@@ -2163,6 +2290,7 @@ NON_BILLABLE_RESPONSE_IDS = frozenset(
         "award-opportunity-disambiguation",
         "item-disambiguation",
         "platform-disambiguation",
+        "capability-index-insufficient",
         "out-of-domain",
     }
 )
@@ -2630,6 +2758,28 @@ def generate_answer(
     resolved_company_scope: Dict[str, Any] | None = None
     company_query = explicit_company_name_query(request.messages)
     latest_question = str(request.messages[-1].content or "")
+    if (
+        is_open_capability_discovery_request(latest_question)
+        and not runtime.platform_contexts.mentions(latest_question)
+    ):
+        return {
+            "answer": (
+                "I cannot currently produce a reliable market-wide supplier list for that "
+                "capability. Ask Mimir can assess it within a named platform, program or company, "
+                "but the cross-platform capability index is not yet complete enough to support "
+                "a defensible US-wide result."
+            ),
+            "response_id": "capability-index-insufficient",
+            "model": "deterministic-evidence-control",
+            "release_id": runtime.store.manifest["release_id"],
+            "tool_trace": [],
+            "answer_artifacts": {},
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "response_calls": 0,
+            "usage": None,
+            "usage_by_response": [],
+            "estimated_cost": None,
+        }
     active_company_cages = []
     active_company_name = None
     if request.active_scope:
@@ -3279,6 +3429,96 @@ def generate_answer(
                 }
             )
             return result
+
+    comparison_platforms = explicit_platform_comparison(
+        request.messages, runtime.platform_contexts
+    )
+    if (
+        request.active_scope
+        and request.active_scope.scope_type == "platform_comparison"
+        and platform_comparison_follow_up_intent(request.messages[-1].content)
+    ):
+        comparison_platforms = request.active_scope.compared_platform_ids
+    if len(comparison_platforms) >= 2:
+        emit_progress(
+            progress,
+            "Resolving the comparison",
+            "Matching both platform and program scopes",
+            22,
+        )
+        arguments = {"platform_ids": comparison_platforms}
+        pack = runtime.call_tool("compare_platform_contexts", arguments)
+        answer_mode = platform_comparison_answer_mode(request.messages[-1].content)
+        pack = comparison_answer_projection(pack, answer_mode)
+        pack["requested_question"] = request.messages[-1].content
+        arguments = {"platform_ids": pack["platform_ids"]}
+        trace = [
+            {
+                "tool": "compare_platform_contexts",
+                "arguments": arguments,
+                "result": pack,
+            }
+        ]
+        comparison_input = [
+            {"role": "user", "content": request.messages[-1].content},
+            {
+                "role": "user",
+                "content": (
+                    "MIMIR PLATFORM COMPARISON EVIDENCE\n"
+                    + json.dumps(pack, default=str)
+                ),
+            },
+        ]
+        emit_progress(
+            progress,
+            "Comparing supplier evidence",
+            "Checking shared sites, roles and wider program exposure",
+            58,
+        )
+        response = client.responses.create(
+            model=runtime.model,
+            instructions=PLATFORM_COMPARISON_PROMPT,
+            input=comparison_input,
+            tools=[{"type": "web_search", "search_context_size": "low"}],
+            reasoning={"effort": runtime.reasoning_effort},
+            max_output_tokens=min(runtime.max_output_tokens, 10000),
+            store=False,
+        )
+        call_usages = [_usage_dict(response)]
+        response, answer_text = finalize_response(
+            client,
+            response,
+            PLATFORM_COMPARISON_PROMPT,
+            comparison_input,
+            call_usages,
+            progress,
+            min(runtime.max_output_tokens, 10000),
+        )
+        usage = aggregate_usage(call_usages)
+        result = {
+            "answer": answer_text,
+            "response_id": response.id,
+            "model": runtime.model,
+            "release_id": runtime.store.manifest["release_id"],
+            "answer_artifacts": {"platform_comparison_dossier": pack},
+            "tool_trace": trace,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "response_calls": len(call_usages),
+            "usage": usage,
+            "usage_by_response": call_usages,
+            "estimated_cost": estimate_usage_cost(runtime.model, usage),
+        }
+        runtime.write_audit_record(
+            {
+                "run_id": str(uuid.uuid4()),
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "request_messages": [
+                    message.model_dump() for message in request.messages
+                ],
+                **result,
+            }
+        )
+        return result
 
     platform_query = explicit_platform_query(request.messages, runtime.platform_contexts)
     if (

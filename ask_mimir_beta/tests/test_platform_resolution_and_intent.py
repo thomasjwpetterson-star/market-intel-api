@@ -2,7 +2,10 @@ import unittest
 
 from platform_context import PlatformContextStore
 from platform_intent import (
+    is_open_capability_discovery_request,
     platform_answer_mode,
+    platform_comparison_answer_mode,
+    platform_comparison_follow_up_intent,
     platform_follow_up_intent,
     platform_follow_up_retains_scope,
 )
@@ -18,6 +21,8 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             "PATRIOT AIR DEFENSE SYSTEM",
             "LTAMDS",
             "TOMAHAWK",
+            "UH-60",
+            "CH-47",
         ]
 
     def test_patriot_resolves_to_the_umbrella_system(self):
@@ -111,6 +116,42 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
                 "Which parts of the supply chain appear dependent on a small number of supplier sites?"
             ),
             "supplier_concentration",
+        )
+
+    def test_two_named_rotorcraft_are_both_detected(self):
+        self.assertEqual(
+            set(self.store.mentions(
+                "Compare the supplier bases of the UH-60 Black Hawk and CH-47 Chinook."
+            )),
+            {"UH-60", "CH-47"},
+        )
+
+    def test_comparison_follow_up_retains_both_platforms(self):
+        self.assertTrue(
+            platform_comparison_follow_up_intent(
+                "Which of those suppliers are also important to other US Army aviation programs?"
+            )
+        )
+        self.assertEqual(
+            platform_comparison_answer_mode(
+                "Which of those suppliers are also important to other US Army aviation programs?"
+            ),
+            "comparison_cross_program_exposure",
+        )
+
+    def test_comparison_conclusion_mode(self):
+        self.assertEqual(
+            platform_comparison_answer_mode(
+                "What is the most commercially interesting conclusion from the overlap?"
+            ),
+            "comparison_conclusions",
+        )
+
+    def test_open_capability_discovery_is_detected(self):
+        self.assertTrue(
+            is_open_capability_discovery_request(
+                "Find US manufacturers with demonstrated experience supplying electrical power generation equipment to military aircraft."
+            )
         )
 
 

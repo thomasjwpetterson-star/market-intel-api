@@ -24,16 +24,25 @@ def platform_answer_mode(text: str) -> str:
         )
     ):
         return "platform_conclusions"
-    if has_supplier and any(
-        phrase in lowered
-        for phrase in (
-            "other programs",
-            "other platforms",
-            "cross-program",
-            "cross program",
-            "shared across",
-            "dependency",
-            "dependencies",
+    if has_supplier and (
+        (
+            "other" in lowered
+            and any(
+                term in lowered
+                for term in ("program", "programme", "platform", "aviation")
+            )
+        )
+        or any(
+            phrase in lowered
+            for phrase in (
+                "other programs",
+                "other platforms",
+                "cross-program",
+                "cross program",
+                "shared across",
+                "dependency",
+                "dependencies",
+            )
         )
     ):
         return "supplier_cross_program"
@@ -149,3 +158,114 @@ def platform_follow_up_retains_scope(text: str) -> bool:
             "the supply chain",
         )
     )
+
+
+def platform_comparison_answer_mode(text: str) -> str:
+    """Classify a question comparing two or more platform supplier bases."""
+    lowered = str(text or "").lower()
+    if any(
+        phrase in lowered
+        for phrase in (
+            "commercially interesting",
+            "commercial conclusion",
+            "most important conclusion",
+            "key conclusion",
+            "main conclusion",
+            "three conclusions",
+            "key takeaways",
+        )
+    ):
+        return "comparison_conclusions"
+    if (
+        "supplier" in lowered
+        and "other" in lowered
+        and any(
+            term in lowered
+            for term in ("program", "programme", "platform", "aviation")
+        )
+    ) or any(
+        phrase in lowered
+        for phrase in (
+            "particularly exposed",
+            "wider rotorcraft",
+            "other army aviation",
+            "other aviation programs",
+            "other aviation programmes",
+            "other programs",
+            "other platforms",
+        )
+    ):
+        return "comparison_cross_program_exposure"
+    if any(
+        phrase in lowered
+        for phrase in (
+            "share important suppliers",
+            "shared suppliers",
+            "supplier overlap",
+            "overlap between",
+            "where do the two",
+        )
+    ):
+        return "comparison_overlap"
+    return "supplier_base_comparison"
+
+
+def platform_comparison_follow_up_intent(text: str) -> bool:
+    """Recognize anaphoric follow-ups to an active multi-platform comparison."""
+    lowered = str(text or "").lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "the two platforms",
+            "both platforms",
+            "both programs",
+            "both programmes",
+            "between the two",
+            "between them",
+            "those suppliers",
+            "these suppliers",
+            "which of those",
+            "the overlap",
+            "three conclusions",
+            "key conclusions",
+            "most important conclusion",
+            "commercially interesting",
+        )
+    )
+
+
+def is_open_capability_discovery_request(text: str) -> bool:
+    """Identify market-wide supplier searches that need a dedicated capability index."""
+    lowered = str(text or "").lower()
+    has_discovery = any(
+        phrase in lowered
+        for phrase in (
+            "find manufacturers",
+            "find us manufacturers",
+            "find suppliers",
+            "which manufacturers",
+            "which suppliers",
+            "companies supplying",
+            "manufacturers with",
+            "suppliers with",
+        )
+    )
+    has_capability = any(
+        term in lowered
+        for term in (
+            "capability",
+            "equipment",
+            "electronics",
+            "electrical",
+            "power",
+            "avionics",
+            "propulsion",
+            "antenna",
+            "radar",
+            "actuation",
+            "machining",
+            "composites",
+            "energetics",
+        )
+    )
+    return has_discovery and has_capability

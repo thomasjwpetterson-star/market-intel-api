@@ -336,6 +336,54 @@ class PlatformContextStore:
         self._cache[resolved] = context
         return context
 
+    def comparison_projection(self, platform_id: str) -> Dict[str, Any]:
+        """Return the supplier evidence needed for a multi-platform comparison."""
+        resolution = self.search(platform_id)
+        resolved = resolution.get("resolved_platform_id")
+        if not resolved:
+            raise KeyError(f"platform was not found: {platform_id}")
+        suppliers = self._reported_supplier_sites(resolved, limit=500)
+        categories = self._component_categories(resolved, limit=150)
+        positive_values = [
+            max(
+                float(
+                    row.get("mimir_modelled_reported_subcontract_value_usd") or 0
+                ),
+                0,
+            )
+            for row in suppliers
+        ]
+        positive_total = sum(positive_values)
+        return {
+            "scope": {
+                "platform_id": resolved,
+                "display_name": PLATFORM_DISPLAY_NAMES.get(resolved, resolved),
+                "included_platform_records": self._platform_members(resolved),
+                "completed_fiscal_years": list(COMPLETED_FISCAL_YEARS),
+                "partial_fiscal_year": 2026,
+                "observation_window": OBSERVATION_WINDOW,
+            },
+            "reported_supplier_sites": suppliers,
+            "reported_component_categories": categories,
+            "reported_supplier_summary": {
+                "supplier_site_count": len(suppliers),
+                "available_supplier_site_count": self._available_count(suppliers),
+                "positive_reported_subcontract_value_usd": positive_total,
+                "top_supplier_share_pct": (
+                    max(positive_values) / positive_total * 100
+                    if positive_total and positive_values
+                    else 0
+                ),
+                "top_five_supplier_share_pct": (
+                    sum(sorted(positive_values, reverse=True)[:5])
+                    / positive_total
+                    * 100
+                    if positive_total
+                    else 0
+                ),
+            },
+        }
+
     @staticmethod
     def _available_count(rows: List[Dict[str, Any]]) -> int:
         if not rows:
