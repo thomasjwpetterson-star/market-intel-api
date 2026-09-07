@@ -18,7 +18,7 @@ DEFAULT_CONTEXT_DIR = ROOT / "validation-output" / "company-context"
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
-DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v7"
+DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v8"
 
 
 # Reviewed trading-name aliases prevent common surnames from sweeping unrelated
@@ -73,6 +73,7 @@ FOCUS_SECTIONS = {
         "site_financials",
         "site_capability_evidence",
         "location_footprint",
+        "place_of_performance_activity",
         "capability_evidence",
         "product_and_part_evidence",
         "platform_exposure",
@@ -90,6 +91,7 @@ FOCUS_SECTIONS = {
         "site_financials",
         "site_capability_evidence",
         "location_footprint",
+        "place_of_performance_activity",
         "capability_evidence",
         "product_and_part_evidence",
         "platform_exposure",
@@ -106,6 +108,7 @@ FOCUS_SECTIONS = {
         "identity",
         "annual_activity",
         "site_capability_evidence",
+        "place_of_performance_activity",
         "capability_evidence",
         "platform_exposure",
         "missile_program_trajectory",
@@ -117,6 +120,7 @@ FOCUS_SECTIONS = {
         "observed_financials",
         "annual_activity",
         "site_capability_evidence",
+        "place_of_performance_activity",
         "capability_evidence",
         "platform_exposure",
         "missile_program_trajectory",
@@ -885,19 +889,34 @@ class CompanyContextStore:
         sites = [row for row in directory_matches if row["scope_type"] == "company_site"]
         if len(sites) < 2:
             return None
-        cages = sorted(
+        observed_cages = sorted(
             {
                 str(row["scope_id"]).upper()
                 for row in sites
                 if row.get("has_observed_profile")
             }
         )
-        if not cages:
+        if not observed_cages:
             return None
-        cage_set = set(cages)
+        cage_set = set(observed_cages)
         scoped_sites = [
             row for row in sites if str(row["scope_id"]).upper() in cage_set
         ]
+        all_location_keys = {
+            (str(row.get("city") or "").upper(), str(row.get("state") or "").upper())
+            for row in sites
+        }
+        all_at_one_location = (
+            len(all_location_keys) == 1 and next(iter(all_location_keys))[0]
+        )
+        if all_at_one_location:
+            cages = sorted({str(row["scope_id"]).upper() for row in sites})
+            cage_set = set(cages)
+            scoped_sites = [
+                row for row in sites if str(row["scope_id"]).upper() in cage_set
+            ]
+        else:
+            cages = observed_cages
         location_keys = {
             (str(row.get("city") or "").upper(), str(row.get("state") or "").upper())
             for row in scoped_sites
@@ -907,7 +926,7 @@ class CompanyContextStore:
         if one_location:
             city, state = next(iter(location_keys))
             query_label = re.sub(
-                rf"\b{re.escape(city)}\b(?:\s*,?\s*{re.escape(state)})?",
+                rf"\b{re.escape(city)}\b.*$",
                 "",
                 query_label,
                 flags=re.IGNORECASE,
@@ -995,6 +1014,23 @@ class CompanyContextStore:
             raise ValueError(f"unsupported company context focus: {focus}")
         clean_id = str(scope_id).strip().upper()
         context = self.get_raw(scope_type, clean_id)
+        if (
+            scope_type == "company_site"
+            and "place_of_performance_activity" not in context
+        ):
+            from company_context import CompanyContextBuilder
+
+            with self._dynamic_lock:
+                if self._dynamic_builder is None:
+                    self._dynamic_builder = CompanyContextBuilder(
+                        data_root=self.data_root
+                    )
+                context["place_of_performance_activity"] = (
+                    self._dynamic_builder._place_of_performance_activity(
+                        context.get("identity", {}).get("sites", []),
+                        context.get("scope", {}).get("fiscal_years", []),
+                    )
+                )
 
         result = {
             "context_id": context["context_id"],
@@ -1130,6 +1166,8 @@ class CompanyContextStore:
                     "reported_subaward_locations", []
                 )[:8],
             }
+        if section == "place_of_performance_activity" and isinstance(value, dict):
+            return {**value, "records": value.get("records", [])[:15]}
         if section == "product_and_part_evidence" and isinstance(value, dict):
             financial_rows = []
             for row in value.get("niin_financial_observations", [])[:10]:

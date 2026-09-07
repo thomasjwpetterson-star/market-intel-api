@@ -39,6 +39,7 @@ PLATFORM_DISPLAY_NAMES = {
 }
 
 PLATFORM_ALIASES = {
+    "HIGH MOBILITY ARTILLERY ROCKET SYSTEM": "HIMARS",
     "GMLRS": "GMLRS/GMLRS AW",
     "MLRS": "GMLRS/GMLRS AW",
     "TRIDENT II": "TRIDENT II MISSILE",
@@ -61,6 +62,42 @@ PLATFORM_ALIASES = {
     "COLUMBIA CLASS": "COLUMBIA CLASS SSBN",
     "COLOMBIA": "COLUMBIA CLASS SSBN",
     "COLOMBIA CLASS": "COLUMBIA CLASS SSBN",
+    "F 15EX": "F-15",
+    "F15EX": "F-15",
+    "EAGLE II": "F-15",
+    "KING STALLION": "CH-53K",
+    "CH 53K KING STALLION": "CH-53K",
+    "E 7A": "E-7",
+    "E7A": "E-7",
+    "WEDGETAIL": "E-7",
+    "LRASM": "JASSM",
+    "LONG RANGE ANTI SHIP MISSILE": "JASSM",
+    "STANDARD MISSILE 6": "SM-6",
+    "STANDARD MISSILE SIX": "SM-6",
+}
+
+PLATFORM_FOCUSES = {
+    "F-15EX": {
+        "display_name": "F-15EX",
+        "base_platform": "F-15",
+        "match_pattern": r"F-?15EX|EAGLE II",
+        "related_mapped_platforms": ["F-15"],
+        "relationship": "variant focus within the F-15 platform family",
+    },
+    "LRASM": {
+        "display_name": "LRASM",
+        "base_platform": "JASSM",
+        "match_pattern": r"LRASM|LONG RANGE ANTI.SHIP MISSILE",
+        "related_mapped_platforms": ["JASSM", "P-8A"],
+        "relationship": "program focus within the JASSM/LRASM industrial family",
+    },
+    "E-7A": {
+        "display_name": "E-7A Wedgetail",
+        "base_platform": "E-7",
+        "match_pattern": r"E-?7A|WEDGETAIL",
+        "related_mapped_platforms": ["E-7", "E-7A RP"],
+        "relationship": "US variant focus within the E-7 platform family",
+    },
 }
 
 # Tomahawk aliases are intentionally collapsed into one family. Patriot retains
@@ -80,6 +117,21 @@ def _normalize(value: Any) -> str:
 def _date(value: Any) -> str | None:
     text = str(value or "").strip()
     return text[:10] if text else None
+
+
+def requested_platform_focus(text: str) -> str | None:
+    normalized = f" {_normalize(text)} "
+    if (
+        " F 15EX " in normalized
+        or " F15EX " in normalized
+        or " EAGLE II " in normalized
+    ):
+        return "F-15EX"
+    if " LRASM " in normalized or " LONG RANGE ANTI SHIP MISSILE " in normalized:
+        return "LRASM"
+    if " E 7A " in normalized or " E7A " in normalized or " WEDGETAIL " in normalized:
+        return "E-7A"
+    return None
 
 
 class PlatformContextStore:
@@ -417,9 +469,8 @@ class PlatformContextStore:
     @classmethod
     def _multi_platform_condition(cls, alias: str = "t") -> str:
         return (
-            f"({alias}.platform_family IN (SELECT UNNEST(?)) OR EXISTS ("
-            f"SELECT 1 FROM UNNEST(STR_SPLIT(COALESCE({alias}.platform_families, ''), ' | ')) member(value) "
-            "WHERE value IN (SELECT UNNEST(?))))"
+            f"({alias}.platform_family IN (SELECT UNNEST(?)) OR "
+            f"LIST_HAS_ANY(STR_SPLIT(COALESCE({alias}.platform_families, ''), ' | '), ?))"
         )
 
     def get_export_context(
@@ -441,8 +492,10 @@ class PlatformContextStore:
         return expanded
 
     def answer_projection(
-        self, platform_id: str, supplier_limit: int = 14
+        self, platform_id: str, supplier_limit: int = 14, focus_id: str | None = None
     ) -> Dict[str, Any]:
+        if focus_id:
+            return self._focused_program_projection(platform_id, focus_id, supplier_limit)
         context = self.get(platform_id)
         supplier_limit = min(max(int(supplier_limit), 1), 250)
         direct = []
@@ -472,7 +525,7 @@ class PlatformContextStore:
             for key, value in context["coverage"].items()
             if key != "component_proof_status"
         }
-        return {
+        projected = {
             **customer_context,
             "direct_award_recipients": direct,
             "reported_supplier_sites": suppliers,
@@ -484,6 +537,191 @@ class PlatformContextStore:
                 "top_items": context["item_and_component_evidence"]["top_items"][:10],
                 "top_item_supplier_sites": context["item_and_component_evidence"]["top_item_supplier_sites"][:12],
             },
+        }
+        return projected
+
+    def _focused_program_projection(
+        self, platform_id: str, focus_id: str, supplier_limit: int
+    ) -> Dict[str, Any]:
+        resolution = self.search(platform_id)
+        resolved = resolution.get("resolved_platform_id")
+        if not resolved:
+            raise KeyError(f"base platform was not found: {platform_id}")
+        focus = self._focus_evidence(focus_id)
+        if focus["base_platform"] != resolved:
+            raise ValueError(
+                f"{focus_id} is configured against {focus['base_platform']}, not {resolved}"
+            )
+        base_activity = _rows(
+            self.connection.execute(
+                """
+                SELECT year AS fiscal_year, source_system,
+                       SUM(CASE WHEN source_system = 'USA_SPENDING' THEN spend_amount ELSE 0 END)
+                           AS net_prime_obligations_usd,
+                       SUM(CASE WHEN source_system = 'DLA'
+                           THEN COALESCE(platform_attributed_spend_amount, 0) ELSE 0 END)
+                           AS attributed_dla_procurement_value_usd,
+                       SUM(CASE WHEN source_system = 'DLA'
+                           THEN COALESCE(shared_use_exposure_amount, 0) ELSE 0 END)
+                           AS shared_use_niin_exposure_usd,
+                       COUNT(DISTINCT award_key) AS award_count
+                FROM read_parquet(?)
+                WHERE year BETWEEN 2021 AND 2026 AND platform_family = ?
+                GROUP BY 1, 2
+                ORDER BY 1, 2
+                """,
+                [str(self.paths["transactions"]), resolved],
+            )
+        )
+        focus_prime = sum(
+            float(row.get("net_value_usd") or 0)
+            for row in focus["explicit_named_record_summary"]
+            if row.get("source_system") == "USA_SPENDING"
+        )
+        focus_supplier_value = sum(
+            float(row.get("mimir_modelled_reported_subcontract_value_usd") or 0)
+            for row in focus["reported_supplier_sites_on_explicit_records"]
+        )
+        supplier_limit = min(max(int(supplier_limit), 1), 250)
+        return {
+            "context_type": "focused_platform_or_program_dossier",
+            "scope": {
+                "platform_id": resolved,
+                "display_name": focus["display_name"],
+                "included_platform_records": [resolved],
+                "completed_fiscal_years": list(COMPLETED_FISCAL_YEARS),
+                "partial_fiscal_year": 2026,
+                "observation_window": OBSERVATION_WINDOW,
+                "requested_focus": focus,
+            },
+            "annual_activity": {
+                "records": base_activity,
+                "completed_fiscal_years": list(COMPLETED_FISCAL_YEARS),
+                "partial_fiscal_year": 2026,
+            },
+            "direct_award_recipients": [],
+            "reported_supplier_sites": focus[
+                "reported_supplier_sites_on_explicit_records"
+            ][:supplier_limit],
+            "reported_component_categories": [],
+            "item_and_component_evidence": {
+                "associated_niin_count": 0,
+                "top_items": [],
+                "top_item_supplier_sites": [],
+            },
+            "top_prime_awards": focus["top_explicit_prime_awards"],
+            "current_opportunities": [],
+            "coverage": {
+                "reported_supplier_sites": len(
+                    focus["reported_supplier_sites_on_explicit_records"]
+                ),
+                "reported_supplier_sites_loaded": min(
+                    len(focus["reported_supplier_sites_on_explicit_records"]),
+                    supplier_limit,
+                ),
+                "prime_awards": len(focus["top_explicit_prime_awards"]),
+                "prime_awards_loaded": len(focus["top_explicit_prime_awards"]),
+                "focus_uses_explicit_named_records": True,
+                "reported_supplier_lane_is_sparse": len(
+                    focus["reported_supplier_sites_on_explicit_records"]
+                ) < 10,
+            },
+            "financial_totals": {
+                "observation_window": OBSERVATION_WINDOW,
+                "net_prime_obligations_usd": focus_prime,
+                "mimir_modelled_reported_subcontract_value_usd": focus_supplier_value,
+            },
+            "reported_supplier_concentration": {},
+            "methodology": {
+                "focus_rule": "Explicit named records define the requested variant or related program.",
+                "base_rule": "The mapped base platform provides wider industrial context without relabelling all base activity as the requested focus.",
+            },
+            "evidence_index": [],
+        }
+
+    def _focus_evidence(self, focus_id: str) -> Dict[str, Any]:
+        clean_focus = str(focus_id or "").strip().upper()
+        definition = PLATFORM_FOCUSES.get(clean_focus)
+        if not definition:
+            raise KeyError(f"platform focus was not found: {focus_id}")
+        pattern = definition["match_pattern"]
+        transaction_expression = (
+            "UPPER(COALESCE(base_award_description, '') || ' ' || "
+            "COALESCE(action_description, '') || ' ' || COALESCE(description, ''))"
+        )
+        network_expression = (
+            "UPPER(COALESCE(prime_award_description, '') || ' ' || "
+            "COALESCE(description, ''))"
+        )
+        mapped_records = _rows(
+            self.connection.execute(
+                f"""
+                SELECT source_system, COALESCE(platform_family, 'UNMAPPED') AS platform_family,
+                       COUNT(*) AS record_count, COUNT(DISTINCT contract_id) AS award_count,
+                       SUM(spend_amount) AS net_value_usd
+                FROM read_parquet(?)
+                WHERE year BETWEEN 2021 AND 2026
+                  AND REGEXP_MATCHES({transaction_expression}, ?)
+                GROUP BY 1, 2
+                ORDER BY ABS(net_value_usd) DESC
+                """,
+                [str(self.paths["transactions"]), pattern],
+            )
+        )
+        prime_awards = _rows(
+            self.connection.execute(
+                f"""
+                SELECT contract_id, MAX(vendor_name) AS recipient_name,
+                       MAX(vendor_cage) AS recipient_cage,
+                       MAX(base_award_description) AS base_award_description,
+                       SUM(spend_amount) AS net_prime_obligations_usd,
+                       MIN(SUBSTR(action_date, 1, 10)) AS first_action_date,
+                       MAX(SUBSTR(action_date, 1, 10)) AS latest_action_date
+                FROM read_parquet(?)
+                WHERE source_system = 'USA_SPENDING' AND year BETWEEN 2021 AND 2026
+                  AND REGEXP_MATCHES({transaction_expression}, ?)
+                GROUP BY contract_id
+                ORDER BY ABS(net_prime_obligations_usd) DESC
+                LIMIT 20
+                """,
+                [str(self.paths["transactions"]), pattern],
+            )
+        )
+        supplier_sites = _rows(
+            self.connection.execute(
+                f"""
+                SELECT sub_cage AS cage, MAX(sub_name) AS supplier_name,
+                       MAX(sub_city) AS city, MAX(sub_state) AS state,
+                       SUM(COALESCE(subaward_value, 0))
+                           AS mimir_modelled_reported_subcontract_value_usd,
+                       LIST_SLICE(LIST_DISTINCT(LIST(description) FILTER (
+                           WHERE description IS NOT NULL AND TRIM(description) <> ''
+                       )), 1, 8) AS reported_descriptions,
+                       LIST_SLICE(LIST_DISTINCT(LIST(platform_family)), 1, 8)
+                           AS current_platform_mappings
+                FROM read_parquet(?)
+                WHERE year BETWEEN 2021 AND 2026
+                  AND REGEXP_MATCHES({network_expression}, ?)
+                  AND sub_cage IS NOT NULL
+                  AND UPPER(TRIM(sub_cage)) NOT IN ('', 'UNKNOWN', 'UNKNO')
+                GROUP BY sub_cage
+                HAVING SUM(COALESCE(subaward_value, 0)) <> 0
+                ORDER BY ABS(mimir_modelled_reported_subcontract_value_usd) DESC
+                LIMIT 40
+                """,
+                [str(self.paths["network"]), pattern],
+            )
+        )
+        return {
+            "focus_id": clean_focus,
+            "display_name": definition["display_name"],
+            "base_platform": definition["base_platform"],
+            "relationship": definition["relationship"],
+            "related_mapped_platforms": definition["related_mapped_platforms"],
+            "observation_window": OBSERVATION_WINDOW,
+            "explicit_named_record_summary": mapped_records,
+            "top_explicit_prime_awards": prime_awards,
+            "reported_supplier_sites_on_explicit_records": supplier_sites,
         }
 
     def _annual_activity(self, platform: str) -> Dict[str, Any]:

@@ -119,13 +119,24 @@ def platform_follow_up_intent(text: str) -> bool:
         phrase in lowered
         for phrase in (
             "supporting evidence",
+            "show me the evidence",
             "underlying contracts",
             "underlying records",
+            "directly evidenced",
+            "which parts are inferred",
+            "which parts of that answer",
             "export the companies",
             "export the suppliers",
             "conclusions",
             "takeaways",
             "what matters most",
+            "best positioned to benefit",
+            "positioned to benefit",
+            "increasing production mean",
+            "production increase mean",
+            "risks or uncertainties",
+            "main risks",
+            "in that outlook",
         )
     )
 

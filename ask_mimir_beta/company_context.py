@@ -43,6 +43,25 @@ SOURCE_FILES = {
 }
 OPTIONAL_SOURCE_FILES = {"summary", "classifications"}
 
+US_STATE_NAMES = {
+    "AL": "ALABAMA", "AK": "ALASKA", "AZ": "ARIZONA", "AR": "ARKANSAS",
+    "CA": "CALIFORNIA", "CO": "COLORADO", "CT": "CONNECTICUT",
+    "DE": "DELAWARE", "FL": "FLORIDA", "GA": "GEORGIA", "HI": "HAWAII",
+    "ID": "IDAHO", "IL": "ILLINOIS", "IN": "INDIANA", "IA": "IOWA",
+    "KS": "KANSAS", "KY": "KENTUCKY", "LA": "LOUISIANA", "ME": "MAINE",
+    "MD": "MARYLAND", "MA": "MASSACHUSETTS", "MI": "MICHIGAN",
+    "MN": "MINNESOTA", "MS": "MISSISSIPPI", "MO": "MISSOURI",
+    "MT": "MONTANA", "NE": "NEBRASKA", "NV": "NEVADA",
+    "NH": "NEW HAMPSHIRE", "NJ": "NEW JERSEY", "NM": "NEW MEXICO",
+    "NY": "NEW YORK", "NC": "NORTH CAROLINA", "ND": "NORTH DAKOTA",
+    "OH": "OHIO", "OK": "OKLAHOMA", "OR": "OREGON",
+    "PA": "PENNSYLVANIA", "RI": "RHODE ISLAND", "SC": "SOUTH CAROLINA",
+    "SD": "SOUTH DAKOTA", "TN": "TENNESSEE", "TX": "TEXAS", "UT": "UTAH",
+    "VT": "VERMONT", "VA": "VIRGINIA", "WA": "WASHINGTON",
+    "WV": "WEST VIRGINIA", "WI": "WISCONSIN", "WY": "WYOMING",
+    "DC": "DISTRICT OF COLUMBIA",
+}
+
 
 def file_sha256(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
     digest = hashlib.sha256()
@@ -76,6 +95,24 @@ def placeholders(values: Sequence[Any]) -> str:
     if not values:
         raise ValueError("at least one value is required")
     return ",".join("?" for _ in values)
+
+
+def legal_company_core(value: Any) -> str:
+    tokens = re.findall(r"[A-Z0-9]+", str(value or "").upper())
+    while tokens and tokens[0] == "THE":
+        tokens.pop(0)
+    suffixes = {
+        "CO", "COMPANY", "CORP", "CORPORATION", "INC", "INCORPORATED",
+        "LLC", "LP", "LTD", "LIMITED", "PLC",
+    }
+    while tokens and tokens[-1] in suffixes:
+        tokens.pop()
+    return " ".join(tokens)
+
+
+def normalized_state(value: Any) -> str:
+    clean = re.sub(r"[^A-Z ]", "", str(value or "").upper()).strip()
+    return US_STATE_NAMES.get(clean, clean)
 
 
 class CompanyContextBuilder:
@@ -265,12 +302,15 @@ class CompanyContextBuilder:
         top_awards = self._top_awards(cages, years)
         network_context = self._network_context(cages, years)
         platform_exposure = self._platform_exposure(cages, years)
+        place_of_performance_activity = self._place_of_performance_activity(
+            sites, years
+        )
         missile_program_trajectory = self._missile_program_trajectory(cages, years)
         return {
             "context_id": context_id,
             "evidence_fingerprint": evidence_fingerprint,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "calculation_version": "mimir-company-context-2026-09-v6",
+            "calculation_version": "mimir-company-context-2026-09-v7",
             "scope": {
                 "scope_type": scope_type,
                 "scope_id": scope_id,
@@ -293,6 +333,7 @@ class CompanyContextBuilder:
             "site_financials": self._site_financials(cages, years),
             "site_capability_evidence": site_capability_evidence,
             "location_footprint": self._location_footprint(cages, years, sites),
+            "place_of_performance_activity": place_of_performance_activity,
             "capability_evidence": capability_evidence,
             "product_and_part_evidence": product_evidence,
             "platform_exposure": platform_exposure,
@@ -312,6 +353,106 @@ class CompanyContextBuilder:
             ),
             "quality": self._quality_summary(cages, years, sites),
             "source_manifest": source_manifest,
+        }
+
+    def _place_of_performance_activity(
+        self,
+        sites: Sequence[Dict[str, Any]],
+        years: Sequence[int],
+    ) -> Dict[str, Any]:
+        """Find same-company prime activity performed at a registered CAGE location."""
+        records: List[Dict[str, Any]] = []
+        seen = set()
+        for site in sites:
+            city = str(site.get("city") or "").strip()
+            state = normalized_state(site.get("state"))
+            company_core = legal_company_core(site.get("vendor_name"))
+            if not city or not company_core:
+                continue
+            query = f"""
+                SELECT
+                    vendor_cage AS recipient_cage,
+                    MODE(vendor_name) AS recipient_name,
+                    MODE(place_of_performance_city) AS place_of_performance_city,
+                    MODE(place_of_performance_state) AS place_of_performance_state,
+                    platform_family,
+                    SUM(spend_amount) AS net_prime_obligations_usd,
+                    COUNT(DISTINCT award_key) AS distinct_awards,
+                    COUNT(DISTINCT transaction_key) AS distinct_actions,
+                    ARRAY_SLICE(
+                        ARRAY_AGG(DISTINCT contract_id ORDER BY contract_id), 1, 8
+                    ) AS contract_ids,
+                    ARRAY_SLICE(
+                        ARRAY_AGG(
+                            DISTINCT COALESCE(
+                                NULLIF(TRIM(base_award_description), ''),
+                                NULLIF(TRIM(description), '')
+                            )
+                        ) FILTER (
+                            WHERE COALESCE(
+                                NULLIF(TRIM(base_award_description), ''),
+                                NULLIF(TRIM(description), '')
+                            ) IS NOT NULL
+                        ), 1, 6
+                    ) AS award_descriptions,
+                    MIN(TRY_CAST(action_date AS DATE)) AS first_action_date,
+                    MAX(TRY_CAST(action_date AS DATE)) AS latest_action_date
+                FROM read_parquet(?)
+                WHERE source_system = 'USA_SPENDING'
+                  AND UPPER(TRIM(place_of_performance_city)) = UPPER(?)
+                  AND year IN ({placeholders(years)})
+                GROUP BY 1, 5
+                ORDER BY ABS(net_prime_obligations_usd) DESC
+            """
+            candidates = rows_as_dicts(
+                self.connection.execute(
+                    query,
+                    [str(self.paths["transactions"]), city, *years],
+                )
+            )
+            for row in candidates:
+                if normalized_state(row.get("place_of_performance_state")) != state:
+                    continue
+                if legal_company_core(row.get("recipient_name")) != company_core:
+                    continue
+                key = (
+                    site.get("cage"),
+                    row.get("recipient_cage"),
+                    row.get("platform_family"),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(
+                    {
+                        "registered_site_cage": site.get("cage"),
+                        "registered_site_name": site.get("vendor_name"),
+                        "registered_site_city": site.get("city"),
+                        "registered_site_state": site.get("state"),
+                        **row,
+                        "relationship_basis": (
+                            "Same legal company name and reported place of performance "
+                            "matching the registered CAGE city and state"
+                        ),
+                    }
+                )
+        records.sort(
+            key=lambda row: abs(float(row.get("net_prime_obligations_usd") or 0)),
+            reverse=True,
+        )
+        return {
+            "observation_window": f"FY{years[0]}-FY{years[-1]}",
+            "records": records[:40],
+            "matched_registered_sites": len(
+                {row.get("registered_site_cage") for row in records}
+            ),
+            "matched_recipient_cages": len(
+                {row.get("recipient_cage") for row in records}
+            ),
+            "interpretation": (
+                "Prime-contract activity reported at the registered site's city and state "
+                "for the same legal company. Recipient and registered-site CAGEs remain distinct."
+            ),
         }
 
     def _future_demand_context(

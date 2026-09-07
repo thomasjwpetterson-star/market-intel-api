@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import quote, unquote
 
 import duckdb
 
@@ -21,12 +22,46 @@ CAPABILITY_DEFINITIONS = {
         "item_pattern": r"BRAKE|BRAKING|ANTI[- ]?SKID",
         "scope_note": "Aircraft wheel and brake equipment identified through FSC 1630 and matching item descriptions.",
     },
+    "military_radar": {
+        "display_name": "Military radar systems and components",
+        "request_pattern": r"\bradar\s+(?:systems?|equipment|components?|suppliers?|manufacturers?)\b|\b(?:systems?|equipment|components?|suppliers?|manufacturers?)\b.*\bradar\b",
+        "fsc_codes": ["5840", "5841"],
+        "item_pattern": r"RADAR|AZIMUTH|WAVEGUIDE|ANTENNA|DISPLAY|INDICATOR",
+        "scope_note": "Ground, shipboard and airborne radar equipment identified through FSC 5840 and 5841 with radar-related item descriptions.",
+    },
+    "mission_computing": {
+        "display_name": "Military mission computing and rugged computing equipment",
+        "request_pattern": r"\bmission\s+comput(?:er|ers|ing)\b|\brugged(?:ized|ised)?\s+(?:mission\s+)?comput(?:er|ers|ing|ing equipment)\b",
+        "fsc_codes": ["7010", "7021", "7025", "7042"],
+        "item_pattern": r"MISSION COMPUTER|RUGGED(?:IZED|ISED)? COMPUTER|SINGLE[- ]BOARD COMPUTER|COMPUTER,?(?: DIGITAL| FLIGHT| MISSION| NAVIGATION| FIRE CONTROL)|COMPUTER SYSTEM,DIGITAL|COMPUTER SUBASSEMBLY|PROCESSOR,GATEWAY|DATA ACQUISITION UNIT",
+        "scope_note": "Mission-computing and rugged-computing equipment identified through relevant product classifications and item descriptions.",
+    },
 }
+
+DYNAMIC_CAPABILITY_PREFIX = "capability:"
+CAPABILITY_QUERY_PATTERNS = (
+    r"(?:find|identify|show)\s+(?:us\s+)?(?:manufacturers|suppliers|companies)\s+(?:that\s+)?(?:supply|provide|make|manufacture)\s+(.+?)(?:\s+to|\s+for)\s+(?:the\s+)?(?:us\s+)?military",
+    r"(?:which|what)\s+(?:us\s+)?(?:manufacturers|suppliers|companies)\s+(?:supply|provide|make|manufacture)\s+(.+?)(?:\?|$)",
+    r"(?:companies|manufacturers|suppliers)\s+(?:supplying|providing|manufacturing|with)\s+(.+?)(?:\s+to|\s+for)\s+(?:military|defen[cs]e)",
+)
+CAPABILITY_STOPWORDS = {
+    "and", "or", "the", "a", "an", "for", "to", "of", "into", "with",
+    "military", "defense", "defence", "platform", "platforms", "systems",
+    "system", "equipment", "components", "component", "products", "product",
+}
+US_STATE_CODES = [
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI",
+    "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN",
+    "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH",
+    "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA",
+    "WV", "WI", "WY", "PR",
+]
 
 NON_COMMERCIAL_NAME_PATTERN = re.compile(
     r"MILITARY (?:STANDARDS|SPECIFICATIONS)|NAVAL INVENTORY|NAVAIR|NAVSEA|"
     r"UNITED STATES DEPARTMENT|U\.?\s*S\.?\s*(?:ARMY|AIR FORCE|NAVY)|"
-    r"DEFENSE LOGISTICS AGENCY|AIR LOGISTICS CENTER",
+    r"DEFENSE LOGISTICS AGENCY|AIR LOGISTICS CENTER|"
+    r"JOINT ELECTRONICS TYPE DESIGNATION(?: SYSTEM)?",
     re.IGNORECASE,
 )
 
@@ -41,7 +76,53 @@ def resolve_capability(text: str) -> str | None:
     for capability_id, definition in CAPABILITY_DEFINITIONS.items():
         if re.search(definition["request_pattern"], clean, re.IGNORECASE):
             return capability_id
+    for pattern in CAPABILITY_QUERY_PATTERNS:
+        match = re.search(pattern, clean, re.IGNORECASE)
+        if not match:
+            continue
+        phrase = re.sub(r"\s+", " ", match.group(1)).strip(" .?")
+        if phrase:
+            return DYNAMIC_CAPABILITY_PREFIX + quote(phrase.lower(), safe="-_ ")
     return None
+
+
+def _capability_terms(phrase: str) -> List[str]:
+    normalized = re.sub(r"[^a-z0-9]+", " ", phrase.lower())
+    terms = []
+    for token in normalized.split():
+        singular = token[:-1] if token.endswith("s") and len(token) > 4 else token
+        if singular not in CAPABILITY_STOPWORDS and len(singular) >= 4:
+            for suffix in ("ations", "ation", "ications", "ication", "ing"):
+                if singular.endswith(suffix) and len(singular) - len(suffix) >= 4:
+                    singular = singular[: -len(suffix)]
+                    break
+            terms.append(singular)
+    return list(dict.fromkeys(terms))[:8]
+
+
+def capability_market_follow_up_intent(text: str) -> bool:
+    """Recognize follow-ups that should retain the selected capability market."""
+    lowered = str(text or "").lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "these suppliers",
+            "those suppliers",
+            "which of these",
+            "which of those",
+            "five suppliers",
+            "top suppliers",
+            "most relevant",
+            "multiple military aircraft",
+            "multiple aircraft platforms",
+            "support multiple platforms",
+            "multiple defence programs",
+            "multiple defense programs",
+            "evidence supporting",
+            "directly evidenced",
+            "which are inferred",
+        )
+    )
 
 
 class CapabilityDiscoveryStore:
@@ -52,6 +133,8 @@ class CapabilityDiscoveryStore:
         self.paths = {
             "references": self.data_root / "nsn_cage_reference.parquet",
             "locations": self.data_root / "cage_locations.parquet",
+            "contracts": self.data_root / "contracts_rolled.parquet",
+            "classifications": self.data_root / "classification_reference.parquet",
         }
         missing = [str(path) for path in self.paths.values() if not path.exists()]
         if missing:
@@ -77,6 +160,8 @@ class CapabilityDiscoveryStore:
     def get(self, capability_id: str, limit: int = 25) -> Dict[str, Any]:
         clean_id = str(capability_id or "").strip().lower()
         definition = CAPABILITY_DEFINITIONS.get(clean_id)
+        if not definition and clean_id.startswith(DYNAMIC_CAPABILITY_PREFIX):
+            definition = self._dynamic_definition(clean_id)
         if not definition:
             raise KeyError(f"capability definition was not found: {capability_id}")
         if clean_id not in self._cache:
@@ -85,8 +170,53 @@ class CapabilityDiscoveryStore:
         bounded = min(max(int(limit), 1), 50)
         return {**pack, "supplier_sites": pack["supplier_sites"][:bounded]}
 
+    def _dynamic_definition(self, capability_id: str) -> Dict[str, Any] | None:
+        phrase = unquote(capability_id[len(DYNAMIC_CAPABILITY_PREFIX):]).strip()
+        terms = _capability_terms(phrase)
+        if not terms:
+            return None
+        minimum_matches = min(2, len(terms))
+        code_rows = _rows(
+            self.connection.execute(
+                """
+                SELECT code, description, term_matches
+                FROM (
+                    SELECT code, description,
+                       LIST_SUM(LIST_TRANSFORM(?, term ->
+                           CASE WHEN CONTAINS(LOWER(description), term) THEN 1 ELSE 0 END
+                       )) AS term_matches
+                    FROM read_parquet(?)
+                    WHERE classification_type = 'PSC'
+                      AND REGEXP_MATCHES(code, '^[A-Z0-9]{4}$')
+                )
+                WHERE term_matches >= ?
+                ORDER BY term_matches DESC, code
+                LIMIT 20
+                """,
+                [terms, str(self.paths["classifications"]), minimum_matches],
+            )
+        )
+        item_terms = list(terms)
+        if any(term.startswith("comput") for term in terms):
+            item_terms.extend(["processor", "data processing", "single board computer"])
+        item_pattern = "|".join(re.escape(term).replace(r"\ ", r"\s+") for term in item_terms)
+        return {
+            "display_name": phrase.title(),
+            "fsc_codes": [str(row["code"]) for row in code_rows],
+            "item_pattern": item_pattern.upper(),
+            "scope_note": f"Supplier evidence matched to the requested capability using product classifications and item descriptions for {phrase}.",
+            "classification_matches": code_rows,
+            "dynamic": True,
+            "term_stems": terms,
+            "minimum_term_matches": minimum_matches,
+        }
+
     def _build(self, capability_id: str, definition: Dict[str, Any]) -> Dict[str, Any]:
         fsc_codes = definition["fsc_codes"]
+        use_codes = bool(fsc_codes)
+        is_dynamic = bool(definition.get("dynamic"))
+        term_stems = definition.get("term_stems", [])
+        minimum_term_matches = 1 if use_codes else definition.get("minimum_term_matches", 1)
         rows = _rows(
             self.connection.execute(
                 """
@@ -119,8 +249,12 @@ class CapabilityDiscoveryStore:
                             )), 1, 12
                         ) AS platform_groups
                     FROM read_parquet(?)
-                    WHERE fsc_code IN (SELECT UNNEST(?))
-                      AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?)
+                    WHERE (NOT ? OR fsc_code IN (SELECT UNNEST(?)))
+                      AND ((NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?))
+                           OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
+                               CASE WHEN CONTAINS(LOWER(COALESCE(description, '')), term)
+                                    THEN 1 ELSE 0 END
+                           )) >= ?))
                       AND cage IS NOT NULL AND TRIM(cage) <> ''
                     GROUP BY 1, 3
                 ), locations AS (
@@ -145,6 +279,9 @@ class CapabilityDiscoveryStore:
                     COUNT(DISTINCT r.niin) FILTER (
                         WHERE r.has_observed_procurement
                     ) AS observed_procurement_niin_count,
+                    COUNT(DISTINCT r.niin) FILTER (
+                        WHERE LEN(r.platform_groups) > 0
+                    ) AS mapped_platform_niin_count,
                     SUM(r.observed_dla_procurement_value_usd) AS observed_dla_procurement_value_usd,
                     SUM(COALESCE(r.observed_contract_count, 0)) AS observed_contract_count,
                     MIN(r.first_observed_fiscal_year) AS first_observed_fiscal_year,
@@ -165,17 +302,24 @@ class CapabilityDiscoveryStore:
                 FROM item_relationships r
                 LEFT JOIN locations l USING (cage)
                 WHERE (r.is_active_authorized_source OR r.has_observed_procurement)
-                  AND l.state IS NOT NULL AND TRIM(l.state) <> ''
+                  AND UPPER(TRIM(l.state)) IN (SELECT UNNEST(?))
                 GROUP BY r.cage
-                ORDER BY active_authorized_niin_count DESC,
+                ORDER BY mapped_platform_niin_count DESC,
+                         active_authorized_niin_count DESC,
                          observed_procurement_niin_count DESC,
                          matching_niin_count DESC
                 """,
                 [
                     str(self.paths["references"]),
+                    use_codes,
                     fsc_codes,
+                    is_dynamic,
                     definition["item_pattern"],
+                    is_dynamic,
+                    term_stems,
+                    minimum_term_matches,
                     str(self.paths["locations"]),
+                    US_STATE_CODES,
                 ],
             )
         )
@@ -189,13 +333,65 @@ class CapabilityDiscoveryStore:
                 """
                 SELECT COUNT(DISTINCT LPAD(TRIM(niin), 9, '0'))
                 FROM read_parquet(?)
-                WHERE fsc_code IN (SELECT UNNEST(?))
-                  AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?)
+                WHERE (NOT ? OR fsc_code IN (SELECT UNNEST(?)))
+                  AND ((NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?))
+                       OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
+                           CASE WHEN CONTAINS(LOWER(COALESCE(description, '')), term)
+                                THEN 1 ELSE 0 END
+                       )) >= ?))
                   AND cage IS NOT NULL AND TRIM(cage) <> ''
                 """,
-                [str(self.paths["references"]), fsc_codes, definition["item_pattern"]],
+                [str(self.paths["references"]), use_codes, fsc_codes, is_dynamic,
+                 definition["item_pattern"], is_dynamic, term_stems, minimum_term_matches],
             ).fetchone()[0]
             or 0
+        )
+        prime_award_sites = _rows(
+            self.connection.execute(
+                """
+                WITH locations AS (
+                    SELECT UPPER(TRIM(cage_code)) AS cage,
+                           MAX(vendor_name) AS location_name,
+                           MAX(city) AS city, MAX(state) AS state
+                    FROM read_parquet(?) GROUP BY 1
+                )
+                SELECT UPPER(TRIM(c.vendor_cage)) AS cage,
+                       COALESCE(MAX(c.vendor_name), MAX(l.location_name)) AS supplier_name,
+                       MAX(l.city) AS city, MAX(l.state) AS state,
+                       SUM(c.total_spend) AS net_prime_obligations_usd,
+                       COUNT(DISTINCT c.award_key) AS prime_award_count,
+                       LIST_SLICE(LIST_DISTINCT(LIST(c.psc)), 1, 12) AS matching_psc_codes,
+                       LIST_SLICE(LIST_DISTINCT(LIST(c.platform_family) FILTER (
+                           WHERE c.platform_family IS NOT NULL
+                       )), 1, 20) AS platforms,
+                       LIST_SLICE(LIST_DISTINCT(LIST(COALESCE(
+                           c.base_award_description, c.description
+                       ))), 1, 8) AS award_descriptions
+                FROM read_parquet(?) c
+                LEFT JOIN locations l ON UPPER(TRIM(c.vendor_cage)) = l.cage
+                WHERE c.source_system = 'USA_SPENDING'
+                  AND c.year BETWEEN 2021 AND 2026
+                  AND c.vendor_cage IS NOT NULL
+                  AND UPPER(TRIM(l.state)) IN (SELECT UNNEST(?))
+                  AND (NOT ? OR c.psc IN (SELECT UNNEST(?)))
+                  AND ((NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(
+                           c.base_award_description, c.description, ''
+                       )), ?)) OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
+                           CASE WHEN CONTAINS(LOWER(COALESCE(
+                               c.base_award_description, c.description, ''
+                           )), term) THEN 1 ELSE 0 END
+                       )) >= ?))
+                GROUP BY 1
+                ORDER BY ABS(net_prime_obligations_usd) DESC
+                LIMIT 100
+                """,
+                [
+                    str(self.paths["locations"]), str(self.paths["contracts"]),
+                    US_STATE_CODES, use_codes, fsc_codes, is_dynamic,
+                    definition["item_pattern"], is_dynamic, term_stems,
+                    minimum_term_matches,
+                ],
+            )
         )
         for index, row in enumerate(commercial_rows, start=1):
             row["rank"] = index
@@ -215,8 +411,10 @@ class CapabilityDiscoveryStore:
                 "display_name": definition["display_name"],
                 "observation_window": "FY2021-FY2026 observed procurement; current DLA source references",
                 "definition": definition["scope_note"],
+                "matched_product_classifications": definition.get("classification_matches", []),
             },
             "supplier_sites": commercial_rows,
+            "prime_award_sites": prime_award_sites,
             "coverage": {
                 "commercial_supplier_sites": len(commercial_rows),
                 "supplier_sites_with_active_authorized_items": sum(
@@ -226,6 +424,7 @@ class CapabilityDiscoveryStore:
                     row["observed_procurement_niin_count"] > 0 for row in commercial_rows
                 ),
                 "matching_niins": matching_niins,
+                "prime_award_sites": len(prime_award_sites),
             },
             "ranking_basis": (
                 "CAGE sites are ordered by active authorized-source NIIN count, then observed "

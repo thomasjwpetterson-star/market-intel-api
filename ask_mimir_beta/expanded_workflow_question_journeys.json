@@ -1,0 +1,135 @@
+[
+  {
+    "journey_id": "platform_himars",
+    "label": "Platform - HIMARS",
+    "entry_variants": ["Map the industrial base behind the High Mobility Artillery Rocket System.", "Who supplies HIMARS and what evidence supports those positions?"],
+    "expected_scope": {"scope_type": "platform", "scope_id": "HIMARS"},
+    "turns": [
+      {"question": "Give me an overview of the supplier base supporting HIMARS.", "expected_workflow": "platform_intelligence", "minimum_values": {"coverage.prime_awards": 1, "coverage.reported_supplier_sites": 1}},
+      {"question": "Which suppliers appear most important to the program?", "expected_workflow": "platform_intelligence"},
+      {"question": "What does each of those suppliers provide?", "expected_workflow": "platform_intelligence"},
+      {"question": "Show me the evidence supporting that conclusion.", "expected_workflow": "platform_intelligence"}
+    ]
+  },
+  {
+    "journey_id": "company_ducommun",
+    "label": "Company - Ducommun",
+    "entry_variants": ["What does Ducommun supply into the US military market?", "Profile Ducommun's observed defense activity across its US facilities."],
+    "expected_scope": {"scope_type": "company_parent", "scope_name_contains": "DUCOMMUN"},
+    "turns": [
+      {"question": "Give me an overview of Ducommun's US defence business.", "expected_workflow": "company_site_intelligence"},
+      {"question": "Which defence platforms and programs appear most important to Ducommun?", "expected_workflow": "company_site_intelligence", "minimum_list_lengths": {"platform_exposure": 1}},
+      {"question": "How has Ducommun's visible defence activity changed over the last five years?", "expected_workflow": "company_site_intelligence"}
+    ]
+  },
+  {
+    "journey_id": "facility_lockheed_orlando",
+    "label": "Facility - Lockheed Martin Orlando",
+    "entry_variants": ["Tell me about Lockheed Martin's Orlando operations.", "Which programs and capabilities are associated with Lockheed Martin sites in Orlando, Florida?"],
+    "expected_scope": {"scope_type": "company_parent", "scope_name_contains": "LOCKHEED MARTIN - ORLANDO"},
+    "turns": [
+      {"question": "Give me an overview of the defence activity associated with Lockheed Martin's Orlando, Florida operations.", "expected_workflow": "company_site_intelligence"},
+      {"question": "Which programs appear most important to the Orlando sites?", "expected_workflow": "company_site_intelligence", "minimum_list_lengths": {"platform_exposure": 1}},
+      {"question": "What products or capabilities are associated with those programs?", "expected_workflow": "company_site_intelligence"}
+    ]
+  },
+  {
+    "journey_id": "capability_mission_computing",
+    "label": "Capability - mission computing",
+    "entry_variants": ["Identify US suppliers of rugged mission computing equipment.", "Which manufacturers provide mission computers to military programs?"],
+    "expected_scope": {"scope_type": "capability_market", "scope_id": "mission_computing"},
+    "turns": [
+      {"question": "Find US manufacturers that supply mission computers or ruggedized computing equipment to military platforms.", "expected_workflow": "capability_discovery", "minimum_values": {"coverage.commercial_supplier_sites": 20, "coverage.prime_award_sites": 1}},
+      {"question": "Which of these suppliers support multiple defence programs?", "expected_workflow": "capability_discovery"},
+      {"question": "Which five suppliers appear most relevant based on the evidence available?", "expected_workflow": "capability_discovery"},
+      {"question": "Which parts of that answer are directly evidenced and which are inferred?", "expected_workflow": "capability_discovery"}
+    ]
+  },
+  {
+    "journey_id": "geography_texas",
+    "label": "Geography - Texas",
+    "entry_variants": ["Map Texas's defense industrial base.", "Which military companies, facilities and programs matter most in Texas?"],
+    "expected_scope": {"scope_type": "state_market", "scope_id": "TX"},
+    "turns": [
+      {"question": "Give me an overview of the defence industrial base in Texas.", "expected_workflow": "state_industrial_base", "minimum_values": {"coverage.registered_facilities_with_observed_activity": 20}},
+      {"question": "Which defence companies and facilities appear most important in the state?", "expected_workflow": "state_industrial_base"},
+      {"question": "Which platforms and capability areas account for the most visible activity?", "expected_workflow": "state_industrial_base"}
+    ]
+  },
+  {
+    "journey_id": "segment_c_uas",
+    "label": "Market segment - C-UAS",
+    "entry_variants": ["Assess activity across the US counter-drone market.", "Which programs and suppliers are shaping US C-UAS?"],
+    "expected_scope": {"scope_type": "market_segment", "scope_id": "US_C_UAS"},
+    "turns": [
+      {"question": "What is happening in the US C-UAS market?", "expected_workflow": "market_segment_intelligence", "minimum_values": {"coverage.directly_matched_awards": 1, "coverage.current_opportunities": 1}},
+      {"question": "Which programs are driving the most activity?", "expected_workflow": "market_segment_intelligence"},
+      {"question": "Which companies appear most important across the market?", "expected_workflow": "market_segment_intelligence"}
+    ]
+  },
+  {
+    "journey_id": "forward_virginia_class",
+    "label": "Forward-looking - Virginia class",
+    "entry_variants": ["Assess the five-year outlook for Virginia-class submarine production.", "Which suppliers are positioned to benefit from the Virginia-class program?"],
+    "expected_scope": {"scope_type": "platform", "scope_id": "VIRGINIA CLASS (SSN 774)"},
+    "turns": [
+      {"question": "What is the outlook for the Virginia-class submarine program over the next five years?", "expected_workflow": "platform_intelligence", "minimum_values": {"coverage.prime_awards": 1, "coverage.reported_supplier_sites": 20}},
+      {"question": "Which companies appear best positioned to benefit from the program?", "expected_workflow": "platform_intelligence"},
+      {"question": "What are the main risks or uncertainties in that outlook?", "expected_workflow": "platform_intelligence"},
+      {"question": "Which parts of that answer are directly evidenced and which are inferred?", "expected_workflow": "platform_intelligence"}
+    ]
+  },
+  {
+    "journey_id": "opportunity_avionics",
+    "label": "Opportunity search - military avionics",
+    "entry_variants": ["Show open defense opportunities relevant to avionics manufacturers.", "Search current military-avionics contracting opportunities."],
+    "expected_scope": {"scope_type": "record_search"},
+    "turns": [
+      {"question": "Find current US defence opportunities relevant to companies supplying military avionics.", "expected_workflow": "market_record_search", "minimum_values": {"coverage.matching_records": 1}},
+      {"question": "Which opportunities appear most relevant to an established avionics manufacturer?", "expected_workflow": "market_record_search"},
+      {"question": "Show me the five opportunities I should investigate first and explain briefly why.", "expected_workflow": "market_record_search"},
+      {"question": "Tell me more about the third one.", "expected_workflow": "market_record_search"}
+    ]
+  },
+  {
+    "journey_id": "sources_sought_avionics",
+    "label": "Notice search - Sources Sought",
+    "entry_variants": ["Search open Sources Sought for military avionics.", "Which active Sources Sought notices concern aircraft avionics?"],
+    "expected_scope": {"scope_type": "record_search"},
+    "turns": [
+      {"question": "Find currently open Sources Sought notices related to military aircraft avionics.", "expected_workflow": "market_record_search", "required_values": {"scope.notice_type": "SOURCES_SOUGHT"}},
+      {"question": "Which of these appear to be seeking actual industry capability rather than simply conducting broad market research?", "expected_workflow": "market_record_search"},
+      {"question": "Show me the most relevant notices with the response deadline, customer and requirement.", "expected_workflow": "market_record_search"}
+    ]
+  },
+  {
+    "journey_id": "rfi_uas",
+    "label": "Notice search - UAS RFIs",
+    "entry_variants": ["Show active requests for information concerning uncrewed aircraft."],
+    "expected_scope": {"scope_type": "record_search"},
+    "turns": [
+      {"question": "Find currently open RFIs related to unmanned aircraft systems.", "expected_workflow": "market_record_search", "required_values": {"scope.notice_type": "RFI"}, "minimum_values": {"coverage.matching_records": 1}}
+    ]
+  },
+  {
+    "journey_id": "solicitation_vehicle_components",
+    "label": "Notice search - vehicle components",
+    "entry_variants": ["Search open solicitations for military ground-vehicle parts."],
+    "expected_scope": {"scope_type": "record_search"},
+    "turns": [
+      {"question": "Find currently open solicitations related to military vehicle components.", "expected_workflow": "market_record_search", "required_values": {"scope.notice_type": "SOLICITATION"}, "minimum_values": {"coverage.matching_records": 1}}
+    ]
+  },
+  {
+    "journey_id": "award_avionics",
+    "label": "Award search - military avionics",
+    "entry_variants": ["Show recent contract awards for military avionics work.", "Which companies recently won significant defense-avionics awards?"],
+    "expected_scope": {"scope_type": "record_search"},
+    "turns": [
+      {"question": "Find recent US defence contract awards related to military aircraft avionics.", "expected_workflow": "market_record_search", "required_values": {"scope.record_type": "award"}, "minimum_values": {"coverage.matching_records": 10}},
+      {"question": "Which companies have received the largest or most significant awards?", "expected_workflow": "market_record_search"},
+      {"question": "Pick the three most interesting awards and explain what was actually purchased and which programs they support.", "expected_workflow": "market_record_search"},
+      {"question": "Show me the evidence supporting that conclusion.", "expected_workflow": "market_record_search"}
+    ]
+  }
+]

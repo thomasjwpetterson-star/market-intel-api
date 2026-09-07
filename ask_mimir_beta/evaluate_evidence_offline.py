@@ -45,6 +45,11 @@ if runtime_root.exists():
 
 from capability_discovery import resolve_capability  # noqa: E402
 from geographic_market import resolve_state  # noqa: E402
+from market_segment import resolve_market_segment  # noqa: E402
+from market_record_search import (  # noqa: E402
+    record_search_from_scope_id,
+    resolve_market_record_search,
+)
 from lab_api import (  # noqa: E402
     ActiveScope,
     AskRequest,
@@ -53,9 +58,11 @@ from lab_api import (  # noqa: E402
     explicit_item_query,
     explicit_platform_comparison,
     explicit_platform_query,
+    explicit_company_name_query,
     runtime,
     workflow_for_request,
 )
+from platform_context import requested_platform_focus  # noqa: E402
 
 
 def _path_value(value: Any, path: str) -> Any:
@@ -80,6 +87,20 @@ def _money(value: Any) -> str:
 
 def _build_evidence(request: AskRequest, workflow: str) -> Dict[str, Any]:
     latest = request.messages[-1].content
+    if workflow == "market_record_search":
+        spec = resolve_market_record_search(latest)
+        if not spec and request.active_scope:
+            spec = record_search_from_scope_id(request.active_scope.scope_id)
+        return runtime.call_tool(
+            "get_market_record_search", {**(spec or {}), "limit": 75}
+        )
+    if workflow == "market_segment_intelligence":
+        segment_id = resolve_market_segment(latest)
+        if not segment_id and request.active_scope:
+            segment_id = request.active_scope.scope_id
+        return runtime.call_tool(
+            "get_market_segment", {"segment_id": segment_id, "limit": 40}
+        )
     if workflow == "state_industrial_base":
         state_code = resolve_state(latest)
         if not state_code and request.active_scope:
@@ -89,6 +110,8 @@ def _build_evidence(request: AskRequest, workflow: str) -> Dict[str, Any]:
         )
     if workflow == "capability_discovery":
         capability_id = resolve_capability(latest)
+        if not capability_id and request.active_scope:
+            capability_id = request.active_scope.scope_id
         if not capability_id:
             return {"unsupported_capability": latest}
         return runtime.call_tool(
@@ -103,21 +126,37 @@ def _build_evidence(request: AskRequest, workflow: str) -> Dict[str, Any]:
         )
     if workflow == "platform_intelligence":
         platform_id = explicit_platform_query(request.messages, runtime.platform_contexts)
+        focus_id = requested_platform_focus(latest)
         if not platform_id and request.active_scope:
             platform_id = request.active_scope.scope_id
+            focus_id = focus_id or request.active_scope.platform_focus
         resolution = runtime.call_tool(
             "search_platform_contexts", {"query": platform_id or latest, "limit": 15}
         )
         resolved = resolution.get("resolved_platform_id")
         if not resolved:
             return {"resolution": resolution}
-        return runtime.call_tool(
-            "get_platform_context", {"platform_id": resolved, "supplier_limit": 180}
-        )
+        arguments = {"platform_id": resolved, "supplier_limit": 180}
+        if focus_id:
+            arguments["focus_id"] = focus_id
+        return runtime.call_tool("get_platform_context", arguments)
     if workflow == "company_site_intelligence":
+        if request.active_scope and request.active_scope.scope_type in {
+            "company_parent",
+            "company_site",
+        }:
+            return runtime.call_tool(
+                "get_company_context",
+                {
+                    "scope_type": request.active_scope.scope_type,
+                    "scope_id": request.active_scope.scope_id,
+                    "focus": "full_dossier",
+                },
+            )
+        company_query = explicit_company_name_query(request.messages) or latest
         return runtime.call_tool(
             "search_company_contexts",
-            {"query": latest, "scope_type": None, "limit": 20},
+            {"query": company_query, "scope_type": None, "limit": 20},
         )
     if workflow == "item_intelligence":
         query = explicit_item_query(request.messages)
@@ -133,6 +172,18 @@ def _build_evidence(request: AskRequest, workflow: str) -> Dict[str, Any]:
 
 
 def _preview(workflow: str, evidence: Dict[str, Any]) -> str:
+    if workflow == "market_record_search" and evidence.get("scope"):
+        scope = evidence["scope"]
+        rows = evidence.get("records", [])[:5]
+        labels = ", ".join(
+            str(row.get("title") or row.get("record_id")) for row in rows
+        )
+        return (
+            f"{scope.get('record_type')} search for {scope.get('subject')} | "
+            f"{scope.get('observation_window')} | "
+            f"{evidence.get('coverage', {}).get('matching_records', 0)} matching records. "
+            f"Leading results: {labels}."
+        )
     if workflow == "platform_intelligence" and evidence.get("scope"):
         scope = evidence["scope"]
         coverage = evidence.get("coverage", {})
@@ -172,6 +223,44 @@ def _preview(workflow: str, evidence: Dict[str, Any]) -> str:
         return (
             f"{evidence['scope']['state_name']} | {evidence['scope']['observation_window']}. "
             f"Leading facilities: {sites}."
+        )
+    if workflow == "market_segment_intelligence" and evidence.get("scope"):
+        programs = ", ".join(
+            str(row.get("platform_family"))
+            for row in evidence.get("platform_activity", [])[:6]
+        )
+        suppliers = "; ".join(
+            f"{row.get('supplier_name')} (CAGE {row.get('cage')})"
+            for row in evidence.get("leading_reported_supplier_sites", [])[:5]
+        )
+        return (
+            f"{evidence['scope']['display_name']} | "
+            f"{evidence['scope']['observation_window']}. "
+            f"Leading mapped programs: {programs}. Leading reported supplier sites: {suppliers}."
+        )
+    if workflow == "company_site_intelligence" and evidence.get("scope"):
+        scope = evidence["scope"]
+        identity = evidence.get("identity", {})
+        platforms = evidence.get("platform_exposure", [])
+        performance_records = evidence.get("place_of_performance_activity", {}).get(
+            "records", []
+        )
+        performance_platforms = sorted(
+            {
+                str(row.get("platform_family"))
+                for row in performance_records
+                if row.get("platform_family")
+            }
+        )
+        awards = evidence.get("top_awards", [])
+        return (
+            f"{scope.get('scope_name')} | {scope.get('observation_window')} | "
+            f"{identity.get('site_count', 0)} resolved sites, "
+            f"{len(evidence.get('observed_financials', []))} financial observations, "
+            f"{len(platforms)} contracting-CAGE platform records, "
+            f"{len(performance_records)} same-company place-of-performance records "
+            f"({', '.join(performance_platforms) or 'no mapped platform'}), and "
+            f"{len(awards)} leading contracting-CAGE awards."
         )
     if workflow == "platform_comparison":
         platforms = evidence.get("platform_ids", [])

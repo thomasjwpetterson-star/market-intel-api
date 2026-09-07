@@ -52,14 +52,21 @@ def resolve_state(text: str) -> str | None:
 
 def is_geographic_market_request(text: str) -> bool:
     lowered = str(text or "").lower()
-    return resolve_state(text) is not None and any(
+    explicit_phrasing = any(
         phrase in lowered
         for phrase in (
             "industrial base", "defence companies", "defense companies",
             "defence facilities", "defense facilities", "companies and facilities",
             "important in the state", "state's defense", "state's defence",
+            "military industry", "defence industry", "defense industry",
         )
     )
+    entity_phrasing = (
+        any(term in lowered for term in ("defence", "defense", "military"))
+        and any(term in lowered for term in ("companies", "facilities", "platforms", "programs", "programmes"))
+        and any(term in lowered for term in ("important", "largest", "leading", "activity", "map", "matter most"))
+    )
+    return resolve_state(text) is not None and (explicit_phrasing or entity_phrasing)
 
 
 def state_market_follow_up_intent(text: str) -> bool:
@@ -73,6 +80,9 @@ def state_market_follow_up_intent(text: str) -> bool:
             "leading facilities", "what are the main programs",
             "what programmes", "what programs", "show me the figures",
             "show the evidence", "why are they important",
+            "which platforms and capability areas",
+            "which programmes and capability areas",
+            "most visible activity",
         )
     )
 
