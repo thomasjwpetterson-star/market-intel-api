@@ -21,6 +21,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 
 from company_context_store import CompanyContextStore
+from company_intent import company_follow_up_intent
 from company_opportunity_store import CompanyOpportunityStore
 from competitive_position import CompetitivePositionStore
 from competitive_position_export import build_competitive_position_zip
@@ -56,7 +57,11 @@ from beta_controls import (
 )
 from platform_supply_chain_store import PlatformSupplyChainStore
 from program_momentum_store import ProgramMomentumStore
-from platform_intent import platform_answer_mode, platform_follow_up_intent
+from platform_intent import (
+    platform_answer_mode,
+    platform_follow_up_intent,
+    platform_follow_up_retains_scope,
+)
 from release_manager import resolve_active_release
 from web_source_policy import load_web_source_policy, render_web_source_policy
 
@@ -400,6 +405,9 @@ PSC descriptions, DLA item descriptions, reported subcontract descriptions, NIIN
 platform relationships. A repeated and specific description can support a bounded capability statement.
 Do not let the largest contract erase other demonstrated product or repair/manufacturing lines. Every PSC
 or NAICS code shown to a customer must include its description; omit an unexplained code.
+When selecting evidence examples, give priority to recurring or financially material relationships. Include
+the relevant time-bounded value when available; do not present a single low-value contract or isolated NIIN
+as one of the company's principal positions without explaining its scale.
 
 The site_capability_evidence section is keyed by CAGE and is the primary evidence for assigning work to a
 particular facility. Use its recurring descriptions, mapped platforms, customer routes, item examples and
@@ -451,6 +459,9 @@ fiscal-year period it covers in the heading, table label or immediately adjacent
 follow-up question silently narrow a company-wide or site-wide scope to one contract merely because a prior
 answer cited that contract. Use the full active company scope unless the latest user message explicitly names
 an award identifier.
+For a question about what changed, compare the full active company scope across the completed fiscal years.
+Rank the most material changes in financial activity, customer routes, sites, capabilities and platform
+exposure; do not substitute one platform or a generic supplier list for the company-wide comparison.
 
 Finish with one concise "Evidence used" section naming useful public award IDs, NIIN/NSN examples and source
 types. Never print release names, calculation versions, evidence-index record counts, context IDs, hashes,
@@ -571,10 +582,16 @@ Answer for the resolved platform or program. Follow requested_answer_mode exactl
   route. Rank sites, not consolidated company parents. Keep wider item-level suppliers outside this value
   ranking. Do not create forward assessments or rank prime award recipients.
 - supplier_concentration: assess the reported supplier-site value distribution and component source
-  depth. Do not substitute concentration among direct government recipients.
+  depth. Do not substitute concentration among direct government recipients. Keep value concentration
+  across supplier sites, site count within a broad capability category, and qualified-source depth for a
+  specific component separate. Eight evidenced sites is normally a dispersed footprint, not a concentrated
+  one, unless one or two sites are shown to control the same critical component.
 - supplier_facilities: identify the principal production or support sites and their evidenced roles.
 - supplier_cross_program: identify which material supplier sites also appear on other mapped platforms
-  or programs. Keep the current platform relationship and the other mapped relationships distinct.
+  or programs. Start with supplier sites evidenced on the active platform and intersect those same CAGE
+  sites with named relationships on other platforms. Keep the current platform relationship and the other
+  mapped relationships distinct. Do not replace the active supplier set with unrelated recipients from a
+  broad portfolio such as Army aviation, and do not treat a generic portfolio label as a platform.
 - supplier_source_depth: distinguish high-value positions with limited evidenced source depth from
   lower-value items that merely have one observed recipient. Do not call an item sole-source unless
   authoritative source-status evidence establishes it.
@@ -627,6 +644,10 @@ For concentration questions, analyze the reported supplier-site distribution in
 reported_supplier_concentration and the component/source evidence separately. Do not use concentration
 among direct government award recipients as the answer to supply-base concentration. Express the top-one,
 top-five or top-ten supplier share in plain English; do not lead with HHI or effective-recipient-count jargon.
+A label such as structures, aircraft systems or propulsion-related equipment can combine several products
+and is not itself a valid unit for judging source depth. Identify the actual engine, gearbox, actuator,
+structure, electronic assembly or other component and its sites where the evidence permits. Otherwise,
+describe the category distribution without calling it a bottleneck or single-source dependency.
 
 If curated_platform_supply_chain is present, use it as the strongest component-proof layer and keep
 broader family references separate. Otherwise, use authoritative government and first-party web
@@ -1400,41 +1421,6 @@ def company_wide_intent(text: str) -> bool:
     )
 
 
-def company_follow_up_intent(text: str) -> bool:
-    lowered = str(text or "").lower()
-    return any(
-        term in lowered
-        for term in (
-            "them",
-            "their",
-            "this company",
-            "this site",
-            "what do they",
-            "how has",
-            "largest customers",
-            "prime contractors buy",
-            "platforms",
-            "programs",
-            "capabilities",
-            "awards",
-            "contracts",
-            "how important",
-            "wider us defence footprint",
-            "wider us defense footprint",
-            "wider defence footprint",
-            "wider defense footprint",
-            "investigate next",
-            "due diligence",
-            "this facility",
-            "the facility",
-            "commercial importance",
-            "most important conclusions",
-            "key conclusions",
-            "main conclusions",
-        )
-    )
-
-
 def explicit_item_query(messages: List[ChatMessage]) -> str | None:
     # An identifier quoted in an earlier assistant answer must not hijack a later
     # company or platform follow-up. Explicit scope changes come from the user's
@@ -1987,13 +1973,13 @@ def workflow_for_request(request: AskRequest) -> str:
         return "contract_or_opportunity"
     if explicit_item_query(request.messages):
         return "item_intelligence"
-    if explicit_platform_query(request.messages, runtime.platform_contexts):
-        return "platform_intelligence"
     if (
         request.active_scope
         and request.active_scope.scope_type == "platform"
         and platform_follow_up_intent(request.messages[-1].content)
     ):
+        return "platform_intelligence"
+    if explicit_platform_query(request.messages, runtime.platform_contexts):
         return "platform_intelligence"
     if company_site_dossier_cage(request.messages):
         return "company_site_intelligence"
@@ -3296,10 +3282,12 @@ def generate_answer(
 
     platform_query = explicit_platform_query(request.messages, runtime.platform_contexts)
     if (
-        not platform_query
-        and request.active_scope
+        request.active_scope
         and request.active_scope.scope_type == "platform"
-        and platform_follow_up_intent(request.messages[-1].content)
+        and (
+            not platform_query
+            or platform_follow_up_retains_scope(request.messages[-1].content)
+        )
     ):
         platform_query = request.active_scope.scope_id
     if platform_query:

@@ -75,7 +75,17 @@ def platform_answer_mode(text: str) -> str:
         )
     ):
         return "supplier_roles"
-    if has_supplier and any(term in lowered for term in ("concentrat", "source depth")):
+    if has_supplier and any(
+        term in lowered
+        for term in (
+            "concentrat",
+            "source depth",
+            "dependent on a small number",
+            "depend on a small number",
+            "few suppliers",
+            "few supplier sites",
+        )
+    ):
         return "supplier_concentration"
     if has_supplier and any(term in lowered for term in ("which facilities", "important facilities")):
         return "supplier_facilities"
@@ -107,5 +117,35 @@ def platform_follow_up_intent(text: str) -> bool:
             "conclusions",
             "takeaways",
             "what matters most",
+        )
+    )
+
+
+def platform_follow_up_retains_scope(text: str) -> bool:
+    """Keep an anaphoric comparison anchored to the active platform."""
+    lowered = str(text or "").lower()
+    if not platform_follow_up_intent(lowered):
+        return False
+    if platform_answer_mode(lowered) in {
+        "platform_conclusions",
+        "supplier_cross_program",
+    }:
+        return True
+    return any(
+        phrase in lowered
+        for phrase in (
+            "those suppliers",
+            "these suppliers",
+            "of those",
+            "which of them",
+            "the suppliers",
+            "the supplier base",
+            "this platform",
+            "that platform",
+            "the platform",
+            "this program",
+            "that program",
+            "the program",
+            "the supply chain",
         )
     )

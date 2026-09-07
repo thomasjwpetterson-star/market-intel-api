@@ -36,7 +36,11 @@ class CompanyParentResolutionTests(unittest.TestCase):
                         ('W3333', 'WOODWARD COUNTY', NULL, NULL, 20.0, 2.0),
                         ('C1111', 'ROCKWELL COLLINS, INC.', NULL, NULL, 700.0, 70.0),
                         ('C2222', 'COLLINS AEROSPACE, INC.', NULL, NULL, 650.0, 65.0),
-                        ('C3333', 'COLLINS CONSULTING, INC.', NULL, NULL, 30.0, 3.0)
+                        ('C3333', 'COLLINS CONSULTING, INC.', NULL, NULL, 30.0, 3.0),
+                        ('E1111', 'EATON AEROSPACE, LLC', 'EATON AEROSPACE,', 'EATONUEI001', 800.0, 80.0),
+                        ('E2222', 'EATON-AEROQUIP LLC.', 'EATON CORPORATION PUBLIC LIMITED', 'EATONUEI002', 700.0, 70.0),
+                        ('E3333', 'EATON CORPORATION', 'EATON', 'EATONUEI003', 600.0, 60.0),
+                        ('E4444', 'EUROFINS EATON ANALYTICAL, LLC', 'EUROFINS EATON ANALYTICAL', 'EUROFINS001', 500.0, 50.0)
                     ) AS t(
                         cage_code,
                         vendor_name,
@@ -84,6 +88,10 @@ class CompanyParentResolutionTests(unittest.TestCase):
                     ,('C1111', 'ROCKWELL COLLINS, INC.', 'CEDAR RAPIDS', 'IA', 'A', NULL)
                     ,('C2222', 'COLLINS AEROSPACE, INC.', 'CEDAR RAPIDS', 'IA', 'A', NULL)
                     ,('C3333', 'COLLINS CONSULTING, INC.', 'CEDAR RAPIDS', 'IA', 'A', NULL)
+                    ,('E1111', 'EATON AEROSPACE, LLC', 'JACKSON', 'MS', 'A', NULL)
+                    ,('E2222', 'EATON-AEROQUIP LLC.', 'JACKSON', 'MI', 'A', NULL)
+                    ,('E3333', 'EATON CORPORATION', 'IRVINE', 'CA', 'A', NULL)
+                    ,('E4444', 'EUROFINS EATON ANALYTICAL, LLC', 'POMONA', 'CA', 'A', NULL)
                 ) AS t(cage_code, vendor_name, city, state, cage_status, replacement_cage)
             ) TO ? (FORMAT PARQUET)
             """,
@@ -202,6 +210,17 @@ class CompanyParentResolutionTests(unittest.TestCase):
             )
             self.assertEqual(facility["resolved_cages"], ["C1111", "C2222"])
             self.assertNotIn("C3333", facility["resolved_cages"])
+
+    def test_reviewed_eaton_group_combines_parent_variants_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            result = store.search("Eaton", limit=20)
+
+            parent = next(
+                row for row in result["matches"] if row["scope_type"] == "company_parent"
+            )
+            self.assertEqual(parent["resolved_cages"], ["E1111", "E2222", "E3333"])
+            self.assertNotIn("E4444", parent["resolved_cages"])
 
 
 if __name__ == "__main__":

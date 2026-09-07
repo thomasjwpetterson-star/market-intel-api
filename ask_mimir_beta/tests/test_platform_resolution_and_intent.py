@@ -1,7 +1,11 @@
 import unittest
 
 from platform_context import PlatformContextStore
-from platform_intent import platform_answer_mode, platform_follow_up_intent
+from platform_intent import (
+    platform_answer_mode,
+    platform_follow_up_intent,
+    platform_follow_up_retains_scope,
+)
 
 
 class PlatformResolutionAndIntentTests(unittest.TestCase):
@@ -83,10 +87,30 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             "supplier_cross_program",
         )
 
+    def test_cross_program_follow_up_retains_the_active_platform(self):
+        self.assertTrue(
+            platform_follow_up_retains_scope(
+                "Which of those suppliers are also important to other US Army aviation programs?"
+            )
+        )
+
+    def test_explicit_new_platform_question_can_change_scope(self):
+        self.assertFalse(
+            platform_follow_up_retains_scope("Who supplies the Black Hawk?")
+        )
+
     def test_alternative_source_question_has_a_distinct_mode(self):
         self.assertEqual(
             platform_answer_mode("Which suppliers have the fewest alternative sources?"),
             "supplier_source_depth",
+        )
+
+    def test_small_supplier_base_dependency_is_concentration(self):
+        self.assertEqual(
+            platform_answer_mode(
+                "Which parts of the supply chain appear dependent on a small number of supplier sites?"
+            ),
+            "supplier_concentration",
         )
 
 

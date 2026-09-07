@@ -35,6 +35,24 @@ REVIEWED_COMPANY_ALIASES = {
         "ROCKWELL COLLINS",
         "COLLINS ELBIT VISION SYSTEMS",
     ),
+    "EATON": (
+        "EATON",
+        "EATON AEROSPACE",
+        "EATON AEROQUIP",
+        "EATON CORPORATION",
+        "EATON FILTRATION",
+        "EATON INDUSTRIES",
+        "EATON LIMITED",
+    ),
+    "EATON AEROSPACE": (
+        "EATON",
+        "EATON AEROSPACE",
+        "EATON AEROQUIP",
+        "EATON CORPORATION",
+        "EATON FILTRATION",
+        "EATON INDUSTRIES",
+        "EATON LIMITED",
+    ),
 }
 
 
