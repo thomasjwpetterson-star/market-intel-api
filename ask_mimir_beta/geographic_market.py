@@ -52,6 +52,14 @@ def resolve_state(text: str) -> str | None:
 
 def is_geographic_market_request(text: str) -> bool:
     lowered = str(text or "").lower()
+    company_site_request = bool(
+        re.search(
+            r"\bassociated\s+with\b.+?(?:['’]s|s)\s+.+?\b(?:operations|site|facility)\b",
+            lowered,
+        )
+    )
+    if company_site_request:
+        return False
     explicit_phrasing = any(
         phrase in lowered
         for phrase in (

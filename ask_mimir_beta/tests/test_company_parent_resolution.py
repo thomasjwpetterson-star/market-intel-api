@@ -28,8 +28,10 @@ class CompanyParentResolutionTests(unittest.TestCase):
                         ('44444', 'THE BOEING COMPANY', 'THE BOEING', 'BOEINGUEI001', 500.0, 50.0),
                         ('55555', 'BELL BOEING JOINT PROJECT OFFICE', 'BELL BOEING JOINT PROJECT OFFICE', 'BELLBOEING01', 100.0, 10.0),
                         ('66666', 'CURTISS-WRIGHT CONTROLS, INC.', 'CURTISS-WRIGHT CORPORATION', 'CURTISSUEI1', 300.0, 30.0),
+                        ('66667', 'CURTISS-WRIGHT FLOW CONTROL SERVICE, LLC', 'CURTISS-WRIGHT FLOW CONTROL SERVICE,', 'CURTISSUEI2', 250.0, 25.0),
                         ('77777', 'MOOG INC.', 'MOOG INC.', 'MOOGUEI0001', 400.0, 40.0),
                         ('88888', 'MOOG INC.', 'MOOG INC.', 'MOOGUEI0002', 350.0, 35.0),
+                        ('M9999', 'MOOG INC.', 'MOOG INC.', 'MOOGUEI0003', 325.0, 32.0),
                         ('9EME1', 'CURTISS VILLAGE OF', 'CURTISS VILLAGE OF', 'CURTISSVILL1', 1.0, 0.0),
                         ('W1111', 'WOODWARD, INC.', NULL, NULL, 600.0, 60.0),
                         ('W2222', 'WOODWARD HRT, INC.', NULL, NULL, 500.0, 50.0),
@@ -86,8 +88,10 @@ class CompanyParentResolutionTests(unittest.TestCase):
                     ('44444', 'THE BOEING COMPANY', 'ARLINGTON', 'VA', 'A', NULL),
                     ('55555', 'BELL BOEING JOINT PROJECT OFFICE', 'AMARILLO', 'TX', 'A', NULL),
                     ('66666', 'CURTISS-WRIGHT CONTROLS, INC.', 'ASHBURN', 'VA', 'A', NULL),
+                    ('66667', 'CURTISS-WRIGHT FLOW CONTROL SERVICE, LLC', 'BREA', 'CA', 'A', NULL),
                     ('77777', 'MOOG INC.', 'BLACKSBURG', 'VA', 'A', NULL),
                     ('88888', 'MOOG INC.', 'EAST AURORA', 'NY', 'A', NULL),
+                    ('M9999', 'MOOG INC.', 'BLACKSBURG', 'VA', 'A', NULL),
                     ('9EME1', 'CURTISS VILLAGE OF', 'CURTISS', 'WI', 'A', NULL)
                     ,('W1111', 'WOODWARD, INC.', 'FORT COLLINS', 'CO', 'A', NULL)
                     ,('W2222', 'WOODWARD HRT, INC.', 'SKOKIE', 'IL', 'A', NULL)
@@ -174,7 +178,7 @@ class CompanyParentResolutionTests(unittest.TestCase):
                 if row["scope_type"] == "company_parent"
             )
             self.assertEqual(parent["scope_name"], "CURTISS-WRIGHT CORPORATION")
-            self.assertEqual(parent["resolved_cages"], ["66666"])
+            self.assertEqual(parent["resolved_cages"], ["66666", "66667"])
 
     def test_location_follow_up_resolves_only_within_active_company_cages(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -189,6 +193,20 @@ class CompanyParentResolutionTests(unittest.TestCase):
             self.assertEqual(result["scope_type"], "company_site")
             self.assertEqual(result["scope_id"], "77777")
             self.assertEqual(result["city"], "BLACKSBURG")
+
+    def test_initial_company_location_query_exposes_co_located_facility_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            result = store.search("Moog Blacksburg Virginia", limit=20)
+
+            facility = next(
+                row
+                for row in result["matches"]
+                if row.get("group_kind") == "co_located_facility"
+            )
+            self.assertEqual(facility["scope_type"], "company_parent")
+            self.assertEqual(facility["resolved_cages"], ["77777", "M9999"])
+            self.assertEqual(facility["city"], "BLACKSBURG")
 
     def test_reviewed_ontic_group_includes_reference_only_sites(self):
         with tempfile.TemporaryDirectory() as directory:

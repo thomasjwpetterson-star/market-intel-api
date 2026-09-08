@@ -20,6 +20,11 @@ DEFAULT_DATA_ROOT = Path(
 )
 DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v9"
 
+CANONICAL_CONSOLIDATED_PARENT_NAMES = {
+    "CURTISS WRIGHT": "CURTISS-WRIGHT CORPORATION",
+    "TRANSDIGM": "TRANSDIGM GROUP INCORPORATED",
+}
+
 
 # Reviewed trading-name aliases prevent common surnames from sweeping unrelated
 # legal entities into an automatically generated company-wide scope.
@@ -396,6 +401,30 @@ class CompanyContextStore:
                 group = self._observed_group_match(query, directory_matches)
                 if group:
                     matches = self._merge_directory_matches(matches, [group])
+            if scope_type != "company_site":
+                parent_candidates = sorted(
+                    (
+                        row
+                        for row in matches
+                        if row.get("scope_type") == "company_parent"
+                        and row.get("resolved_cages")
+                    ),
+                    key=lambda row: int(row.get("site_count") or 0),
+                    reverse=True,
+                )
+                if parent_candidates:
+                    location_group = self.resolve_site_reference(
+                        parent_candidates[0]["resolved_cages"],
+                        query,
+                        parent_name=str(parent_candidates[0].get("scope_name") or query),
+                    )
+                    if (
+                        location_group
+                        and location_group.get("group_kind") == "co_located_facility"
+                    ):
+                        matches = self._merge_directory_matches(
+                            matches, [location_group]
+                        )
         matches.sort(
             key=lambda row: (
                 not row.get("context_available", False),
@@ -410,6 +439,14 @@ class CompanyContextStore:
         selected = matches[: max(1, min(int(limit), 100))]
         if not any(row["scope_type"] == "company_parent" for row in selected):
             parent_match = next(
+                (
+                    row
+                    for row in matches
+                    if row["scope_type"] == "company_parent"
+                    and row.get("group_kind") == "co_located_facility"
+                ),
+                None,
+            ) or next(
                 (row for row in matches if row["scope_type"] == "company_parent"), None
             )
             if parent_match:
@@ -490,7 +527,10 @@ class CompanyContextStore:
         if len(cages) < 2:
             return None
         preferred = max(compatible, key=lambda row: int(row.get("site_count") or 0))
-        scope_name = str(preferred.get("scope_name") or query).strip()
+        scope_name = CANONICAL_CONSOLIDATED_PARENT_NAMES.get(
+            query_core,
+            str(preferred.get("scope_name") or query).strip(),
+        )
         scope_id = _reported_parent_id(scope_name)
         cage_list = sorted(cages)
         site_by_cage = {

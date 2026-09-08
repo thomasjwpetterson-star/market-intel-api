@@ -26,7 +26,7 @@
     "journey_id": "facility_lockheed_orlando",
     "label": "Facility - Lockheed Martin Orlando",
     "entry_variants": ["Tell me about Lockheed Martin's Orlando operations.", "Which programs and capabilities are associated with Lockheed Martin sites in Orlando, Florida?"],
-    "expected_scope": {"scope_type": "company_parent", "scope_name_contains": "LOCKHEED MARTIN - ORLANDO"},
+    "expected_scope": {"scope_type": "company_parent", "scope_name_contains": "ORLANDO"},
     "turns": [
       {"question": "Give me an overview of the defence activity associated with Lockheed Martin's Orlando, Florida operations.", "expected_workflow": "company_site_intelligence"},
       {"question": "Which programs appear most important to the Orlando sites?", "expected_workflow": "company_site_intelligence", "minimum_list_lengths": {"platform_exposure": 1}},

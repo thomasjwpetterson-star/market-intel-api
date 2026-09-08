@@ -376,7 +376,9 @@ class DataReleaseGuard:
 
     def __init__(self, metric_release_id: str, paths: Iterable[Path]) -> None:
         self.metric_release_id = metric_release_id
-        self.paths = sorted({Path(path).resolve() for path in paths if Path(path).exists()})
+        self.paths = sorted(
+            {Path(path).resolve() for path in paths if Path(path).is_file()}
+        )
         self.snapshot = self._snapshot()
         payload = json.dumps(
             [metric_release_id, self.snapshot], sort_keys=True, default=str

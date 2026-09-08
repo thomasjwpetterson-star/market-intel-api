@@ -6,6 +6,7 @@ from unittest.mock import patch
 from beta_controls import (
     AccessContext,
     BetaStateStore,
+    DataReleaseGuard,
     DailyQuotaExceeded,
     TIER_POLICIES,
 )
@@ -71,6 +72,23 @@ class BetaStateStoreTests(unittest.TestCase):
                     store.reserve("request-over-month", access, "release-1", "company")
             self.assertEqual(raised.exception.period, "month")
             store.connection.close()
+
+
+class DataReleaseGuardTests(unittest.TestCase):
+    def test_guard_tracks_files_but_never_registers_a_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.parquet"
+            source.write_bytes(b"initial")
+            guard = DataReleaseGuard("release-1", [root, source])
+
+            self.assertEqual(guard.paths, [source.resolve()])
+            (root / "runtime-cache.json").write_text("cache")
+            guard.assert_unchanged()
+
+            source.write_bytes(b"changed")
+            with self.assertRaises(RuntimeError):
+                guard.assert_unchanged()
 
 
 if __name__ == "__main__":

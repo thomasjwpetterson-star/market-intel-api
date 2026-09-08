@@ -321,6 +321,31 @@ FOLLOW_UP_CASES = [
         ),
         "Tell me more about the third one.",
     ),
+    (
+        "company_site_intelligence",
+        ActiveScope(
+            scope_type="company_parent",
+            scope_id="PARENT_MOOG",
+            scope_name="MOOG INC.",
+            resolved_cages=["77777", "88888"],
+        ),
+        "Which platforms does the Blacksburg site support?",
+    ),
+    (
+        "company_site_intelligence",
+        ActiveScope(
+            scope_type="company_parent",
+            scope_id="PARENT_HONEYWELL",
+            scope_name="HONEYWELL INTERNATIONAL INC.",
+            resolved_cages=["09128", "0BFA5", "99193"],
+        ),
+        "Now do Honeywell Phoenix.",
+    ),
+    (
+        "platform_intelligence",
+        ActiveScope(scope_type="platform", scope_id="F-16", scope_name="F-16"),
+        "Give me the full supplier list.",
+    ),
 ]
 
 
@@ -359,6 +384,20 @@ CONVERSATION_CASES = [
             ChatMessage(role="user", content="Who supplies F-16?"),
             ChatMessage(role="assistant", content="Here is the observed supplier base."),
             ChatMessage(role="user", content="What is tomorrow's weather?"),
+        ],
+    ),
+    (
+        "platform_intelligence",
+        ActiveScope(
+            scope_type="company_parent",
+            scope_id="PARENT_HONEYWELL",
+            scope_name="HONEYWELL INTERNATIONAL INC.",
+            resolved_cages=["09128", "0BFA5", "99193"],
+        ),
+        [
+            ChatMessage(role="user", content="Tell me about Honeywell's US defense business."),
+            ChatMessage(role="assistant", content="Here is Honeywell's observed footprint."),
+            ChatMessage(role="user", content="Who supplies the Virginia class?"),
         ],
     ),
 ]

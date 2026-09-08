@@ -84,6 +84,13 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
         self.assertEqual(resolve_state(question), "AL")
         self.assertTrue(is_geographic_market_request(question))
 
+    def test_named_company_site_is_not_routed_as_state_market(self):
+        question = (
+            "Give me an overview of the defence activity associated with "
+            "Lockheed Martin's Orlando, Florida operations."
+        )
+        self.assertFalse(is_geographic_market_request(question))
+
     def test_geographic_shorthand_resolves(self):
         for question, state in (
             ("Alabama defense suppliers", "AL"),

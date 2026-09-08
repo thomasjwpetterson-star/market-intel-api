@@ -2105,9 +2105,11 @@ class LabRuntime:
             *self.market_segments.paths.values(),
             *self.market_records.paths.values(),
         }
-        fydp_budget_file = Path(os.getenv("ASK_MIMIR_FYDP_BUDGET_FILE", ""))
-        if fydp_budget_file.exists():
-            release_sources.add(fydp_budget_file)
+        fydp_budget_value = os.getenv("ASK_MIMIR_FYDP_BUDGET_FILE", "").strip()
+        if fydp_budget_value:
+            fydp_budget_file = Path(fydp_budget_value)
+            if fydp_budget_file.is_file():
+                release_sources.add(fydp_budget_file)
         if self.market_segments.precomputed_dir is not None:
             market_segment_manifest = self.market_segments.precomputed_dir / "manifest.json"
             if market_segment_manifest.exists():

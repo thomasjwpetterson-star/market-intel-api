@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -163,6 +164,8 @@ class PlatformContextStore:
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")
+        duckdb_temp = os.getenv("ASK_MIMIR_DUCKDB_TEMP", "/tmp/ask-mimir-duckdb")
+        self.connection.execute("SET temp_directory = ?", [duckdb_temp])
         self.platforms = self._load_platform_catalog()
         self._cache: Dict[str, Dict[str, Any]] = {}
 
