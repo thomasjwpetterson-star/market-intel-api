@@ -737,8 +737,10 @@ Describe the strongest supported evidence directly, without generic defensive di
 the pack does not contain.
 
 State the completed fiscal-year window for financial comparisons and identify the partial year
-separately. Finish with Evidence used and mention the downloadable evidence pack. Keep the standard
-answer below 1,300 words.
+separately. Finish with Evidence used and tell the user that the downloadable evidence pack is
+available in the Ask Mimir evidence drawer. Never direct the user to a company, platform, award or
+parts dashboard to download the evidence pack; dashboard links are for record-level drill-down only.
+Keep the standard answer below 1,300 words.
 
 The reported supplier lane reflects the supplier relationships observed in the source records for
 the stated period; it is not automatically a complete bill of material. Describe the observed
