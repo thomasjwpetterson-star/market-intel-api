@@ -60,11 +60,13 @@ def _search_terms(phrase: str) -> List[str]:
 
 def _subject(text: str) -> str:
     patterns = (
-        r"relevant\s+to(?:\s+companies\s+supplying)?\s+(.+?)(?:\?|\.|$)",
+        r"relevant\s+to\s*:?\s*(?:companies\s+supplying\s+)?(.+?)(?:\?|\.|$)",
         r"related\s+to\s+(.+?)(?:\?|\.|$)",
-        r"(?:opportunities|notices|sources?\s+sought|rfis?|requests?\s+for\s+information|solicitations)\s+(?:for|concern(?:ing)?)\s+(.+?)(?:\?|\.|$)",
+        r"(?:opportunities|notices|sources?\s+sought|rfis?|requests?\s+for\s+information|solicitations)\s+(?:for|about|cover(?:ing)?|concern(?:ing)?)\s+(.+?)(?:\?|\.|$)",
+        r"opportunities\s+(?:are\s+)?open\s+for\s+(.+?)(?:\?|\.|$)",
         r"(?:search|show|find)\s+(?:current|open|active|recent)?\s*(.+?)\s+(?:contracting\s+)?opportunities(?:\?|\.|$)",
         r"awards?\s+for\s+(.+?)(?:\?|\.|$)",
+        r"awards?\s+(?:related\s+to|concerning)\s+(.+?)(?:\?|\.|$)",
         r"(?:significant|recent)\s+(.+?)\s+awards?(?:\?|\.|$)",
     )
     for pattern in patterns:
@@ -79,7 +81,9 @@ def _subject(text: str) -> str:
 def resolve_market_record_search(text: str) -> Dict[str, Any] | None:
     clean = str(text or "").strip()
     lowered = clean.lower()
-    has_search = any(term in lowered for term in ("find", "show", "which", "search"))
+    has_search = any(term in lowered for term in ("find", "show", "which", "search")) or bool(
+        re.search(r"\bwhat\s+(?:defen[sc]e\s+)?opportunities\s+are\s+open\b", lowered)
+    )
     if not has_search:
         return None
     is_opportunity = any(

@@ -17,6 +17,7 @@ from geographic_market import (
 )
 from platform_intent import platform_follow_up_intent
 from market_segment import market_segment_follow_up_intent, resolve_market_segment
+from market_record_search import resolve_market_record_search
 
 
 class MarketWorkflowResolutionTests(unittest.TestCase):
@@ -60,6 +61,17 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
             "capability:aerospace fuel systems",
         )
 
+    def test_general_capability_supplier_phrasings_resolve_dynamically(self):
+        cases = {
+            "Who makes military-aircraft landing gear?": "capability:military-aircraft landing gear",
+            "Find companies with flight-control experience.": "capability:flight-control experience",
+            "Identify suppliers of aerospace fuel systems.": "capability:aerospace fuel systems",
+            "Find suppliers capable of producing energetic components.": "capability:energetic components",
+        }
+        for question, expected in cases.items():
+            with self.subTest(question=question):
+                self.assertEqual(resolve_capability(question), expected)
+
     def test_aerospace_qualifier_scopes_fuel_without_becoming_a_search_term(self):
         self.assertEqual(_capability_terms("aerospace fuel systems"), ["fuel"])
         self.assertEqual(
@@ -71,6 +83,16 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
         question = "Give me an overview of the defence industrial base in Alabama."
         self.assertEqual(resolve_state(question), "AL")
         self.assertTrue(is_geographic_market_request(question))
+
+    def test_geographic_shorthand_resolves(self):
+        for question, state in (
+            ("Alabama defense suppliers", "AL"),
+            ("Show the US defense footprint in Ohio.", "OH"),
+            ("Map aerospace and defense activity across Connecticut.", "CT"),
+        ):
+            with self.subTest(question=question):
+                self.assertEqual(resolve_state(question), state)
+                self.assertTrue(is_geographic_market_request(question))
 
     def test_capability_follow_up_is_retained(self):
         self.assertTrue(
@@ -115,6 +137,24 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
             "US_MILITARY_ROTORCRAFT",
         )
 
+    def test_market_segment_language_variants_resolve(self):
+        cases = {
+            "Give me an overview of the US rotorcraft market.": "US_MILITARY_ROTORCRAFT",
+            "Which missile programs are driving the most activity?": "US_MISSILES_AND_MUNITIONS",
+            "Show me the military airlift and tanker market.": "US_AIRLIFT_AND_TANKER_AIRCRAFT",
+            "Which companies matter most across military UAS?": "US_UNCREWED_AIRCRAFT",
+        }
+        for question, expected in cases.items():
+            with self.subTest(question=question):
+                self.assertEqual(resolve_market_segment(question), expected)
+
+    def test_named_submarine_platform_is_not_broadened_to_market(self):
+        self.assertIsNone(
+            resolve_market_segment(
+                "Show the supplier base for the Virginia-class submarine."
+            )
+        )
+
     def test_market_segment_follow_up_is_retained(self):
         self.assertTrue(
             market_segment_follow_up_intent(
@@ -153,6 +193,30 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
             resolve_market_segment("What is happening in the US submarine industrial base?"),
             "US_SUBMARINES",
         )
+
+    def test_opportunity_starter_accepts_colon_separator(self):
+        result = resolve_market_record_search(
+            "Find current US defense opportunities relevant to: aircraft thermal management"
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["record_type"], "opportunity")
+        self.assertEqual(result["subject"], "aircraft thermal management")
+
+    def test_what_opportunities_are_open_resolves(self):
+        result = resolve_market_record_search(
+            "What defense opportunities are open for radar manufacturers?"
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["record_type"], "opportunity")
+        self.assertEqual(result["subject"], "radar")
+
+    def test_recent_awards_concerning_subject_resolves(self):
+        result = resolve_market_record_search(
+            "Find recent awards concerning electronic warfare."
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["record_type"], "award")
+        self.assertEqual(result["subject"], "electronic warfare")
 
     def test_internal_identifier_is_removed_without_discarding_answer(self):
         answer = (

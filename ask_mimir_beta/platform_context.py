@@ -55,6 +55,9 @@ PLATFORM_ALIASES = {
     "PATRIOT AIR DEFENCE": "PATRIOT AIR DEFENSE SYSTEM",
     "PATRIOT AIR DEFENCE SYSTEM": "PATRIOT AIR DEFENSE SYSTEM",
     "ABRAMS": "M1 ABRAMS",
+    "APACHE": "AH-64",
+    "BLACK HAWK": "UH-60",
+    "CHINOOK": "CH-47",
     "VIRGINIA CLASS": "VIRGINIA CLASS (SSN 774)",
     "DDG 51": "DDG-51 ARLEIGH BURKE",
     "FORD CLASS": "FORD CLASS CARRIER",
@@ -261,7 +264,16 @@ class PlatformContextStore:
         matches = []
         for platform in self.platforms:
             candidate = _normalize(platform)
-            if len(candidate) >= 3 and f" {candidate} " in normalized:
+            compact_candidate = candidate.replace(" ", "")
+            compact_match = (
+                compact_candidate != candidate
+                and len(compact_candidate) >= 3
+                and any(character.isdigit() for character in compact_candidate)
+                and f" {compact_candidate} " in normalized
+            )
+            if len(candidate) >= 3 and (
+                f" {candidate} " in normalized or compact_match
+            ):
                 matches.append(platform)
         matches.extend(alias_matches)
         ordered = sorted(set(matches), key=lambda value: len(_normalize(value)), reverse=True)

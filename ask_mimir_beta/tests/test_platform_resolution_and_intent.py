@@ -3,6 +3,7 @@ import unittest
 from platform_context import PlatformContextStore
 from platform_intent import (
     is_open_capability_discovery_request,
+    is_platform_centered_request,
     platform_answer_mode,
     platform_comparison_answer_mode,
     platform_comparison_follow_up_intent,
@@ -23,6 +24,16 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             "TOMAHAWK",
             "UH-60",
             "CH-47",
+            "F-16",
+            "F-35",
+            "B-52",
+            "AMRAAM",
+            "SM-6",
+            "STRYKER",
+            "AH-64",
+            "UH-60",
+            "CH-53K",
+            "P-8A",
         ]
 
     def test_patriot_resolves_to_the_umbrella_system(self):
@@ -126,6 +137,23 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             {"UH-60", "CH-47"},
         )
 
+    def test_compact_platform_designations_are_detected(self):
+        cases = {
+            "Show suppliers for F16": ["F-16"],
+            "Who supplies CH53K?": ["CH-53K"],
+            "SM6 production outlook": ["SM-6"],
+            "What vendors support P8A?": ["P-8A"],
+        }
+        for question, expected in cases.items():
+            with self.subTest(question=question):
+                self.assertEqual(self.store.mentions(question), expected)
+
+    def test_common_platform_names_are_detected(self):
+        self.assertEqual(
+            set(self.store.mentions("Where do Apache and Black Hawk suppliers overlap?")),
+            {"AH-64", "UH-60"},
+        )
+
     def test_comparison_follow_up_retains_both_platforms(self):
         self.assertTrue(
             platform_comparison_follow_up_intent(
@@ -151,6 +179,40 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
         self.assertTrue(
             is_open_capability_discovery_request(
                 "Find US manufacturers with demonstrated experience supplying electrical power generation equipment to military aircraft."
+            )
+        )
+
+    def test_platform_supplier_commands_outrank_company_word_search(self):
+        for question in (
+            "Show me F-16 suppliers",
+            "Who are the F-16 suppliers?",
+            "F-16 suppliers",
+            "Suppliers to F-16",
+            "List the suppliers for the F-35",
+            "Give me F-35 vendors",
+            "Which companies support the F-35?",
+            "Show me firms involved in F-16",
+            "Who builds the F-35?",
+            "F-16 production outlook",
+            "Map the Stryker supply chain",
+            "Tell me about the F-16",
+            "How is B-52 modernization progressing?",
+            "What does Raytheon provide on AMRAAM?",
+            "Which facilities support Tomahawk?",
+        ):
+            with self.subTest(question=question):
+                self.assertTrue(
+                    is_platform_centered_request(
+                        question,
+                        has_platform_mention=bool(self.store.mentions(question)),
+                    )
+                )
+
+    def test_company_platform_evidence_question_is_not_reclassified(self):
+        self.assertFalse(
+            is_platform_centered_request(
+                "What evidence shows L3Harris supplies the F-16?",
+                has_platform_mention=True,
             )
         )
 

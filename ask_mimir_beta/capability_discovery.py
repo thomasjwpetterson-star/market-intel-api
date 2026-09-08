@@ -58,6 +58,9 @@ CAPABILITY_QUERY_PATTERNS = (
     r"(?:find|identify|show)\s+(?:us\s+)?(?:manufacturers|suppliers|companies)\s+(?:that\s+)?(?:supply|provide|make|manufacture)\s+(.+?)(?:\s+to|\s+for)\s+(?:the\s+)?(?:us\s+)?military",
     r"(?:which|what)\s+(?:us\s+)?(?:manufacturers|suppliers|companies)\s+(?:supply|provide|make|manufacture)\s+(.+?)(?:\?|$)",
     r"(?:companies|manufacturers|suppliers)\s+(?:supplying|providing|manufacturing|with)\s+(.+?)(?:\s+to|\s+for)\s+(?:military|defen[cs]e)",
+    r"who\s+(?:makes|manufactures)\s+(.+?)(?:\?|$)",
+    r"(?:who\s+makes|find|identify|show)\s+(?:us\s+)?(?:manufacturers|suppliers|companies|firms)?\s*(?:that\s+)?(?:supply|supplying|provide|providing|make|manufacture|manufacturing|of)\s+(.+?)(?:\?|$)",
+    r"(?:find|identify|show)\s+(?:us\s+)?(?:manufacturers|suppliers|companies|firms)\s+(?:with|capable\s+of\s+(?:making|manufacturing|producing))\s+(.+?)(?:\?|$)",
 )
 CAPABILITY_STOPWORDS = {
     "and", "or", "the", "a", "an", "for", "to", "of", "into", "with",

@@ -57,13 +57,18 @@ def is_geographic_market_request(text: str) -> bool:
         for phrase in (
             "industrial base", "defence companies", "defense companies",
             "defence facilities", "defense facilities", "companies and facilities",
+            "defence contractors", "defense contractors", "military contractors",
+            "defence suppliers", "defense suppliers", "military suppliers",
+            "defence firms", "defense firms", "military firms",
+            "defence footprint", "defense footprint",
+            "defence activity", "defense activity",
             "important in the state", "state's defense", "state's defence",
             "military industry", "defence industry", "defense industry",
         )
     )
     entity_phrasing = (
         any(term in lowered for term in ("defence", "defense", "military"))
-        and any(term in lowered for term in ("companies", "facilities", "platforms", "programs", "programmes"))
+        and any(term in lowered for term in ("companies", "contractors", "firms", "facilities", "platforms", "programs", "programmes"))
         and any(term in lowered for term in ("important", "largest", "leading", "activity", "map", "matter most"))
     )
     return resolve_state(text) is not None and (explicit_phrasing or entity_phrasing)

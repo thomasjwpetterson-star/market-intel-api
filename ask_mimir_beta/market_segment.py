@@ -22,7 +22,8 @@ MARKET_SEGMENTS = {
     "US_MILITARY_ROTORCRAFT": {
         "display_name": "US military rotorcraft market",
         "request_pattern": (
-            r"\b(?:us|u\.?s\.?)?\s*military\s+(?:rotorcraft|helicopters?)\b"
+            r"\b(?:us|u\.?s\.?)?\s*(?:military\s+)?(?:rotorcraft|helicopters?)\s+market\b"
+            r"|\b(?:us|u\.?s\.?)?\s*military\s+(?:rotorcraft|helicopters?)\b"
             r"|\bmilitary\s+helicopter\s+market\b"
             r"|\b(?:army|marine corps)\s+(?:rotorcraft|helicopters?)\b"
         ),
@@ -69,6 +70,7 @@ MARKET_SEGMENTS = {
             r"(?:aircraft|aerial\s+systems?|systems?)(?:\s+(?:market|segment))?\b"
             r"|\b(?:us|u\.?s\.?)?\s*(?:military\s+)?(?:uas|uav)(?:\s+(?:market|segment))\b"
             r"|\bmilitary\s+drone\s+market\b"
+            r"|\bacross\s+(?:the\s+)?(?:us\s+)?military\s+(?:uas|uav)\b"
         ),
         "mapped_market_segments": ["Air", "Cross-Domain / Support"],
         "platform_pattern": (
@@ -105,6 +107,7 @@ MARKET_SEGMENTS = {
         "request_pattern": (
             r"\b(?:us|u\.?s\.?)?\s*(?:military\s+)?(?:airlift|transport|tanker)\s+"
             r"aircraft(?:\s+(?:market|segment))?\b"
+            r"|\b(?:us|u\.?s\.?)?\s*(?:military\s+)?airlift\s+and\s+tanker\s+market\b"
         ),
         "mapped_market_segments": ["Air"],
         "platform_pattern": r"C-5|C-17|C-130|KC-46|C/KC-135|KC-135|KC-10|C-40|C-32",
@@ -126,8 +129,9 @@ MARKET_SEGMENTS = {
     "US_SUBMARINES": {
         "display_name": "US submarine industrial base",
         "request_pattern": (
-            r"\b(?:us|u\.?s\.?)?\s*(?:navy|naval)?\s*submarines?"
-            r"(?:\s+(?:industrial\s+base|market|segment))?\b"
+            r"\b(?:us|u\.?s\.?)?\s*(?:navy|naval)?\s*submarine\s+"
+            r"(?:industrial\s+base|market|segment)\b"
+            r"|\b(?:us|u\.?s\.?)\s+(?:navy|naval\s+)?submarines\b"
         ),
         "mapped_market_segments": ["Naval"],
         "platform_pattern": r"SUBMARINE|VIRGINIA CLASS|COLUMBIA CLASS|OHIO CLASS|LOS ANGELES CLASS|SEAWOLF|SSN|SSBN",
@@ -138,6 +142,8 @@ MARKET_SEGMENTS = {
         "request_pattern": (
             r"\b(?:us|u\.?s\.?)?\s*(?:missiles?|munitions?|guided weapons?)\s+"
             r"(?:market|industrial\s+base|segment)\b"
+            r"|\bwhich\s+(?:us\s+)?missile\s+programs?\s+(?:are\s+)?driv(?:e|ing)\b"
+            r"|\bwhat\s+is\s+happening\s+in\s+(?:the\s+)?(?:us\s+)?(?:tactical\s+)?missiles?\b"
         ),
         "mapped_market_segments": ["Missiles & Munitions"],
         "platform_pattern": r".+",

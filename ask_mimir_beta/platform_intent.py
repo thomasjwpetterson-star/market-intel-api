@@ -2,6 +2,97 @@
 
 from __future__ import annotations
 
+import re
+
+
+def is_platform_centered_request(text: str, *, has_platform_mention: bool) -> bool:
+    """Keep named-platform questions out of the company-name resolver."""
+    if not has_platform_mention:
+        return False
+    lowered = str(text or "").lower().strip()
+    supplier_request = any(
+        phrase in lowered
+        for phrase in (
+            "who supplies",
+            "who builds",
+            "who makes",
+            "who manufactures",
+            "supplier base",
+            "supply chain",
+            "suppliers for",
+            "suppliers of",
+            "suppliers to",
+            "platform suppliers",
+            "program suppliers",
+            "programme suppliers",
+        )
+    ) or bool(
+        re.search(
+            r"^(?:show|list|find|identify|name|map|give)(?:\s+me)?\b.*\b"
+            r"(?:suppliers?|vendors?|manufacturers?|subcontractors?|contractors?)\b",
+            lowered,
+        )
+    ) or bool(
+        re.search(
+            r"^(?:who|which|what)\b.*\b"
+            r"(?:suppliers?|vendors?|manufacturers?|subcontractors?|contractors?)\b",
+            lowered,
+        )
+    ) or bool(
+        re.search(
+            r"^(?:which|what|show(?:\s+me)?|list|find)\s+"
+            r"(?:companies|firms)\b.*\b(?:supply|supplies|supplying|support|"
+            r"supports|supporting|build|builds|building|work|works|involved)\b",
+            lowered,
+        )
+    ) or bool(
+        re.search(
+            r"^(?:which|what)\s+(?:facilities|sites|locations)\b.*\b"
+            r"(?:support|supports|serve|serves|work|works)\b",
+            lowered,
+        )
+    ) or bool(
+        re.search(
+            r"^what\s+does\s+.+?\s+provide\s+(?:on|for|to)\b|"
+            r"^(?:what\s+is|describe)\s+.+?(?:'s|’s)?\s+role\s+(?:on|in)\b|"
+            r"^how\s+is\s+.+?\s+involved\s+in\b",
+            lowered,
+        )
+    ) or bool(
+        re.fullmatch(
+            r"(?:the\s+)?\S+(?:\s+\S+){0,3}\s+"
+            r"(?:suppliers?|vendors?|manufacturers?|subcontractors?|contractors?)\??",
+            lowered,
+        )
+    )
+    direct_platform_request = bool(
+        re.search(
+            r"^(?:tell\s+me\s+about|give\s+me\s+an?\s+overview\s+of|"
+            r"overview\s+of|explain|map)\b",
+            lowered,
+        )
+    )
+    compact_platform_request = len(lowered.split()) <= 7 and any(
+        term in lowered
+        for term in (
+            "supplier",
+            "vendor",
+            "manufacturer",
+            "subcontractor",
+            "contractor",
+            "supply chain",
+            "industrial base",
+            "production",
+            "procurement",
+            "outlook",
+            "modernization",
+            "modernisation",
+            "progress",
+            "trajectory",
+        )
+    )
+    return supplier_request or direct_platform_request or compact_platform_request
+
 
 def platform_answer_mode(text: str) -> str:
     """Classify the latest platform question without inheriting prior answer language."""

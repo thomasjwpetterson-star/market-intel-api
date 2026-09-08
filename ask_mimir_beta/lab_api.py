@@ -87,6 +87,7 @@ from platform_supply_chain_store import PlatformSupplyChainStore
 from program_momentum_store import ProgramMomentumStore
 from platform_intent import (
     is_open_capability_discovery_request,
+    is_platform_centered_request,
     platform_answer_mode,
     platform_comparison_answer_mode,
     platform_comparison_follow_up_intent,
@@ -1488,12 +1489,44 @@ def is_supported_platform_supply_chain_request(messages: List[ChatMessage]) -> b
 
 
 def is_article_analysis_request(messages: List[ChatMessage]) -> bool:
-    text = "\n".join(message.content for message in messages if message.role == "user")
+    user_messages = [str(message.content or "") for message in messages if message.role == "user"]
+    if not user_messages:
+        return False
+    text = user_messages[-1]
     lowered = text.lower()
-    return bool(re.search(r"https?://\S+", text)) or (
-        any(term in lowered for term in ("analyse this", "analyze this", "news article", "article text"))
+    direct_article_request = bool(re.search(r"https?://\S+", text)) or (
+        any(
+            term in lowered
+            for term in (
+                "analyse this", "analyze this", "news article", "article text",
+                "this article", "article implications", "implications of the article",
+                "this announcement", "press release", "announced a",
+            )
+        )
         and len(text) >= 80
     )
+    if direct_article_request:
+        return True
+    prior_article_request = any(
+        bool(re.search(r"https?://\S+", prior))
+        or (
+            any(
+                term in prior.lower()
+                for term in ("analyse this", "analyze this", "news article", "article text")
+            )
+            and len(prior) >= 80
+        )
+        for prior in user_messages[:-1]
+    )
+    article_follow_up = any(
+        phrase in lowered
+        for phrase in (
+            "this article", "the article", "this announcement", "the announcement",
+            "which suppliers benefit", "what does it mean", "what are the implications",
+            "how significant is it", "supporting that conclusion",
+        )
+    )
+    return prior_article_request and article_follow_up
 
 
 def explicit_platform_query(
@@ -1501,7 +1534,20 @@ def explicit_platform_query(
 ) -> str | None:
     text = str(messages[-1].content or "").strip()
     intent = text.lower()
-    if not any(
+    mentions = store.mentions(text)
+    if len(mentions) == 1 and is_platform_centered_request(
+        text,
+        has_platform_mention=True,
+    ):
+        return mentions[0]
+    has_direct_platform_language = bool(
+        re.match(
+            r"^(?:tell\s+me\s+about|give\s+me\s+an?\s+overview\s+of|"
+            r"overview\s+of|explain|map)\b",
+            intent,
+        )
+    )
+    if not has_direct_platform_language and not any(
         term in intent
         for term in (
             "platform", "program", "programme", "who supplies", "supply chain",
@@ -1510,7 +1556,6 @@ def explicit_platform_query(
         )
     ):
         return None
-    mentions = store.mentions(text)
     if len(mentions) == 1:
         return mentions[0]
     guided = re.search(
@@ -1536,6 +1581,12 @@ def explicit_platform_comparison(
             "between",
             "overlap",
             "shared supplier",
+            "differ",
+            "difference",
+            "versus",
+            " vs ",
+            "contrast",
+            "in common",
         )
     ):
         return []
@@ -1543,7 +1594,7 @@ def explicit_platform_comparison(
 
 
 def is_clearly_out_of_domain(messages: List[ChatMessage]) -> bool:
-    text = " ".join(message.content for message in messages).lower()
+    text = str(messages[-1].content or "").lower()
     defense_terms = (
         "defense", "defence", "military", "pentagon", "dod", "contract", "award",
         "supplier", "cage", "nsn", "niin", "platform", "program", "missile",
@@ -1552,9 +1603,12 @@ def is_clearly_out_of_domain(messages: List[ChatMessage]) -> bool:
     if any(term in text for term in defense_terms):
         return False
     unrelated_phrases = (
-        "weather forecast", "football score", "basketball score", "recipe for",
+        "weather forecast", "football score", "football game", "basketball score",
+        "basketball game", "recipe for",
         "write me a poem", "dating advice", "medical diagnosis", "solve this equation",
         "write python code", "javascript tutorial", "holiday itinerary",
+        "tomorrow's weather", "tomorrows weather", "recommend a restaurant",
+        "plan a holiday",
     )
     return any(phrase in text for phrase in unrelated_phrases)
 
@@ -1570,7 +1624,7 @@ def is_program_momentum_request(messages: List[ChatMessage]) -> bool:
 
 
 def is_ground_vehicle_power_position_request(messages: List[ChatMessage]) -> bool:
-    text = str(messages[-1].content or "").lower()
+    text = re.sub(r"[-_/]+", " ", str(messages[-1].content or "").lower())
     has_market = any(
         term in text
         for term in (
@@ -1598,7 +1652,11 @@ def is_ground_vehicle_power_position_request(messages: List[ChatMessage]) -> boo
 def is_eaton_competitor_request(messages: List[ChatMessage]) -> bool:
     text = str(messages[-1].content or "").lower()
     return "eaton" in text and any(
-        term in text for term in ("competitor", "competes", "peer", "compared with")
+        term in text
+        for term in (
+            "competitor", "compete", "competes", "peer", "compared with",
+            "similar to",
+        )
     )
 
 
@@ -1625,6 +1683,16 @@ def company_site_trajectory_cage(messages: List[ChatMessage]) -> str | None:
 def company_site_dossier_cage(messages: List[ChatMessage]) -> str | None:
     text = str(messages[-1].content or "")
     match = re.search(r"\bCAGE\s*[:#-]?\s*([A-Z0-9]{5})\b", text, re.IGNORECASE)
+    if not match:
+        match = re.fullmatch(r"\s*([A-Z0-9]{5})\s*", text, re.IGNORECASE)
+        if match and not any(character.isdigit() for character in match.group(1)):
+            match = None
+    if match and re.fullmatch(
+        r"\s*(?:CAGE\s*[:#-]?\s*)?[A-Z0-9]{5}\s*",
+        text,
+        re.IGNORECASE,
+    ):
+        return match.group(1).upper()
     bare_followup = False
     if not match and len(messages) > 1:
         bare_cage = re.fullmatch(
@@ -1657,6 +1725,7 @@ def company_site_dossier_cage(messages: List[ChatMessage]) -> str | None:
             "site profile",
             "full picture",
             "overview",
+            "what does",
         )
     ):
         return None
@@ -1666,7 +1735,7 @@ def company_site_dossier_cage(messages: List[ChatMessage]) -> str | None:
 def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     text = str(messages[-1].content or "").strip()
     if re.match(
-        r"^(?:who\s+supplies|what\s+does\s+each\s+.+?\s+supplier|"
+        r"^(?:what\s+does\s+each\s+.+?\s+supplier|"
         r"which\s+.+?\s+suppliers|how\s+concentrated\s+is\s+the\s+.+?\s+supplier\s+base)",
         text,
         re.IGNORECASE,
@@ -1680,6 +1749,7 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
         r"which\s+(?:programs|programmes|platforms).+?associated\s+with\s+(.+?)\s+in\s+(.+?),\s*([A-Za-z .'-]+?)(?:\?|\.|$)",
         r"(?:give\s+me\s+an?\s+overview\s+of|overview\s+of)\s+the\s+(?:defense|defence)\s+activity\s+associated\s+with\s+(.+?)(?:['’]s|s)\s+(.+?),\s*([A-Za-z .'-]+?)\s+operations(?:\?|\.|$)",
         r"(?:give\s+me\s+an?\s+overview\s+of|overview\s+of)\s+the\s+(?:defense|defence)\s+activity\s+associated\s+with\s+(.+?)(?:['’]s|s)\s+(.+?),\s*([A-Za-z .'-]+?)\s+(?:site|facility)(?:\?|\.|$)",
+        r"(?:give\s+me\s+an?\s+overview\s+of|overview\s+of)\s+(.+?)(?:['’]s|s)\s+(.+?),\s*([A-Za-z .'-]+?)\s+(?:operations|site|facility)(?:\?|\.|$)",
         r"(?:give\s+me\s+an?\s+overview\s+of|an?\s+overview\s+of|overview\s+of)\s+(.+?)(?:'s|’s)\s+(?:us\s+)?(?:defense|defence)\s+(?:business|activity)(?:\s+in\s+.+?)?(?:\?|\.|$)",
         r"(?:tell\s+me\s+about|give\s+me\s+an?\s+overview\s+of)\s+(.+?)(?:'s|’s)\s+(?:defense|defence)\s+activity(?:\s+in\s+.+?)?(?:\?|\.|$)",
         r"what\s+(?:defense|defence)\s+work\s+is\s+carried\s+out\s+at\s+(.+?)\s+(?:facilities|sites)(?:\?|\.|$)",
@@ -1687,20 +1757,25 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
         r"profile\s+(.+?)(?:'s|’s)\s+observed\s+(?:us\s+)?(?:defense|defence)\s+activity(?:\s+across.+?)?(?:\?|\.|$)",
         r"(?:defense\s+supplier|defence\s+supplier|supplier|company)\s*:\s*([^\n?]+)",
         r"what\s+does\s+(.+?)\s+supply(?:\s|\?|$)",
+        r"what\s+does\s+(.+?)\s+make\s+for\s+(?:the\s+)?(?:us\s+)?(?:defense|defence|military)(?:\?|\.|$)",
         r"which\s+(?:defense|defence)?\s*platforms\s+does\s+(.+?)\s+support(?:\s|\?|$)",
-        r"what\s+does\s+(.+?)(?:'s|’s)\s+.+?\s+facility\s+manufacture(?:\s|\?|$)",
-        r"which\s+programs\s+does\s+(.+?)(?:'s|’s)\s+.+?\s+(?:site|facility)\s+support(?:\s|\?|$)",
-        r"who\s+are\s+(.+?)(?:['’]s|s)\s+largest\s+(?:defense|defence)\s+customers",
-        r"who\s+are\s+(.+?)(?:'s|’s)\s+largest\s+(?:defense|defence)\s+customers",
+        r"what\s+(?:defense|defence)?\s*platforms\s+does\s+(.+?)\s+support(?:\s|\?|$)",
+        r"what\s+does\s+(.+?)(?:'s|’s)\s+(.+?)\s+facility\s+manufacture(?:\s|\?|$)",
+        r"which\s+programs\s+does\s+(.+?)(?:'s|’s)\s+(.+?)\s+(?:site|facility)\s+support(?:\s|\?|$)",
+        r"who\s+are\s+(.+?)(?:['’]s|s)\s+(?:largest|main|leading)\s+(?:defense|defence)\s+customers",
+        r"who\s+are\s+(.+?)(?:'s|’s)\s+(?:largest|main|leading)\s+(?:defense|defence)\s+customers",
         r"which\s+prime\s+contractors\s+buy\s+from\s+(.+?)(?:\?|$)",
+        r"which\s+suppliers\s+does\s+(.+?)\s+buy\s+from(?:\?|$)",
+        r"who\s+(?:buys\s+from|supplies)\s+(.+?)(?:\?|$)",
         r"what\s+are\s+(.+?)(?:'s|’s)\s+largest\s+visible\s+(?:defense|defence)\s+positions",
         r"what\s+are\s+(.+?)(?:['’]s|s)\s+largest\s+visible\s+(?:defense|defence)\s+positions",
         r"how\s+has\s+(.+?)(?:'s|’s)\s+(?:defense|defence)\s+activity\s+changed",
         r"how\s+has\s+(.+?)(?:['’]s|s)\s+(?:defense|defence)\s+activity\s+changed",
         r"which\s+cage\s+codes\s+are\s+associated\s+with\s+(.+?)(?:\?|$)",
         r"which\s+facilities\s+belong\s+to\s+(.+?)(?:\s+and\s+what|\?|$)",
-        r"what\s+evidence\s+do\s+you\s+have\s+that\s+(.+?)\s+supplies\s+",
+        r"what\s+evidence\s+(?:do\s+you\s+have\s+that|shows?(?:\s+that)?|supports?(?:\s+that)?)\s+(.+?)\s+supplies\s+",
         r"(?:give\s+me\s+)?(?:a\s+)?concise\s+(?:defense|defence)[-\s]+market\s+profile\s+of\s+(.+?)(?:\?|$)",
+        r"^(.+?)\s+(?:parent|company|corporation)[- ]wide(?:\?|\.|$)",
         r"(?:tell\s+me\s+about|what\s+about|how\s+about)\s+(.+?)(?:\?|$)",
     )
     match = next(
@@ -1792,6 +1867,12 @@ def explicit_item_query(messages: List[ChatMessage]) -> str | None:
     # latest message only.
     text = str(messages[-1].content or "")
     intent = text.lower()
+    bare_nsn = re.fullmatch(r"\s*\d{4}[ -]?\d{2}[ -]?\d{3}[ -]?\d{4}\s*", text)
+    if bare_nsn:
+        return re.sub(r"[ -]", "", bare_nsn.group(0))
+    inline_nsn = re.search(r"\b\d{4}[ -]\d{2}[ -]\d{3}[ -]\d{4}\b", text)
+    if inline_nsn:
+        return re.sub(r"[ -]", "", inline_nsn.group(0))
     if not any(term in intent for term in ("nsn", "niin", "part number", "part no", "item")):
         return None
     identifier_patterns = (
@@ -1803,6 +1884,15 @@ def explicit_item_query(messages: List[ChatMessage]) -> str | None:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             return match.group(1).strip()
+    part_number = re.search(
+        r"\bPART\s+(?:NUMBER|NO\.?|#)\s*[:#-]?\s*(.+?)\s*[?.]?$",
+        text,
+        re.IGNORECASE,
+    )
+    if part_number:
+        candidate = part_number.group(1).strip()
+        if 3 <= len(candidate) <= 80 and re.search(r"\d", candidate):
+            return candidate
     compact_nsn = re.search(r"\b\d{13}\b", re.sub(r"(?<=\d)[ -](?=\d)", "", text))
     return compact_nsn.group(0) if compact_nsn else None
 
@@ -1812,11 +1902,31 @@ def explicit_award_or_opportunity_query(messages: List[ChatMessage]) -> str | No
     # workflow when the user explicitly names an award in the latest message.
     text = str(messages[-1].content or "")
     intent = text.lower()
+    bare_identifier = re.fullmatch(
+        r"\s*((?:PANRSA|FA|W91|W31|W56|N00|HQ|SPE)[A-Z0-9._/-]{5,})\s*",
+        text,
+        re.IGNORECASE,
+    )
+    if bare_identifier:
+        return bare_identifier.group(1)
+    inline_identifier = re.search(
+        r"\b((?:PANRSA|FA|W91|W31|W56|N00|HQ|SPE)[A-Z0-9._/-]{5,})\b",
+        text,
+        re.IGNORECASE,
+    )
+    if inline_identifier and any(
+        phrase in intent
+        for phrase in (
+            "purchased under", "bought under", "awarded under", "who won",
+            "recipient", "awardee",
+        )
+    ):
+        return inline_identifier.group(1)
     if not any(term in intent for term in ("contract", "award", "solicitation", "opportunity", "notice")):
         return None
     patterns = (
         r"\b(?:CONTRACT|AWARD|SOLICITATION|OPPORTUNITY|NOTICE)(?:\s+(?:NUMBER|NO\.?|ID))?\s*[:#]?\s*([A-Z0-9][A-Z0-9._/-]{4,})",
-        r"\b((?:PANRSA|FA|W91|W31|N00|HQ|SPE)[A-Z0-9._/-]{5,})\b",
+        r"\b((?:PANRSA|FA|W91|W31|W56|N00|HQ|SPE)[A-Z0-9._/-]{5,})\b",
     )
     for pattern in patterns:
         matches = re.findall(pattern, text, re.IGNORECASE)
@@ -2405,6 +2515,8 @@ app.mount("/assets", StaticFiles(directory=LAB_DIR / "assets"), name="assets")
 def workflow_for_request(request: AskRequest) -> str:
     if is_article_analysis_request(request.messages):
         return "news_article_implications"
+    if is_clearly_out_of_domain(request.messages):
+        return "out_of_domain"
     if resolve_market_record_search(request.messages[-1].content):
         return "market_record_search"
     if (
@@ -2413,6 +2525,16 @@ def workflow_for_request(request: AskRequest) -> str:
         and record_search_follow_up_intent(request.messages[-1].content)
     ):
         return "market_record_search"
+    if explicit_award_or_opportunity_query(request.messages):
+        return "contract_or_opportunity"
+    if explicit_item_query(request.messages):
+        return "item_intelligence"
+    if explicit_platform_comparison(request.messages, runtime.platform_contexts):
+        return "platform_comparison"
+    if explicit_platform_query(request.messages, runtime.platform_contexts):
+        return "platform_intelligence"
+    if is_ground_vehicle_power_position_request(request.messages):
+        return "defined_market_competitive_position"
     if resolve_market_segment(request.messages[-1].content):
         return "market_segment_intelligence"
     if resolve_capability(request.messages[-1].content):
@@ -2439,14 +2561,6 @@ def workflow_for_request(request: AskRequest) -> str:
         return "capability_discovery"
     if is_eaton_competitor_request(request.messages):
         return "competitor_discovery"
-    if is_ground_vehicle_power_position_request(request.messages):
-        return "defined_market_competitive_position"
-    if explicit_award_or_opportunity_query(request.messages):
-        return "contract_or_opportunity"
-    if explicit_item_query(request.messages):
-        return "item_intelligence"
-    if explicit_platform_comparison(request.messages, runtime.platform_contexts):
-        return "platform_comparison"
     if (
         request.active_scope
         and request.active_scope.scope_type == "platform_comparison"
@@ -2458,8 +2572,6 @@ def workflow_for_request(request: AskRequest) -> str:
         and request.active_scope.scope_type == "platform"
         and platform_follow_up_intent(request.messages[-1].content)
     ):
-        return "platform_intelligence"
-    if explicit_platform_query(request.messages, runtime.platform_contexts):
         return "platform_intelligence"
     if company_site_dossier_cage(request.messages):
         return "company_site_intelligence"
@@ -2477,8 +2589,6 @@ def workflow_for_request(request: AskRequest) -> str:
         return "program_momentum"
     if is_open_capability_discovery_request(request.messages[-1].content):
         return "capability_discovery"
-    if is_clearly_out_of_domain(request.messages):
-        return "out_of_domain"
     return "general_defense_research"
 
 
@@ -3226,9 +3336,42 @@ def generate_answer(
     if runtime.mock_mode:
         return runtime.mock_answer(request)
     started = time.perf_counter()
+    if is_clearly_out_of_domain(request.messages):
+        return {
+            "answer": (
+                "Ask Mimir is focused on the defense industrial base, government acquisition and "
+                "national-security supply chains. I cannot help with that request here, but I can "
+                "help if you reframe it around a defense company, program, component, award or market."
+            ),
+            "response_id": "out-of-domain",
+            "model": "deterministic-scope-guard",
+            "release_id": runtime.store.manifest["release_id"],
+            "tool_trace": [],
+            "answer_artifacts": {},
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "response_calls": 0,
+            "usage": None,
+            "usage_by_response": [],
+            "estimated_cost": None,
+        }
     resolved_company_scope: Dict[str, Any] | None = None
-    company_query = explicit_company_name_query(request.messages)
     latest_question = str(request.messages[-1].content or "")
+    platform_mentions = runtime.platform_contexts.mentions(latest_question)
+    platform_comparison_candidate = explicit_platform_comparison(
+        request.messages, runtime.platform_contexts
+    )
+    platform_query_candidate = explicit_platform_query(
+        request.messages, runtime.platform_contexts
+    )
+    ground_vehicle_position_request = is_ground_vehicle_power_position_request(
+        request.messages
+    )
+    company_query = explicit_company_name_query(request.messages)
+    if is_platform_centered_request(
+        latest_question,
+        has_platform_mention=bool(platform_mentions),
+    ):
+        company_query = None
     record_search_spec = resolve_market_record_search(latest_question)
     if (
         not record_search_spec
@@ -3239,6 +3382,10 @@ def generate_answer(
         record_search_spec = record_search_from_scope_id(request.active_scope.scope_id)
     capability_id = resolve_capability(latest_question)
     segment_id = resolve_market_segment(latest_question)
+    if platform_query_candidate or platform_comparison_candidate or ground_vehicle_position_request:
+        capability_id = None
+    if ground_vehicle_position_request:
+        segment_id = None
     if (
         not segment_id
         and request.active_scope
@@ -3253,6 +3400,19 @@ def generate_answer(
         and capability_market_follow_up_intent(latest_question)
     ):
         capability_id = request.active_scope.scope_id
+    if any(
+        (
+            record_search_spec,
+            capability_id,
+            segment_id,
+            is_geographic_market_request(latest_question),
+            explicit_item_query(request.messages),
+            explicit_award_or_opportunity_query(request.messages),
+            explicit_platform_comparison(request.messages, runtime.platform_contexts),
+            is_article_analysis_request(request.messages),
+        )
+    ):
+        company_query = None
     if (
         is_open_capability_discovery_request(latest_question)
         and not runtime.platform_contexts.mentions(latest_question)
@@ -3475,24 +3635,6 @@ def generate_answer(
         {"role": message.role, "content": message.content} for message in request.messages
     ]
     client = OpenAI()
-    if is_clearly_out_of_domain(request.messages):
-        return {
-            "answer": (
-                "Ask Mimir is focused on the defense industrial base, government acquisition and "
-                "national-security supply chains. I cannot help with that request here, but I can "
-                "help if you reframe it around a defense company, program, component, award or market."
-            ),
-            "response_id": "out-of-domain",
-            "model": "deterministic-scope-guard",
-            "release_id": runtime.store.manifest["release_id"],
-            "tool_trace": [],
-            "answer_artifacts": {},
-            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-            "response_calls": 0,
-            "usage": None,
-            "usage_by_response": [],
-            "estimated_cost": None,
-        }
     if is_article_analysis_request(request.messages):
         emit_progress(progress, "Reading the article", "Verifying the report and resolving the entities it names", 24)
         article_tools = [*TOOLS, {"type": "web_search", "search_context_size": "low"}]
@@ -3834,6 +3976,33 @@ def generate_answer(
         trace = [
             {"tool": "get_capability_market", "arguments": arguments, "result": pack}
         ]
+        coverage = pack.get("coverage") or {}
+        connected_evidence_count = sum(
+            int(coverage.get(field) or 0)
+            for field in (
+                "matching_niins",
+                "commercial_supplier_sites",
+                "prime_award_sites",
+            )
+        )
+        if capability_id.startswith("capability:") and connected_evidence_count == 0:
+            return {
+                "answer": (
+                    "I do not yet have enough connected evidence to answer that "
+                    "capability-wide question reliably. Try narrowing the question to a "
+                    "named platform, company, contract or current opportunity."
+                ),
+                "response_id": "capability-evidence-insufficient",
+                "model": "deterministic-evidence-control",
+                "release_id": runtime.store.manifest["release_id"],
+                "tool_trace": trace,
+                "answer_artifacts": {"capability_market": pack},
+                "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                "response_calls": 0,
+                "usage": None,
+                "usage_by_response": [],
+                "estimated_cost": None,
+            }
         capability_input = [
             {"role": "user", "content": latest_question},
             {
@@ -4244,9 +4413,7 @@ def generate_answer(
             )
             return result
 
-    comparison_platforms = explicit_platform_comparison(
-        request.messages, runtime.platform_contexts
-    )
+    comparison_platforms = platform_comparison_candidate
     if (
         request.active_scope
         and request.active_scope.scope_type == "platform_comparison"
@@ -4334,7 +4501,7 @@ def generate_answer(
         )
         return result
 
-    platform_query = explicit_platform_query(request.messages, runtime.platform_contexts)
+    platform_query = platform_query_candidate
     platform_focus = requested_platform_focus(request.messages[-1].content)
     if (
         request.active_scope
