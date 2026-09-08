@@ -1109,7 +1109,11 @@ function renderEvidence(trace, answerText = "", artifacts = {}) {
     evidenceList.appendChild(gate);
   }
   if (!visibleTrace.length) {
-    evidenceList.insertAdjacentHTML("beforeend", '<div class="evidence-placeholder">No evidence tool was used. Treat this response as unsupported.</div>');
+    const isResolutionStep = trace.some((entry) => String(entry.tool || "").startsWith("search_"));
+    const message = isResolutionStep
+      ? "Select or confirm a result to load its supporting evidence."
+      : "No supporting evidence was returned for this response.";
+    evidenceList.insertAdjacentHTML("beforeend", `<div class="evidence-placeholder">${message}</div>`);
     return;
   }
   visibleTrace.forEach((entry, index) => {
