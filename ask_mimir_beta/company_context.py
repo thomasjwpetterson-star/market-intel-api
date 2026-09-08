@@ -364,12 +364,18 @@ class CompanyContextBuilder:
         """Find same-company prime activity performed at a registered CAGE location."""
         records: List[Dict[str, Any]] = []
         seen = set()
+        sites_by_location: Dict[tuple[str, str, str], List[Dict[str, Any]]] = {}
         for site in sites:
             city = str(site.get("city") or "").strip()
             state = normalized_state(site.get("state"))
             company_core = legal_company_core(site.get("vendor_name"))
-            if not city or not company_core:
+            if not city or not state or not company_core:
                 continue
+            key = (city.upper(), state, company_core)
+            sites_by_location.setdefault(key, []).append(site)
+
+        if sites_by_location:
+            cities = sorted({key[0] for key in sites_by_location})
             query = f"""
                 SELECT
                     vendor_cage AS recipient_cage,
@@ -400,7 +406,7 @@ class CompanyContextBuilder:
                     MAX(TRY_CAST(action_date AS DATE)) AS latest_action_date
                 FROM read_parquet(?)
                 WHERE source_system = 'USA_SPENDING'
-                  AND UPPER(TRIM(place_of_performance_city)) = UPPER(?)
+                  AND UPPER(TRIM(place_of_performance_city)) IN ({placeholders(cities)})
                   AND year IN ({placeholders(years)})
                 GROUP BY 1, 5
                 ORDER BY ABS(net_prime_obligations_usd) DESC
@@ -408,35 +414,37 @@ class CompanyContextBuilder:
             candidates = rows_as_dicts(
                 self.connection.execute(
                     query,
-                    [str(self.paths["transactions"]), city, *years],
+                    [str(self.paths["transactions"]), *cities, *years],
                 )
             )
             for row in candidates:
-                if normalized_state(row.get("place_of_performance_state")) != state:
-                    continue
-                if legal_company_core(row.get("recipient_name")) != company_core:
-                    continue
                 key = (
-                    site.get("cage"),
-                    row.get("recipient_cage"),
-                    row.get("platform_family"),
+                    str(row.get("place_of_performance_city") or "").strip().upper(),
+                    normalized_state(row.get("place_of_performance_state")),
+                    legal_company_core(row.get("recipient_name")),
                 )
-                if key in seen:
-                    continue
-                seen.add(key)
-                records.append(
-                    {
-                        "registered_site_cage": site.get("cage"),
-                        "registered_site_name": site.get("vendor_name"),
-                        "registered_site_city": site.get("city"),
-                        "registered_site_state": site.get("state"),
-                        **row,
-                        "relationship_basis": (
-                            "Same legal company name and reported place of performance "
-                            "matching the registered CAGE city and state"
-                        ),
-                    }
-                )
+                for site in sites_by_location.get(key, []):
+                    record_key = (
+                        site.get("cage"),
+                        row.get("recipient_cage"),
+                        row.get("platform_family"),
+                    )
+                    if record_key in seen:
+                        continue
+                    seen.add(record_key)
+                    records.append(
+                        {
+                            "registered_site_cage": site.get("cage"),
+                            "registered_site_name": site.get("vendor_name"),
+                            "registered_site_city": site.get("city"),
+                            "registered_site_state": site.get("state"),
+                            **row,
+                            "relationship_basis": (
+                                "Same legal company name and reported place of performance "
+                                "matching the registered CAGE city and state"
+                            ),
+                        }
+                    )
         records.sort(
             key=lambda row: abs(float(row.get("net_prime_obligations_usd") or 0)),
             reverse=True,

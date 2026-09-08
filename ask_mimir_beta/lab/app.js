@@ -847,12 +847,53 @@ function renderItemEvidence(entry, artifacts = {}) {
         ${suppliers.slice(0, 16).map((supplier) => `<div class="evidence-row">
           <strong>${dashboardLink(`${supplier.vendor_name || supplier.cage} · CAGE ${supplier.cage}`, "COMPANY", "cage", supplier.cage)}</strong>
           ${escapeHtml([supplier.city, supplier.state].filter(Boolean).join(", ") || "Location not shown")}<br />
-          ${supplier.is_active_authorized_source ? '<span class="evidence-tag">Active authorized source</span>' : ""}
+          ${supplier.is_active_authorized_source ? '<span class="evidence-tag">Authorized by DLA</span>' : ""}
           ${supplier.has_observed_dla_procurement ? `<span class="evidence-tag">Observed DLA procurement · ${formatMoney(supplier.net_dla_procurement_value_usd)}</span>` : ""}
         </div>`).join("")}
       </section></div>`;
     evidenceList.appendChild(supplierDetails);
   }
+}
+
+function renderCapabilityEvidence(entry) {
+  const result = entry.result || {};
+  const scope = result.scope || {};
+  const coverage = result.coverage || {};
+  const suppliers = result.supplier_sites || [];
+  const overview = document.createElement("details");
+  overview.className = "evidence-card";
+  overview.open = true;
+  overview.innerHTML = `
+    <summary>
+      <span class="tool-name">${escapeHtml(scope.display_name || "Capability evidence")}</span>
+      <span class="tool-meta">${escapeHtml(scope.observation_window || "Current source and procurement evidence")}</span>
+    </summary>
+    <div class="evidence-detail"><section class="evidence-section">
+      <div class="evidence-row">
+        <strong>${escapeHtml(coverage.commercial_supplier_sites || 0)} supplier sites identified</strong>
+        ${escapeHtml(coverage.matching_niins || 0)} matched NIINs ·
+        ${escapeHtml(coverage.supplier_sites_with_active_authorized_items || 0)} sites authorized by DLA for at least one matched item ·
+        ${escapeHtml(coverage.supplier_sites_with_observed_procurement || 0)} sites with observed DLA procurement
+      </div>
+    </section></div>`;
+  evidenceList.appendChild(overview);
+
+  if (!suppliers.length) return;
+  const details = document.createElement("details");
+  details.className = "evidence-card";
+  details.innerHTML = `
+    <summary>
+      <span class="tool-name">Supplier evidence</span>
+      <span class="tool-meta">Showing ${Math.min(suppliers.length, 16)} of ${escapeHtml(coverage.commercial_supplier_sites || suppliers.length)}</span>
+    </summary>
+    <div class="evidence-detail"><section class="evidence-section">
+      ${suppliers.slice(0, 16).map((supplier) => `<div class="evidence-row">
+        <strong>${dashboardLink(`${supplier.supplier_name || supplier.cage} · CAGE ${supplier.cage}`, "COMPANY", "cage", supplier.cage)}</strong>
+        ${escapeHtml([supplier.city, supplier.state].filter(Boolean).join(", ") || "Location not shown")}<br />
+        ${escapeHtml((supplier.evidence_summary || []).join(" · ") || "Matched item evidence")}
+      </div>`).join("")}
+    </section></div>`;
+  evidenceList.appendChild(details);
 }
 
 function renderAwardOpportunityEvidence(entry, artifacts = {}) {
@@ -1053,7 +1094,8 @@ function renderMetricEvidence(entry) {
 
 function renderEvidence(trace, answerText = "", artifacts = {}) {
   evidenceList.innerHTML = "";
-  evidenceCount.textContent = `${trace.length} ${trace.length === 1 ? "call" : "calls"}`;
+  const visibleTrace = trace.filter((entry) => !String(entry.tool || "").startsWith("search_"));
+  evidenceCount.textContent = `${visibleTrace.length} evidence ${visibleTrace.length === 1 ? "section" : "sections"}`;
   const evidencePack = artifacts.evidence_pack || {};
   if (evidencePack.locked) {
     const gate = document.createElement("section");
@@ -1066,11 +1108,11 @@ function renderEvidence(trace, answerText = "", artifacts = {}) {
       <a href="${escapeHtml(evidencePack.upgrade_url || "https://www.mimiradvisors.org/dashboard?upgrade=professional")}">View Professional</a>`;
     evidenceList.appendChild(gate);
   }
-  if (!trace.length) {
+  if (!visibleTrace.length) {
     evidenceList.insertAdjacentHTML("beforeend", '<div class="evidence-placeholder">No evidence tool was used. Treat this response as unsupported.</div>');
     return;
   }
-  trace.forEach((entry, index) => {
+  visibleTrace.forEach((entry, index) => {
     if (entry.tool === "get_company_opportunity_candidates" && entry.result) {
       renderOpportunityEvidence(entry, answerText);
       return;
@@ -1092,6 +1134,10 @@ function renderEvidence(trace, answerText = "", artifacts = {}) {
       renderItemEvidence(entry, artifacts);
       return;
     }
+    if (entry.tool === "get_capability_market" && entry.result) {
+      renderCapabilityEvidence(entry);
+      return;
+    }
     if (entry.tool === "get_award_opportunity_context" && entry.result) {
       renderAwardOpportunityEvidence(entry, artifacts);
       return;
@@ -1106,15 +1152,6 @@ function renderEvidence(trace, answerText = "", artifacts = {}) {
     }
     if (["get_metric_observation", "get_metric_evidence"].includes(entry.tool) && entry.result) {
       renderMetricEvidence(entry);
-      return;
-    }
-    if (entry.tool === "search_award_opportunity_contexts" && entry.result && (artifacts.contract_dossier || artifacts.opportunity_dossier)) {
-      return;
-    }
-    if (entry.tool === "search_item_contexts" && entry.result && artifacts.item_dossier) {
-      return;
-    }
-    if (entry.tool === "search_platform_contexts" && entry.result && artifacts.platform_dossier) {
       return;
     }
     const details = document.createElement("details");

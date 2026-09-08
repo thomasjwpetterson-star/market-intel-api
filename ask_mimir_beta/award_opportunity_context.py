@@ -90,6 +90,7 @@ class AwardOpportunityContextStore:
                 "opportunities": "opportunities.parquet",
                 "network": "network.parquet",
                 "locations": "cage_locations.parquet",
+                "references": "nsn_cage_reference.parquet",
             }.items()
         }
         missing = [str(path) for path in self.paths.values() if not path.exists()]
@@ -138,6 +139,13 @@ class AwardOpportunityContextStore:
             projected["action_history"] = context["action_history"][:20]
             projected["reported_subaward_suppliers"] = context["reported_subaward_suppliers"][:20]
             projected["comparable_suppliers"] = context["comparable_suppliers"][:12]
+            financial = dict(context["financial_summary"])
+            financial["annual_obligations"] = [
+                row
+                for row in financial.get("annual_obligations", [])
+                if int(row.get("action_count") or 0) > 0
+            ]
+            projected["financial_summary"] = financial
         else:
             projected["likely_competitors"] = context["likely_competitors"][:12]
             projected["related_historical_awards"] = context["related_historical_awards"][:15]
@@ -351,9 +359,9 @@ class AwardOpportunityContextStore:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "identity": identity,
             "financial_summary": {
-                "net_prime_obligations_all_loaded_years_usd": row.get("total_spend") or 0.0,
+                "net_prime_obligations_fy2019_fy2026_usd": row.get("total_spend") or 0.0,
                 "annual_obligations": annual,
-                "loaded_fiscal_years": list(range(2019, 2027)),
+                "available_fiscal_years": list(range(2019, 2027)),
                 "partial_fiscal_year": 2026,
             },
             "action_history": actions,
@@ -362,8 +370,8 @@ class AwardOpportunityContextStore:
             "related_opportunities": related_opportunities,
             "evidence_index": self._contract_sources(row, actions, related_opportunities),
             "methodology": {
-                "award_value": "Net prime obligations are summed from reported contract actions in the loaded fiscal years.",
-                "subaward_value": "Mimir-modelled reported subcontract value uses the current curated subaward methodology and remains separate from prime obligations.",
+                "award_value": "Net prime obligations are summed from reported contract actions for FY2019-FY2026.",
+                "subaward_value": "Reported subcontract value follows Mimir's published subaward methodology for the stated period.",
                 "comparables": "Comparable suppliers are ranked from completed-year awards using shared PSC, NAICS and buying-organization evidence; they are not identified bidders.",
             },
         }
@@ -593,7 +601,12 @@ class AwardOpportunityContextStore:
         if not cages or not platforms:
             return rows
 
-        cage_placeholders = ",".join("?" for _ in cages)
+        enrichment_cages = [
+            str(row.get("supplier_cage") or "").strip().upper()
+            for row in rows[:30]
+            if str(row.get("supplier_cage") or "").strip()
+        ]
+        cage_placeholders = ",".join("?" for _ in enrichment_cages)
         platform_placeholders = ",".join("?" for _ in platforms)
         related = _rows(
             self.connection.execute(
@@ -617,17 +630,70 @@ class AwardOpportunityContextStore:
                   AND UPPER(TRIM(platform_family)) IN ({platform_placeholders})
                 GROUP BY 1
                 """,
-                [str(self.paths["network"]), *cages, *platforms],
+                [str(self.paths["network"]), *enrichment_cages, *platforms],
             )
         )
         related_by_cage = {row["supplier_cage"]: row for row in related}
-        for row in rows:
-            enrichment = related_by_cage.get(
-                str(row.get("supplier_cage") or "").upper(), {}
+        item_rows = _rows(
+            self.connection.execute(
+                f"""
+                SELECT UPPER(TRIM(cage)) AS supplier_cage,
+                       LIST_SLICE(LIST_DISTINCT(LIST(description) FILTER (
+                           WHERE COALESCE(TRIM(description), '') <> ''
+                       )), 1, 8) AS item_reference_descriptions,
+                       LIST_SLICE(LIST_DISTINCT(LIST(platform_families) FILTER (
+                           WHERE COALESCE(TRIM(platform_families), '') <> ''
+                       )), 1, 8) AS item_reference_platforms
+                FROM read_parquet(?)
+                WHERE UPPER(TRIM(cage)) IN ({cage_placeholders})
+                GROUP BY 1
+                """,
+                [str(self.paths["references"]), *enrichment_cages],
             )
+        )
+        items_by_cage = {row["supplier_cage"]: row for row in item_rows}
+        prime_rows = _rows(
+            self.connection.execute(
+                f"""
+                SELECT UPPER(TRIM(vendor_cage)) AS supplier_cage,
+                       LIST_SLICE(LIST_DISTINCT(LIST(COALESCE(
+                           base_award_description, description
+                       )) FILTER (WHERE COALESCE(TRIM(COALESCE(
+                           base_award_description, description
+                       )), '') <> ''
+                         AND LENGTH(COALESCE(base_award_description, description)) <= 300
+                         AND LENGTH(COALESCE(base_award_description, description))
+                             - LENGTH(REPLACE(COALESCE(base_award_description, description), '!', '')) <= 3
+                       )), 1, 8) AS site_prime_award_descriptions
+                FROM read_parquet(?)
+                WHERE UPPER(TRIM(vendor_cage)) IN ({cage_placeholders})
+                  AND source_system='USA_SPENDING'
+                  AND year BETWEEN 2021 AND 2026
+                GROUP BY 1
+                """,
+                [str(self.paths["contracts"]), *enrichment_cages],
+            )
+        )
+        prime_by_cage = {row["supplier_cage"]: row for row in prime_rows}
+        for row in rows:
+            cage = str(row.get("supplier_cage") or "").upper()
+            enrichment = related_by_cage.get(cage, {})
+            item_context = items_by_cage.get(cage, {})
+            prime_context = prime_by_cage.get(cage, {})
             row["same_platform_reported_descriptions"] = enrichment.get(
                 "same_platform_reported_descriptions"
             ) or []
+            row["broader_site_capability_evidence"] = {
+                "item_reference_descriptions": item_context.get(
+                    "item_reference_descriptions"
+                ) or [],
+                "item_reference_platforms": item_context.get(
+                    "item_reference_platforms"
+                ) or [],
+                "prime_award_descriptions": prime_context.get(
+                    "site_prime_award_descriptions"
+                ) or [],
+            }
         return rows
 
     def _comparable_suppliers(

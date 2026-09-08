@@ -100,7 +100,11 @@ def artifact_files() -> Iterable[Tuple[Path, str]]:
     included = set()
     for source_dir, destination_dir in artifact_directories():
         for path in sorted(source_dir.rglob("*")):
-            if not path.is_file() or "duckdb_tmp" in path.parts:
+            if (
+                not path.is_file()
+                or "duckdb_tmp" in path.parts
+                or ".dynamic-cache" in path.parts
+            ):
                 continue
             if destination_dir == "metric-release" and path.parent != source_dir:
                 continue

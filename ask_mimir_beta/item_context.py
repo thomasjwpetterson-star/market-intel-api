@@ -67,6 +67,11 @@ def normalize_niin(value: Any) -> str | None:
     return None
 
 
+def normalize_nsn(value: Any) -> str | None:
+    digits = re.sub(r"\D", "", str(value or ""))
+    return digits if len(digits) == 13 else None
+
+
 def normalize_part_number(value: Any) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
 
@@ -102,7 +107,28 @@ class ItemContextStore:
             return {"query": clean_query, "matches": [], "requires_disambiguation": False}
 
         digits = re.sub(r"\D", "", clean_query)
+        requested_nsn = normalize_nsn(clean_query)
         direct_niin = normalize_niin(clean_query) if len(digits) in {8, 9, 13} else None
+        if requested_nsn and direct_niin and not self._nsn_exists(requested_nsn):
+            if self._niin_exists(direct_niin):
+                match = self._resolution_summary(direct_niin, clean_query)
+                return {
+                    "query": clean_query,
+                    "query_type": "NSN_FSC_MISMATCH",
+                    "matches": [match],
+                    "requires_disambiguation": False,
+                    "requires_identifier_confirmation": True,
+                    "requested_nsn": requested_nsn,
+                    "catalog_nsn": match.get("nsn"),
+                    "resolved_niin": None,
+                }
+            return {
+                "query": clean_query,
+                "query_type": "NSN",
+                "matches": [],
+                "requires_disambiguation": False,
+                "resolved_niin": None,
+            }
         if direct_niin and self._niin_exists(direct_niin):
             matches = [self._resolution_summary(direct_niin, clean_query)]
             return {
@@ -157,6 +183,11 @@ class ItemContextStore:
         clean_niin = normalize_niin(niin)
         if not clean_niin:
             raise ValueError("A valid 9-digit NIIN or 13-digit NSN is required")
+        requested_nsn = normalize_nsn(niin)
+        if requested_nsn and not self._nsn_exists(requested_nsn):
+            raise ValueError(
+                f"NSN {requested_nsn} is not an exact match in the current item reference"
+            )
         years = tuple(sorted({int(year) for year in fiscal_years}))
         cache_key = (clean_niin, years)
         if cache_key in self._cache:
@@ -258,10 +289,17 @@ class ItemContextStore:
             or row["has_linked_prime_obligations"]
         ]
         material_cages = {row["cage"] for row in material_suppliers}
+        reference_only_suppliers = [
+            row
+            for row in context["supplier_summary"]
+            if row["cage"] not in material_cages
+        ][:20]
+        answer_suppliers = [*material_suppliers, *reference_only_suppliers]
+        answer_cages = {row["cage"] for row in answer_suppliers}
         reference_rows = [
             row
             for row in context["reference_relationships"]
-            if row["cage"] in material_cages
+            if row["cage"] in answer_cages
         ]
         projected = {
             key: value
@@ -279,7 +317,7 @@ class ItemContextStore:
         }
         projected.update(
             {
-                "supplier_summary": material_suppliers,
+                "supplier_summary": answer_suppliers,
                 "reference_relationships": reference_rows[:30],
                 "part_number_summary": context["part_number_summary"][:30],
                 "contracts": context["contracts"][:15],
@@ -288,6 +326,7 @@ class ItemContextStore:
                 "coverage": {
                     "supplier_or_reference_sites": len(context["supplier_summary"]),
                     "material_supplier_sites_in_answer": len(material_suppliers),
+                    "other_reference_sites_in_answer": len(reference_only_suppliers),
                     "part_number_relationships": len(context["reference_relationships"]),
                     "distinct_part_numbers": len(context["part_number_summary"]),
                     "dla_contract_records": len(context["contracts"]),
@@ -307,6 +346,28 @@ class ItemContextStore:
             or self.connection.execute(
                 "SELECT 1 FROM read_parquet(?) WHERE niin=? LIMIT 1",
                 [str(self.paths["profile"]), niin],
+            ).fetchone()
+        )
+
+    def _nsn_exists(self, nsn: str) -> bool:
+        return bool(
+            self.connection.execute(
+                """
+                SELECT 1
+                FROM read_parquet(?)
+                WHERE REGEXP_REPLACE(COALESCE(nsn, ''), '[^0-9]', '', 'g')=?
+                LIMIT 1
+                """,
+                [str(self.paths["reference"]), nsn],
+            ).fetchone()
+            or self.connection.execute(
+                """
+                SELECT 1
+                FROM read_parquet(?)
+                WHERE REGEXP_REPLACE(COALESCE(nsn, ''), '[^0-9]', '', 'g')=?
+                LIMIT 1
+                """,
+                [str(self.paths["profile"]), nsn],
             ).fetchone()
         )
 

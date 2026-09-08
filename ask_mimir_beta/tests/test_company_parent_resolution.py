@@ -40,7 +40,10 @@ class CompanyParentResolutionTests(unittest.TestCase):
                         ('E1111', 'EATON AEROSPACE, LLC', 'EATON AEROSPACE,', 'EATONUEI001', 800.0, 80.0),
                         ('E2222', 'EATON-AEROQUIP LLC.', 'EATON CORPORATION PUBLIC LIMITED', 'EATONUEI002', 700.0, 70.0),
                         ('E3333', 'EATON CORPORATION', 'EATON', 'EATONUEI003', 600.0, 60.0),
-                        ('E4444', 'EUROFINS EATON ANALYTICAL, LLC', 'EUROFINS EATON ANALYTICAL', 'EUROFINS001', 500.0, 50.0)
+                        ('E4444', 'EUROFINS EATON ANALYTICAL, LLC', 'EUROFINS EATON ANALYTICAL', 'EUROFINS001', 500.0, 50.0),
+                        ('T1111', 'DATA DEVICE CORPORATION', 'TRANSDIGM GROUP INCORPORATED', 'TRANSDIGM001', 900.0, 90.0),
+                        ('T2222', 'ARMTEC DEFENSE PRODUCTS CO.', 'TRANSDIGM', 'TRANSDIGM002', 800.0, 80.0),
+                        ('T3333', 'TRANSDIGM INC.', NULL, NULL, 700.0, 70.0)
                     ) AS t(
                         cage_code,
                         vendor_name,
@@ -96,6 +99,9 @@ class CompanyParentResolutionTests(unittest.TestCase):
                     ,('E2222', 'EATON-AEROQUIP LLC.', 'JACKSON', 'MI', 'A', NULL)
                     ,('E3333', 'EATON CORPORATION', 'IRVINE', 'CA', 'A', NULL)
                     ,('E4444', 'EUROFINS EATON ANALYTICAL, LLC', 'POMONA', 'CA', 'A', NULL)
+                    ,('T1111', 'DATA DEVICE CORPORATION', 'BOHEMIA', 'NY', 'A', NULL)
+                    ,('T2222', 'ARMTEC DEFENSE PRODUCTS CO.', 'COACHELLA', 'CA', 'A', NULL)
+                    ,('T3333', 'TRANSDIGM INC.', 'CLEVELAND', 'OH', 'A', NULL)
                 ) AS t(cage_code, vendor_name, city, state, cage_status, replacement_cage)
             ) TO ? (FORMAT PARQUET)
             """,
@@ -237,6 +243,20 @@ class CompanyParentResolutionTests(unittest.TestCase):
             )
             self.assertEqual(parent["resolved_cages"], ["E1111", "E2222", "E3333"])
             self.assertNotIn("E4444", parent["resolved_cages"])
+
+    def test_reported_parent_variants_and_direct_named_sites_are_consolidated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            result = store.search("TransDigm", limit=20)
+
+            parents = [
+                row for row in result["matches"] if row["scope_type"] == "company_parent"
+            ]
+            self.assertEqual(len(parents), 1)
+            self.assertEqual(
+                parents[0]["resolved_cages"], ["T1111", "T2222", "T3333"]
+            )
+            self.assertEqual(parents[0]["site_count"], 3)
 
 
 if __name__ == "__main__":

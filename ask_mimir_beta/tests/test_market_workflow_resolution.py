@@ -39,6 +39,14 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
             "aircraft_actuation",
         )
 
+    def test_open_landing_gear_capability_resolves_dynamically(self):
+        self.assertEqual(
+            resolve_capability(
+                "Give me an overview of this US defense market, capability area or industrial base: Military Landing Gear"
+            ),
+            "capability:military landing gear",
+        )
+
     def test_alabama_market_request_resolves(self):
         question = "Give me an overview of the defence industrial base in Alabama."
         self.assertEqual(resolve_state(question), "AL")

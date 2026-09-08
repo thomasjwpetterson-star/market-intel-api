@@ -170,14 +170,20 @@ class CapabilityDiscoveryStore:
 
     def search(self, query: str) -> Dict[str, Any]:
         capability_id = resolve_capability(query)
-        return {
-            "query": str(query or "").strip(),
-            "resolved_capability_id": capability_id,
-            "resolved_capability_name": (
+        if capability_id and capability_id.startswith(DYNAMIC_CAPABILITY_PREFIX):
+            capability_name = unquote(
+                capability_id[len(DYNAMIC_CAPABILITY_PREFIX):]
+            ).strip().title()
+        else:
+            capability_name = (
                 CAPABILITY_DEFINITIONS[capability_id]["display_name"]
                 if capability_id
                 else None
-            ),
+            )
+        return {
+            "query": str(query or "").strip(),
+            "resolved_capability_id": capability_id,
+            "resolved_capability_name": capability_name,
         }
 
     def get(self, capability_id: str, limit: int = 25) -> Dict[str, Any]:
@@ -438,16 +444,30 @@ class CapabilityDiscoveryStore:
                 ],
             )
         )
+        prime_by_cage = {
+            str(row.get("cage") or "").upper(): row for row in prime_award_sites
+        }
         for index, row in enumerate(commercial_rows, start=1):
             row["rank"] = index
-            row["evidence_basis"] = [
+            prime = prime_by_cage.get(str(row.get("cage") or "").upper(), {})
+            row["direct_prime_award_count"] = int(prime.get("prime_award_count") or 0)
+            row["evidence_summary"] = [
                 label
-                for present, label in (
-                    (row["active_authorized_niin_count"] > 0, "DLA authorized-source relationships"),
-                    (row["observed_procurement_niin_count"] > 0, "observed DLA procurement"),
-                    (bool(row.get("item_evidence")), "NIIN and part-number references"),
+                for count, label in (
+                    (
+                        int(row["active_authorized_niin_count"] or 0),
+                        f"Authorized by DLA for {int(row['active_authorized_niin_count'] or 0):,} matched item(s)",
+                    ),
+                    (
+                        int(row["observed_procurement_niin_count"] or 0),
+                        f"Received DLA procurement awards for {int(row['observed_procurement_niin_count'] or 0):,} matched item(s)",
+                    ),
+                    (
+                        int(prime.get("prime_award_count") or 0),
+                        f"Recipient of {int(prime.get('prime_award_count') or 0):,} directly relevant prime award(s)",
+                    ),
                 )
-                if present
+                if count > 0
             ]
         return {
             "context_type": "capability_supplier_market",

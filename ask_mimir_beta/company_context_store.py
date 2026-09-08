@@ -18,7 +18,7 @@ DEFAULT_CONTEXT_DIR = ROOT / "validation-output" / "company-context"
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
-DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v8"
+DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v9"
 
 
 # Reviewed trading-name aliases prevent common surnames from sweeping unrelated
@@ -370,16 +370,26 @@ class CompanyContextStore:
                         row for row in matches if row["scope_type"] != "company_parent"
                     ]
                     matches = self._merge_directory_matches(matches, [group])
-            if (
-                not reviewed_aliases
-                and scope_type != "company_site"
-                and not any(row["scope_type"] == "company_parent" for row in matches)
-            ):
+            reported_parent_matches: List[Dict[str, Any]] = []
+            if not reviewed_aliases and scope_type != "company_site":
                 reported_parent_matches = self._reported_parent_matches(query)
-                matches = self._merge_directory_matches(
-                    matches,
+                if not any(row["scope_type"] == "company_parent" for row in matches):
+                    matches = self._merge_directory_matches(
+                        matches,
+                        reported_parent_matches,
+                    )
+                consolidated_parent = self._consolidated_reported_parent_match(
+                    query,
                     reported_parent_matches,
+                    directory_matches,
                 )
+                if consolidated_parent:
+                    matches = [
+                        row for row in matches if row["scope_type"] != "company_parent"
+                    ]
+                    matches = self._merge_directory_matches(
+                        matches, [consolidated_parent]
+                    )
             if scope_type != "company_site" and not any(
                 row["scope_type"] == "company_parent" for row in matches
             ):
@@ -441,6 +451,73 @@ class CompanyContextStore:
                 if requires_disambiguation
                 else []
             ),
+        }
+
+    def _consolidated_reported_parent_match(
+        self,
+        query: str,
+        parent_matches: List[Dict[str, Any]],
+        directory_matches: List[Dict[str, Any]],
+    ) -> Dict[str, Any] | None:
+        """Combine equivalent reported parent-name variants into one company scope."""
+        if len(parent_matches) < 2:
+            return None
+        query_core = _company_name_core(query)
+        compatible = [
+            row
+            for row in parent_matches
+            if (
+                _company_name_core(row.get("scope_name")) == query_core
+                or _company_name_core(row.get("scope_name", "")).startswith(
+                    f"{query_core} "
+                )
+            )
+        ]
+        if len(compatible) < 2:
+            return None
+        cages = {
+            _normalize_cage(cage)
+            for row in compatible
+            for cage in row.get("resolved_cages", [])
+            if _normalize_cage(cage)
+        }
+        for row in directory_matches:
+            name_core = _company_name_core(row.get("scope_name"))
+            if name_core == query_core or name_core.startswith(f"{query_core} "):
+                cage = _normalize_cage(row.get("scope_id"))
+                if cage:
+                    cages.add(cage)
+        if len(cages) < 2:
+            return None
+        preferred = max(compatible, key=lambda row: int(row.get("site_count") or 0))
+        scope_name = str(preferred.get("scope_name") or query).strip()
+        scope_id = _reported_parent_id(scope_name)
+        cage_list = sorted(cages)
+        site_by_cage = {
+            _normalize_cage(row.get("scope_id")): dict(row)
+            for row in directory_matches
+            if _normalize_cage(row.get("scope_id")) in cages
+        }
+        self._dynamic_groups[scope_id] = {
+            "scope_name": scope_name,
+            "cages": cage_list,
+            "identity_sites": list(site_by_cage.values()),
+            "group_kind": "reported_ultimate_parent",
+            "parent_name": scope_name,
+        }
+        return {
+            "context_id": None,
+            "scope_type": "company_parent",
+            "scope_id": scope_id,
+            "scope_name": scope_name,
+            "observation_window": None,
+            "site_count": len(cage_list),
+            "resolved_cages": cage_list,
+            "city": None,
+            "state": None,
+            "option_label": f"{scope_name} - company-wide ({len(cage_list)} CAGE sites)",
+            "context_available": False,
+            "group_kind": "reported_ultimate_parent",
         }
 
     def resolve_site_reference(
@@ -841,13 +918,18 @@ class CompanyContextStore:
             ).fetchall()
 
             query_core = _company_name_core(clean_query)
-            exact_name_rows = [
+            compatible_name_rows = [
                 row
                 for row in parent_rows
-                if _company_name_core(_parent_display_name(row[0])) == query_core
+                if (
+                    _company_name_core(_parent_display_name(row[0])) == query_core
+                    or _company_name_core(_parent_display_name(row[0])).startswith(
+                        f"{query_core} "
+                    )
+                )
             ]
-            if exact_name_rows:
-                parent_rows = exact_name_rows
+            if compatible_name_rows:
+                parent_rows = compatible_name_rows
 
             results: List[Dict[str, Any]] = []
             for parent_rank, (parent_name, _observed_value) in enumerate(parent_rows):
