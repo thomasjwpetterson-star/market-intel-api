@@ -145,6 +145,9 @@ class CompanyContextBuilder:
         self.connection.execute("SET preserve_insertion_order = false")
         self.connection.execute("SET threads = 2")
         self.connection.execute("SET memory_limit = '1GB'")
+        duckdb_temp = os.getenv("ASK_MIMIR_DUCKDB_TEMP", "/tmp/ask-mimir-duckdb")
+        Path(duckdb_temp).mkdir(parents=True, exist_ok=True)
+        self.connection.execute("SET temp_directory = ?", [duckdb_temp])
 
     def parent_definition(self, parent_id: str) -> Dict[str, Any]:
         clean = str(parent_id).strip().upper()
