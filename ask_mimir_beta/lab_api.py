@@ -2945,6 +2945,7 @@ class AskJobManager:
                         "detail": "The evidence and citations have been checked",
                         "percent": 100,
                         "result": customer_result,
+                        "access": customer_result["access"],
                         "completed_at": datetime.now(timezone.utc).isoformat(),
                     }
                 )
