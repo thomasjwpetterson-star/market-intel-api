@@ -1610,7 +1610,11 @@ def is_clearly_out_of_domain(messages: List[ChatMessage]) -> bool:
         "write me a poem", "dating advice", "medical diagnosis", "solve this equation",
         "write python code", "javascript tutorial", "holiday itinerary",
         "tomorrow's weather", "tomorrows weather", "recommend a restaurant",
-        "plan a holiday",
+        "plan a holiday", "plan my holiday", "plan a vacation", "travel itinerary",
+        "stock price", "crypto price", "horoscope", "tell me a joke",
+        "write an essay", "write my essay", "homework help", "translate this",
+        "capital of france", "capital of england", "capital of italy",
+        "premier league score", "super bowl score", "world cup score",
     )
     return any(phrase in text for phrase in unrelated_phrases)
 
