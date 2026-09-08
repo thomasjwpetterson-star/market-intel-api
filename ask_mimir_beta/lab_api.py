@@ -2835,6 +2835,15 @@ class AskJobManager:
         except Exception as exc:
             runtime.beta_state.fail(request_id, refund=True)
             detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            if "credit_balance_exhausted" in str(detail) or "insufficient_quota" in str(detail):
+                detail = (
+                    "Ask Mimir is temporarily unavailable. Your query allowance has been "
+                    "restored; please try again shortly."
+                )
+            refreshed_access = access.public_dict(
+                runtime.beta_state.used_today(access.subject_id),
+                runtime.beta_state.used_this_month(access.subject_id),
+            )
             with self.lock:
                 self.jobs[request_id].update(
                     {
@@ -2843,6 +2852,7 @@ class AskJobManager:
                         "detail": detail,
                         "percent": 100,
                         "error": detail,
+                        "access": refreshed_access,
                     }
                 )
 
