@@ -4,7 +4,12 @@ from beta_controls import (
     remove_unsafe_and_internal_answer_content,
     validate_answer_citations,
 )
-from capability_discovery import capability_market_follow_up_intent, resolve_capability
+from capability_discovery import (
+    _capability_domains,
+    _capability_terms,
+    capability_market_follow_up_intent,
+    resolve_capability,
+)
 from geographic_market import (
     is_geographic_market_request,
     resolve_state,
@@ -45,6 +50,21 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
                 "Give me an overview of this US defense market, capability area or industrial base: Military Landing Gear"
             ),
             "capability:military landing gear",
+        )
+
+    def test_natural_language_aerospace_fuel_market_resolves_dynamically(self):
+        self.assertEqual(
+            resolve_capability(
+                "Give me an overview of aerospace fuel systems in the US defense market."
+            ),
+            "capability:aerospace fuel systems",
+        )
+
+    def test_aerospace_qualifier_scopes_fuel_without_becoming_a_search_term(self):
+        self.assertEqual(_capability_terms("aerospace fuel systems"), ["fuel"])
+        self.assertEqual(
+            _capability_domains("aerospace fuel systems"),
+            (["AIR"], ["aircraft", "aviation", "airborne", "aerospace"]),
         )
 
     def test_alabama_market_request_resolves(self):

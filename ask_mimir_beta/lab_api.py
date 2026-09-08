@@ -761,9 +761,25 @@ CAPABILITY_DISCOVERY_PROMPT = f"""
 You are Ask Mimir, an evidence-led US defense-market research assistant. The final user message is
 followed by a defined capability-market evidence set.
 
-Answer the requested supplier search directly. Lead with a compact table containing supplier site,
-CAGE, city/state, why the organization appears, matching NIIN count, example items, associated platforms and the
-FY2021-FY2026 observed procurement value when present. Describe a company as authorized according
+Answer the requested market overview or supplier search directly. When the evidence set contains
+matching supplier sites, NIINs, procurement activity, prime awards or platform associations, do not
+open by saying the market is fragmented, is not a clean category, cannot be sized comprehensively,
+or was not resolved into a comprehensive universe. Define the practical evidence boundary in one
+short sentence, then describe the market visible through the evidence.
+
+For a market overview, lead with a concise bottom line covering market structure, principal demand
+routes and the strongest observed supplier positions. Use annual_prime_activity to describe the
+direction of directly classified prime obligations and award activity. Treat
+broader_related_award_obligations_usd as the total value of wider awards whose descriptions include
+the capability, not as the value of the capability itself. Use top_platform_activity to
+identify the platform families carrying the broadest matched item coverage. Then provide a compact
+table containing supplier site, CAGE, city/state, why the organization appears, matching NIIN count,
+example items, associated platforms and FY2021-FY2026 observed procurement value when present. Do
+not claim that there were no matching awards or notices when the structured item, platform, supplier
+or prime-award evidence is populated. Only state that the available evidence is insufficient when all
+of those evidence lanes are empty.
+
+For a supplier search, lead with the same compact supplier table. Describe a company as authorized according
 to DLA when active_authorized_niin_count is positive. Describe it as an observed procurement source
 when observed_procurement_niin_count is positive. Do not turn either status into a claim that the
 company manufactured every listed item.
@@ -784,7 +800,7 @@ broad classification alone.
 
 For equipment inherently used across most aircraft, such as landing gear, brakes or flight controls,
 broad platform coverage is expected and is not itself a market insight. Focus on supplier roles, source
-depth, recurring platform families, procurement concentration and distinctive capabilities. Do not
+depth, recurring platform families, demand routes, procurement direction and distinctive capabilities. Do not
 describe ordinary cross-platform use as unusual.
 
 Use authoritative government and first-party sources to confirm the current role of the most
@@ -2099,7 +2115,7 @@ class LabRuntime:
             elif name == "get_capability_market":
                 cache_arguments = {
                     **arguments,
-                    "_context_schema": "capability-market-v5",
+                    "_context_schema": "capability-market-v6",
                 }
             elif name == "get_award_opportunity_context":
                 cache_arguments = {**arguments, "_context_schema": "award-context-v2"}

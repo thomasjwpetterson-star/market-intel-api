@@ -860,6 +860,8 @@ function renderCapabilityEvidence(entry) {
   const scope = result.scope || {};
   const coverage = result.coverage || {};
   const suppliers = result.supplier_sites || [];
+  const annual = result.annual_prime_activity || [];
+  const platforms = result.top_platform_activity || [];
   const overview = document.createElement("details");
   overview.className = "evidence-card";
   overview.open = true;
@@ -873,10 +875,27 @@ function renderCapabilityEvidence(entry) {
         <strong>${escapeHtml(coverage.commercial_supplier_sites || 0)} supplier sites identified</strong>
         ${escapeHtml(coverage.matching_niins || 0)} matched NIINs ·
         ${escapeHtml(coverage.supplier_sites_with_active_authorized_items || 0)} sites authorized by DLA for at least one matched item ·
-        ${escapeHtml(coverage.supplier_sites_with_observed_procurement || 0)} sites with observed DLA procurement
+        ${escapeHtml(coverage.supplier_sites_with_observed_procurement || 0)} sites with observed DLA procurement<br />
+        ${formatMoney(coverage.observed_dla_procurement_value_usd)} observed DLA procurement ·
+        ${formatMoney(coverage.directly_classified_prime_obligations_usd)} directly classified prime obligations
       </div>
     </section></div>`;
   evidenceList.appendChild(overview);
+
+  if (annual.length || platforms.length) {
+    const activity = document.createElement("details");
+    activity.className = "evidence-card";
+    activity.innerHTML = `
+      <summary>
+        <span class="tool-name">Market activity and platform coverage</span>
+        <span class="tool-meta">FY2021–FY2026</span>
+      </summary>
+      <div class="evidence-detail"><section class="evidence-section">
+        ${annual.map((row) => `<div class="evidence-row"><strong>FY${escapeHtml(row.fiscal_year)}</strong>${formatMoney(row.directly_classified_prime_obligations_usd)} directly classified prime obligations · ${escapeHtml(row.prime_award_count || 0)} related awards</div>`).join("")}
+        ${platforms.length ? `<div class="evidence-row"><strong>Leading associated platforms</strong>${platforms.slice(0, 12).map((row) => `${dashboardLink(row.platform, "PLATFORM", "platform", row.platform)} (${escapeHtml(row.matching_niin_count || 0)} NIINs)`).join(" · ")}</div>` : ""}
+      </section></div>`;
+    evidenceList.appendChild(activity);
+  }
 
   if (!suppliers.length) return;
   const details = document.createElement("details");

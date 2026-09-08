@@ -53,6 +53,8 @@ DYNAMIC_CAPABILITY_PREFIX = "capability:"
 CAPABILITY_QUERY_PATTERNS = (
     r"(?:market,\s*)?capability area(?:\s+or\s+industrial base)?\s*:\s*(.+?)(?:\?|$)",
     r"overview of (?:the\s+)?(?:us\s+)?(?:defen[cs]e\s+)?(?:market|capability area|industrial base)\s*:\s*(.+?)(?:\?|$)",
+    r"overview of (?:the\s+)?(.+?)\s+in\s+(?:the\s+)?(?:us\s+)?defen[cs]e market(?:[?.]|$)",
+    r"(?:what is happening in|describe|analyse|analyze)\s+(?:the\s+)?(?:us\s+)?(.+?)\s+(?:defen[cs]e\s+)?market(?:[?.]|$)",
     r"(?:find|identify|show)\s+(?:us\s+)?(?:manufacturers|suppliers|companies)\s+(?:that\s+)?(?:supply|provide|make|manufacture)\s+(.+?)(?:\s+to|\s+for)\s+(?:the\s+)?(?:us\s+)?military",
     r"(?:which|what)\s+(?:us\s+)?(?:manufacturers|suppliers|companies)\s+(?:supply|provide|make|manufacture)\s+(.+?)(?:\?|$)",
     r"(?:companies|manufacturers|suppliers)\s+(?:supplying|providing|manufacturing|with)\s+(.+?)(?:\s+to|\s+for)\s+(?:military|defen[cs]e)",
@@ -61,7 +63,16 @@ CAPABILITY_STOPWORDS = {
     "and", "or", "the", "a", "an", "for", "to", "of", "into", "with",
     "military", "defense", "defence", "platform", "platforms", "systems",
     "system", "equipment", "components", "component", "products", "product",
+    "aerospace", "aircraft", "aviation", "airborne", "naval", "maritime",
+    "shipboard", "ground", "vehicle", "vehicles", "land", "space",
 }
+CAPABILITY_DOMAIN_RULES = (
+    (r"\b(?:aerospace|aircraft|aviation|airborne)\b", ["AIR"], ["aircraft", "aviation", "airborne", "aerospace"]),
+    (r"\b(?:naval|maritime|shipboard|warship|submarine)\b", ["NAVAL"], ["naval", "ship", "marine", "submarine"]),
+    (r"\b(?:ground|land)[- ]?(?:vehicle|vehicles|system|systems)?\b", ["GROUND"], ["ground", "vehicular", "vehicle"]),
+    (r"\b(?:missile|missiles|munition|munitions)\b", ["MISSILES & MUNITIONS"], ["missile", "munition"]),
+    (r"\bspace\b", ["SPACE"], ["space", "satellite"]),
+)
 US_STATE_CODES = [
     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI",
     "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN",
@@ -113,6 +124,16 @@ def _capability_terms(phrase: str) -> List[str]:
     return list(dict.fromkeys(terms))[:8]
 
 
+def _capability_domains(phrase: str) -> tuple[List[str], List[str]]:
+    segments: List[str] = []
+    classification_terms: List[str] = []
+    for pattern, matched_segments, matched_terms in CAPABILITY_DOMAIN_RULES:
+        if re.search(pattern, phrase, re.IGNORECASE):
+            segments.extend(matched_segments)
+            classification_terms.extend(matched_terms)
+    return list(dict.fromkeys(segments)), list(dict.fromkeys(classification_terms))
+
+
 def capability_market_follow_up_intent(text: str) -> bool:
     """Recognize follow-ups that should retain the selected capability market."""
     lowered = str(text or "").lower()
@@ -162,6 +183,8 @@ class CapabilityDiscoveryStore:
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")
+        duckdb_temp = os.getenv("ASK_MIMIR_DUCKDB_TEMP", "/tmp/ask-mimir-duckdb")
+        self.connection.execute("SET temp_directory = ?", [duckdb_temp])
         self._cache: Dict[str, Dict[str, Any]] = {}
         configured_dir = precomputed_dir or Path(
             os.getenv("ASK_MIMIR_CAPABILITY_DIR", str(DEFAULT_PRECOMPUTED_DIR))
@@ -212,27 +235,43 @@ class CapabilityDiscoveryStore:
         terms = _capability_terms(phrase)
         if not terms:
             return None
+        market_segments, domain_terms = _capability_domains(phrase)
         minimum_matches = min(2, len(terms))
-        code_rows = _rows(
+        classification_candidates = _rows(
             self.connection.execute(
                 """
-                SELECT code, description, term_matches
-                FROM (
-                    SELECT code, description,
-                       LIST_SUM(LIST_TRANSFORM(?, term ->
-                           CASE WHEN CONTAINS(LOWER(description), term) THEN 1 ELSE 0 END
-                       )) AS term_matches
-                    FROM read_parquet(?)
-                    WHERE classification_type = 'PSC'
-                      AND REGEXP_MATCHES(code, '^[A-Z0-9]{4}$')
-                )
-                WHERE term_matches >= ?
-                ORDER BY term_matches DESC, code
-                LIMIT 20
+                SELECT code, description
+                FROM read_parquet(?)
+                WHERE classification_type = 'PSC'
+                  AND REGEXP_MATCHES(code, '^[A-Z0-9]{4}$')
                 """,
-                [terms, str(self.paths["classifications"]), minimum_matches],
+                [str(self.paths["classifications"])],
             )
         )
+        scored_codes = []
+        for row in classification_candidates:
+            description = str(row.get("description") or "").lower()
+            subject_matches = sum(term in description for term in terms)
+            domain_matches = sum(
+                bool(re.search(rf"\b{re.escape(term)}\b", description))
+                for term in domain_terms
+            )
+            if subject_matches < 1:
+                continue
+            scored_codes.append(
+                {
+                    **row,
+                    "term_matches": subject_matches,
+                    "domain_matches": domain_matches,
+                }
+            )
+        contextual_codes = [row for row in scored_codes if row["domain_matches"] > 0]
+        if domain_terms and contextual_codes:
+            scored_codes = contextual_codes
+        code_rows = sorted(
+            scored_codes,
+            key=lambda row: (-row["domain_matches"], -row["term_matches"], row["code"]),
+        )[:20]
         item_terms = list(terms)
         if any(term.startswith("comput") for term in terms):
             item_terms.extend(["processor", "data processing", "single board computer"])
@@ -246,11 +285,13 @@ class CapabilityDiscoveryStore:
             "dynamic": True,
             "term_stems": terms,
             "minimum_term_matches": minimum_matches,
+            "market_segments": market_segments,
         }
 
     def _build(self, capability_id: str, definition: Dict[str, Any]) -> Dict[str, Any]:
         fsc_codes = definition["fsc_codes"]
         classification_matches = definition.get("classification_matches", [])
+        market_segments = definition.get("market_segments", [])
         if fsc_codes and not classification_matches:
             classification_matches = _rows(
                 self.connection.execute(
@@ -264,10 +305,10 @@ class CapabilityDiscoveryStore:
                     [str(self.paths["classifications"]), fsc_codes],
                 )
             )
-        use_codes = bool(fsc_codes)
+        use_scope = bool(fsc_codes or market_segments)
         is_dynamic = bool(definition.get("dynamic"))
         term_stems = definition.get("term_stems", [])
-        minimum_term_matches = 1 if use_codes else definition.get("minimum_term_matches", 1)
+        minimum_term_matches = 1 if use_scope else definition.get("minimum_term_matches", 1)
         rows = _rows(
             self.connection.execute(
                 """
@@ -300,7 +341,9 @@ class CapabilityDiscoveryStore:
                             )), 1, 12
                         ) AS platform_groups
                     FROM read_parquet(?)
-                    WHERE (NOT ? OR fsc_code IN (SELECT UNNEST(?)))
+                    WHERE (NOT ?
+                           OR fsc_code IN (SELECT UNNEST(?))
+                           OR UPPER(TRIM(COALESCE(market_segment, ''))) IN (SELECT UNNEST(?)))
                       AND ((NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?))
                            OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
                                CASE WHEN CONTAINS(LOWER(COALESCE(description, '')), term)
@@ -355,15 +398,16 @@ class CapabilityDiscoveryStore:
                 WHERE (r.is_active_authorized_source OR r.has_observed_procurement)
                   AND UPPER(TRIM(l.state)) IN (SELECT UNNEST(?))
                 GROUP BY r.cage
-                ORDER BY mapped_platform_niin_count DESC,
-                         active_authorized_niin_count DESC,
+                ORDER BY active_authorized_niin_count DESC,
                          observed_procurement_niin_count DESC,
-                         matching_niin_count DESC
+                         matching_niin_count DESC,
+                         mapped_platform_niin_count DESC
                 """,
                 [
                     str(self.paths["references"]),
-                    use_codes,
+                    use_scope,
                     fsc_codes,
+                    market_segments,
                     is_dynamic,
                     definition["item_pattern"],
                     is_dynamic,
@@ -384,7 +428,9 @@ class CapabilityDiscoveryStore:
                 """
                 SELECT COUNT(DISTINCT LPAD(TRIM(niin), 9, '0'))
                 FROM read_parquet(?)
-                WHERE (NOT ? OR fsc_code IN (SELECT UNNEST(?)))
+                WHERE (NOT ?
+                       OR fsc_code IN (SELECT UNNEST(?))
+                       OR UPPER(TRIM(COALESCE(market_segment, ''))) IN (SELECT UNNEST(?)))
                   AND ((NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?))
                        OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
                            CASE WHEN CONTAINS(LOWER(COALESCE(description, '')), term)
@@ -392,7 +438,7 @@ class CapabilityDiscoveryStore:
                        )) >= ?))
                   AND cage IS NOT NULL AND TRIM(cage) <> ''
                 """,
-                [str(self.paths["references"]), use_codes, fsc_codes, is_dynamic,
+                [str(self.paths["references"]), use_scope, fsc_codes, market_segments, is_dynamic,
                  definition["item_pattern"], is_dynamic, term_stems, minimum_term_matches],
             ).fetchone()[0]
             or 0
@@ -409,8 +455,30 @@ class CapabilityDiscoveryStore:
                 SELECT UPPER(TRIM(c.vendor_cage)) AS cage,
                        COALESCE(MAX(c.vendor_name), MAX(l.location_name)) AS supplier_name,
                        MAX(l.city) AS city, MAX(l.state) AS state,
-                       SUM(c.total_spend) AS net_prime_obligations_usd,
-                       COUNT(DISTINCT c.award_key) AS prime_award_count,
+                       SUM(
+                           COALESCE(c.obligations_fy2021, 0) +
+                           COALESCE(c.obligations_fy2022, 0) +
+                           COALESCE(c.obligations_fy2023, 0) +
+                           COALESCE(c.obligations_fy2024, 0) +
+                           COALESCE(c.obligations_fy2025, 0) +
+                           COALESCE(c.obligations_fy2026, 0)
+                       ) AS broader_related_award_obligations_usd,
+                       SUM(CASE WHEN c.psc IN (SELECT UNNEST(?)) THEN
+                           COALESCE(c.obligations_fy2021, 0) +
+                           COALESCE(c.obligations_fy2022, 0) +
+                           COALESCE(c.obligations_fy2023, 0) +
+                           COALESCE(c.obligations_fy2024, 0) +
+                           COALESCE(c.obligations_fy2025, 0) +
+                           COALESCE(c.obligations_fy2026, 0)
+                       ELSE 0 END) AS directly_classified_prime_obligations_usd,
+                       COUNT(DISTINCT c.award_key) FILTER (WHERE
+                           COALESCE(c.action_count_fy2021, 0) +
+                           COALESCE(c.action_count_fy2022, 0) +
+                           COALESCE(c.action_count_fy2023, 0) +
+                           COALESCE(c.action_count_fy2024, 0) +
+                           COALESCE(c.action_count_fy2025, 0) +
+                           COALESCE(c.action_count_fy2026, 0) > 0
+                       ) AS prime_award_count,
                        LIST_SLICE(LIST_DISTINCT(LIST(c.psc)), 1, 12) AS matching_psc_codes,
                        LIST_SLICE(LIST_DISTINCT(LIST(c.platform_family) FILTER (
                            WHERE c.platform_family IS NOT NULL
@@ -421,10 +489,11 @@ class CapabilityDiscoveryStore:
                 FROM read_parquet(?) c
                 LEFT JOIN locations l ON UPPER(TRIM(c.vendor_cage)) = l.cage
                 WHERE c.source_system = 'USA_SPENDING'
-                  AND c.year BETWEEN 2021 AND 2026
                   AND c.vendor_cage IS NOT NULL
                   AND UPPER(TRIM(l.state)) IN (SELECT UNNEST(?))
-                  AND (NOT ? OR c.psc IN (SELECT UNNEST(?)))
+                  AND (NOT ?
+                       OR c.psc IN (SELECT UNNEST(?))
+                       OR UPPER(TRIM(COALESCE(c.market_segment, ''))) IN (SELECT UNNEST(?)))
                   AND ((NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(
                            c.base_award_description, c.description, ''
                        )), ?)) OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
@@ -433,12 +502,14 @@ class CapabilityDiscoveryStore:
                            )), term) THEN 1 ELSE 0 END
                        )) >= ?))
                 GROUP BY 1
-                ORDER BY ABS(net_prime_obligations_usd) DESC
+                ORDER BY ABS(directly_classified_prime_obligations_usd) DESC,
+                         ABS(broader_related_award_obligations_usd) DESC
                 LIMIT 100
                 """,
                 [
-                    str(self.paths["locations"]), str(self.paths["contracts"]),
-                    US_STATE_CODES, use_codes, fsc_codes, is_dynamic,
+                    str(self.paths["locations"]), fsc_codes,
+                    str(self.paths["contracts"]),
+                    US_STATE_CODES, use_scope, fsc_codes, market_segments, is_dynamic,
                     definition["item_pattern"], is_dynamic, term_stems,
                     minimum_term_matches,
                 ],
@@ -469,6 +540,93 @@ class CapabilityDiscoveryStore:
                 )
                 if count > 0
             ]
+        annual_prime_activity = _rows(
+            self.connection.execute(
+                """
+                WITH matched AS (
+                    SELECT *, psc IN (SELECT UNNEST(?)) AS is_direct_classification
+                    FROM read_parquet(?)
+                    WHERE source_system = 'USA_SPENDING'
+                      AND (NOT ?
+                           OR psc IN (SELECT UNNEST(?))
+                           OR UPPER(TRIM(COALESCE(market_segment, ''))) IN (SELECT UNNEST(?)))
+                      AND ((NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(
+                               base_award_description, description, ''
+                           )), ?)) OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
+                               CASE WHEN CONTAINS(LOWER(COALESCE(
+                                   base_award_description, description, ''
+                               )), term) THEN 1 ELSE 0 END
+                           )) >= ?))
+                ), annualized AS (
+                    SELECT award_key, vendor_cage, is_direct_classification,
+                           activity.fiscal_year,
+                           activity.net_obligations_usd,
+                           activity.action_count
+                    FROM matched,
+                    UNNEST([
+                        STRUCT_PACK(fiscal_year := 2021, net_obligations_usd := COALESCE(obligations_fy2021, 0), action_count := COALESCE(action_count_fy2021, 0)),
+                        STRUCT_PACK(fiscal_year := 2022, net_obligations_usd := COALESCE(obligations_fy2022, 0), action_count := COALESCE(action_count_fy2022, 0)),
+                        STRUCT_PACK(fiscal_year := 2023, net_obligations_usd := COALESCE(obligations_fy2023, 0), action_count := COALESCE(action_count_fy2023, 0)),
+                        STRUCT_PACK(fiscal_year := 2024, net_obligations_usd := COALESCE(obligations_fy2024, 0), action_count := COALESCE(action_count_fy2024, 0)),
+                        STRUCT_PACK(fiscal_year := 2025, net_obligations_usd := COALESCE(obligations_fy2025, 0), action_count := COALESCE(action_count_fy2025, 0)),
+                        STRUCT_PACK(fiscal_year := 2026, net_obligations_usd := COALESCE(obligations_fy2026, 0), action_count := COALESCE(action_count_fy2026, 0))
+                    ]) AS u(activity)
+                )
+                SELECT fiscal_year,
+                       SUM(net_obligations_usd) FILTER (WHERE is_direct_classification)
+                           AS directly_classified_prime_obligations_usd,
+                       SUM(net_obligations_usd)
+                           AS broader_related_award_obligations_usd,
+                       COUNT(DISTINCT award_key) FILTER (WHERE action_count > 0)
+                           AS prime_award_count,
+                       COUNT(DISTINCT vendor_cage) FILTER (WHERE action_count > 0)
+                           AS recipient_site_count
+                FROM annualized
+                GROUP BY 1
+                ORDER BY 1
+                """,
+                [
+                    fsc_codes, str(self.paths["contracts"]), use_scope, fsc_codes,
+                    market_segments, is_dynamic, definition["item_pattern"],
+                    is_dynamic, term_stems, minimum_term_matches,
+                ],
+            )
+        )
+        top_platform_activity = _rows(
+            self.connection.execute(
+                """
+                WITH matched AS (
+                    SELECT DISTINCT
+                           LPAD(TRIM(niin), 9, '0') AS niin,
+                           UPPER(TRIM(cage)) AS cage,
+                           TRIM(platform) AS platform
+                    FROM read_parquet(?),
+                         UNNEST(STRING_SPLIT(COALESCE(platform_families, ''), ' | ')) AS p(platform)
+                    WHERE (NOT ?
+                           OR fsc_code IN (SELECT UNNEST(?))
+                           OR UPPER(TRIM(COALESCE(market_segment, ''))) IN (SELECT UNNEST(?)))
+                      AND ((NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?))
+                           OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
+                               CASE WHEN CONTAINS(LOWER(COALESCE(description, '')), term)
+                                    THEN 1 ELSE 0 END
+                           )) >= ?))
+                      AND COALESCE(TRIM(platform), '') <> ''
+                )
+                SELECT platform,
+                       COUNT(DISTINCT niin) AS matching_niin_count,
+                       COUNT(DISTINCT cage) AS supplier_site_count
+                FROM matched
+                GROUP BY 1
+                ORDER BY matching_niin_count DESC, supplier_site_count DESC, platform
+                LIMIT 30
+                """,
+                [
+                    str(self.paths["references"]), use_scope, fsc_codes,
+                    market_segments, is_dynamic, definition["item_pattern"],
+                    is_dynamic, term_stems, minimum_term_matches,
+                ],
+            )
+        )
         return {
             "context_type": "capability_supplier_market",
             "scope": {
@@ -477,9 +635,12 @@ class CapabilityDiscoveryStore:
                 "observation_window": "FY2021-FY2026 observed procurement; current DLA source references",
                 "definition": definition["scope_note"],
                 "matched_product_classifications": classification_matches,
+                "matched_market_segments": market_segments,
             },
             "supplier_sites": commercial_rows,
             "prime_award_sites": prime_award_sites,
+            "annual_prime_activity": annual_prime_activity,
+            "top_platform_activity": top_platform_activity,
             "coverage": {
                 "commercial_supplier_sites": len(commercial_rows),
                 "supplier_sites_with_active_authorized_items": sum(
@@ -490,6 +651,18 @@ class CapabilityDiscoveryStore:
                 ),
                 "matching_niins": matching_niins,
                 "prime_award_sites": len(prime_award_sites),
+                "observed_dla_procurement_value_usd": sum(
+                    float(row.get("observed_dla_procurement_value_usd") or 0)
+                    for row in commercial_rows
+                ),
+                "directly_classified_prime_obligations_usd": sum(
+                    float(row.get("directly_classified_prime_obligations_usd") or 0)
+                    for row in annual_prime_activity
+                ),
+                "broader_related_award_obligations_usd": sum(
+                    float(row.get("broader_related_award_obligations_usd") or 0)
+                    for row in annual_prime_activity
+                ),
             },
             "ranking_basis": (
                 "CAGE sites are ordered by active authorized-source NIIN count, then observed "
