@@ -35,6 +35,30 @@ TIER_POLICIES: Dict[str, TierPolicy] = {
 }
 
 
+CLARIFICATION_OPENING_PATTERNS = (
+    r"do you mean\b",
+    r"which .{1,120} did you mean\b",
+    r"which scope do you mean\b",
+    r"could you (?:clarify|specify|choose|confirm)\b",
+    r"please (?:clarify|specify|choose|confirm)\b",
+    r"before i answer.{0,80}(?:clarify|specify|choose|confirm)\b",
+    r"i need (?:a|one) (?:quick |short )?clarification\b",
+)
+
+
+def response_requires_clarification(result: Dict[str, Any]) -> bool:
+    """Identify a scope question that should not consume an Ask Mimir allowance."""
+    if result.get("requires_clarification") is True:
+        return True
+
+    answer = re.sub(r"\s+", " ", str(result.get("answer") or "")).strip()
+    if not answer or len(answer) > 1_500:
+        return False
+
+    answer = re.sub(r"^[#>*_`\-\s]+", "", answer).strip().lower()
+    return any(re.match(pattern, answer) for pattern in CLARIFICATION_OPENING_PATTERNS)
+
+
 def normalize_tier(value: str | None) -> str:
     candidate = str(value or "public").strip().lower()
     aliases = {"paid": "professional", "pro": "professional", "anonymous": "public"}

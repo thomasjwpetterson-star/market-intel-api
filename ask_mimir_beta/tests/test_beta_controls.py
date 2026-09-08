@@ -9,10 +9,28 @@ from beta_controls import (
     DataReleaseGuard,
     DailyQuotaExceeded,
     TIER_POLICIES,
+    response_requires_clarification,
 )
 
 
 class BetaStateStoreTests(unittest.TestCase):
+    def test_unbilled_clarification_restores_public_query_allowance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = BetaStateStore(Path(directory) / "beta-state.sqlite3")
+            access = AccessContext("guest", "public", False)
+            store.reserve("clarification", access, "release-1", "capability")
+            store.complete(
+                "clarification",
+                latency_ms=1,
+                estimated_cost_usd=0.01,
+                billable=False,
+            )
+
+            self.assertEqual(store.used_today(access.subject_id), 0)
+            store.reserve("answer", access, "release-1", "capability")
+            self.assertEqual(store.used_today(access.subject_id), 1)
+            store.connection.close()
+
     def test_restart_refunds_an_interrupted_query(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "beta-state.sqlite3"
@@ -89,6 +107,26 @@ class DataReleaseGuardTests(unittest.TestCase):
             source.write_bytes(b"changed")
             with self.assertRaises(RuntimeError):
                 guard.assert_unchanged()
+
+
+class ClarificationDetectionTests(unittest.TestCase):
+    def test_model_generated_scope_question_is_a_clarification(self):
+        result = {
+            "answer": (
+                "Do you mean the US defense market for complete aircraft-engine fuel-control "
+                "units, or the broader fuel-control ecosystem?"
+            )
+        }
+        self.assertTrue(response_requires_clarification(result))
+
+    def test_completed_answer_with_follow_up_question_is_not_a_clarification(self):
+        result = {
+            "answer": (
+                "The market is led by sustainment demand across military aircraft fleets. "
+                "Would you like the supporting supplier records?"
+            )
+        }
+        self.assertFalse(response_requires_clarification(result))
 
 
 if __name__ == "__main__":

@@ -78,6 +78,7 @@ from beta_controls import (
     EvidencePackCache,
     TIER_POLICIES,
     normalize_tier,
+    response_requires_clarification,
     sanitize_customer_payload,
     remove_unsafe_and_internal_answer_content,
     remove_unsupported_mimir_links,
@@ -2862,7 +2863,10 @@ NON_BILLABLE_RESPONSE_IDS = frozenset(
 
 
 def result_counts_toward_quota(result: Dict[str, Any]) -> bool:
-    return str(result.get("response_id") or "") not in NON_BILLABLE_RESPONSE_IDS
+    return (
+        str(result.get("response_id") or "") not in NON_BILLABLE_RESPONSE_IDS
+        and not response_requires_clarification(result)
+    )
 
 
 class AskJobManager:
