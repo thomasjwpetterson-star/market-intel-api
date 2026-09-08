@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import urllib.request
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -20,7 +23,9 @@ import duckdb
 from bootstrap_data import DEFAULT_BUCKET, file_sha256
 from build_platform_source_depth import build_platform_source_depth
 from capability_discovery import build_precomputed_capabilities
+from company_context_store import build_precomputed_parent_contexts
 from market_segment import build_precomputed_market_segments
+from platform_context import build_precomputed_platform_contexts
 
 
 ROOT = Path(__file__).resolve().parent
@@ -54,7 +59,49 @@ PINNED_REFERENCE_FILES = (
 CLASSIFICATION_REFERENCE = ROOT / "validation-output" / "classification_reference.parquet"
 MARKET_SEGMENT_DIR = ROOT / "validation-output" / "market-segments"
 CAPABILITY_DIR = ROOT / "validation-output" / "capability-markets"
+PRECOMPUTED_COMPANY_CONTEXT_DIR = (
+    ROOT / "validation-output" / "precomputed-company-contexts"
+)
+PLATFORM_CONTEXT_DIR = ROOT / "validation-output" / "platform-contexts"
 RUNTIME_ARTIFACT_ROOT = ROOT / ".runtime-data" / "artifacts"
+
+HIGH_VALUE_PARENT_QUERIES = (
+    "Lockheed Martin",
+    "RTX",
+    "Boeing",
+    "Northrop Grumman",
+    "General Dynamics",
+    "BAE Systems",
+    "L3Harris",
+    "Honeywell",
+    "Huntington Ingalls",
+    "Textron",
+    "Parker Hannifin",
+    "TransDigm",
+    "Curtiss-Wright",
+)
+
+KEY_PLATFORM_CONTEXTS = (
+    "F-35",
+    "F-16",
+    "F-15",
+    "F/A-18",
+    "B-52",
+    "CH-53K",
+    "UH-60",
+    "CH-47",
+    "AH-64",
+    "HIMARS",
+    "M1 ABRAMS",
+    "STRYKER",
+    "TOMAHAWK",
+    "JASSM",
+    "AMRAAM",
+    "SM-6",
+    "PATRIOT AIR DEFENSE SYSTEM",
+    "VIRGINIA CLASS (SSN 774)",
+    "COLUMBIA CLASS SSBN",
+)
 
 
 def _artifact_source(name: str) -> Path:
@@ -79,12 +126,18 @@ def artifact_directories() -> Tuple[Tuple[Path, str], ...]:
     )
     return (
         (metric_source, "metric-release"),
-        (_artifact_source("company-context"), "company-context"),
+        (
+            PRECOMPUTED_COMPANY_CONTEXT_DIR
+            if (PRECOMPUTED_COMPANY_CONTEXT_DIR / "manifest.json").exists()
+            else _artifact_source("company-context"),
+            "company-context",
+        ),
         (_artifact_source("company-opportunities"), "company-opportunities"),
         (_artifact_source("platform-supply-chains"), "platform-supply-chains"),
         (_artifact_source("program-momentum"), "program-momentum"),
         (MARKET_SEGMENT_DIR, "market-segments"),
         (CAPABILITY_DIR, "capability-markets"),
+        (PLATFORM_CONTEXT_DIR, "platform-contexts"),
     )
 
 
@@ -154,6 +207,99 @@ def serving_manifest_entry(
     return entry
 
 
+def verified_serving_manifest_entry(
+    s3: Any,
+    bucket: str,
+    source_key: str,
+    local_path: str,
+    local_file: Path,
+) -> Dict[str, Any]:
+    """Pin and byte-verify one S3 serving object without downloading it again."""
+    if not local_file.exists():
+        raise FileNotFoundError(f"local serving input is missing: {local_file}")
+
+    attributes = s3.get_object_attributes(
+        Bucket=bucket,
+        Key=source_key,
+        ObjectAttributes=["Checksum", "ObjectParts", "ObjectSize"],
+        MaxParts=1000,
+    )
+    version_id = str(attributes.get("VersionId") or "").strip()
+    if not version_id or version_id == "null":
+        raise RuntimeError(
+            f"S3 versioning is required for atomic release input: {source_key}"
+        )
+    remote_size = int(attributes["ObjectSize"])
+    if local_file.stat().st_size != remote_size:
+        raise RuntimeError(
+            f"local serving input is stale: {local_file.name} has "
+            f"{local_file.stat().st_size} bytes; pinned S3 object has {remote_size}"
+        )
+
+    parts = list(attributes.get("ObjectParts", {}).get("Parts", []))
+    part_marker = attributes.get("ObjectParts", {}).get("NextPartNumberMarker")
+    while attributes.get("ObjectParts", {}).get("IsTruncated"):
+        attributes = s3.get_object_attributes(
+            Bucket=bucket,
+            Key=source_key,
+            VersionId=version_id,
+            ObjectAttributes=["Checksum", "ObjectParts", "ObjectSize"],
+            MaxParts=1000,
+            PartNumberMarker=int(part_marker),
+        )
+        parts.extend(attributes.get("ObjectParts", {}).get("Parts", []))
+        part_marker = attributes.get("ObjectParts", {}).get("NextPartNumberMarker")
+
+    digest = hashlib.sha256()
+    full_crc = 0
+    bytes_read = 0
+    with local_file.open("rb") as handle:
+        if parts:
+            for part in parts:
+                chunk = handle.read(int(part["Size"]))
+                if len(chunk) != int(part["Size"]):
+                    raise RuntimeError(f"local input ended early: {local_file.name}")
+                digest.update(chunk)
+                bytes_read += len(chunk)
+                expected_crc = str(part.get("ChecksumCRC32") or "")
+                actual_crc = base64.b64encode(
+                    struct.pack(">I", zlib.crc32(chunk) & 0xFFFFFFFF)
+                ).decode()
+                if not expected_crc or actual_crc != expected_crc:
+                    raise RuntimeError(
+                        f"local serving input does not match pinned S3 version: "
+                        f"{local_file.name}, part {part['PartNumber']}"
+                    )
+        else:
+            while chunk := handle.read(8 * 1024 * 1024):
+                digest.update(chunk)
+                full_crc = zlib.crc32(chunk, full_crc)
+                bytes_read += len(chunk)
+            expected_crc = str(
+                attributes.get("Checksum", {}).get("ChecksumCRC32") or ""
+            )
+            actual_crc = base64.b64encode(
+                struct.pack(">I", full_crc & 0xFFFFFFFF)
+            ).decode()
+            if not expected_crc or actual_crc != expected_crc:
+                raise RuntimeError(
+                    f"local serving input does not match pinned S3 version: "
+                    f"{local_file.name}"
+                )
+        if handle.read(1):
+            raise RuntimeError(f"local input has unexpected trailing bytes: {local_file.name}")
+
+    if bytes_read != remote_size:
+        raise RuntimeError(f"local input size changed while reading: {local_file.name}")
+    return {
+        "local_path": local_path,
+        "s3_key": source_key,
+        "size": remote_size,
+        "sha256": digest.hexdigest(),
+        "s3_version_id": version_id,
+    }
+
+
 def trigger_render_deploy(deploy_hook_url: str) -> int:
     request = urllib.request.Request(deploy_hook_url, method="POST")
     with urllib.request.urlopen(request, timeout=30) as response:
@@ -209,6 +355,19 @@ def publish(
     prefix = f"ask_mimir/releases/{release_id}"
     entries: List[Dict[str, Any]] = []
 
+    pinned_serving_entries = []
+    for filename in DATA_FILES:
+        print(f"Verifying serving data: {filename}", file=sys.stderr)
+        pinned_serving_entries.append(
+            verified_serving_manifest_entry(
+                s3,
+                bucket,
+                f"app_cache/{filename}",
+                f"data/{filename}",
+                DATA_ROOT / filename,
+            )
+        )
+
     classification_path = build_classification_reference()
     serving_classification_path = DATA_ROOT / classification_path.name
     if (
@@ -217,6 +376,11 @@ def publish(
     ):
         shutil.copyfile(classification_path, serving_classification_path)
     source_depth_summary = build_platform_source_depth(DATA_ROOT)
+    for generated_dir in (
+        PRECOMPUTED_COMPANY_CONTEXT_DIR,
+        PLATFORM_CONTEXT_DIR,
+    ):
+        shutil.rmtree(generated_dir, ignore_errors=True)
     market_segment_manifest = build_precomputed_market_segments(
         DATA_ROOT,
         MARKET_SEGMENT_DIR,
@@ -225,6 +389,19 @@ def publish(
         DATA_ROOT,
         CAPABILITY_DIR,
     )
+    company_context_manifest = build_precomputed_parent_contexts(
+        DATA_ROOT,
+        _artifact_source("company-context"),
+        PRECOMPUTED_COMPANY_CONTEXT_DIR,
+        HIGH_VALUE_PARENT_QUERIES,
+        release_id=release_id,
+    )
+    platform_context_manifest = build_precomputed_platform_contexts(
+        DATA_ROOT,
+        PLATFORM_CONTEXT_DIR,
+        KEY_PLATFORM_CONTEXTS,
+        release_id=release_id,
+    )
 
     for path, local_path in artifact_files():
         print(f"Publishing artifact: {local_path}", file=sys.stderr)
@@ -232,19 +409,7 @@ def publish(
         s3.upload_file(str(path), bucket, key)
         entries.append(manifest_entry(path, local_path, key))
 
-    for filename in DATA_FILES:
-        print(f"Pinning serving data: {filename}", file=sys.stderr)
-        path = DATA_ROOT / filename
-        source_key = f"app_cache/{filename}"
-        entries.append(
-            serving_manifest_entry(
-                s3,
-                bucket,
-                source_key,
-                f"data/{filename}",
-                path,
-            )
-        )
+    entries.extend(pinned_serving_entries)
 
     for filename in GENERATED_DATA_FILES:
         print(f"Publishing derived serving data: {filename}", file=sys.stderr)
@@ -287,6 +452,10 @@ def publish(
             "platform_source_depth": source_depth_summary,
             "market_segments": market_segment_manifest,
             "capability_markets": capability_manifest,
+            "precomputed_parent_context_count": len(
+                company_context_manifest.get("precomputed_parent_queries", [])
+            ),
+            "precomputed_platform_contexts": platform_context_manifest,
         },
         "files": entries,
     }

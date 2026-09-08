@@ -1,6 +1,9 @@
 import unittest
+import json
+import tempfile
+from pathlib import Path
 
-from platform_context import PlatformContextStore
+from platform_context import PlatformContextStore, _canonical_fingerprint_value
 from platform_intent import (
     is_open_capability_discovery_request,
     is_platform_centered_request,
@@ -221,6 +224,24 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             is_open_capability_discovery_request(
                 "Find US manufacturers that supply braking systems or brake components to military aircraft."
             )
+        )
+
+    def test_precomputed_context_is_used_for_a_resolved_platform(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context_path = Path(directory) / "f16.json"
+            expected = {"scope": {"platform_id": "F-16"}, "marker": "precomputed"}
+            context_path.write_text(json.dumps(expected))
+            self.store._cache = {}
+            self.store._precomputed_paths = {"F-16": context_path}
+
+            self.assertEqual(self.store.get("F-16"), expected)
+
+    def test_fingerprint_input_ignores_sub_cent_and_list_order_noise(self):
+        first = [{"id": "b", "value": 10.0001}, {"id": "a", "value": 2.0}]
+        second = [{"id": "a", "value": 2.0}, {"id": "b", "value": 10.0002}]
+        self.assertEqual(
+            _canonical_fingerprint_value(first),
+            _canonical_fingerprint_value(second),
         )
 
 

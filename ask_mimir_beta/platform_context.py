@@ -8,7 +8,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 import duckdb
 
@@ -114,6 +114,23 @@ def _rows(cursor: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+def _canonical_fingerprint_value(value: Any) -> Any:
+    if isinstance(value, float):
+        return round(value, 2)
+    if isinstance(value, dict):
+        return {
+            key: _canonical_fingerprint_value(item)
+            for key, item in sorted(value.items())
+        }
+    if isinstance(value, list):
+        normalized = [_canonical_fingerprint_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(item, default=str, sort_keys=True),
+        )
+    return value
+
+
 def _normalize(value: Any) -> str:
     return " ".join(re.findall(r"[A-Z0-9]+", str(value or "").upper()))
 
@@ -141,7 +158,13 @@ def requested_platform_focus(text: str) -> str | None:
 class PlatformContextStore:
     """Build a common evidence baseline for any mapped platform or program."""
 
-    def __init__(self, data_root: Path = DEFAULT_DATA_ROOT) -> None:
+    def __init__(
+        self,
+        data_root: Path = DEFAULT_DATA_ROOT,
+        precomputed_dir: Path | None = None,
+        *,
+        load_precomputed: bool = True,
+    ) -> None:
         self.data_root = data_root.resolve()
         self.paths = {
             name: self.data_root / filename
@@ -168,6 +191,24 @@ class PlatformContextStore:
         self.connection.execute("SET temp_directory = ?", [duckdb_temp])
         self.platforms = self._load_platform_catalog()
         self._cache: Dict[str, Dict[str, Any]] = {}
+        configured_dir = os.getenv("ASK_MIMIR_PLATFORM_CONTEXT_DIR", "").strip()
+        self.precomputed_dir = (
+            precomputed_dir.resolve()
+            if precomputed_dir is not None
+            else Path(configured_dir).resolve()
+            if configured_dir
+            else None
+        )
+        self._precomputed_paths: Dict[str, Path] = {}
+        if load_precomputed and self.precomputed_dir is not None:
+            manifest_path = self.precomputed_dir / "manifest.json"
+            if manifest_path.exists():
+                manifest = json.loads(manifest_path.read_text())
+                self._precomputed_paths = {
+                    str(entry["platform_id"]).upper(): self.precomputed_dir
+                    / str(entry["path"])
+                    for entry in manifest.get("platforms", [])
+                }
 
     def _load_platform_catalog(self) -> List[str]:
         rows = self.connection.execute(
@@ -299,6 +340,12 @@ class PlatformContextStore:
             raise KeyError(f"platform was not found: {platform_id}")
         if resolved in self._cache:
             return self._cache[resolved]
+        precomputed_path = self._precomputed_paths.get(resolved.upper())
+        if precomputed_path is not None and precomputed_path.exists():
+            context = json.loads(precomputed_path.read_text())
+            if context.get("scope", {}).get("platform_id") == resolved:
+                self._cache[resolved] = context
+                return context
 
         members = self._platform_members(resolved)
         annual = self._annual_activity(resolved)
@@ -415,7 +462,11 @@ class PlatformContextStore:
             },
             "evidence_index": self._source_index(resolved, top_awards, opportunities),
             "evidence_fingerprint": hashlib.sha256(
-                json.dumps(fingerprint_input, default=str, sort_keys=True).encode()
+                json.dumps(
+                    _canonical_fingerprint_value(fingerprint_input),
+                    default=str,
+                    sort_keys=True,
+                ).encode()
             ).hexdigest(),
         }
         self._cache[resolved] = context
@@ -711,10 +762,10 @@ class PlatformContextStore:
                        MAX(sub_city) AS city, MAX(sub_state) AS state,
                        SUM(COALESCE(subaward_value, 0))
                            AS mimir_modelled_reported_subcontract_value_usd,
-                       LIST_SLICE(LIST_DISTINCT(LIST(description) FILTER (
+                       LIST_SLICE(LIST_SORT(LIST_DISTINCT(LIST(description) FILTER (
                            WHERE description IS NOT NULL AND TRIM(description) <> ''
-                       )), 1, 8) AS reported_descriptions,
-                       LIST_SLICE(LIST_DISTINCT(LIST(platform_family)), 1, 8)
+                       ))), 1, 8) AS reported_descriptions,
+                       LIST_SLICE(LIST_SORT(LIST_DISTINCT(LIST(platform_family))), 1, 8)
                            AS current_platform_mappings
                 FROM read_parquet(?)
                 WHERE year BETWEEN 2021 AND 2026
@@ -804,9 +855,9 @@ class PlatformContextStore:
                     COUNT(DISTINCT t.award_key) AS award_count,
                     MIN(SUBSTR(t.action_date,1,10)) AS first_action_date,
                     MAX(SUBSTR(t.action_date,1,10)) AS latest_action_date,
-                    LIST_SLICE(LIST_DISTINCT(LIST(t.contract_id) FILTER (WHERE t.contract_id IS NOT NULL)),1,8) AS sample_contract_ids,
-                    LIST_SLICE(LIST_DISTINCT(LIST(t.base_award_description) FILTER (WHERE t.base_award_description IS NOT NULL)),1,6) AS sample_award_descriptions,
-                    LIST_SLICE(LIST_DISTINCT(LIST(CONCAT_WS(', ', NULLIF(t.place_of_performance_city,''), NULLIF(t.place_of_performance_state,''), NULLIF(t.place_of_performance_country,''))) FILTER (WHERE NULLIF(t.place_of_performance_city,'') IS NOT NULL)),1,8) AS observed_places_of_performance,
+                    LIST_SLICE(LIST_SORT(LIST_DISTINCT(LIST(t.contract_id) FILTER (WHERE t.contract_id IS NOT NULL))),1,8) AS sample_contract_ids,
+                    LIST_SLICE(LIST_SORT(LIST_DISTINCT(LIST(t.base_award_description) FILTER (WHERE t.base_award_description IS NOT NULL))),1,6) AS sample_award_descriptions,
+                    LIST_SLICE(LIST_SORT(LIST_DISTINCT(LIST(CONCAT_WS(', ', NULLIF(t.place_of_performance_city,''), NULLIF(t.place_of_performance_state,''), NULLIF(t.place_of_performance_country,''))) FILTER (WHERE NULLIF(t.place_of_performance_city,'') IS NOT NULL))),1,8) AS observed_places_of_performance,
                     COUNT(*) OVER () AS total_available
                 FROM read_parquet(?) t
                 LEFT JOIN locations l ON UPPER(TRIM(t.vendor_cage)) = l.cage
@@ -814,7 +865,9 @@ class PlatformContextStore:
                   AND t.year BETWEEN 2021 AND 2026
                   AND t.platform_family IN (SELECT UNNEST(?))
                 GROUP BY t.vendor_cage
-                ORDER BY positive_prime_obligations_usd DESC, net_prime_obligations_usd DESC
+                ORDER BY positive_prime_obligations_usd DESC,
+                         net_prime_obligations_usd DESC,
+                         t.vendor_cage
                 LIMIT ?
                 """,
                 [str(self.paths["locations"]), str(self.paths["transactions"]), members, limit],
@@ -834,11 +887,11 @@ class PlatformContextStore:
                     SELECT
                         UPPER(TRIM(sub_cage)) AS cage,
                         LIST_SLICE(
-                            LIST_DISTINCT(
+                            LIST_SORT(LIST_DISTINCT(
                                 LIST(platform_family) FILTER (
                                     WHERE platform_family IS NOT NULL AND TRIM(platform_family) <> ''
                                 )
-                            ),
+                            )),
                             1,
                             30
                         ) AS mapped_platforms
@@ -868,10 +921,10 @@ class PlatformContextStore:
                     COUNT(DISTINCT n.contract_id) AS prime_award_count,
                     MIN(SUBSTR(n.action_date,1,10)) AS first_reported_date,
                     MAX(SUBSTR(n.action_date,1,10)) AS latest_reported_date,
-                    LIST_SLICE(LIST_DISTINCT(LIST(n.prime_name) FILTER (WHERE n.prime_name IS NOT NULL)),1,8) AS reported_prime_names,
-                    LIST_SLICE(LIST_DISTINCT(LIST(n.prime_cage) FILTER (WHERE n.prime_cage IS NOT NULL)),1,8) AS reported_prime_cages,
-                    LIST_SLICE(LIST_DISTINCT(LIST(n.contract_id) FILTER (WHERE n.contract_id IS NOT NULL)),1,8) AS sample_prime_contract_ids,
-                    LIST_SLICE(LIST_DISTINCT(LIST(n.description) FILTER (WHERE n.description IS NOT NULL)),1,8) AS reported_descriptions,
+                    LIST_SLICE(LIST_SORT(LIST_DISTINCT(LIST(n.prime_name) FILTER (WHERE n.prime_name IS NOT NULL))),1,8) AS reported_prime_names,
+                    LIST_SLICE(LIST_SORT(LIST_DISTINCT(LIST(n.prime_cage) FILTER (WHERE n.prime_cage IS NOT NULL))),1,8) AS reported_prime_cages,
+                    LIST_SLICE(LIST_SORT(LIST_DISTINCT(LIST(n.contract_id) FILTER (WHERE n.contract_id IS NOT NULL))),1,8) AS sample_prime_contract_ids,
+                    LIST_SLICE(LIST_SORT(LIST_DISTINCT(LIST(n.description) FILTER (WHERE n.description IS NOT NULL))),1,8) AS reported_descriptions,
                     ANY_VALUE(sp.mapped_platforms) AS mapped_platforms,
                     COUNT(*) OVER () AS total_available
                 FROM read_parquet(?) n
@@ -883,7 +936,7 @@ class PlatformContextStore:
                   AND UPPER(TRIM(n.sub_cage)) NOT IN ('','UNKNOWN','UNKNO')
                 GROUP BY n.sub_cage
                 HAVING SUM(COALESCE(n.subaward_value,0)) <> 0
-                ORDER BY mimir_modelled_reported_subcontract_value_usd DESC
+                ORDER BY mimir_modelled_reported_subcontract_value_usd DESC, n.sub_cage
                 LIMIT ?
                 """,
                 [
@@ -906,15 +959,16 @@ class PlatformContextStore:
                     SUM(COALESCE(subaward_value,0)) AS mimir_modelled_reported_subcontract_value_usd,
                     COUNT(*) AS selected_report_count,
                     COUNT(DISTINCT sub_cage) AS supplier_site_count,
-                    LIST_SLICE(LIST_DISTINCT(LIST(sub_name) FILTER (WHERE sub_name IS NOT NULL)),1,8) AS suppliers,
-                    LIST_SLICE(LIST_DISTINCT(LIST(contract_id) FILTER (WHERE contract_id IS NOT NULL)),1,6) AS sample_prime_contract_ids,
+                    LIST_SLICE(LIST_SORT(LIST_DISTINCT(LIST(sub_name) FILTER (WHERE sub_name IS NOT NULL))),1,8) AS suppliers,
+                    LIST_SLICE(LIST_SORT(LIST_DISTINCT(LIST(contract_id) FILTER (WHERE contract_id IS NOT NULL))),1,6) AS sample_prime_contract_ids,
                     COUNT(*) OVER () AS total_available
                 FROM read_parquet(?)
                 WHERE platform_family IN (SELECT UNNEST(?)) AND year BETWEEN 2021 AND 2026
                   AND description IS NOT NULL AND TRIM(description) <> ''
                 GROUP BY description
                 HAVING SUM(COALESCE(subaward_value,0)) <> 0
-                ORDER BY ABS(mimir_modelled_reported_subcontract_value_usd) DESC
+                ORDER BY ABS(mimir_modelled_reported_subcontract_value_usd) DESC,
+                         description
                 LIMIT ?
                 """,
                 [str(self.paths["network"]), members, limit],
@@ -932,8 +986,8 @@ class PlatformContextStore:
                 """
                 WITH bridge AS (
                     SELECT LPAD(TRIM(niin),9,'0') AS niin,
-                           LIST_DISTINCT(LIST(wsdc_code)) AS wsdc_codes,
-                           LIST_DISTINCT(LIST(association_source)) AS association_sources
+                           LIST_SORT(LIST_DISTINCT(LIST(wsdc_code))) AS wsdc_codes,
+                           LIST_SORT(LIST_DISTINCT(LIST(association_source))) AS association_sources
                     FROM read_parquet(?) WHERE platform_family IN (SELECT UNNEST(?)) GROUP BY 1
                 ), platform_value AS (
                     SELECT LPAD(TRIM(niin),9,'0') AS niin,
@@ -962,7 +1016,8 @@ class PlatformContextStore:
                 LEFT JOIN platform_value v ON b.niin=v.niin
                 LEFT JOIN read_parquet(?) s ON b.niin=s.niin
                 ORDER BY ABS(COALESCE(v.attributed_dla_procurement_value_usd,0))
-                       + ABS(COALESCE(v.shared_use_niin_exposure_usd,0)) DESC
+                       + ABS(COALESCE(v.shared_use_niin_exposure_usd,0)) DESC,
+                         b.niin
                 LIMIT ?
                 """,
                 [
@@ -1005,7 +1060,10 @@ class PlatformContextStore:
                        COUNT(DISTINCT s.cage) OVER () AS total_supplier_sites
                 FROM supplier_values s
                 LEFT JOIN locations l ON UPPER(TRIM(s.cage))=l.cage
-                ORDER BY ABS(attributed_dla_procurement_value_usd) + ABS(shared_use_niin_exposure_usd) DESC
+                ORDER BY ABS(attributed_dla_procurement_value_usd)
+                       + ABS(shared_use_niin_exposure_usd) DESC,
+                         s.niin,
+                         s.cage
                 LIMIT ?
                 """,
                 [
@@ -1097,7 +1155,10 @@ class PlatformContextStore:
                 WHERE source_system='USA_SPENDING' AND year BETWEEN 2021 AND 2026
                   AND platform_family IN (SELECT UNNEST(?))
                 GROUP BY contract_id,vendor_name,vendor_cage,base_award_description
-                ORDER BY positive_prime_obligations_usd DESC, net_prime_obligations_usd DESC
+                ORDER BY positive_prime_obligations_usd DESC,
+                         net_prime_obligations_usd DESC,
+                         contract_id,
+                         recipient_cage
                 LIMIT ?
                 """,
                 [str(self.paths["transactions"]), members, limit],
@@ -1144,7 +1205,7 @@ class PlatformContextStore:
                     SELECT 1 FROM UNNEST(?) pattern(value)
                     WHERE UPPER(COALESCE(search_text,title,'')) LIKE UPPER(value)
                 )
-                ORDER BY deadline DESC
+                ORDER BY deadline DESC, COALESCE(sol_num, id), id
                 LIMIT 30
                 """,
                 [str(self.paths["opportunities"]), patterns],
@@ -1183,3 +1244,52 @@ class PlatformContextStore:
                 }
             )
         return sources
+
+
+def build_precomputed_platform_contexts(
+    data_root: Path,
+    output_dir: Path,
+    platform_ids: Sequence[str],
+    *,
+    release_id: str | None = None,
+) -> Dict[str, Any]:
+    """Materialize selected high-use platform dossiers for one runtime release."""
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    store = PlatformContextStore(data_root, load_precomputed=False)
+    entries = []
+    for requested_id in platform_ids:
+        resolution = store.search(requested_id)
+        resolved = resolution.get("resolved_platform_id")
+        if not resolved:
+            raise RuntimeError(f"key platform did not resolve uniquely: {requested_id}")
+        print(f"Building platform context: {resolved}", flush=True)
+        context = store.get(resolved)
+        filename = (
+            hashlib.sha256(resolved.encode()).hexdigest()[:16]
+            + "-platform-context.json"
+        )
+        destination = output_dir / filename
+        temporary = destination.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(context, default=str))
+        temporary.replace(destination)
+        entries.append(
+            {
+                "platform_id": resolved,
+                "display_name": context["scope"]["display_name"],
+                "path": filename,
+                "evidence_fingerprint": context["evidence_fingerprint"],
+            }
+        )
+    manifest = {
+        "schema_version": "platform-context-precompute-v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "runtime_release_id": release_id,
+        "platform_count": len(entries),
+        "platforms": entries,
+    }
+    manifest_path = output_dir / "manifest.json"
+    temporary = manifest_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(manifest, indent=2))
+    temporary.replace(manifest_path)
+    return manifest

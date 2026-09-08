@@ -6,7 +6,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import tempfile
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
@@ -239,11 +242,30 @@ class CompanyContextStore:
             raise FileNotFoundError(f"company context manifest was not found: {manifest_path}")
         self.manifest = json.loads(manifest_path.read_text())
         self.contexts: List[Dict[str, Any]] = []
+        self._context_paths: Dict[tuple[str, str], Path] = {}
+        lazy_search_contexts: List[Dict[str, Any]] = []
         for entry in self.manifest.get("contexts", []):
             path = self.context_dir / entry["path"]
+            scope = entry.get("scope", {})
+            key = (
+                str(scope.get("scope_type") or ""),
+                str(scope.get("scope_id") or "").upper(),
+            )
+            if entry.get("lazy") and all(key):
+                self._context_paths[key] = path
+                lazy_search_contexts.append(
+                    {
+                        "context_id": entry.get("context_id"),
+                        "scope": scope,
+                        "identity": entry.get("search_identity", {}),
+                        "_artifact_path": str(path),
+                    }
+                )
+                continue
             context = json.loads(path.read_text())
             context["_artifact_path"] = str(path)
             self.contexts.append(context)
+        self._search_contexts = [*self.contexts, *lazy_search_contexts]
         configured_data_root = data_root or Path(
             os.getenv("ASK_MIMIR_DATA_ROOT", str(DEFAULT_DATA_ROOT))
         )
@@ -286,7 +308,7 @@ class CompanyContextStore:
             return {"matches": []}
         reviewed_aliases = _reviewed_company_aliases(query)
         matches = []
-        for context in self.contexts:
+        for context in self._search_contexts:
             scope = context["scope"]
             if scope_type and scope["scope_type"] != scope_type:
                 continue
@@ -1245,6 +1267,12 @@ class CompanyContextStore:
         key = (scope_type, clean_id)
         if key in self._dynamic_contexts:
             return self._dynamic_contexts[key]
+        precomputed_path = self._context_paths.get(key)
+        if precomputed_path is not None:
+            context = json.loads(precomputed_path.read_text())
+            context["_artifact_path"] = str(precomputed_path)
+            self._dynamic_contexts[key] = context
+            return context
         group = self._dynamic_groups.get(clean_id)
         if scope_type == "company_parent" and group:
             pass
@@ -1477,3 +1505,150 @@ class CompanyContextStore:
                 )
             return {**value, "records": balanced}
         return value
+
+
+def build_precomputed_parent_contexts(
+    data_root: Path,
+    source_context_dir: Path,
+    output_dir: Path,
+    parent_queries: Sequence[str],
+    *,
+    release_id: str,
+) -> Dict[str, Any]:
+    """Add selected parent-wide contexts to a release-bound context directory."""
+    source_context_dir = source_context_dir.resolve()
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for source in source_context_dir.glob("*.json"):
+        shutil.copy2(source, output_dir / source.name)
+
+    source_manifest = json.loads((source_context_dir / "manifest.json").read_text())
+    entries = list(source_manifest.get("contexts", []))
+    previous_cache = os.environ.get("ASK_MIMIR_CACHE_DIR")
+    previous_release = os.environ.get("ASK_MIMIR_RELEASE_ID")
+    try:
+        with tempfile.TemporaryDirectory(prefix="ask-mimir-parent-precompute-") as cache:
+            os.environ["ASK_MIMIR_CACHE_DIR"] = cache
+            os.environ["ASK_MIMIR_RELEASE_ID"] = release_id
+            store = CompanyContextStore(source_context_dir, data_root)
+            for query in parent_queries:
+                resolution = store.search(query, scope_type="company_parent", limit=100)
+                candidates = [
+                    row
+                    for row in resolution.get("matches", [])
+                    if row.get("scope_type") == "company_parent"
+                    and int(row.get("site_count") or 0) > 1
+                ]
+                if not candidates:
+                    raise RuntimeError(f"parent scope did not resolve: {query}")
+                match = max(candidates, key=lambda row: int(row.get("site_count") or 0))
+                print(
+                    f"Building parent context: {match['scope_name']} "
+                    f"({match['site_count']} CAGE sites)",
+                    flush=True,
+                )
+                clean_scope_id = str(match["scope_id"]).upper()
+                store.contexts = [
+                    context
+                    for context in store.contexts
+                    if not (
+                        context.get("scope", {}).get("scope_type") == "company_parent"
+                        and str(context.get("scope", {}).get("scope_id") or "").upper()
+                        == clean_scope_id
+                    )
+                ]
+                store._dynamic_contexts.pop(("company_parent", clean_scope_id), None)
+                store._context_paths.pop(("company_parent", clean_scope_id), None)
+                context = dict(store.get_raw("company_parent", match["scope_id"]))
+                context.pop("_artifact_path", None)
+                filename = (
+                    hashlib.sha256(str(match["scope_id"]).encode()).hexdigest()[:16]
+                    + "-parent-context.json"
+                )
+                destination = output_dir / filename
+                temporary = destination.with_suffix(".json.tmp")
+                temporary.write_text(json.dumps(context, default=str))
+                temporary.replace(destination)
+                replaced_entries = [
+                    entry
+                    for entry in entries
+                    if (
+                        entry.get("scope", {}).get("scope_type") == "company_parent"
+                        and str(entry.get("scope", {}).get("scope_id") or "").upper()
+                        == clean_scope_id
+                    )
+                ]
+                entries = [
+                    entry
+                    for entry in entries
+                    if not (
+                        entry.get("scope", {}).get("scope_type") == "company_parent"
+                        and str(entry.get("scope", {}).get("scope_id") or "").upper()
+                        == str(match["scope_id"]).upper()
+                    )
+                ]
+                for replaced_entry in replaced_entries:
+                    replaced_path = output_dir / str(replaced_entry.get("path") or "")
+                    if replaced_path != destination and replaced_path.is_file():
+                        replaced_path.unlink()
+                entries.append(
+                    {
+                        "context_id": context["context_id"],
+                        "scope": context["scope"],
+                        "path": filename,
+                    }
+                )
+    finally:
+        if previous_cache is None:
+            os.environ.pop("ASK_MIMIR_CACHE_DIR", None)
+        else:
+            os.environ["ASK_MIMIR_CACHE_DIR"] = previous_cache
+        if previous_release is None:
+            os.environ.pop("ASK_MIMIR_RELEASE_ID", None)
+        else:
+            os.environ["ASK_MIMIR_RELEASE_ID"] = previous_release
+
+    lazy_entries = []
+    for entry in entries:
+        context = json.loads((output_dir / entry["path"]).read_text())
+        identity = context.get("identity", {})
+        search_sites = [
+            {
+                key: site.get(key)
+                for key in (
+                    "cage",
+                    "vendor_name",
+                    "official_site_label",
+                    "city",
+                    "state",
+                )
+            }
+            for site in identity.get("sites", [])
+        ]
+        lazy_entries.append(
+            {
+                "context_id": context.get("context_id"),
+                "scope": context.get("scope", {}),
+                "path": entry["path"],
+                "lazy": True,
+                "search_identity": {
+                    "sites": search_sites,
+                    "site_count": identity.get("site_count", len(search_sites)),
+                    "resolved_cages": identity.get("resolved_cages", []),
+                    "parent_resolution": identity.get("parent_resolution", {}),
+                },
+            }
+        )
+
+    manifest = {
+        **source_manifest,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "runtime_release_id": release_id,
+        "precomputed_parent_queries": list(parent_queries),
+        "contexts": lazy_entries,
+    }
+    manifest_path = output_dir / "manifest.json"
+    temporary = manifest_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(manifest, indent=2))
+    temporary.replace(manifest_path)
+    return manifest

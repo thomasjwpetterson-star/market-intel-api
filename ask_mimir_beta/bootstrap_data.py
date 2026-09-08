@@ -168,6 +168,9 @@ def bootstrap() -> Dict[str, Any]:
     os.environ["ASK_MIMIR_PLATFORM_SUPPLY_CHAIN_DIR"] = str(
         artifact_root / "platform-supply-chains"
     )
+    os.environ["ASK_MIMIR_PLATFORM_CONTEXT_DIR"] = str(
+        artifact_root / "platform-contexts"
+    )
     os.environ["ASK_MIMIR_PROGRAM_MOMENTUM_PACK"] = str(
         artifact_root / "program-momentum" / "missile-program-momentum.json"
     )

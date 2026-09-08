@@ -276,6 +276,56 @@ class CompanyParentResolutionTests(unittest.TestCase):
             )
             self.assertEqual(parents[0]["site_count"], 3)
 
+    def test_release_contexts_are_loaded_lazily(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context_dir = root / "contexts"
+            data_root = root / "data"
+            context_dir.mkdir()
+            data_root.mkdir()
+            context = {
+                "context_id": "context-acme",
+                "scope": {
+                    "scope_type": "company_parent",
+                    "scope_id": "ACME_PARENT",
+                    "scope_name": "Acme Corporation",
+                    "observation_window": "FY2021-FY2026 observed records",
+                },
+                "identity": {
+                    "site_count": 2,
+                    "resolved_cages": ["11111", "22222"],
+                    "sites": [
+                        {"cage": "11111", "vendor_name": "Acme", "city": "Austin", "state": "TX"},
+                        {"cage": "22222", "vendor_name": "Acme", "city": "Dallas", "state": "TX"},
+                    ],
+                },
+            }
+            (context_dir / "acme.json").write_text(json.dumps(context))
+            (context_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "contexts": [
+                            {
+                                "context_id": "context-acme",
+                                "scope": context["scope"],
+                                "path": "acme.json",
+                                "lazy": True,
+                                "search_identity": context["identity"],
+                            }
+                        ]
+                    }
+                )
+            )
+
+            store = CompanyContextStore(context_dir, data_root)
+            self.assertEqual(store.contexts, [])
+            loaded = store.get_raw("company_parent", "ACME_PARENT")
+
+            self.assertEqual(loaded["identity"]["site_count"], 2)
+            self.assertIn(
+                ("company_parent", "ACME_PARENT"), store._dynamic_contexts
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

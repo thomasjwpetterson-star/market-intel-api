@@ -2105,6 +2105,12 @@ class LabRuntime:
             *self.market_segments.paths.values(),
             *self.market_records.paths.values(),
         }
+        if self.platform_contexts.precomputed_dir is not None:
+            platform_context_manifest = (
+                self.platform_contexts.precomputed_dir / "manifest.json"
+            )
+            if platform_context_manifest.exists():
+                release_sources.add(platform_context_manifest)
         fydp_budget_value = os.getenv("ASK_MIMIR_FYDP_BUDGET_FILE", "").strip()
         if fydp_budget_value:
             fydp_budget_file = Path(fydp_budget_value)
