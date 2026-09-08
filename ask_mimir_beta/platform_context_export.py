@@ -52,7 +52,21 @@ def build_platform_context_zip(context: Dict[str, Any]) -> bytes:
         _write(archive, "05_item_relationships.csv", context["item_and_component_evidence"]["top_items"], [
             "nsn", "niin", "description", "fsc_code", "attributed_dla_procurement_value_usd",
             "shared_use_niin_exposure_usd", "latest_observed_date", "wsdc_codes", "association_sources",
+            "active_authorized_source_count", "active_authorized_source_cages",
+            "active_authorized_source_names", "source_depth",
         ])
+        _write(
+            archive,
+            "05a_authorized_source_depth_summary.csv",
+            [context["item_and_component_evidence"]["authorized_source_depth"]],
+            [
+                "associated_niin_count",
+                "niin_count_without_active_authorized_source",
+                "niin_count_with_one_active_authorized_source",
+                "niin_count_with_multiple_active_authorized_sources",
+                "active_authorized_source_relationship_count",
+            ],
+        )
         _write(archive, "06_item_supplier_sites.csv", context["item_and_component_evidence"]["top_item_supplier_sites"], [
             "niin", "cage", "supplier_name", "attributed_dla_procurement_value_usd",
             "shared_use_niin_exposure_usd", "observed_units",

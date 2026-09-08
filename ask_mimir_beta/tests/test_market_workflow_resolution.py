@@ -31,6 +31,14 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
             "aircraft_braking",
         )
 
+    def test_aircraft_actuation_overview_resolves(self):
+        self.assertEqual(
+            resolve_capability(
+                "Give me an overview of this US defense market, capability area or industrial base: aircraft actuation"
+            ),
+            "aircraft_actuation",
+        )
+
     def test_alabama_market_request_resolves(self):
         question = "Give me an overview of the defence industrial base in Alabama."
         self.assertEqual(resolve_state(question), "AL")
@@ -92,6 +100,30 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
                 "What is happening in the US military ground vehicle market?"
             ),
             "US_MILITARY_GROUND_VEHICLES",
+        )
+
+    def test_uncrewed_aircraft_market_resolves(self):
+        self.assertEqual(
+            resolve_market_segment("What is happening in the US military UAS market?"),
+            "US_UNCREWED_AIRCRAFT",
+        )
+
+    def test_fighter_aircraft_market_resolves(self):
+        self.assertEqual(
+            resolve_market_segment("Which programs drive the US fighter jet market?"),
+            "US_FIGHTER_AIRCRAFT",
+        )
+
+    def test_bomber_market_resolves(self):
+        self.assertEqual(
+            resolve_market_segment("Give me an overview of the US bomber market."),
+            "US_BOMBER_AIRCRAFT",
+        )
+
+    def test_submarine_market_resolves(self):
+        self.assertEqual(
+            resolve_market_segment("What is happening in the US submarine industrial base?"),
+            "US_SUBMARINES",
         )
 
     def test_internal_identifier_is_removed_without_discarding_answer(self):

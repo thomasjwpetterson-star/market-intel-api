@@ -21,16 +21,17 @@ class TierPolicy:
     tier: str
     display_name: str
     queries_per_utc_day: int
+    queries_per_utc_month: int
     can_download_evidence: bool
 
 
 TIER_POLICIES: Dict[str, TierPolicy] = {
-    "public": TierPolicy("public", "Guest access", 1, False),
-    "free": TierPolicy("free", "Free", 3, False),
-    "trial": TierPolicy("trial", "Trial", 20, False),
-    "lite": TierPolicy("lite", "Lite", 20, False),
-    "professional": TierPolicy("professional", "Professional", 75, True),
-    "enterprise": TierPolicy("enterprise", "Enterprise", 200, True),
+    "public": TierPolicy("public", "Guest access", 1, 10, False),
+    "free": TierPolicy("free", "Free", 2, 30, False),
+    "trial": TierPolicy("trial", "Trial", 5, 35, False),
+    "lite": TierPolicy("lite", "Lite", 5, 100, False),
+    "professional": TierPolicy("professional", "Professional", 15, 300, True),
+    "enterprise": TierPolicy("enterprise", "Enterprise", 50, 1000, True),
 }
 
 
@@ -51,13 +52,25 @@ class AccessContext:
     def policy(self) -> TierPolicy:
         return TIER_POLICIES[normalize_tier(self.tier)]
 
-    def public_dict(self, used_today: int = 0) -> Dict[str, Any]:
+    def public_dict(
+        self,
+        used_today: int = 0,
+        used_this_month: int = 0,
+    ) -> Dict[str, Any]:
         policy = self.policy
         return {
             **asdict(policy),
             "authenticated": self.authenticated,
             "queries_used_today": used_today,
             "queries_remaining_today": max(policy.queries_per_utc_day - used_today, 0),
+            "queries_used_this_month": used_this_month,
+            "queries_remaining_this_month": max(
+                policy.queries_per_utc_month - used_this_month,
+                0,
+            ),
+            "daily_resets_at": next_utc_midnight_iso(),
+            "monthly_resets_at": next_utc_month_iso(),
+            # Retained for clients that currently read the daily reset from this key.
             "resets_at": next_utc_midnight_iso(),
         }
 
@@ -66,19 +79,50 @@ def utc_day() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def utc_month() -> str:
+    return utc_day()[:7]
+
+
 def next_utc_midnight_iso() -> str:
     now = datetime.now(timezone.utc)
     tomorrow = now.date() + timedelta(days=1)
     return datetime.combine(tomorrow, datetime_time.min, tzinfo=timezone.utc).isoformat()
 
 
-class DailyQuotaExceeded(RuntimeError):
-    def __init__(self, policy: TierPolicy) -> None:
-        self.policy = policy
-        super().__init__(
-            f"The {policy.display_name} allowance of {policy.queries_per_utc_day} "
-            "Ask Mimir queries per UTC day has been used."
+def next_utc_month_iso() -> str:
+    now = datetime.now(timezone.utc)
+    if now.month == 12:
+        first_of_next_month = now.date().replace(
+            year=now.year + 1,
+            month=1,
+            day=1,
         )
+    else:
+        first_of_next_month = now.date().replace(month=now.month + 1, day=1)
+    return datetime.combine(
+        first_of_next_month,
+        datetime_time.min,
+        tzinfo=timezone.utc,
+    ).isoformat()
+
+
+class DailyQuotaExceeded(RuntimeError):
+    def __init__(self, policy: TierPolicy, period: str = "day") -> None:
+        self.policy = policy
+        self.period = period
+        if period == "month":
+            message = (
+                f"The {policy.display_name} allowance of "
+                f"{policy.queries_per_utc_month} Ask Mimir queries per UTC month "
+                "has been used."
+            )
+        else:
+            message = (
+                f"The {policy.display_name} allowance of "
+                f"{policy.queries_per_utc_day} Ask Mimir queries per UTC day "
+                "has been used."
+            )
+        super().__init__(message)
 
 
 class BetaStateStore:
@@ -141,6 +185,18 @@ class BetaStateStore:
             ).fetchone()
         return int(row[0])
 
+    def used_this_month(self, subject_id: str) -> int:
+        with self.lock:
+            row = self.connection.execute(
+                """
+                SELECT COUNT(*) FROM query_events
+                WHERE subject_id = ? AND SUBSTR(utc_day, 1, 7) = ?
+                  AND status IN ('reserved', 'running', 'completed', 'failed')
+                """,
+                [subject_id, utc_month()],
+            ).fetchone()
+        return int(row[0])
+
     def reserve(
         self,
         request_id: str,
@@ -165,6 +221,18 @@ class BetaStateStore:
                 )
                 if used >= policy.queries_per_utc_day:
                     raise DailyQuotaExceeded(policy)
+                used_this_month = int(
+                    self.connection.execute(
+                        """
+                        SELECT COUNT(*) FROM query_events
+                        WHERE subject_id = ? AND SUBSTR(utc_day, 1, 7) = ?
+                          AND status IN ('reserved', 'running', 'completed', 'failed')
+                        """,
+                        [access.subject_id, utc_month()],
+                    ).fetchone()[0]
+                )
+                if used_this_month >= policy.queries_per_utc_month:
+                    raise DailyQuotaExceeded(policy, period="month")
                 self.connection.execute(
                     """
                     INSERT INTO query_events (

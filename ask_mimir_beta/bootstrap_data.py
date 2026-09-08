@@ -171,6 +171,15 @@ def bootstrap() -> Dict[str, Any]:
     os.environ["ASK_MIMIR_PROGRAM_MOMENTUM_PACK"] = str(
         artifact_root / "program-momentum" / "missile-program-momentum.json"
     )
+    os.environ["ASK_MIMIR_MARKET_SEGMENT_DIR"] = str(
+        artifact_root / "market-segments"
+    )
+    os.environ["ASK_MIMIR_CAPABILITY_DIR"] = str(
+        artifact_root / "capability-markets"
+    )
+    os.environ["ASK_MIMIR_FYDP_BUDGET_FILE"] = str(
+        data_root / "dod_fydp_budget_facts.parquet"
+    )
     os.environ.setdefault("ASK_MIMIR_CACHE_DIR", str(runtime_root / "cache"))
     os.environ.setdefault("ASK_MIMIR_BETA_STATE", str(runtime_root / "beta-state.sqlite3"))
     os.environ.setdefault("ASK_MIMIR_AUDIT_LOG", str(runtime_root / "audit" / "answers.jsonl"))

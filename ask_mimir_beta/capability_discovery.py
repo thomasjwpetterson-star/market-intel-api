@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import quote, unquote
@@ -13,8 +16,16 @@ import duckdb
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
+DEFAULT_PRECOMPUTED_DIR = Path(__file__).resolve().parent / "validation-output" / "capability-markets"
 
 CAPABILITY_DEFINITIONS = {
+    "aircraft_actuation": {
+        "display_name": "Military-aircraft actuation and flight-control equipment",
+        "request_pattern": r"\b(?:aircraft|aviation|flight[- ]?control)\b.*\bactuat(?:or|ors|ion)\b|\bactuat(?:or|ors|ion)\b.*\b(?:aircraft|aviation|flight[- ]?control)\b",
+        "fsc_codes": ["1650", "1680"],
+        "item_pattern": r"ACTUAT(?:OR|ORS|ION)|SERVOACTUAT(?:OR|ORS)|FLIGHT[- ,]?CONTROL|CONTROL ASSEMBLY",
+        "scope_note": "Aircraft actuation and flight-control equipment identified through FSC 1650 and 1680 with actuation-specific item and award descriptions.",
+    },
     "aircraft_braking": {
         "display_name": "Military-aircraft braking systems and components",
         "request_pattern": r"\b(?:aircraft|aviation|military aircraft)\b.*\bbrak(?:e|es|ing)\b|\bbrak(?:e|es|ing)\b.*\b(?:aircraft|aviation)\b",
@@ -40,6 +51,8 @@ CAPABILITY_DEFINITIONS = {
 
 DYNAMIC_CAPABILITY_PREFIX = "capability:"
 CAPABILITY_QUERY_PATTERNS = (
+    r"(?:market,\s*)?capability area(?:\s+or\s+industrial base)?\s*:\s*(.+?)(?:\?|$)",
+    r"overview of (?:the\s+)?(?:us\s+)?(?:defen[cs]e\s+)?(?:market|capability area|industrial base)\s*:\s*(.+?)(?:\?|$)",
     r"(?:find|identify|show)\s+(?:us\s+)?(?:manufacturers|suppliers|companies)\s+(?:that\s+)?(?:supply|provide|make|manufacture)\s+(.+?)(?:\s+to|\s+for)\s+(?:the\s+)?(?:us\s+)?military",
     r"(?:which|what)\s+(?:us\s+)?(?:manufacturers|suppliers|companies)\s+(?:supply|provide|make|manufacture)\s+(.+?)(?:\?|$)",
     r"(?:companies|manufacturers|suppliers)\s+(?:supplying|providing|manufacturing|with)\s+(.+?)(?:\s+to|\s+for)\s+(?:military|defen[cs]e)",
@@ -128,7 +141,13 @@ def capability_market_follow_up_intent(text: str) -> bool:
 class CapabilityDiscoveryStore:
     """Build a CAGE-site supplier universe from exact item and source evidence."""
 
-    def __init__(self, data_root: Path = DEFAULT_DATA_ROOT) -> None:
+    def __init__(
+        self,
+        data_root: Path = DEFAULT_DATA_ROOT,
+        precomputed_dir: Path | None = None,
+        *,
+        load_precomputed: bool = True,
+    ) -> None:
         self.data_root = data_root.resolve()
         self.paths = {
             "references": self.data_root / "nsn_cage_reference.parquet",
@@ -144,6 +163,10 @@ class CapabilityDiscoveryStore:
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")
         self._cache: Dict[str, Dict[str, Any]] = {}
+        configured_dir = precomputed_dir or Path(
+            os.getenv("ASK_MIMIR_CAPABILITY_DIR", str(DEFAULT_PRECOMPUTED_DIR))
+        )
+        self.precomputed_dir = configured_dir.resolve() if load_precomputed else None
 
     def search(self, query: str) -> Dict[str, Any]:
         capability_id = resolve_capability(query)
@@ -165,7 +188,15 @@ class CapabilityDiscoveryStore:
         if not definition:
             raise KeyError(f"capability definition was not found: {capability_id}")
         if clean_id not in self._cache:
-            self._cache[clean_id] = self._build(clean_id, definition)
+            precomputed_path = (
+                self.precomputed_dir / f"{clean_id}.json"
+                if self.precomputed_dir is not None
+                else None
+            )
+            if precomputed_path is not None and precomputed_path.exists():
+                self._cache[clean_id] = json.loads(precomputed_path.read_text())
+            else:
+                self._cache[clean_id] = self._build(clean_id, definition)
         pack = self._cache[clean_id]
         bounded = min(max(int(limit), 1), 50)
         return {**pack, "supplier_sites": pack["supplier_sites"][:bounded]}
@@ -213,6 +244,20 @@ class CapabilityDiscoveryStore:
 
     def _build(self, capability_id: str, definition: Dict[str, Any]) -> Dict[str, Any]:
         fsc_codes = definition["fsc_codes"]
+        classification_matches = definition.get("classification_matches", [])
+        if fsc_codes and not classification_matches:
+            classification_matches = _rows(
+                self.connection.execute(
+                    """
+                    SELECT code, description
+                    FROM read_parquet(?)
+                    WHERE classification_type = 'PSC'
+                      AND code IN (SELECT UNNEST(?))
+                    ORDER BY code
+                    """,
+                    [str(self.paths["classifications"]), fsc_codes],
+                )
+            )
         use_codes = bool(fsc_codes)
         is_dynamic = bool(definition.get("dynamic"))
         term_stems = definition.get("term_stems", [])
@@ -411,7 +456,7 @@ class CapabilityDiscoveryStore:
                 "display_name": definition["display_name"],
                 "observation_window": "FY2021-FY2026 observed procurement; current DLA source references",
                 "definition": definition["scope_note"],
-                "matched_product_classifications": definition.get("classification_matches", []),
+                "matched_product_classifications": classification_matches,
             },
             "supplier_sites": commercial_rows,
             "prime_award_sites": prime_award_sites,
@@ -432,3 +477,29 @@ class CapabilityDiscoveryStore:
                 "determine the ranking."
             ),
         }
+
+
+def build_precomputed_capabilities(data_root: Path, output_dir: Path) -> Dict[str, Any]:
+    """Materialize governed capability evidence for fast, release-bound retrieval."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    store = CapabilityDiscoveryStore(data_root, load_precomputed=False)
+    entries = []
+    for capability_id in sorted(CAPABILITY_DEFINITIONS):
+        pack = store.get(capability_id, limit=50)
+        path = output_dir / f"{capability_id}.json"
+        path.write_text(json.dumps(pack, indent=2, default=str))
+        entries.append(
+            {
+                "capability_id": capability_id,
+                "display_name": CAPABILITY_DEFINITIONS[capability_id]["display_name"],
+                "path": path.name,
+                "commercial_supplier_sites": pack["coverage"]["commercial_supplier_sites"],
+                "matching_niins": pack["coverage"]["matching_niins"],
+            }
+        )
+    manifest = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "capabilities": entries,
+    }
+    (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return manifest

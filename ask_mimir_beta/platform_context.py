@@ -145,6 +145,8 @@ class PlatformContextStore:
                 "transactions": "transactions.parquet",
                 "network": "network.parquet",
                 "platform_bom": "platform_bom.parquet",
+                "niin_source_depth": "niin_source_depth.parquet",
+                "platform_source_depth": "platform_source_depth.parquet",
                 "item_profiles": "nsn_profile_lookup.parquet",
                 "item_suppliers": "nsn_supplier_lookup.parquet",
                 "locations": "cage_locations.parquet",
@@ -934,10 +936,16 @@ class PlatformContextStore:
                        COALESCE(v.attributed_dla_procurement_value_usd,0) AS attributed_dla_procurement_value_usd,
                        COALESCE(v.shared_use_niin_exposure_usd,0) AS shared_use_niin_exposure_usd,
                        v.latest_observed_date,
-                       b.wsdc_codes, b.association_sources
+                       b.wsdc_codes, b.association_sources,
+                       COALESCE(s.active_authorized_source_count, 0)
+                           AS active_authorized_source_count,
+                       s.active_authorized_source_cages,
+                       s.active_authorized_source_names,
+                       s.source_depth
                 FROM bridge b
                 LEFT JOIN read_parquet(?) p ON LPAD(TRIM(p.niin),9,'0') = b.niin
                 LEFT JOIN platform_value v ON b.niin=v.niin
+                LEFT JOIN read_parquet(?) s ON b.niin=s.niin
                 ORDER BY ABS(COALESCE(v.attributed_dla_procurement_value_usd,0))
                        + ABS(COALESCE(v.shared_use_niin_exposure_usd,0)) DESC
                 LIMIT ?
@@ -945,7 +953,9 @@ class PlatformContextStore:
                 [
                     str(self.paths["platform_bom"]), members,
                     str(self.paths["transactions"]), members, members,
-                    str(self.paths["item_profiles"]), limit,
+                    str(self.paths["item_profiles"]),
+                    str(self.paths["niin_source_depth"]),
+                    limit,
                 ],
             )
         )
@@ -989,14 +999,69 @@ class PlatformContextStore:
                 ],
             )
         )
+        source_depth = self._source_depth_summary(members)
         return {
             "associated_niin_count": associated_count,
+            "authorized_source_depth": source_depth,
             "observed_dla_recipient_site_count": int(
                 suppliers[0].get("total_supplier_sites") or 0
             ) if suppliers else 0,
             "top_items": top_items,
             "top_item_supplier_sites": suppliers,
             "financial_treatment": "Single-platform attributed value and shared-use NIIN exposure remain separate.",
+        }
+
+    def _source_depth_summary(self, members: List[str]) -> Dict[str, Any]:
+        if len(members) == 1:
+            rows = _rows(
+                self.connection.execute(
+                    """
+                    SELECT associated_niin_count,
+                           niin_count_without_active_authorized_source,
+                           niin_count_with_one_active_authorized_source,
+                           niin_count_with_multiple_active_authorized_sources,
+                           active_authorized_source_relationship_count
+                    FROM read_parquet(?)
+                    WHERE platform_family = ?
+                    """,
+                    [str(self.paths["platform_source_depth"]), members[0]],
+                )
+            )
+        else:
+            rows = _rows(
+                self.connection.execute(
+                    """
+                    WITH member_items AS (
+                        SELECT DISTINCT LPAD(TRIM(niin), 9, '0') AS niin
+                        FROM read_parquet(?)
+                        WHERE platform_family IN (SELECT UNNEST(?))
+                    )
+                    SELECT
+                        COUNT(*) AS associated_niin_count,
+                        COUNT(*) FILTER (WHERE s.active_authorized_source_count = 0)
+                            AS niin_count_without_active_authorized_source,
+                        COUNT(*) FILTER (WHERE s.active_authorized_source_count = 1)
+                            AS niin_count_with_one_active_authorized_source,
+                        COUNT(*) FILTER (WHERE s.active_authorized_source_count > 1)
+                            AS niin_count_with_multiple_active_authorized_sources,
+                        SUM(s.active_authorized_source_count)
+                            AS active_authorized_source_relationship_count
+                    FROM member_items m
+                    JOIN read_parquet(?) s USING (niin)
+                    """,
+                    [
+                        str(self.paths["platform_bom"]),
+                        members,
+                        str(self.paths["niin_source_depth"]),
+                    ],
+                )
+            )
+        return rows[0] if rows else {
+            "associated_niin_count": 0,
+            "niin_count_without_active_authorized_source": 0,
+            "niin_count_with_one_active_authorized_source": 0,
+            "niin_count_with_multiple_active_authorized_sources": 0,
+            "active_authorized_source_relationship_count": 0,
         }
 
     def _top_awards(self, platform: str, limit: int = 100) -> List[Dict[str, Any]]:

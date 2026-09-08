@@ -540,7 +540,7 @@ class AwardOpportunityContextStore:
         )
 
     def _contract_subawards(self, contract_id: str, award_key: str | None) -> List[Dict[str, Any]]:
-        return _rows(
+        rows = _rows(
             self.connection.execute(
                 """
                 WITH locations AS (
@@ -551,9 +551,19 @@ class AwardOpportunityContextStore:
                 SELECT
                     n.sub_cage AS supplier_cage,
                     COALESCE(MAX(n.sub_name), MAX(l.location_vendor_name)) AS supplier_name,
-                    MAX(COALESCE(n.sub_city, l.city)) AS city,
-                    MAX(COALESCE(n.sub_state, l.state)) AS state,
+                    COALESCE(MAX(l.city), NULLIF(MAX(n.sub_city), '')) AS city,
+                    COALESCE(MAX(l.state), NULLIF(MAX(n.sub_state), '')) AS state,
                     MAX(n.sub_country) AS country,
+                    MAX(n.platform_family) AS platform,
+                    LIST_SLICE(
+                        LIST_DISTINCT(LIST(
+                            NULLIF(TRIM(CONCAT_WS(', ', NULLIF(n.sub_city, ''), NULLIF(n.sub_state, ''))), '')
+                        ) FILTER (
+                            WHERE NULLIF(TRIM(CONCAT_WS(', ', NULLIF(n.sub_city, ''), NULLIF(n.sub_state, ''))), '') IS NOT NULL
+                        )),
+                        1,
+                        8
+                    ) AS reported_subaward_locations,
                     SUM(COALESCE(n.subaward_value, 0)) AS mimir_modelled_reported_subcontract_value_usd,
                     SUM(COALESCE(n.subaward_value_raw, 0)) AS source_reported_value_usd,
                     COUNT(*) AS selected_report_count,
@@ -572,6 +582,53 @@ class AwardOpportunityContextStore:
                 [str(self.paths["locations"]), str(self.paths["network"]), award_key, award_key, award_key, contract_id],
             )
         )
+        cages = sorted(
+            {str(row.get("supplier_cage") or "").strip().upper() for row in rows}
+            - {""}
+        )
+        platforms = sorted(
+            {str(row.get("platform") or "").strip().upper() for row in rows}
+            - {""}
+        )
+        if not cages or not platforms:
+            return rows
+
+        cage_placeholders = ",".join("?" for _ in cages)
+        platform_placeholders = ",".join("?" for _ in platforms)
+        related = _rows(
+            self.connection.execute(
+                f"""
+                SELECT
+                    UPPER(TRIM(sub_cage)) AS supplier_cage,
+                    LIST_SLICE(
+                        LIST_DISTINCT(LIST(description) FILTER (
+                            WHERE description IS NOT NULL
+                              AND TRIM(description) <> ''
+                              AND NOT REGEXP_MATCHES(
+                                  UPPER(TRIM(description)),
+                                  '^(PLEASE )?SEE\\b|^(VARIOUS|MISC(ELLANEOUS)?|N/?A|NONE|NOT PROVIDED|SUBCONTRACT( WORK)?|PER ATTACHED|ASSEMBLY|MECHANICAL|MATERIALS?( AND SERVICES)?)$'
+                              )
+                        )),
+                        1,
+                        8
+                    ) AS same_platform_reported_descriptions
+                FROM read_parquet(?)
+                WHERE UPPER(TRIM(sub_cage)) IN ({cage_placeholders})
+                  AND UPPER(TRIM(platform_family)) IN ({platform_placeholders})
+                GROUP BY 1
+                """,
+                [str(self.paths["network"]), *cages, *platforms],
+            )
+        )
+        related_by_cage = {row["supplier_cage"]: row for row in related}
+        for row in rows:
+            enrichment = related_by_cage.get(
+                str(row.get("supplier_cage") or "").upper(), {}
+            )
+            row["same_platform_reported_descriptions"] = enrichment.get(
+                "same_platform_reported_descriptions"
+            ) or []
+        return rows
 
     def _comparable_suppliers(
         self,

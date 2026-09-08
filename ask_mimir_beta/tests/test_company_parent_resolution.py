@@ -76,6 +76,10 @@ class CompanyParentResolutionTests(unittest.TestCase):
                     ('11111', 'GARRETT AEROSPACE SERVICES', 'PHOENIX', 'AZ', 'A', NULL),
                     ('22222', 'ALLIEDSIGNAL AVIONICS', 'CLEARWATER', 'FL', 'A', NULL),
                     ('33333', 'ONTIC ENGINEERING', 'CHATSWORTH', 'CA', 'A', NULL),
+                    ('O4444', 'ONTIC ENGINEERING AND MANUFACTURING, INC.', 'MIRAMAR', 'FL', 'A', NULL),
+                    ('O5555', 'ONTIC ENGINEERING & MANUFACTURING UK LIMITED', 'CHELTENHAM', '', 'A', NULL),
+                    ('O6666', 'ONTIC TECHNOLOGIES INC', 'AUSTIN', 'TX', 'A', NULL),
+                    ('O7777', 'ONTIC ENGINEERING & MFG INC', 'SAN ANTONIO', 'TX', 'R', '33333'),
                     ('44444', 'THE BOEING COMPANY', 'ARLINGTON', 'VA', 'A', NULL),
                     ('55555', 'BELL BOEING JOINT PROJECT OFFICE', 'AMARILLO', 'TX', 'A', NULL),
                     ('66666', 'CURTISS-WRIGHT CONTROLS, INC.', 'ASHBURN', 'VA', 'A', NULL),
@@ -179,6 +183,18 @@ class CompanyParentResolutionTests(unittest.TestCase):
             self.assertEqual(result["scope_type"], "company_site")
             self.assertEqual(result["scope_id"], "77777")
             self.assertEqual(result["city"], "BLACKSBURG")
+
+    def test_reviewed_ontic_group_includes_reference_only_sites(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            result = store.search("Ontic", limit=20)
+
+            parent = next(
+                row for row in result["matches"] if row["scope_type"] == "company_parent"
+            )
+            self.assertEqual(parent["resolved_cages"], ["33333", "O4444", "O5555"])
+            self.assertNotIn("O6666", parent["resolved_cages"])
+            self.assertNotIn("O7777", parent["resolved_cages"])
 
     def test_reviewed_woodward_group_excludes_unrelated_surname_entities(self):
         with tempfile.TemporaryDirectory() as directory:

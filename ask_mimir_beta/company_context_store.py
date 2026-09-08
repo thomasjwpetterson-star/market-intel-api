@@ -24,6 +24,12 @@ DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v8"
 # Reviewed trading-name aliases prevent common surnames from sweeping unrelated
 # legal entities into an automatically generated company-wide scope.
 REVIEWED_COMPANY_ALIASES = {
+    "ONTIC": (
+        "ONTIC ENGINEERING",
+        "ONTIC ENGINEERING MANUFACTURING",
+        "ONTIC ENGINEERING AND MANUFACTURING",
+        "ONTIC ENGINEERING MFG",
+    ),
     "WOODWARD": ("WOODWARD", "WOODWARD HRT", "WOODWARD FST"),
     "COLLINS AEROSPACE": (
         "COLLINS AEROSPACE",
@@ -355,6 +361,15 @@ class CompanyContextStore:
                 matches,
                 directory_matches if scope_type != "company_parent" else [],
             )
+            if reviewed_aliases and scope_type != "company_site":
+                group = self._reviewed_group_match(
+                    query, directory_matches, reviewed_aliases
+                )
+                if group:
+                    matches = [
+                        row for row in matches if row["scope_type"] != "company_parent"
+                    ]
+                    matches = self._merge_directory_matches(matches, [group])
             if (
                 not reviewed_aliases
                 and scope_type != "company_site"
@@ -735,6 +750,45 @@ class CompanyContextStore:
                 }
             )
         return results
+
+    def _reviewed_group_match(
+        self,
+        query: str,
+        directory_matches: List[Dict[str, Any]],
+        aliases: Sequence[str],
+    ) -> Dict[str, Any] | None:
+        """Build a reviewed company scope that also retains reference-only CAGE sites."""
+        sites = [
+            row
+            for row in directory_matches
+            if row["scope_type"] == "company_site"
+            and _matches_reviewed_company_alias(row.get("scope_name"), aliases)
+        ]
+        cages = sorted({str(row["scope_id"]).upper() for row in sites})
+        if len(cages) < 2:
+            return None
+        scope_name = re.sub(r"\s+", " ", str(query or "").strip()).rstrip(".?")
+        scope_id = _group_id(scope_name, cages)
+        self._dynamic_groups[scope_id] = {
+            "scope_name": scope_name,
+            "cages": cages,
+            "identity_sites": [dict(row) for row in sites],
+            "group_kind": "reviewed_company_group",
+        }
+        return {
+            "context_id": None,
+            "scope_type": "company_parent",
+            "scope_id": scope_id,
+            "scope_name": scope_name,
+            "observation_window": None,
+            "site_count": len(cages),
+            "resolved_cages": cages,
+            "city": None,
+            "state": None,
+            "option_label": f"{scope_name} - company-wide ({len(cages)} CAGE sites)",
+            "context_available": False,
+            "group_kind": "reviewed_company_group",
+        }
 
     def _reported_parent_matches(self, query: str) -> List[Dict[str, Any]]:
         profiles_path = self.directory_paths["profiles"]

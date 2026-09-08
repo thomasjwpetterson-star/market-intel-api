@@ -62,6 +62,97 @@ MARKET_SEGMENTS = {
             r"ABRAMS|BRADLEY|STRYKER|JLTV|AMPV|PALADIN|HIMARS|FMTV|HMMWV|MRAP"
         ),
     },
+    "US_UNCREWED_AIRCRAFT": {
+        "display_name": "US military uncrewed-aircraft market",
+        "request_pattern": (
+            r"\b(?:us|u\.?s\.?)?\s*(?:military\s+)?(?:uas|uav|unmanned|uncrewed)\s+"
+            r"(?:aircraft|aerial\s+systems?|systems?)(?:\s+(?:market|segment))?\b"
+            r"|\b(?:us|u\.?s\.?)?\s*(?:military\s+)?(?:uas|uav)(?:\s+(?:market|segment))\b"
+            r"|\bmilitary\s+drone\s+market\b"
+        ),
+        "mapped_market_segments": ["Air", "Cross-Domain / Support"],
+        "platform_pattern": (
+            r"(?:^|\b)(?:MQ|RQ|XQ)-|TRITON|GLOBAL HAWK|GRAY EAGLE|REAPER|"
+            r"PREDATOR|FIRE SCOUT|SHADOW|UAS|UAV|UNMANNED|UNCREWED"
+        ),
+        "record_pattern": (
+            r"\b(?:UAS|UAV)\b|UNMANNED (?:AIR|AERIAL|AIRCRAFT)|UNCREWED (?:AIR|AERIAL|AIRCRAFT)|"
+            r"GLOBAL HAWK|GRAY EAGLE|REAPER|PREDATOR|TRITON|FIRE SCOUT|RQ-|MQ-"
+        ),
+    },
+    "US_FIGHTER_AIRCRAFT": {
+        "display_name": "US military fighter-aircraft market",
+        "request_pattern": (
+            r"\b(?:us|u\.?s\.?)?\s*(?:military\s+)?(?:fighter|combat)\s+"
+            r"(?:aircraft|jets?)(?:\s+(?:market|segment))?\b"
+        ),
+        "mapped_market_segments": ["Air"],
+        "platform_pattern": r"(?:^|\b)(?:F-15|F-16|F-22|F-35|F/A-18|F-5|AV-8B|NGAD)(?:\b|$)",
+        "record_pattern": r"F-15|F-16|F-22|F-35|F/A-18|SUPER HORNET|F-5|AV-8B|NEXT GENERATION AIR DOMINANCE|\bNGAD\b",
+    },
+    "US_BOMBER_AIRCRAFT": {
+        "display_name": "US military bomber-aircraft market",
+        "request_pattern": (
+            r"\b(?:us|u\.?s\.?)?\s*(?:military\s+)?(?:strategic\s+)?bombers?"
+            r"(?:\s+(?:aircraft\s+)?(?:market|segment))?\b"
+        ),
+        "mapped_market_segments": ["Air"],
+        "platform_pattern": r"(?:^|\b)(?:B-1B|B-2|B-21|B-52)(?:\b|$)",
+        "record_pattern": r"B-1B|B-2(?:\s|$)|B-21|B-52|RAIDER|STRATOFORTRESS|BOMBER",
+    },
+    "US_AIRLIFT_AND_TANKER_AIRCRAFT": {
+        "display_name": "US military airlift and tanker-aircraft market",
+        "request_pattern": (
+            r"\b(?:us|u\.?s\.?)?\s*(?:military\s+)?(?:airlift|transport|tanker)\s+"
+            r"aircraft(?:\s+(?:market|segment))?\b"
+        ),
+        "mapped_market_segments": ["Air"],
+        "platform_pattern": r"C-5|C-17|C-130|KC-46|C/KC-135|KC-135|KC-10|C-40|C-32",
+        "record_pattern": r"C-5|C-17|C-130|KC-46|KC-135|C/KC-135|KC-10|AIRLIFT|AERIAL REFUEL|TANKER AIRCRAFT",
+    },
+    "US_NAVAL_SHIPBUILDING": {
+        "display_name": "US naval shipbuilding market",
+        "request_pattern": (
+            r"\b(?:us|u\.?s\.?)?\s*(?:naval|navy)\s+(?:shipbuilding|ship\s+construction)"
+            r"(?:\s+(?:market|segment))?\b"
+        ),
+        "mapped_market_segments": ["Naval"],
+        "platform_pattern": (
+            r"DDG|DESTROYER|CRUISER|LCS|FRIGATE|FFG|CARRIER|CVN|LPD|LHA|LHD|"
+            r"SUBMARINE|SSN|SSBN|T-AO|T-AKE|LCAC"
+        ),
+        "record_pattern": r"SHIPBUILD|DESTROYER|CRUISER|FRIGATE|AIRCRAFT CARRIER|SUBMARINE|AMPHIBIOUS SHIP|FLEET REPLENISHMENT",
+    },
+    "US_SUBMARINES": {
+        "display_name": "US submarine industrial base",
+        "request_pattern": (
+            r"\b(?:us|u\.?s\.?)?\s*(?:navy|naval)?\s*submarines?"
+            r"(?:\s+(?:industrial\s+base|market|segment))?\b"
+        ),
+        "mapped_market_segments": ["Naval"],
+        "platform_pattern": r"SUBMARINE|VIRGINIA CLASS|COLUMBIA CLASS|OHIO CLASS|LOS ANGELES CLASS|SEAWOLF|SSN|SSBN",
+        "record_pattern": r"SUBMARINE|VIRGINIA CLASS|COLUMBIA CLASS|OHIO CLASS|SEAWOLF|\bSSN\b|\bSSBN\b",
+    },
+    "US_MISSILES_AND_MUNITIONS": {
+        "display_name": "US missiles and munitions market",
+        "request_pattern": (
+            r"\b(?:us|u\.?s\.?)?\s*(?:missiles?|munitions?|guided weapons?)\s+"
+            r"(?:market|industrial\s+base|segment)\b"
+        ),
+        "mapped_market_segments": ["Missiles & Munitions"],
+        "platform_pattern": r".+",
+        "record_pattern": r"MISSILE|MUNITION|ROCKET|INTERCEPTOR|TORPEDO|GUIDED WEAPON|BOMB",
+    },
+    "US_MILITARY_SPACE_SYSTEMS": {
+        "display_name": "US military space-systems market",
+        "request_pattern": (
+            r"\b(?:us|u\.?s\.?)?\s*(?:military|defen[cs]e|national security)\s+space"
+            r"(?:\s+(?:systems?|market|segment|industrial\s+base))?\b"
+        ),
+        "mapped_market_segments": ["Space"],
+        "platform_pattern": r".+",
+        "record_pattern": r"SATELLITE|\bSPACE\b|ORBIT|LAUNCH|\bGPS\b|OPIR|SBIRS|AEHF|MUOS",
+    },
 }
 
 
@@ -100,15 +191,36 @@ def market_segment_follow_up_intent(text: str) -> bool:
 class MarketSegmentStore:
     """Aggregate named mapped programs without merging unlike financial measures."""
 
-    def __init__(self, data_root: Path = DEFAULT_DATA_ROOT) -> None:
+    def __init__(
+        self,
+        data_root: Path = DEFAULT_DATA_ROOT,
+        precomputed_dir: Path | None = None,
+    ) -> None:
         self.data_root = data_root.resolve()
+        configured_precomputed_dir = os.getenv("ASK_MIMIR_MARKET_SEGMENT_DIR", "").strip()
+        self.precomputed_dir = (
+            precomputed_dir.resolve()
+            if precomputed_dir is not None
+            else Path(configured_precomputed_dir).resolve()
+            if configured_precomputed_dir
+            else None
+        )
+        classification_path = self.data_root / "classification_reference.parquet"
+        if not classification_path.exists():
+            local_classification = (
+                Path(__file__).resolve().parent
+                / "validation-output"
+                / "classification_reference.parquet"
+            )
+            if local_classification.exists():
+                classification_path = local_classification
         self.paths = {
             "transactions": self.data_root / "transactions.parquet",
             "contracts": self.data_root / "contracts_rolled.parquet",
             "network": self.data_root / "network.parquet",
             "locations": self.data_root / "cage_locations.parquet",
             "opportunities": self.data_root / "opportunities.parquet",
-            "classifications": self.data_root / "classification_reference.parquet",
+            "classifications": classification_path,
         }
         missing = [str(path) for path in self.paths.values() if not path.exists()]
         if missing:
@@ -138,7 +250,18 @@ class MarketSegmentStore:
         if clean_id not in self._cache:
             cache_path = self.cache_dir / f"{clean_id.lower()}.json"
             loaded_from_disk = False
-            if cache_path.exists():
+            precomputed_path = (
+                self.precomputed_dir / f"{clean_id.lower()}.json"
+                if self.precomputed_dir is not None
+                else None
+            )
+            if precomputed_path is not None and precomputed_path.exists():
+                try:
+                    self._cache[clean_id] = json.loads(precomputed_path.read_text())
+                    loaded_from_disk = True
+                except (OSError, json.JSONDecodeError):
+                    self._cache[clean_id] = self._build(clean_id, definition)
+            elif cache_path.exists():
                 try:
                     self._cache[clean_id] = json.loads(cache_path.read_text())
                     loaded_from_disk = True
@@ -468,7 +591,8 @@ class MarketSegmentStore:
                 SELECT contract_id, vendor_name, vendor_cage,
                        COALESCE(base_award_description, description) AS description,
                        platform_family, total_spend AS net_prime_obligations_usd,
-                       last_action_date
+                       last_action_date,
+                       COUNT(*) OVER () AS total_available
                 FROM read_parquet(?)
                 WHERE source_system = 'USA_SPENDING' AND year BETWEEN 2021 AND 2026
                   AND ((? AND platform_family IN (SELECT UNNEST(?)))
@@ -482,7 +606,8 @@ class MarketSegmentStore:
         current_opportunities = _rows(
             self.connection.execute(
                 """
-                SELECT id, sol_num, title, agency, sub_agency, deadline, psc, naics, url
+                SELECT id, sol_num, title, agency, sub_agency, deadline, psc, naics, url,
+                       COUNT(*) OVER () AS total_available
                 FROM read_parquet(?)
                 WHERE SUBSTR(COALESCE(deadline, ''), 1, 10) >= CAST(CURRENT_DATE AS VARCHAR)
                   AND REGEXP_MATCHES(UPPER(COALESCE(search_text, title, '')), ?)
@@ -511,16 +636,72 @@ class MarketSegmentStore:
             "current_opportunities": current_opportunities,
             "coverage": {
                 "defined_platform_count": len(platforms),
-                "platforms_with_prime_activity": len(platform_activity),
+                "platforms_with_prime_activity": sum(
+                    row.get("platform_family") in platforms
+                    for row in platform_activity
+                ),
+                "directly_matched_activity_group_present": any(
+                    str(row.get("platform_family") or "").startswith("Other directly matched")
+                    for row in platform_activity
+                ),
                 "prime_recipient_sites": int(prime_sites[0].get("total_available") or 0)
                     if prime_sites else 0,
                 "reported_supplier_sites": int(supplier_sites[0].get("total_available") or 0)
                     if supplier_sites else 0,
-                "directly_matched_awards": len(leading_awards),
-                "current_opportunities": len(current_opportunities),
+                "directly_matched_awards": int(
+                    leading_awards[0].get("total_available") or 0
+                ) if leading_awards else 0,
+                "current_opportunities": int(
+                    current_opportunities[0].get("total_available") or 0
+                ) if current_opportunities else 0,
             },
             "methodology": {
                 "scope_rule": "Programs are selected from Mimir's mapped taxonomy and supplemented by directly matching public records.",
                 "financial_rule": "Prime obligations, reported subcontract value and DLA procurement remain separate measures.",
             },
         }
+
+
+def build_precomputed_market_segments(
+    data_root: Path,
+    output_dir: Path,
+) -> Dict[str, Any]:
+    """Materialize every configured segment once for release-bound runtime use."""
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    store = MarketSegmentStore(data_root=data_root, precomputed_dir=output_dir / "unused")
+    entries = []
+    for segment_id, definition in MARKET_SEGMENTS.items():
+        print(f"Building market segment: {definition['display_name']}", flush=True)
+        pack = store._build(segment_id, definition)
+        if not pack["coverage"]["defined_platform_count"]:
+            raise RuntimeError(
+                f"market segment has no mapped platforms: {segment_id}"
+            )
+        if not pack["platform_activity"]:
+            raise RuntimeError(
+                f"market segment has no platform activity: {segment_id}"
+            )
+        path = output_dir / f"{segment_id.lower()}.json"
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(pack, default=str))
+        temporary.replace(path)
+        entries.append(
+            {
+                "segment_id": segment_id,
+                "display_name": definition["display_name"],
+                "filename": path.name,
+                "defined_platform_count": pack["coverage"]["defined_platform_count"],
+            }
+        )
+    manifest = {
+        "schema_version": MARKET_SEGMENT_SCHEMA_VERSION,
+        "validation_status": "pass",
+        "segment_count": len(entries),
+        "segments": entries,
+    }
+    manifest_path = output_dir / "manifest.json"
+    temporary = manifest_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(manifest, indent=2))
+    temporary.replace(manifest_path)
+    return manifest

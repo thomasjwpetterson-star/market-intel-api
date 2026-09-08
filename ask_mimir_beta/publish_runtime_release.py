@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sys
 import tempfile
 import urllib.request
@@ -17,6 +18,9 @@ import boto3
 import duckdb
 
 from bootstrap_data import DEFAULT_BUCKET, file_sha256
+from build_platform_source_depth import build_platform_source_depth
+from capability_discovery import build_precomputed_capabilities
+from market_segment import build_precomputed_market_segments
 
 
 ROOT = Path(__file__).resolve().parent
@@ -37,23 +41,68 @@ DATA_FILES = (
     "contracts_rolled.parquet",
     "profiles.parquet",
 )
-CLASSIFICATION_REFERENCE = ROOT / "validation-output" / "classification_reference.parquet"
-ARTIFACT_DIRS: Tuple[Tuple[Path, str], ...] = (
-    (ROOT / "validation-output", "metric-release"),
-    (ROOT / "validation-output" / "company-context", "company-context"),
-    (ROOT / "validation-output" / "company-opportunities", "company-opportunities"),
-    (ROOT / "validation-output" / "platform-supply-chains", "platform-supply-chains"),
-    (ROOT / "validation-output" / "program-momentum", "program-momentum"),
+GENERATED_DATA_FILES = (
+    "niin_source_depth.parquet",
+    "platform_source_depth.parquet",
 )
+PINNED_REFERENCE_FILES = (
+    (
+        "silver/dod_budget/ref_fydp_budget_facts/releases/pb_fy2027_v1/data/dod_fydp_budget_facts.parquet",
+        "dod_fydp_budget_facts.parquet",
+    ),
+)
+CLASSIFICATION_REFERENCE = ROOT / "validation-output" / "classification_reference.parquet"
+MARKET_SEGMENT_DIR = ROOT / "validation-output" / "market-segments"
+CAPABILITY_DIR = ROOT / "validation-output" / "capability-markets"
+RUNTIME_ARTIFACT_ROOT = ROOT / ".runtime-data" / "artifacts"
+
+
+def _artifact_source(name: str) -> Path:
+    preferred = ROOT / "validation-output" / name
+    if (preferred / "manifest.json").exists():
+        return preferred
+    fallback = RUNTIME_ARTIFACT_ROOT / name
+    if (fallback / "manifest.json").exists():
+        return fallback
+    raise FileNotFoundError(
+        f"Ask Mimir artifact pack is unavailable for {name}: "
+        f"checked {preferred} and {fallback}"
+    )
+
+
+def artifact_directories() -> Tuple[Tuple[Path, str], ...]:
+    validation_root = ROOT / "validation-output"
+    metric_source = (
+        validation_root
+        if (validation_root / "manifest.json").exists()
+        else _artifact_source("metric-release")
+    )
+    return (
+        (metric_source, "metric-release"),
+        (_artifact_source("company-context"), "company-context"),
+        (_artifact_source("company-opportunities"), "company-opportunities"),
+        (_artifact_source("platform-supply-chains"), "platform-supply-chains"),
+        (_artifact_source("program-momentum"), "program-momentum"),
+        (MARKET_SEGMENT_DIR, "market-segments"),
+        (CAPABILITY_DIR, "capability-markets"),
+    )
+
+
+def artifact_source_for_destination(destination: str) -> Path:
+    return next(
+        source
+        for source, artifact_destination in artifact_directories()
+        if artifact_destination == destination
+    )
 
 
 def artifact_files() -> Iterable[Tuple[Path, str]]:
     included = set()
-    for source_dir, destination_dir in ARTIFACT_DIRS:
+    for source_dir, destination_dir in artifact_directories():
         for path in sorted(source_dir.rglob("*")):
             if not path.is_file() or "duckdb_tmp" in path.parts:
                 continue
-            if source_dir == ROOT / "validation-output" and path.parent != source_dir:
+            if destination_dir == "metric-release" and path.parent != source_dir:
                 continue
             destination = f"artifacts/{destination_dir}/{path.relative_to(source_dir)}"
             if destination not in included:
@@ -156,6 +205,23 @@ def publish(
     prefix = f"ask_mimir/releases/{release_id}"
     entries: List[Dict[str, Any]] = []
 
+    classification_path = build_classification_reference()
+    serving_classification_path = DATA_ROOT / classification_path.name
+    if (
+        not serving_classification_path.exists()
+        or file_sha256(serving_classification_path) != file_sha256(classification_path)
+    ):
+        shutil.copyfile(classification_path, serving_classification_path)
+    source_depth_summary = build_platform_source_depth(DATA_ROOT)
+    market_segment_manifest = build_precomputed_market_segments(
+        DATA_ROOT,
+        MARKET_SEGMENT_DIR,
+    )
+    capability_manifest = build_precomputed_capabilities(
+        DATA_ROOT,
+        CAPABILITY_DIR,
+    )
+
     for path, local_path in artifact_files():
         print(f"Publishing artifact: {local_path}", file=sys.stderr)
         key = f"{prefix}/{local_path}"
@@ -176,7 +242,25 @@ def publish(
             )
         )
 
-    classification_path = build_classification_reference()
+    for filename in GENERATED_DATA_FILES:
+        print(f"Publishing derived serving data: {filename}", file=sys.stderr)
+        path = DATA_ROOT / filename
+        key = f"{prefix}/data/{filename}"
+        s3.upload_file(str(path), bucket, key)
+        entries.append(manifest_entry(path, f"data/{filename}", key))
+
+    for source_key, filename in PINNED_REFERENCE_FILES:
+        print(f"Pinning reference data: {filename}", file=sys.stderr)
+        entries.append(
+            serving_manifest_entry(
+                s3,
+                bucket,
+                source_key,
+                f"data/{filename}",
+                DATA_ROOT / filename,
+            )
+        )
+
     classification_key = f"{prefix}/data/{classification_path.name}"
     s3.upload_file(str(classification_path), bucket, classification_key)
     entries.append(
@@ -191,8 +275,15 @@ def publish(
         "release_id": release_id,
         "generated_at": generated_at,
         "metric_release_id": json.loads(
-            (ROOT / "validation-output" / "manifest.json").read_text()
+            artifact_source_for_destination("metric-release")
+            .joinpath("manifest.json")
+            .read_text()
         )["release_id"],
+        "derived_release": {
+            "platform_source_depth": source_depth_summary,
+            "market_segments": market_segment_manifest,
+            "capability_markets": capability_manifest,
+        },
         "files": entries,
     }
     manifest_key = f"{prefix}/runtime_manifest.json"

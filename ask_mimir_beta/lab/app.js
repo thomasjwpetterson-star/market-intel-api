@@ -101,7 +101,10 @@ function betaHeaders() {
 function updateAllowance(access) {
   if (!access) return;
   state.entitlement = access;
-  allowanceStatus.textContent = `${access.display_name} · ${access.queries_remaining_today} of ${access.queries_per_utc_day} queries left today`;
+  const monthly = Number.isFinite(Number(access.queries_remaining_this_month))
+    ? ` · ${access.queries_remaining_this_month} left this month`
+    : "";
+  allowanceStatus.textContent = `${access.display_name} · ${access.queries_remaining_today} left today${monthly}`;
 }
 
 function stopThinking() {
