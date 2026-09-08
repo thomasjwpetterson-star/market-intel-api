@@ -256,7 +256,7 @@ class CapabilityDiscoveryStore:
                 bool(re.search(rf"\b{re.escape(term)}\b", description))
                 for term in domain_terms
             )
-            if subject_matches < 1:
+            if subject_matches < minimum_matches:
                 continue
             scored_codes.append(
                 {
@@ -266,7 +266,7 @@ class CapabilityDiscoveryStore:
                 }
             )
         contextual_codes = [row for row in scored_codes if row["domain_matches"] > 0]
-        if domain_terms and contextual_codes:
+        if domain_terms:
             scored_codes = contextual_codes
         code_rows = sorted(
             scored_codes,
@@ -308,7 +308,9 @@ class CapabilityDiscoveryStore:
         use_scope = bool(fsc_codes or market_segments)
         is_dynamic = bool(definition.get("dynamic"))
         term_stems = definition.get("term_stems", [])
-        minimum_term_matches = 1 if use_scope else definition.get("minimum_term_matches", 1)
+        minimum_term_matches = (
+            definition.get("minimum_term_matches", 1) if is_dynamic else 1
+        )
         rows = _rows(
             self.connection.execute(
                 """
