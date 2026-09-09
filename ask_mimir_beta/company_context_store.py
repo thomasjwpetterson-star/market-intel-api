@@ -1583,6 +1583,18 @@ class CompanyContextStore:
         return value
 
 
+def _matching_parent_scope_ids(
+    candidates: Sequence[Dict[str, Any]], selected_scope_id: str
+) -> set[str]:
+    scope_ids = {
+        str(candidate.get("scope_id") or "").upper()
+        for candidate in candidates
+        if candidate.get("scope_id")
+    }
+    scope_ids.add(str(selected_scope_id).upper())
+    return scope_ids
+
+
 def build_precomputed_parent_contexts(
     data_root: Path,
     source_context_dir: Path,
@@ -1624,17 +1636,21 @@ def build_precomputed_parent_contexts(
                     flush=True,
                 )
                 clean_scope_id = str(match["scope_id"]).upper()
+                replacement_scope_ids = _matching_parent_scope_ids(
+                    candidates, clean_scope_id
+                )
                 store.contexts = [
                     context
                     for context in store.contexts
                     if not (
                         context.get("scope", {}).get("scope_type") == "company_parent"
                         and str(context.get("scope", {}).get("scope_id") or "").upper()
-                        == clean_scope_id
+                        in replacement_scope_ids
                     )
                 ]
-                store._dynamic_contexts.pop(("company_parent", clean_scope_id), None)
-                store._context_paths.pop(("company_parent", clean_scope_id), None)
+                for scope_id in replacement_scope_ids:
+                    store._dynamic_contexts.pop(("company_parent", scope_id), None)
+                    store._context_paths.pop(("company_parent", scope_id), None)
                 context = _bounded_precomputed_context(
                     dict(store.get_raw("company_parent", match["scope_id"]))
                 )
@@ -1653,7 +1669,7 @@ def build_precomputed_parent_contexts(
                     if (
                         entry.get("scope", {}).get("scope_type") == "company_parent"
                         and str(entry.get("scope", {}).get("scope_id") or "").upper()
-                        == clean_scope_id
+                        in replacement_scope_ids
                     )
                 ]
                 entries = [
@@ -1662,7 +1678,7 @@ def build_precomputed_parent_contexts(
                     if not (
                         entry.get("scope", {}).get("scope_type") == "company_parent"
                         and str(entry.get("scope", {}).get("scope_id") or "").upper()
-                        == str(match["scope_id"]).upper()
+                        in replacement_scope_ids
                     )
                 ]
                 for replaced_entry in replaced_entries:
@@ -1717,6 +1733,11 @@ def build_precomputed_parent_contexts(
                 },
             }
         )
+
+    referenced_paths = {str(entry["path"]) for entry in lazy_entries}
+    for context_path in output_dir.glob("*.json"):
+        if context_path.name != "manifest.json" and context_path.name not in referenced_paths:
+            context_path.unlink()
 
     manifest = {
         **source_manifest,

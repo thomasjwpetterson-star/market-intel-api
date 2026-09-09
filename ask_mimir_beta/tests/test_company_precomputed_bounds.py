@@ -1,6 +1,9 @@
 import unittest
 
-from company_context_store import _bounded_precomputed_context
+from company_context_store import (
+    _bounded_precomputed_context,
+    _matching_parent_scope_ids,
+)
 
 
 class CompanyPrecomputedBoundsTests(unittest.TestCase):
@@ -59,6 +62,52 @@ class CompanyPrecomputedBoundsTests(unittest.TestCase):
         )
         self.assertEqual(bounded["evidence_index"]["record_count"], 6)
         self.assertEqual(bounded["precomputed_row_limit_per_table"], 2)
+
+    def test_parent_rebuild_replaces_every_matching_legacy_scope(self):
+        candidates = [
+            {"scope_id": "TRANSDIGM_GROUP_INC"},
+            {"scope_id": "PARENT_7ABF4B0054D95B83A7C1"},
+        ]
+        replacement_scope_ids = _matching_parent_scope_ids(
+            candidates, "parent_7abf4b0054d95b83a7c1"
+        )
+        entries = [
+            {
+                "scope": {
+                    "scope_type": "company_parent",
+                    "scope_id": "TRANSDIGM_GROUP_INC",
+                }
+            },
+            {
+                "scope": {
+                    "scope_type": "company_parent",
+                    "scope_id": "PARENT_7ABF4B0054D95B83A7C1",
+                }
+            },
+            {
+                "scope": {
+                    "scope_type": "company_parent",
+                    "scope_id": "UNRELATED_PARENT",
+                }
+            },
+            {"scope": {"scope_type": "company_site", "scope_id": "19645"}},
+        ]
+
+        retained = [
+            entry
+            for entry in entries
+            if not (
+                entry.get("scope", {}).get("scope_type") == "company_parent"
+                and str(entry.get("scope", {}).get("scope_id") or "").upper()
+                in replacement_scope_ids
+            )
+        ]
+
+        self.assertEqual(len(retained), 2)
+        self.assertEqual(
+            {entry["scope"]["scope_id"] for entry in retained},
+            {"UNRELATED_PARENT", "19645"},
+        )
 
 
 if __name__ == "__main__":
