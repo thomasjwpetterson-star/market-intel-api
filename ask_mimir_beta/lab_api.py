@@ -3019,6 +3019,7 @@ def styles() -> FileResponse:
 def health() -> Dict[str, Any]:
     return {
         "status": "ok",
+        "runtime_release_id": os.getenv("ASK_MIMIR_RELEASE_ID"),
         "release_id": runtime.store.manifest["release_id"],
         "analysis_fy": runtime.store.manifest["analysis_fy"],
         "model": runtime.model,
