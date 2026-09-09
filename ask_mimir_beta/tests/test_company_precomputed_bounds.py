@@ -68,30 +68,36 @@ class CompanyPrecomputedBoundsTests(unittest.TestCase):
             {"scope_id": "TRANSDIGM_GROUP_INC"},
             {"scope_id": "PARENT_7ABF4B0054D95B83A7C1"},
         ]
-        replacement_scope_ids = _matching_parent_scope_ids(
-            candidates, "parent_7abf4b0054d95b83a7c1"
-        )
         entries = [
             {
                 "scope": {
                     "scope_type": "company_parent",
                     "scope_id": "TRANSDIGM_GROUP_INC",
+                    "scope_name": "TRANSDIGM GROUP INCORPORATED",
                 }
             },
             {
                 "scope": {
                     "scope_type": "company_parent",
                     "scope_id": "PARENT_7ABF4B0054D95B83A7C1",
+                    "scope_name": "TRANSDIGM GROUP INCORPORATED",
                 }
             },
             {
                 "scope": {
                     "scope_type": "company_parent",
                     "scope_id": "UNRELATED_PARENT",
+                    "scope_name": "UNRELATED PARENT",
                 }
             },
             {"scope": {"scope_type": "company_site", "scope_id": "19645"}},
         ]
+        replacement_scope_ids = _matching_parent_scope_ids(
+            [candidates[1]],
+            "parent_7abf4b0054d95b83a7c1",
+            entries,
+            "TRANSDIGM GROUP INCORPORATED",
+        )
 
         retained = [
             entry

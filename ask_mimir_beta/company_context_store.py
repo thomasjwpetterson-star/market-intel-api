@@ -1584,7 +1584,10 @@ class CompanyContextStore:
 
 
 def _matching_parent_scope_ids(
-    candidates: Sequence[Dict[str, Any]], selected_scope_id: str
+    candidates: Sequence[Dict[str, Any]],
+    selected_scope_id: str,
+    entries: Sequence[Dict[str, Any]] = (),
+    selected_scope_name: str = "",
 ) -> set[str]:
     scope_ids = {
         str(candidate.get("scope_id") or "").upper()
@@ -1592,6 +1595,16 @@ def _matching_parent_scope_ids(
         if candidate.get("scope_id")
     }
     scope_ids.add(str(selected_scope_id).upper())
+    selected_name_core = _company_name_core(selected_scope_name)
+    if selected_name_core:
+        scope_ids.update(
+            str(entry.get("scope", {}).get("scope_id") or "").upper()
+            for entry in entries
+            if entry.get("scope", {}).get("scope_type") == "company_parent"
+            and _company_name_core(entry.get("scope", {}).get("scope_name"))
+            == selected_name_core
+            and entry.get("scope", {}).get("scope_id")
+        )
     return scope_ids
 
 
@@ -1637,7 +1650,10 @@ def build_precomputed_parent_contexts(
                 )
                 clean_scope_id = str(match["scope_id"]).upper()
                 replacement_scope_ids = _matching_parent_scope_ids(
-                    candidates, clean_scope_id
+                    candidates,
+                    clean_scope_id,
+                    entries,
+                    str(match.get("scope_name") or ""),
                 )
                 store.contexts = [
                     context
