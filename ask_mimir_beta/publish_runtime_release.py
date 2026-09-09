@@ -26,6 +26,7 @@ from capability_discovery import build_precomputed_capabilities
 from company_context_store import build_precomputed_parent_contexts
 from market_segment import build_precomputed_market_segments
 from platform_context import build_precomputed_platform_contexts
+from product_intelligence import build_precomputed_product_families
 
 
 ROOT = Path(__file__).resolve().parent
@@ -59,6 +60,7 @@ PINNED_REFERENCE_FILES = (
 CLASSIFICATION_REFERENCE = ROOT / "validation-output" / "classification_reference.parquet"
 MARKET_SEGMENT_DIR = ROOT / "validation-output" / "market-segments"
 CAPABILITY_DIR = ROOT / "validation-output" / "capability-markets"
+PRODUCT_FAMILY_DIR = ROOT / "validation-output" / "product-families"
 PRECOMPUTED_COMPANY_CONTEXT_DIR = (
     ROOT / "validation-output" / "precomputed-company-contexts"
 )
@@ -137,6 +139,7 @@ def artifact_directories() -> Tuple[Tuple[Path, str], ...]:
         (_artifact_source("program-momentum"), "program-momentum"),
         (MARKET_SEGMENT_DIR, "market-segments"),
         (CAPABILITY_DIR, "capability-markets"),
+        (PRODUCT_FAMILY_DIR, "product-families"),
         (PLATFORM_CONTEXT_DIR, "platform-contexts"),
     )
 
@@ -389,6 +392,10 @@ def publish(
         DATA_ROOT,
         CAPABILITY_DIR,
     )
+    product_family_manifest = build_precomputed_product_families(
+        DATA_ROOT,
+        PRODUCT_FAMILY_DIR,
+    )
     company_context_manifest = build_precomputed_parent_contexts(
         DATA_ROOT,
         _artifact_source("company-context"),
@@ -452,6 +459,7 @@ def publish(
             "platform_source_depth": source_depth_summary,
             "market_segments": market_segment_manifest,
             "capability_markets": capability_manifest,
+            "product_families": product_family_manifest,
             "precomputed_parent_context_count": len(
                 company_context_manifest.get("precomputed_parent_queries", [])
             ),

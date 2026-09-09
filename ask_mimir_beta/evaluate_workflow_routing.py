@@ -22,6 +22,12 @@ from market_segment import resolve_market_segment
 
 
 ROUTING_CASES = {
+    "product_intelligence": [
+        "Find out everything about the Leonardo DRS flight recorder product line.",
+        "What is the outlook for DFIRS 2100?",
+        "Assess the EAS3000F and ELB3000F product family.",
+        "What supports the M-346 AJT CSMU?",
+    ],
     "platform_intelligence": [
         "Tell me about the F-16 market.",
         "Show me F-16 suppliers",
@@ -215,6 +221,12 @@ ROUTING_CASES = {
         "Identify suppliers of aerospace fuel systems.",
         "Which manufacturers provide electronic warfare equipment?",
         "Find suppliers capable of producing energetic components.",
+        "Find US manufacturers supplying avionics to military aircraft.",
+        "Which companies supply aircraft electrical power-management equipment?",
+        "Find military antenna and waveguide suppliers.",
+        "Who manufactures tactical communications equipment?",
+        "Find electro-optical and infrared equipment suppliers.",
+        "Identify energetic initiation-component manufacturers.",
         "Show manufacturers of military aircraft fuel pumps.",
         "Who manufactures rugged computers for defense platforms?",
         "Identify companies supplying missile seeker electronics.",
@@ -448,7 +460,7 @@ RESOLUTION_CASES = {
     },
     "capability": {
         "Identify suppliers of aerospace fuel systems.": "capability:aerospace fuel systems",
-        "Who makes military-aircraft landing gear?": "capability:military-aircraft landing gear",
+        "Who makes military-aircraft landing gear?": "aircraft_landing_gear",
     },
 }
 

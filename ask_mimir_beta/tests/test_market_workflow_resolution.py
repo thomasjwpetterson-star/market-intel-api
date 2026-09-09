@@ -5,9 +5,11 @@ from beta_controls import (
     validate_answer_citations,
 )
 from capability_discovery import (
+    CAPABILITY_DEFINITIONS,
     _capability_domains,
     _capability_terms,
     capability_market_follow_up_intent,
+    load_capability_ontology,
     resolve_capability,
 )
 from geographic_market import (
@@ -45,12 +47,35 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
             "aircraft_actuation",
         )
 
-    def test_open_landing_gear_capability_resolves_dynamically(self):
+    def test_open_landing_gear_capability_uses_governed_definition(self):
         self.assertEqual(
             resolve_capability(
                 "Give me an overview of this US defense market, capability area or industrial base: Military Landing Gear"
             ),
-            "capability:military landing gear",
+            "aircraft_landing_gear",
+        )
+
+    def test_governed_technology_markets_resolve_before_dynamic_fallback(self):
+        cases = {
+            "Who makes military-aircraft landing gear?": "aircraft_landing_gear",
+            "Find aircraft environmental-control equipment manufacturers.": "aircraft_environmental_control",
+            "Who supplies electronic warfare equipment?": "electronic_warfare",
+            "Find missile propulsion system suppliers.": "missile_propulsion",
+            "Find US manufacturers supplying avionics to military aircraft.": "military_avionics",
+            "Find military-aircraft electrical power generation suppliers.": "aircraft_electrical_power",
+            "Find missile antenna and waveguide suppliers.": "military_antennas_rf",
+            "Who supplies tactical communications equipment?": "tactical_communications",
+            "Find electro-optical and infrared system manufacturers.": "electro_optical_infrared",
+            "Find suppliers capable of producing energetic components.": "energetic_components",
+        }
+        for question, expected in cases.items():
+            with self.subTest(question=question):
+                self.assertEqual(resolve_capability(question), expected)
+
+    def test_ungoverned_flight_recorder_market_uses_dynamic_evidence_search(self):
+        self.assertEqual(
+            resolve_capability("Give me an overview of the military flight recorder market."),
+            "capability:military flight recorder",
         )
 
     def test_natural_language_aerospace_fuel_market_resolves_dynamically(self):
@@ -63,10 +88,10 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
 
     def test_general_capability_supplier_phrasings_resolve_dynamically(self):
         cases = {
-            "Who makes military-aircraft landing gear?": "capability:military-aircraft landing gear",
+            "Who makes military-aircraft landing gear?": "aircraft_landing_gear",
             "Find companies with flight-control experience.": "capability:flight-control experience",
             "Identify suppliers of aerospace fuel systems.": "capability:aerospace fuel systems",
-            "Find suppliers capable of producing energetic components.": "capability:energetic components",
+            "Find suppliers capable of producing energetic components.": "energetic_components",
         }
         for question, expected in cases.items():
             with self.subTest(question=question):
@@ -136,6 +161,23 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
         ):
             with self.subTest(question=question):
                 self.assertEqual(resolve_capability(question), expected_phrase)
+
+    def test_capability_ontology_is_valid_and_governed(self):
+        ontology = load_capability_ontology()
+        self.assertEqual(ontology["schema_version"], 1)
+        self.assertEqual(ontology["capabilities"], CAPABILITY_DEFINITIONS)
+        self.assertGreaterEqual(len(CAPABILITY_DEFINITIONS), 15)
+        for capability_id, definition in CAPABILITY_DEFINITIONS.items():
+            with self.subTest(capability_id=capability_id):
+                self.assertIn(
+                    definition["evidence_mode"],
+                    {
+                        "classification_complete",
+                        "classification_complete_sparse_items",
+                        "description_bounded",
+                        "hybrid",
+                    },
+                )
 
     def test_state_market_follow_up_is_retained(self):
         self.assertTrue(

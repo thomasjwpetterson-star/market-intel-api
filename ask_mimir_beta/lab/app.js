@@ -915,6 +915,115 @@ function renderCapabilityEvidence(entry) {
   evidenceList.appendChild(details);
 }
 
+function renderProductEvidence(entry) {
+  const result = entry.result || {};
+  const scope = result.scope || {};
+  const coverage = result.coverage || {};
+  const sources = result.official_sources || [];
+  const opportunities = result.opportunities || [];
+  const awards = result.prime_awards || [];
+  const subawards = result.reported_subawards || [];
+  const items = result.item_references || [];
+  const sites = result.sites || [];
+  const signals = result.diligence_signals || [];
+  const labels = {
+    sole_source_or_source_control: "Sole-source or source-control evidence",
+    modernization_or_obsolescence: "Modernization or obsolescence activity",
+    oem_or_design_authority_dependency: "OEM or design-authority dependency",
+    qualification_or_certification_dependency: "Qualification or certification dependency",
+  };
+
+  const overview = document.createElement("details");
+  overview.className = "evidence-card";
+  overview.open = true;
+  overview.innerHTML = `
+    <summary>
+      <span class="tool-name">${escapeHtml(scope.display_name || "Product-family evidence")}</span>
+      <span class="tool-meta">${escapeHtml(scope.observation_window || "Current public evidence")}</span>
+    </summary>
+    <div class="evidence-detail"><section class="evidence-section">
+      <div class="evidence-row"><strong>${escapeHtml(scope.manufacturer || "Manufacturer not stated")}</strong>
+        ${escapeHtml(coverage.opportunity_records || 0)} opportunity record(s) ·
+        ${escapeHtml(coverage.prime_award_records || 0)} award record(s) ·
+        ${escapeHtml(coverage.resolved_cage_sites || 0)} resolved CAGE site(s)
+      </div>
+      ${signals.length ? `<div class="evidence-row"><strong>Material diligence signals</strong>${signals.map((row) => escapeHtml(labels[row.signal] || row.signal)).join(" · ")}</div>` : ""}
+    </section></div>`;
+  evidenceList.appendChild(overview);
+
+  if (sources.length || opportunities.length) {
+    const publicRecords = document.createElement("details");
+    publicRecords.className = "evidence-card";
+    publicRecords.innerHTML = `
+      <summary><span class="tool-name">Public product and acquisition records</span><span class="tool-meta">${sources.length + opportunities.length} sources</span></summary>
+      <div class="evidence-detail"><section class="evidence-section">
+        ${sources.map((source) => `<div class="evidence-row"><strong><a href="${escapeHtml(source.url)}" target="_blank" rel="noreferrer">${escapeHtml(source.title)}</a></strong>${escapeHtml(source.supports || "Product evidence")}</div>`).join("")}
+        ${opportunities.map((row) => `<div class="evidence-row"><strong><a href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">${escapeHtml(row.sol_num || row.id)}</a></strong>${escapeHtml(row.title || "Public opportunity")} · response date ${escapeHtml(String(row.deadline || "Not stated").slice(0, 10))}</div>`).join("")}
+      </section></div>`;
+    evidenceList.appendChild(publicRecords);
+  }
+
+  if (awards.length) {
+    const awardRecords = document.createElement("details");
+    awardRecords.className = "evidence-card";
+    awardRecords.innerHTML = `
+      <summary><span class="tool-name">Award and location evidence</span><span class="tool-meta">${awards.length} records</span></summary>
+      <div class="evidence-detail"><section class="evidence-section">
+        ${awards.slice(0, 30).map((row) => `<div class="evidence-row">
+          <strong>${dashboardLink(row.contract_id, "AWARDS", "award", row.contract_id)} · ${dashboardLink(`${row.vendor_name || row.vendor_cage} (${row.vendor_cage})`, "COMPANY", "cage", row.vendor_cage)}</strong>
+          ${escapeHtml(row.base_award_description || row.latest_action_description || "Description not stated")}<br />
+          Contracting location: ${escapeHtml([row.contracting_city, row.contracting_state].filter(Boolean).join(", ") || "Not stated")} ·
+          Place of performance: ${escapeHtml([row.place_of_performance_city, row.place_of_performance_state].filter(Boolean).join(", ") || "Not stated")}
+        </div>`).join("")}
+      </section></div>`;
+    evidenceList.appendChild(awardRecords);
+  }
+
+  if (sites.length) {
+    const siteRecords = document.createElement("details");
+    siteRecords.className = "evidence-card";
+    siteRecords.innerHTML = `
+      <summary><span class="tool-name">Resolved organizations and sites</span><span class="tool-meta">${sites.length} CAGE records</span></summary>
+      <div class="evidence-detail"><section class="evidence-section">
+        ${sites.map((site) => `<div class="evidence-row"><strong>${dashboardLink(`${site.vendor_name || site.cage} · CAGE ${site.cage}`, "COMPANY", "cage", site.cage)}</strong>${escapeHtml([site.city, site.state].filter(Boolean).join(", ") || "Location not shown")}</div>`).join("")}
+      </section></div>`;
+    evidenceList.appendChild(siteRecords);
+  }
+
+  if (subawards.length) {
+    const relationshipRecords = document.createElement("details");
+    relationshipRecords.className = "evidence-card";
+    relationshipRecords.innerHTML = `
+      <summary><span class="tool-name">Reported supplier relationships</span><span class="tool-meta">${subawards.length} reported actions</span></summary>
+      <div class="evidence-detail"><section class="evidence-section">
+        ${subawards.slice(0, 50).map((row) => `<div class="evidence-row">
+          <strong>${row.sub_cage && row.sub_cage !== "UNKNO"
+            ? dashboardLink(row.sub_name || row.sub_cage, "COMPANY", "cage", row.sub_cage)
+            : escapeHtml(row.sub_name || "Supplier")}</strong>
+          ${escapeHtml(row.subaward_description || "Description not stated")} · ${escapeHtml(row.action_date || "Date not stated")}<br />
+          Related ${dashboardLink(`award ${row.contract_id}`, "AWARDS", "award", row.contract_id)} ·
+          ${escapeHtml([row.sub_city, row.sub_state, row.sub_country].filter(Boolean).join(", ") || "Location not stated")}
+        </div>`).join("")}
+      </section></div>`;
+    evidenceList.appendChild(relationshipRecords);
+  }
+
+  if (items.length) {
+    const itemRecords = document.createElement("details");
+    itemRecords.className = "evidence-card";
+    itemRecords.innerHTML = `
+      <summary><span class="tool-name">Related parts and item records</span><span class="tool-meta">${items.length} records</span></summary>
+      <div class="evidence-detail"><section class="evidence-section">
+        ${items.slice(0, 50).map((row) => `<div class="evidence-row">
+          <strong>${dashboardLink(row.nsn || row.niin || "Item record", "PARTS", "nsn", row.nsn || row.niin)}</strong>
+          ${escapeHtml(row.description || "Description not stated")}${row.part_number ? ` · part ${escapeHtml(row.part_number)}` : ""}<br />
+          ${dashboardLink(`${row.vendor_name || row.cage} · CAGE ${row.cage}`, "COMPANY", "cage", row.cage)}
+        </div>`).join("")}
+      </section></div>`;
+    evidenceList.appendChild(itemRecords);
+  }
+}
+
 function renderAwardOpportunityEvidence(entry, artifacts = {}) {
   const result = entry.result || {};
   const identity = result.identity || {};
@@ -1159,6 +1268,10 @@ function renderEvidence(trace, answerText = "", artifacts = {}) {
     }
     if (entry.tool === "get_capability_market" && entry.result) {
       renderCapabilityEvidence(entry);
+      return;
+    }
+    if (entry.tool === "get_product_family" && entry.result) {
+      renderProductEvidence(entry);
       return;
     }
     if (entry.tool === "get_award_opportunity_context" && entry.result) {

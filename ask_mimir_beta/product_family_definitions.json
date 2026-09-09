@@ -1,0 +1,43 @@
+{
+  "leonardo_drs_flight_recorders": {
+    "display_name": "Leonardo DRS deployable flight recorders and emergency-location systems",
+    "manufacturer": "Leonardo DRS / DRS Technologies Canada Ltd.",
+    "aliases": [
+      "DFIRS 2100",
+      "DFIRS MUP",
+      "DFIRS",
+      "DFIRU",
+      "Deployable Flight Incident Recorder",
+      "Deployable Flight Incident Recording Set",
+      "Automatic Deployable Flight Recorder",
+      "ADFR",
+      "EAS3000F",
+      "EAS3000",
+      "ELB3000F",
+      "ELB 3000",
+      "CPI-406"
+    ],
+    "candidate_aliases": [
+      "LAD M-346 AJT CSMU",
+      "M-346 AJT CSMU"
+    ],
+    "company_terms": ["Leonardo", "Leonardo DRS", "DRS Technologies Canada", "DRS Systems"],
+    "official_sources": [
+      {
+        "title": "Leonardo DRS deployable flight recorders",
+        "url": "https://www.leonardodrs.com/what-we-do/products-and-services/deployable-flight-recorders/",
+        "supports": "DFIRS 2100 and ADFR product identity, functions and Kanata product contact"
+      },
+      {
+        "title": "Leonardo DRS emergency locator beacons",
+        "url": "https://www.leonardodrs.com/what-we-do/products-and-services/emergency-locator-beacons/",
+        "supports": "ELB3000F, EAS3000F and CPI-406 product identity and functions"
+      },
+      {
+        "title": "Leonardo DRS Ottawa location",
+        "url": "https://www.leonardodrs.com/locations/drs-technologies-canada-ottawa-ontario/",
+        "supports": "Kanata/Ottawa manufacturing scope and recorder certifications"
+      }
+    ]
+  }
+}

@@ -49,6 +49,11 @@ from market_record_search import (
     record_search_from_scope_id,
     resolve_market_record_search,
 )
+from product_intelligence import (
+    ProductIntelligenceStore,
+    product_follow_up_intent,
+    resolve_product_family,
+)
 from competitor_discovery_export import build_competitor_discovery_zip
 from metric_store import MetricStore
 from platform_supply_chain_export import build_customer_evidence_zip
@@ -800,6 +805,14 @@ not claim that there were no matching awards or notices when the structured item
 or prime-award evidence is populated. Only state that the available evidence is insufficient when all
 of those evidence lanes are empty.
 
+When broader_ecosystem is populated, distinguish the two scopes clearly. The main supplier and NIIN
+results are the narrower capability market supported by product descriptions and directly relevant
+awards. broader_ecosystem covers every active-authorized or observed supplier relationship in the
+listed FSC classes and may include adjacent equipment. Use it to show the scale of the surrounding
+industrial ecosystem, but do not relabel its full value or supplier count as the narrower market.
+This distinction is especially important for aviation fuel controls: FSC 2915 covers aircraft and
+missile-prime-mover fuel-system components beyond complete fuel controls.
+
 For a supplier search, lead with the same compact supplier table. Describe a company as authorized according
 to DLA when active_authorized_niin_count is positive. Describe it as an observed procurement source
 when observed_procurement_niin_count is positive. Do not turn either status into a claim that the
@@ -819,6 +832,14 @@ sites with exact item, authorized-source, observed-procurement or directly relev
 Platform associations can show where matched items are used; do not invent component roles from a
 broad classification alone.
 
+Use scope.evidence_boundary to calibrate the answer without repeating internal classification labels.
+For a description-confirmed boundary, describe the visible supplier and award market rather than
+claiming a complete market universe or calculating market share. For a complete product-classification
+boundary, describe coverage of that governed equipment class, while still avoiding a total-addressable-
+market claim. When the boundary says item-procurement coverage is limited, use prime awards, program
+evidence and authoritative sources for the commercial structure instead of treating a short item list
+as the whole supplier base.
+
 For equipment inherently used across most aircraft, such as landing gear, brakes or flight controls,
 broad platform coverage is expected and is not itself a market insight. Focus on supplier roles, source
 depth, recurring platform families, demand routes, procurement direction and distinctive capabilities. Do not
@@ -828,6 +849,48 @@ Use authoritative government and first-party sources to confirm the current role
 material specialist suppliers where useful. Hyperlink every CAGE and cited NIIN to Mimir. Keep the
 answer below 1,000 words. Do not narrate internal data plumbing, release names, source-resolution
 rules or generic cautions about company revenue and non-additivity.
+
+When using web research, apply this source hierarchy:
+{WEB_SOURCE_POLICY_PROMPT}
+""".strip()
+
+PRODUCT_INTELLIGENCE_PROMPT = f"""
+You are Ask Mimir, an evidence-led defense product and acquisition-diligence analyst. The final
+user message is followed by a product-family dossier assembled from public opportunities, prime
+awards, reported subawards, DLA item references, CAGE sites and first-party product sources.
+
+Answer the precise product-line question rather than substituting a company-wide profile. Begin
+with a concise description of the verified product perimeter and distinguish named products,
+variants, upgrades and adjacent equipment. Use first-party sources for product identity and
+functions. Treat candidate_aliases_requiring_validation as user-supplied leads until an authoritative
+source confirms that identity. Use government records for customers, platforms, contract activity, competition status,
+contracting entities and places of performance.
+
+Treat contracting location and place of performance as separate facts. A prime recipient, OEM,
+design authority, manufacturing site and integration site may be different organizations or
+locations; state the role supported by each record. Do not attribute an entire contract or
+subaward to the product merely because the product is mentioned in a wider award description.
+Where an item or subcontract description is adjacent to a product, describe it as associated
+evidence rather than a confirmed bill-of-material position.
+
+Treat part numbers as reference relationships without independent financial value. Any observed
+DLA procurement value in the product evidence is calculated at NIIN-and-recipient-CAGE level from
+the supplier procurement ledger and must not be repeated or divided across part numbers.
+
+For acquisition diligence, prioritize risks that are specific and material to the evidence:
+legal-entity and asset perimeter, ownership of IP and technical data, design authority, sole-source
+or source-control position, certification and qualification, product obsolescence or upgrade
+requirements, installed-platform and customer concentration, manufacturing or support-site
+dependency, and the split between production and sustainment. Tie each risk to a public record or
+clearly label it as a diligence question. Do not present missing public revenue, backlog, unit
+quantities or market share as zero.
+
+Use authoritative web research to fill product specifications, platform installations, corporate
+ownership and current program status when the supplied records do not contain them. Prefer official
+government and manufacturer sources. Hyperlink CAGE sites, awards, platforms and NSNs to Mimir and
+link public opportunities to their source notice. Never expose release IDs, file names, search-tool
+names, report keys or other implementation language. Keep the main answer below 1,500 words and
+finish with a short Evidence used section.
 
 When using web research, apply this source hierarchy:
 {WEB_SOURCE_POLICY_PROMPT}
@@ -1369,6 +1432,33 @@ TOOLS = [
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
             },
             "required": ["capability_id", "limit"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "search_product_families",
+        "description": "Resolve a named defense product, model or product line to a governed product-family identity.",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "get_product_family",
+        "description": "Return product identity, opportunity, award, site, item and acquisition-diligence evidence for one resolved product family.",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "product_id": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 250}
+            },
+            "required": ["product_id", "limit"],
             "additionalProperties": False,
         },
     },
@@ -1978,7 +2068,7 @@ class ChatMessage(BaseModel):
 
 class ActiveScope(BaseModel):
     scope_type: str = Field(
-        pattern="^(company_parent|company_site|platform|platform_comparison|state_market|capability_market|market_segment|record_search)$"
+        pattern="^(company_parent|company_site|platform|platform_comparison|state_market|capability_market|market_segment|record_search|product_family)$"
     )
     scope_id: str = Field(min_length=1, max_length=200)
     scope_name: Optional[str] = Field(default=None, max_length=300)
@@ -2113,6 +2203,15 @@ class LabRuntime:
         self.state_industrial_base = StateIndustrialBaseStore(data_root)
         self.market_segments = MarketSegmentStore(data_root)
         self.market_records = MarketRecordSearchStore(data_root)
+        self.product_intelligence = ProductIntelligenceStore(
+            data_root,
+            precomputed_dir=Path(
+                os.getenv(
+                    "ASK_MIMIR_PRODUCT_DIR",
+                    str(ROOT / "validation-output" / "product-families"),
+                )
+            ),
+        )
         release_sources = {
             self.store.primitives,
             self.store.components_file,
@@ -2129,10 +2228,13 @@ class LabRuntime:
             *self.competitive_position.paths.values(),
             self.competitor_discovery.definitions_path,
             *self.competitor_discovery.paths.values(),
+            self.capability_discovery.ontology_path,
             *self.capability_discovery.paths.values(),
             *self.state_industrial_base.paths.values(),
             *self.market_segments.paths.values(),
             *self.market_records.paths.values(),
+            self.product_intelligence.definitions_path,
+            *self.product_intelligence.paths.values(),
         }
         if self.platform_contexts.precomputed_dir is not None:
             platform_context_manifest = (
@@ -2155,6 +2257,10 @@ class LabRuntime:
             )
             if capability_manifest.exists():
                 release_sources.add(capability_manifest)
+        if self.product_intelligence.precomputed_dir is not None:
+            product_manifest = self.product_intelligence.precomputed_dir / "manifest.json"
+            if product_manifest.exists():
+                release_sources.add(product_manifest)
         self.release_guard = DataReleaseGuard(
             str(self.store.manifest["release_id"]), release_sources
         )
@@ -2256,6 +2362,7 @@ class LabRuntime:
             "get_state_industrial_base",
             "get_market_segment",
             "get_market_record_search",
+            "get_product_family",
         }
         cache_key = None
         if name in cacheable:
@@ -2336,6 +2443,10 @@ class LabRuntime:
             limit = int(arguments.get("limit", 50))
             spec = {key: value for key, value in arguments.items() if key != "limit"}
             result = self.market_records.get(spec, limit=limit)
+        elif name == "search_product_families":
+            return self.product_intelligence.search(**arguments)
+        elif name == "get_product_family":
+            result = self.product_intelligence.get(**arguments)
         elif name == "get_metric_evidence":
             with self.lock:
                 return self.store.evidence(
@@ -2560,6 +2671,18 @@ def workflow_for_request(request: AskRequest) -> str:
         return "news_article_implications"
     if is_clearly_out_of_domain(request.messages):
         return "out_of_domain"
+    if resolve_product_family(request.messages[-1].content):
+        return "product_intelligence"
+    if product_follow_up_intent(request.messages[-1].content) and any(
+        resolve_product_family(message.content) for message in request.messages[:-1]
+    ):
+        return "product_intelligence"
+    if (
+        request.active_scope
+        and request.active_scope.scope_type == "product_family"
+        and product_follow_up_intent(request.messages[-1].content)
+    ):
+        return "product_intelligence"
     if resolve_market_record_search(request.messages[-1].content):
         return "market_record_search"
     if (
@@ -3404,6 +3527,23 @@ def generate_answer(
         }
     resolved_company_scope: Dict[str, Any] | None = None
     latest_question = str(request.messages[-1].content or "")
+    product_id = resolve_product_family(latest_question)
+    if (
+        not product_id
+        and request.active_scope
+        and request.active_scope.scope_type == "product_family"
+        and product_follow_up_intent(latest_question)
+    ):
+        product_id = request.active_scope.scope_id
+    if not product_id and product_follow_up_intent(latest_question):
+        product_id = next(
+            (
+                resolved
+                for message in reversed(request.messages[:-1])
+                if (resolved := resolve_product_family(message.content))
+            ),
+            None,
+        )
     platform_mentions = runtime.platform_contexts.mentions(latest_question)
     platform_comparison_candidate = explicit_platform_comparison(
         request.messages, runtime.platform_contexts
@@ -3450,6 +3590,7 @@ def generate_answer(
         capability_id = request.active_scope.scope_id
     if any(
         (
+            product_id,
             record_search_spec,
             capability_id,
             segment_id,
@@ -3778,6 +3919,74 @@ def generate_answer(
             "model": runtime.model,
             "release_id": runtime.store.manifest["release_id"],
             "answer_artifacts": {"article_analysis": True},
+            "tool_trace": trace,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "response_calls": len(call_usages),
+            "usage": usage,
+            "usage_by_response": call_usages,
+            "estimated_cost": estimate_usage_cost(runtime.model, usage),
+        }
+        runtime.write_audit_record(
+            {
+                "run_id": str(uuid.uuid4()),
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "request_messages": [message.model_dump() for message in request.messages],
+                **result,
+            }
+        )
+        return result
+
+    if product_id:
+        arguments = {"product_id": product_id, "limit": 150}
+        emit_progress(
+            progress,
+            "Resolving the product family",
+            "Connecting product names, public notices, awards and operating sites",
+            38,
+        )
+        pack = runtime.call_tool("get_product_family", arguments)
+        trace = [{"tool": "get_product_family", "arguments": arguments, "result": pack}]
+        product_input = [
+            {"role": message.role, "content": message.content}
+            for message in request.messages[-8:]
+        ] + [
+            {
+                "role": "user",
+                "content": "MIMIR PRODUCT-FAMILY EVIDENCE\n" + json.dumps(pack, default=str),
+            }
+        ]
+        emit_progress(
+            progress,
+            "Testing the acquisition thesis",
+            "Checking product scope, customer evidence, sites and diligence risks",
+            66,
+        )
+        response = client.responses.create(
+            model=runtime.model,
+            instructions=PRODUCT_INTELLIGENCE_PROMPT,
+            input=product_input,
+            tools=[{"type": "web_search", "search_context_size": "medium"}],
+            reasoning={"effort": runtime.reasoning_effort},
+            max_output_tokens=min(runtime.max_output_tokens, 12000),
+            store=False,
+        )
+        call_usages = [_usage_dict(response)]
+        response, answer_text = finalize_response(
+            client,
+            response,
+            PRODUCT_INTELLIGENCE_PROMPT,
+            product_input,
+            call_usages,
+            progress,
+            min(runtime.max_output_tokens, 12000),
+        )
+        usage = aggregate_usage(call_usages)
+        result = {
+            "answer": answer_text,
+            "response_id": response.id,
+            "model": runtime.model,
+            "release_id": runtime.store.manifest["release_id"],
+            "answer_artifacts": {"product_family": pack},
             "tool_trace": trace,
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
             "response_calls": len(call_usages),

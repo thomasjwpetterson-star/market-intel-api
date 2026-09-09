@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "capabilities": {
+    "aviation_fuel_controls": {
+      "display_name": "Military-aircraft engine fuel controls and supporting equipment",
+      "evidence_mode": "hybrid",
+      "request_pattern": "\\b(?:aircraft|aviation|aerospace|military[- ]aircraft)\\b.*\\b(?:engine[- ]fuel[- ]systems?|fuel[- ](?:control|controls|metering))\\b|\\b(?:engine[- ]fuel[- ]systems?|fuel[- ](?:control|controls|metering))\\b.*\\b(?:aircraft|aviation|aerospace|military[- ]aircraft)\\b",
+      "fsc_codes": ["2915", "4920", "J028", "J029", "J049"],
+      "ecosystem_fsc_codes": ["2915"],
+      "market_segments": ["AIR"],
+      "item_pattern": "FUEL.{0,50}(?:CONTROL|METER|GOVERN|HYDROMECH|REGULAT|PUMP|VALVE|NOZZLE|INJECT|MANIFOLD|TEST)|(?:CONTROL|METER|GOVERN|HYDROMECH|REGULAT|PUMP|VALVE|NOZZLE|INJECT|MANIFOLD|TEST).{0,50}FUEL|MAIN ENGINE CONTROL|HYDRO[- ]?MECHANICAL UNIT|\\bHMU\\b|\\bFADEC\\b|FULL AUTHORITY DIGITAL ENGINE CONTROL",
+      "scope_note": "Military-aircraft engine fuel controls and their supporting component, overhaul and test-equipment ecosystem. The evidence includes control and metering units, hydromechanical and digital engine controls, pumps, valves, nozzles, injectors, related repair activity and fuel-control test equipment.",
+      "included_lanes": [
+        "Complete fuel-control, metering and governing units",
+        "Fuel pumps, valves, nozzles, injectors and related control components",
+        "Production, repair and overhaul activity",
+        "Fuel-control test stands and specialized support equipment"
+      ]
+    },
+    "aircraft_actuation": {
+      "display_name": "Military-aircraft actuation and flight-control equipment",
+      "evidence_mode": "description_bounded",
+      "request_pattern": "\\b(?:aircraft|aviation|flight[- ]?control)\\b.*\\bactuat(?:or|ors|ion)\\b|\\bactuat(?:or|ors|ion)\\b.*\\b(?:aircraft|aviation|flight[- ]?control)\\b",
+      "fsc_codes": ["1650", "1680"],
+      "item_pattern": "ACTUAT(?:OR|ORS|ION)|SERVOACTUAT(?:OR|ORS)|FLIGHT[- ,]?CONTROL|CONTROL ASSEMBLY",
+      "scope_note": "Aircraft actuation and flight-control equipment identified through FSC 1650 and 1680 with actuation-specific item and award descriptions."
+    },
+    "aircraft_braking": {
+      "display_name": "Military-aircraft braking systems and components",
+      "evidence_mode": "classification_complete",
+      "request_pattern": "\\b(?:aircraft|aviation|military aircraft)\\b.*\\bbrak(?:e|es|ing)\\b|\\bbrak(?:e|es|ing)\\b.*\\b(?:aircraft|aviation)\\b",
+      "fsc_codes": ["1630"],
+      "complete_fsc_codes": ["1630"],
+      "item_pattern": "BRAKE|BRAKING|ANTI[- ]?SKID",
+      "scope_note": "Aircraft wheel and brake equipment classified in FSC 1630."
+    },
+    "military_radar": {
+      "display_name": "Military radar systems and components",
+      "evidence_mode": "classification_complete",
+      "request_pattern": "\\bradar\\s+(?:systems?|equipment|components?|suppliers?|manufacturers?)\\b|\\b(?:systems?|equipment|components?|suppliers?|manufacturers?)\\b.*\\bradar\\b",
+      "fsc_codes": ["1285", "5840", "5841"],
+      "complete_fsc_codes": ["1285", "5840", "5841"],
+      "item_pattern": "RADAR|AZIMUTH|WAVEGUIDE|ANTENNA|DISPLAY|INDICATOR",
+      "scope_note": "Fire-control, ground, shipboard and airborne radar equipment classified in FSC 1285, 5840 and 5841."
+    },
+    "mission_computing": {
+      "display_name": "Military mission computing and rugged computing equipment",
+      "evidence_mode": "description_bounded",
+      "request_pattern": "\\bmission\\s+comput(?:er|ers|ing)\\b|\\brugged(?:ized|ised)?\\s+(?:mission\\s+)?comput(?:er|ers|ing|ing equipment)\\b",
+      "fsc_codes": ["7010", "7021", "7025", "7042"],
+      "item_pattern": "MISSION COMPUTER|RUGGED(?:IZED|ISED)? COMPUTER|SINGLE[- ]BOARD COMPUTER|COMPUTER,?(?: FLIGHT| MISSION| NAVIGATION| FIRE CONTROL)|AIRBORNE COMPUTER|VEHICULAR COMPUTER",
+      "scope_note": "Description-confirmed military mission computers and rugged computing equipment within relevant information-technology classifications."
+    },
+    "aircraft_landing_gear": {
+      "display_name": "Military-aircraft landing gear and components",
+      "evidence_mode": "classification_complete",
+      "request_pattern": "\\b(?:aircraft|aviation|military[- ]aircraft|military)\\b.*\\blanding[- ]gear\\b|\\blanding[- ]gear\\b.*\\b(?:aircraft|aviation|military)\\b",
+      "fsc_codes": ["1620"],
+      "complete_fsc_codes": ["1620"],
+      "item_pattern": "LANDING GEAR|SHOCK STRUT|OLEO|RETRACTION|GEARBOX,LANDING GEAR",
+      "scope_note": "Aircraft landing-gear assemblies, structural elements, retraction equipment and related components classified in FSC 1620."
+    },
+    "aircraft_environmental_control": {
+      "display_name": "Military-aircraft environmental-control and thermal-management equipment",
+      "evidence_mode": "classification_complete",
+      "request_pattern": "\\b(?:aircraft|aviation|military aircraft)\\b.*\\b(?:environmental[- ]control|thermal[- ]management|air[- ]conditioning|pressurization|pressurisation)\\b|\\b(?:environmental[- ]control|thermal[- ]management)\\b.*\\b(?:aircraft|aviation)\\b",
+      "fsc_codes": ["1660"],
+      "complete_fsc_codes": ["1660"],
+      "item_pattern": "AIR CONDITION|CABIN PRESS|COOLING|HEAT EXCHANGER|THERMAL|ENVIRONMENTAL CONTROL",
+      "scope_note": "Aircraft air-conditioning, heating, pressurization and associated environmental-control components classified in FSC 1660."
+    },
+    "electronic_warfare": {
+      "display_name": "Military electronic-warfare and countermeasure equipment",
+      "evidence_mode": "classification_complete",
+      "request_pattern": "\\b(?:electronic[- ]warfare|electronic[- ]countermeasures?|counter[- ]countermeasures?|ew equipment)\\b",
+      "fsc_codes": ["5865"],
+      "complete_fsc_codes": ["5865"],
+      "item_pattern": "COUNTERMEASURE|ELECTRONIC WARFARE|JAMM|THREAT WARNING|DECOY",
+      "scope_note": "Electronic countermeasure, counter-countermeasure and quick-reaction-capability equipment classified in FSC 5865."
+    },
+    "missile_propulsion": {
+      "display_name": "Missile and rocket propulsion equipment",
+      "evidence_mode": "classification_complete_sparse_items",
+      "request_pattern": "\\b(?:missile|rocket)\\b.*\\b(?:propulsion|motors?|engines?)\\b|\\b(?:propulsion|motors?|engines?)\\b.*\\bmissile\\b",
+      "fsc_codes": ["1338", "2845"],
+      "complete_fsc_codes": ["1338", "2845"],
+      "market_segments": ["MISSILES & MUNITIONS"],
+      "item_pattern": "ROCKET MOTOR|ROCKET ENGINE|MISSILE PROPULSION|PROPELLANT",
+      "scope_note": "Inert missile and space-vehicle propulsion components together with rocket engines and components classified in FSC 1338 and 2845."
+    },
+    "military_avionics": {
+      "display_name": "Military-aircraft avionics and flight-electronics equipment",
+      "evidence_mode": "hybrid",
+      "request_pattern": "\\b(?:military|defen[cs]e|aircraft|aviation)\\b.*\\bavionics?\\b|\\bavionics?\\b.*\\b(?:military|defen[cs]e|aircraft|aviation)\\b",
+      "fsc_codes": ["5821", "5826", "5895", "5998", "6610", "6615"],
+      "complete_fsc_codes": ["5821", "5826", "6610", "6615"],
+      "market_segments": ["AIR"],
+      "item_pattern": "AVIONIC|FLIGHT INSTRUMENT|AUTOPILOT|FLIGHT CONTROL COMPUTER|MISSION COMPUTER|AIR DATA COMPUTER|COCKPIT DISPLAY|MULTIFUNCTION DISPLAY|NAVIGATION COMPUTER|RADIO SET,? AIRBORNE",
+      "scope_note": "Description-confirmed airborne communications, navigation, flight-instrument, flight-control computing and cockpit-display equipment within relevant avionics classifications."
+    },
+    "aircraft_electrical_power": {
+      "display_name": "Military-aircraft electrical power generation, conversion and management equipment",
+      "evidence_mode": "description_bounded",
+      "request_pattern": "\\b(?:aircraft|aviation|military[- ]aircraft)\\b.*\\b(?:electrical[- ]power|power[- ]generation|power[- ]conversion|power[- ]management)\\b|\\b(?:electrical[- ]power|power[- ]generation|power[- ]conversion|power[- ]management)\\b.*\\b(?:aircraft|aviation)\\b",
+      "fsc_codes": ["1680", "2925", "6110", "6115", "6125", "6130"],
+      "market_segments": ["AIR"],
+      "item_pattern": "GENERATOR,? ?AIRCRAFT|GENERATOR (?:STATOR|ARMATURE).{0,30}AIRCRAFT|ALTERNATING GENERATOR|STARTER[- ]GENERATOR|GENERATOR CONTROL UNIT|AIRCRAFT.{0,30}(?:POWER CONTROL|POWER MANAGEMENT|POWER CONVERSION|CONVERTER|INVERTER)|(?:POWER CONTROL|POWER MANAGEMENT|POWER CONVERSION|CONVERTER|INVERTER).{0,30}AIRCRAFT|CONVERTER,? (?:POWER|FREQUENCY)|INVERTER,? (?:POWER|AIRCRAFT)",
+      "scope_note": "Description-confirmed aircraft electrical generation, conversion, control and distribution equipment within relevant electrical-equipment classifications."
+    },
+    "military_antennas_rf": {
+      "display_name": "Military antennas, waveguides and associated RF equipment",
+      "evidence_mode": "hybrid",
+      "request_pattern": "\\b(?:military|defen[cs]e|missile|aircraft|naval|ground)\\b.*\\b(?:antennas?|waveguides?|rf equipment|radio[- ]frequency components?)\\b|\\b(?:antennas?|waveguides?|rf equipment|radio[- ]frequency components?)\\b.*\\b(?:military|defen[cs]e|missile|aircraft|naval|ground)\\b",
+      "fsc_codes": ["5985", "5996", "5895"],
+      "complete_fsc_codes": ["5985"],
+      "item_pattern": "ANTENNA|WAVEGUIDE|RADIO FREQUENCY|\\bRF\\b|TRANSMIT[- ]RECEIVE|MICROWAVE AMPLIFIER|RF AMPLIFIER",
+      "scope_note": "Antennas and waveguides classified in FSC 5985, together with description-confirmed RF amplifiers and associated equipment from adjacent classifications."
+    },
+    "tactical_communications": {
+      "display_name": "Military tactical communications equipment",
+      "evidence_mode": "description_bounded",
+      "request_pattern": "\\b(?:military|tactical|battlefield|defen[cs]e)\\b.*\\b(?:communications?|radios?|networking)\\b|\\b(?:tactical communications?|battlefield communications?|military radios?)\\b",
+      "fsc_codes": ["5810", "5820", "5821", "5895"],
+      "item_pattern": "TACTICAL COMMUNICATION|BATTLEFIELD COMMUNICATION|MANPACK RADIO|HANDHELD RADIO|GROUND RADIO|AIRBORNE RADIO|RADIO SET|SECURE COMMUNICATION|DATA LINK|TACTICAL NETWORK",
+      "scope_note": "Description-confirmed tactical radios, secure communications, data links and battlefield-network equipment within military communications classifications."
+    },
+    "electro_optical_infrared": {
+      "display_name": "Military electro-optical, infrared and night-vision equipment",
+      "evidence_mode": "hybrid",
+      "request_pattern": "\\b(?:electro[- ]optical|electrooptical|eo[/ -]?ir|infrared|night[- ]vision)\\b",
+      "fsc_codes": ["5855", "1240"],
+      "complete_fsc_codes": ["5855"],
+      "item_pattern": "ELECTRO[- ]OPTICAL|INFRARED|NIGHT VISION|THERMAL IMAG|FORWARD LOOKING INFRARED|\\bFLIR\\b|OPTICAL SIGHT|LASER RANGE",
+      "scope_note": "Night-vision and emitted/reflected-radiation equipment classified in FSC 5855, plus description-confirmed optical sighting and ranging equipment from FSC 1240."
+    },
+    "energetic_components": {
+      "display_name": "Military energetic, initiation and ordnance components",
+      "evidence_mode": "classification_complete",
+      "request_pattern": "\\b(?:energetic|energetics|initiation|initiators?|fuzes?|primers?|detonators?|explosive components?)\\b",
+      "fsc_codes": ["1375", "1376", "1390"],
+      "complete_fsc_codes": ["1375", "1376", "1390"],
+      "market_segments": ["MISSILES & MUNITIONS"],
+      "item_pattern": "ENERGETIC|INITIATOR|FUZE|PRIMER|DETONATOR|EXPLOSIVE|DEMOLITION|PYROTECHNIC",
+      "scope_note": "Demolition materials, bulk explosives, fuzes, primers and related initiation components classified in FSC 1375, 1376 and 1390."
+    }
+  },
+  "id_aliases": {
+    "capability:aviation fuel controls": "aviation_fuel_controls",
+    "capability:aircraft fuel controls": "aviation_fuel_controls",
+    "capability:aircraft engine fuel controls": "aviation_fuel_controls",
+    "capability:aerospace fuel controls": "aviation_fuel_controls"
+  }
+}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -48,6 +49,7 @@ class CompetitorDiscoveryStore:
         self.paths = {
             "profiles": self.data_root / "profiles.parquet",
             "references": self.data_root / "nsn_cage_reference.parquet",
+            "suppliers": self.data_root / "nsn_supplier_lookup.parquet",
             "transactions": self.data_root / "transactions.parquet",
             "network": self.data_root / "network.parquet",
             "contracts": self.data_root / "contracts_rolled.parquet",
@@ -60,6 +62,11 @@ class CompetitorDiscoveryStore:
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")
+        temp_directory = Path(
+            os.getenv("ASK_MIMIR_DUCKDB_TEMP_DIR", "/tmp/ask-mimir-duckdb")
+        )
+        temp_directory.mkdir(parents=True, exist_ok=True)
+        self.connection.execute("SET temp_directory=?", [str(temp_directory)])
         self._cache: Dict[str, Dict[str, Any]] = {}
 
     def get(self, target_id: str = "eaton_aerospace", limit: int = 15) -> Dict[str, Any]:
@@ -99,36 +106,72 @@ class CompetitorDiscoveryStore:
         return _rows(
             self.connection.execute(
                 f"""
-                WITH target AS (
+                WITH reference_relationships AS (
+                    SELECT LPAD(TRIM(niin), 9, '0') niin,
+                           UPPER(TRIM(cage)) cage,
+                           MAX(vendor_name) vendor_name,
+                           MAX(description) description,
+                           MAX(platform_families) platform_families,
+                           MAX(platform_family) platform_family,
+                           BOOL_OR(COALESCE(is_active_authorized_source, false))
+                               active_authorized,
+                           MAX(supplier_status) supplier_status
+                    FROM read_parquet(?)
+                    WHERE cage IS NOT NULL AND TRIM(cage) <> ''
+                    GROUP BY 1, 2
+                ), observed_procurement AS (
+                    SELECT LPAD(TRIM(niin), 9, '0') niin,
+                           UPPER(TRIM(cage)) cage,
+                           MAX(vendor) vendor_name,
+                           MAX(platform_families) platform_families,
+                           MAX(platform_family) platform_family,
+                           SUM(COALESCE(total_revenue, 0)) observed_value
+                    FROM read_parquet(?)
+                    WHERE year BETWEEN 2021 AND 2025
+                      AND cage IS NOT NULL AND TRIM(cage) <> ''
+                    GROUP BY 1, 2
+                ), relationship_universe AS (
+                    SELECT COALESCE(r.niin, o.niin) niin,
+                           COALESCE(r.cage, o.cage) cage,
+                           COALESCE(o.vendor_name, r.vendor_name) vendor_name,
+                           r.description,
+                           COALESCE(r.platform_families, o.platform_families)
+                               platform_families,
+                           COALESCE(r.platform_family, o.platform_family) platform_family,
+                           COALESCE(r.active_authorized, false) active_authorized,
+                           o.cage IS NOT NULL observed,
+                           COALESCE(o.observed_value, 0) observed_value,
+                           r.supplier_status
+                    FROM reference_relationships r
+                    FULL OUTER JOIN observed_procurement o USING (niin, cage)
+                ), target AS (
                     SELECT niin,
-                           BOOL_OR(COALESCE(is_active_authorized_source,false)) target_active_authorized,
-                           BOOL_OR(COALESCE(has_observed_revenue,false)) target_observed,
+                           BOOL_OR(active_authorized) target_active_authorized,
+                           BOOL_OR(observed) target_observed,
                            MAX(description) description,
                            MAX(platform_families) platform_families,
                            MAX(platform_family) platform_family,
                            COUNT(DISTINCT cage) target_site_count
-                    FROM read_parquet(?)
+                    FROM relationship_universe
                     WHERE cage IN ({placeholders})
-                      AND (COALESCE(is_procurement_authorized,false)
-                           OR COALESCE(has_observed_revenue,false))
+                      AND (active_authorized OR observed)
                     GROUP BY niin
                 )
                 SELECT r.niin, r.cage, r.vendor_name, t.description,
                        t.platform_families, t.platform_family, t.target_site_count,
                        t.target_active_authorized, t.target_observed,
-                       COALESCE(r.is_active_authorized_source,false) peer_active_authorized,
-                       COALESCE(r.has_observed_revenue,false) peer_observed,
-                       COALESCE(r.observed_spend,0) peer_observed_spend,
+                       r.active_authorized peer_active_authorized,
+                       r.observed peer_observed,
+                       r.observed_value peer_observed_spend,
                        r.supplier_status
-                FROM read_parquet(?) r
+                FROM relationship_universe r
                 JOIN target t USING(niin)
-                WHERE r.cage IS NOT NULL AND TRIM(r.cage) <> ''
-                  AND r.cage NOT IN ({placeholders})
+                WHERE r.cage NOT IN ({placeholders})
                 """,
                 [
                     str(self.paths["references"]),
+                    str(self.paths["suppliers"]),
                     *cages,
-                    str(self.paths["references"]),
                     *cages,
                 ],
             )

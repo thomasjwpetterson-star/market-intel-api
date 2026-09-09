@@ -3,5 +3,8 @@ venv/*.parquet
 local_data/
 *.parquet
 *.csv
+.runtime/
+ask_mimir_beta/.runtime-data/
+ask_mimir_beta/validation-output/
 .env
 venv/

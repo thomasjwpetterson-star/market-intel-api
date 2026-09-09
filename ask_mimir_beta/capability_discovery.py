@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -16,76 +18,50 @@ import duckdb
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
-DEFAULT_PRECOMPUTED_DIR = Path(__file__).resolve().parent / "validation-output" / "capability-markets"
-
-CAPABILITY_DEFINITIONS = {
-    "aviation_fuel_controls": {
-        "display_name": "Military-aircraft engine fuel controls and supporting equipment",
-        "request_pattern": (
-            r"\b(?:aircraft|aviation|aerospace|military[- ]aircraft)\b.*"
-            r"\b(?:engine[- ]fuel[- ]systems?|fuel[- ](?:control|controls|metering))\b|"
-            r"\b(?:engine[- ]fuel[- ]systems?|fuel[- ](?:control|controls|metering))\b.*"
-            r"\b(?:aircraft|aviation|aerospace|military[- ]aircraft)\b"
-        ),
-        "fsc_codes": ["2915", "4920", "J028", "J029", "J049"],
-        "market_segments": ["AIR"],
-        "item_pattern": (
-            r"FUEL.{0,50}(?:CONTROL|METER|GOVERN|HYDROMECH|REGULAT|PUMP|VALVE|"
-            r"NOZZLE|INJECT|MANIFOLD|TEST)|"
-            r"(?:CONTROL|METER|GOVERN|HYDROMECH|REGULAT|PUMP|VALVE|NOZZLE|INJECT|"
-            r"MANIFOLD|TEST).{0,50}FUEL|"
-            r"MAIN ENGINE CONTROL|HYDRO[- ]?MECHANICAL UNIT|\bHMU\b|\bFADEC\b|"
-            r"FULL AUTHORITY DIGITAL ENGINE CONTROL"
-        ),
-        "scope_note": (
-            "Military-aircraft engine fuel controls and their supporting component, "
-            "overhaul and test-equipment ecosystem. The evidence includes control and "
-            "metering units, hydromechanical and digital engine controls, pumps, valves, "
-            "nozzles, injectors, related repair activity and fuel-control test equipment."
-        ),
-        "included_lanes": [
-            "Complete fuel-control, metering and governing units",
-            "Fuel pumps, valves, nozzles, injectors and related control components",
-            "Production, repair and overhaul activity",
-            "Fuel-control test stands and specialized support equipment",
-        ],
-    },
-    "aircraft_actuation": {
-        "display_name": "Military-aircraft actuation and flight-control equipment",
-        "request_pattern": r"\b(?:aircraft|aviation|flight[- ]?control)\b.*\bactuat(?:or|ors|ion)\b|\bactuat(?:or|ors|ion)\b.*\b(?:aircraft|aviation|flight[- ]?control)\b",
-        "fsc_codes": ["1650", "1680"],
-        "item_pattern": r"ACTUAT(?:OR|ORS|ION)|SERVOACTUAT(?:OR|ORS)|FLIGHT[- ,]?CONTROL|CONTROL ASSEMBLY",
-        "scope_note": "Aircraft actuation and flight-control equipment identified through FSC 1650 and 1680 with actuation-specific item and award descriptions.",
-    },
-    "aircraft_braking": {
-        "display_name": "Military-aircraft braking systems and components",
-        "request_pattern": r"\b(?:aircraft|aviation|military aircraft)\b.*\bbrak(?:e|es|ing)\b|\bbrak(?:e|es|ing)\b.*\b(?:aircraft|aviation)\b",
-        "fsc_codes": ["1630"],
-        "item_pattern": r"BRAKE|BRAKING|ANTI[- ]?SKID",
-        "scope_note": "Aircraft wheel and brake equipment identified through FSC 1630 and matching item descriptions.",
-    },
-    "military_radar": {
-        "display_name": "Military radar systems and components",
-        "request_pattern": r"\bradar\s+(?:systems?|equipment|components?|suppliers?|manufacturers?)\b|\b(?:systems?|equipment|components?|suppliers?|manufacturers?)\b.*\bradar\b",
-        "fsc_codes": ["5840", "5841"],
-        "item_pattern": r"RADAR|AZIMUTH|WAVEGUIDE|ANTENNA|DISPLAY|INDICATOR",
-        "scope_note": "Ground, shipboard and airborne radar equipment identified through FSC 5840 and 5841 with radar-related item descriptions.",
-    },
-    "mission_computing": {
-        "display_name": "Military mission computing and rugged computing equipment",
-        "request_pattern": r"\bmission\s+comput(?:er|ers|ing)\b|\brugged(?:ized|ised)?\s+(?:mission\s+)?comput(?:er|ers|ing|ing equipment)\b",
-        "fsc_codes": ["7010", "7021", "7025", "7042"],
-        "item_pattern": r"MISSION COMPUTER|RUGGED(?:IZED|ISED)? COMPUTER|SINGLE[- ]BOARD COMPUTER|COMPUTER,?(?: DIGITAL| FLIGHT| MISSION| NAVIGATION| FIRE CONTROL)|COMPUTER SYSTEM,DIGITAL|COMPUTER SUBASSEMBLY|PROCESSOR,GATEWAY|DATA ACQUISITION UNIT",
-        "scope_note": "Mission-computing and rugged-computing equipment identified through relevant product classifications and item descriptions.",
-    },
+ROOT = Path(__file__).resolve().parent
+DEFAULT_PRECOMPUTED_DIR = ROOT / "validation-output" / "capability-markets"
+DEFAULT_ONTOLOGY_PATH = Path(
+    os.getenv("ASK_MIMIR_CAPABILITY_ONTOLOGY", str(ROOT / "capability_ontology.json"))
+)
+EVIDENCE_MODES = {
+    "classification_complete",
+    "classification_complete_sparse_items",
+    "description_bounded",
+    "hybrid",
 }
 
-CAPABILITY_ID_ALIASES = {
-    "capability:aviation fuel controls": "aviation_fuel_controls",
-    "capability:aircraft fuel controls": "aviation_fuel_controls",
-    "capability:aircraft engine fuel controls": "aviation_fuel_controls",
-    "capability:aerospace fuel controls": "aviation_fuel_controls",
-}
+
+def load_capability_ontology(path: Path = DEFAULT_ONTOLOGY_PATH) -> Dict[str, Any]:
+    ontology = json.loads(path.read_text())
+    if ontology.get("schema_version") != 1:
+        raise ValueError("unsupported capability ontology schema version")
+    definitions = ontology.get("capabilities")
+    if not isinstance(definitions, dict) or not definitions:
+        raise ValueError("capability ontology must contain capability definitions")
+    required = {"display_name", "evidence_mode", "request_pattern", "fsc_codes", "item_pattern", "scope_note"}
+    for capability_id, definition in definitions.items():
+        if not re.fullmatch(r"[a-z0-9_]+", capability_id):
+            raise ValueError(f"invalid capability id: {capability_id}")
+        missing = required.difference(definition)
+        if missing:
+            raise ValueError(f"{capability_id} is missing fields: {sorted(missing)}")
+        if definition["evidence_mode"] not in EVIDENCE_MODES:
+            raise ValueError(f"{capability_id} has an invalid evidence mode")
+        complete_codes = set(definition.get("complete_fsc_codes", []))
+        if not complete_codes.issubset(set(definition["fsc_codes"])):
+            raise ValueError(f"{capability_id} complete FSC codes must be in fsc_codes")
+        re.compile(definition["request_pattern"], re.IGNORECASE)
+        re.compile(definition["item_pattern"], re.IGNORECASE)
+    aliases = ontology.get("id_aliases", {})
+    unknown_aliases = sorted(set(aliases.values()).difference(definitions))
+    if unknown_aliases:
+        raise ValueError(f"capability aliases reference unknown ids: {unknown_aliases}")
+    return ontology
+
+
+CAPABILITY_ONTOLOGY = load_capability_ontology()
+CAPABILITY_DEFINITIONS = CAPABILITY_ONTOLOGY["capabilities"]
+CAPABILITY_ID_ALIASES = CAPABILITY_ONTOLOGY.get("id_aliases", {})
 
 DYNAMIC_CAPABILITY_PREFIX = "capability:"
 CAPABILITY_QUERY_PATTERNS = (
@@ -96,6 +72,7 @@ CAPABILITY_QUERY_PATTERNS = (
     r"overview of (?:the\s+)?(?:us\s+)?(?:defen[cs]e\s+)?(?:market|capability area|industrial base)\s*:\s*(.+?)(?:\?|$)",
     r"overview of (?:the\s+)?(.+?)\s+in\s+(?:the\s+)?(?:us\s+)?defen[cs]e market(?:[?.]|$)",
     r"(?:what is happening in|describe|analyse|analyze)\s+(?:the\s+)?(?:us\s+)?(.+?)\s+(?:defen[cs]e\s+)?market(?:[?.]|$)",
+    r"(?:give me an?\s+)?overview of\s+(?:the\s+)?(.+?)\s+market(?:[?.]|$)",
     r"(?:find|identify|show)\s+(?:us\s+)?(?:manufacturers|suppliers|companies)\s+(?:that\s+)?(?:supply|provide|make|manufacture)\s+(.+?)(?:\s+to|\s+for)\s+(?:the\s+)?(?:us\s+)?military",
     r"(?:which|what)\s+(?:us\s+)?(?:manufacturers|suppliers|companies)\s+(?:supply|provide|make|manufacture)\s+(.+?)(?:\?|$)",
     r"(?:companies|manufacturers|suppliers)\s+(?:supplying|providing|manufacturing|with)\s+(.+?)(?:\s+to|\s+for)\s+(?:military|defen[cs]e)",
@@ -127,8 +104,9 @@ US_STATE_CODES = [
 
 NON_COMMERCIAL_NAME_PATTERN = re.compile(
     r"MILITARY (?:STANDARDS|SPECIFICATIONS)|NAVAL INVENTORY|NAVAIR|NAVSEA|"
-    r"UNITED STATES DEPARTMENT|U\.?\s*S\.?\s*(?:ARMY|AIR FORCE|NAVY)|"
+    r"^DEPARTMENT OF|UNITED STATES DEPARTMENT|U\.?\s*S\.?\s*(?:ARMY|AIR FORCE|NAVY)|"
     r"DEFENSE LOGISTICS AGENCY|AIR LOGISTICS CENTER|"
+    r"NAVAL (?:AIR|SEA) SYSTEMS COMMAND|COMBAT CAPABILITIES DEVELOPMENT|"
     r"JOINT ELECTRONICS TYPE DESIGNATION(?: SYSTEM)?",
     re.IGNORECASE,
 )
@@ -141,6 +119,8 @@ def _rows(cursor: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
 
 def resolve_capability(text: str) -> str | None:
     clean = str(text or "")
+    if re.search(r"\bwho\s+competes\s+with\b|\bwhere\s+should\b", clean, re.IGNORECASE):
+        return None
     for capability_id, definition in CAPABILITY_DEFINITIONS.items():
         if re.search(definition["request_pattern"], clean, re.IGNORECASE):
             return capability_id
@@ -237,8 +217,10 @@ class CapabilityDiscoveryStore:
         load_precomputed: bool = True,
     ) -> None:
         self.data_root = data_root.resolve()
+        self.ontology_path = DEFAULT_ONTOLOGY_PATH.resolve()
         self.paths = {
             "references": self.data_root / "nsn_cage_reference.parquet",
+            "suppliers": self.data_root / "nsn_supplier_lookup.parquet",
             "locations": self.data_root / "cage_locations.parquet",
             "contracts": self.data_root / "contracts_rolled.parquet",
             "classifications": self.data_root / "classification_reference.parquet",
@@ -346,6 +328,7 @@ class CapabilityDiscoveryStore:
         item_pattern = "|".join(re.escape(term).replace(r"\ ", r"\s+") for term in item_terms)
         return {
             "display_name": phrase.title(),
+            "evidence_mode": "description_bounded",
             "fsc_codes": [str(row["code"]) for row in code_rows],
             "item_pattern": item_pattern.upper(),
             "scope_note": f"Supplier evidence matched to the requested capability using product classifications and item descriptions for {phrase}.",
@@ -358,6 +341,7 @@ class CapabilityDiscoveryStore:
 
     def _build(self, capability_id: str, definition: Dict[str, Any]) -> Dict[str, Any]:
         fsc_codes = definition["fsc_codes"]
+        complete_fsc_codes = definition.get("complete_fsc_codes", [])
         classification_matches = definition.get("classification_matches", [])
         market_segments = definition.get("market_segments", [])
         if fsc_codes and not classification_matches:
@@ -382,50 +366,68 @@ class CapabilityDiscoveryStore:
         rows = _rows(
             self.connection.execute(
                 """
-                WITH item_relationships AS (
+                WITH observed_procurement AS (
                     SELECT
                         LPAD(TRIM(niin), 9, '0') AS niin,
-                        MAX(nsn) AS nsn,
                         UPPER(TRIM(cage)) AS cage,
-                        MAX(vendor_name) AS vendor_name,
-                        MAX(description) AS description,
+                        MAX(vendor) AS vendor_name,
+                        SUM(COALESCE(total_revenue, 0)) AS observed_value,
+                        COUNT(DISTINCT contract_id) AS observed_contract_count,
+                        MIN(year) AS first_observed_fiscal_year,
+                        MAX(year) AS last_observed_fiscal_year
+                    FROM read_parquet(?)
+                    WHERE year BETWEEN 2021 AND 2026
+                      AND cage IS NOT NULL AND TRIM(cage) <> ''
+                    GROUP BY 1, 2
+                ), item_relationships AS (
+                    SELECT
+                        LPAD(TRIM(r.niin), 9, '0') AS niin,
+                        MAX(r.nsn) AS nsn,
+                        UPPER(TRIM(r.cage)) AS cage,
+                        COALESCE(MAX(o.vendor_name), MAX(r.vendor_name)) AS vendor_name,
+                        MAX(r.description) AS description,
                         LIST_SLICE(
-                            LIST_DISTINCT(LIST(part_number) FILTER (
-                                WHERE part_number IS NOT NULL AND TRIM(part_number) <> ''
+                            LIST_DISTINCT(LIST(r.part_number) FILTER (
+                                WHERE r.part_number IS NOT NULL AND TRIM(r.part_number) <> ''
                             )), 1, 8
                         ) AS sample_part_numbers,
-                        BOOL_OR(COALESCE(is_active_authorized_source, false))
+                        BOOL_OR(COALESCE(r.is_active_authorized_source, false))
                             AS is_active_authorized_source,
-                        BOOL_OR(COALESCE(has_observed_revenue, false))
-                            AS has_observed_procurement,
-                        MAX(CASE WHEN COALESCE(has_observed_revenue, false)
-                            THEN COALESCE(observed_spend, 0) ELSE 0 END)
+                        BOOL_OR(o.cage IS NOT NULL) AS has_observed_procurement,
+                        COALESCE(MAX(o.observed_value), 0)
                             AS observed_dla_procurement_value_usd,
-                        MAX(observed_contract_count) AS observed_contract_count,
-                        MIN(first_observed_year) AS first_observed_fiscal_year,
-                        MAX(last_observed_year) AS last_observed_fiscal_year,
+                        COALESCE(MAX(o.observed_contract_count), 0)
+                            AS observed_contract_count,
+                        MIN(o.first_observed_fiscal_year) AS first_observed_fiscal_year,
+                        MAX(o.last_observed_fiscal_year) AS last_observed_fiscal_year,
                         LIST_SLICE(
-                            LIST_DISTINCT(LIST(platform_families) FILTER (
-                                WHERE platform_families IS NOT NULL
-                                  AND TRIM(platform_families) <> ''
+                            LIST_DISTINCT(LIST(r.platform_families) FILTER (
+                                WHERE r.platform_families IS NOT NULL
+                                  AND TRIM(r.platform_families) <> ''
                             )), 1, 12
                         ) AS platform_groups
-                    FROM read_parquet(?)
+                    FROM read_parquet(?) r
+                    LEFT JOIN observed_procurement o
+                      ON LPAD(TRIM(r.niin), 9, '0') = o.niin
+                     AND UPPER(TRIM(r.cage)) = o.cage
                     WHERE (NOT ?
-                           OR fsc_code IN (SELECT UNNEST(?))
-                           OR UPPER(TRIM(COALESCE(market_segment, ''))) IN (SELECT UNNEST(?)))
-                      AND ((NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?))
+                           OR r.fsc_code IN (SELECT UNNEST(?))
+                           OR UPPER(TRIM(COALESCE(r.market_segment, ''))) IN (SELECT UNNEST(?)))
+                      AND (r.fsc_code IN (SELECT UNNEST(?))
+                           OR (NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(r.description, '')), ?))
                            OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
-                               CASE WHEN CONTAINS(LOWER(COALESCE(description, '')), term)
+                               CASE WHEN CONTAINS(LOWER(COALESCE(r.description, '')), term)
                                     THEN 1 ELSE 0 END
                            )) >= ?))
-                      AND cage IS NOT NULL AND TRIM(cage) <> ''
+                      AND r.cage IS NOT NULL AND TRIM(r.cage) <> ''
                     GROUP BY 1, 3
                 ), locations AS (
                     SELECT UPPER(TRIM(cage_code)) AS cage,
                            MAX(vendor_name) AS location_vendor_name,
                            MAX(city) AS city,
                            MAX(state) AS state,
+                           MAX(latitude) AS latitude,
+                           MAX(longitude) AS longitude,
                            MAX(location_quality) AS location_quality
                     FROM read_parquet(?)
                     GROUP BY 1
@@ -467,6 +469,10 @@ class CapabilityDiscoveryStore:
                 LEFT JOIN locations l USING (cage)
                 WHERE (r.is_active_authorized_source OR r.has_observed_procurement)
                   AND UPPER(TRIM(l.state)) IN (SELECT UNNEST(?))
+                  AND (l.latitude IS NULL OR (
+                      l.latitude BETWEEN 18 AND 72
+                      AND l.longitude BETWEEN -180 AND -60
+                  ))
                 GROUP BY r.cage
                 ORDER BY active_authorized_niin_count DESC,
                          observed_procurement_niin_count DESC,
@@ -474,10 +480,12 @@ class CapabilityDiscoveryStore:
                          mapped_platform_niin_count DESC
                 """,
                 [
+                    str(self.paths["suppliers"]),
                     str(self.paths["references"]),
                     use_scope,
                     fsc_codes,
                     market_segments,
+                    complete_fsc_codes,
                     is_dynamic,
                     definition["item_pattern"],
                     is_dynamic,
@@ -501,14 +509,16 @@ class CapabilityDiscoveryStore:
                 WHERE (NOT ?
                        OR fsc_code IN (SELECT UNNEST(?))
                        OR UPPER(TRIM(COALESCE(market_segment, ''))) IN (SELECT UNNEST(?)))
-                  AND ((NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?))
+                  AND (fsc_code IN (SELECT UNNEST(?))
+                       OR (NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?))
                        OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
                            CASE WHEN CONTAINS(LOWER(COALESCE(description, '')), term)
                                 THEN 1 ELSE 0 END
                        )) >= ?))
                   AND cage IS NOT NULL AND TRIM(cage) <> ''
                 """,
-                [str(self.paths["references"]), use_scope, fsc_codes, market_segments, is_dynamic,
+                [str(self.paths["references"]), use_scope, fsc_codes, market_segments,
+                 complete_fsc_codes, is_dynamic,
                  definition["item_pattern"], is_dynamic, term_stems, minimum_term_matches],
             ).fetchone()[0]
             or 0
@@ -519,7 +529,8 @@ class CapabilityDiscoveryStore:
                 WITH locations AS (
                     SELECT UPPER(TRIM(cage_code)) AS cage,
                            MAX(vendor_name) AS location_name,
-                           MAX(city) AS city, MAX(state) AS state
+                           MAX(city) AS city, MAX(state) AS state,
+                           MAX(latitude) AS latitude, MAX(longitude) AS longitude
                     FROM read_parquet(?) GROUP BY 1
                 )
                 SELECT UPPER(TRIM(c.vendor_cage)) AS cage,
@@ -561,10 +572,15 @@ class CapabilityDiscoveryStore:
                 WHERE c.source_system = 'USA_SPENDING'
                   AND c.vendor_cage IS NOT NULL
                   AND UPPER(TRIM(l.state)) IN (SELECT UNNEST(?))
+                  AND (l.latitude IS NULL OR (
+                      l.latitude BETWEEN 18 AND 72
+                      AND l.longitude BETWEEN -180 AND -60
+                  ))
                   AND (NOT ?
                        OR c.psc IN (SELECT UNNEST(?))
                        OR UPPER(TRIM(COALESCE(c.market_segment, ''))) IN (SELECT UNNEST(?)))
-                  AND ((NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(
+                  AND (c.psc IN (SELECT UNNEST(?))
+                       OR (NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(
                            c.base_award_description, c.description, ''
                        )), ?)) OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
                            CASE WHEN CONTAINS(LOWER(COALESCE(
@@ -579,7 +595,8 @@ class CapabilityDiscoveryStore:
                 [
                     str(self.paths["locations"]), fsc_codes,
                     str(self.paths["contracts"]),
-                    US_STATE_CODES, use_scope, fsc_codes, market_segments, is_dynamic,
+                    US_STATE_CODES, use_scope, fsc_codes, market_segments,
+                    complete_fsc_codes, is_dynamic,
                     definition["item_pattern"], is_dynamic, term_stems,
                     minimum_term_matches,
                 ],
@@ -620,7 +637,8 @@ class CapabilityDiscoveryStore:
                       AND (NOT ?
                            OR psc IN (SELECT UNNEST(?))
                            OR UPPER(TRIM(COALESCE(market_segment, ''))) IN (SELECT UNNEST(?)))
-                      AND ((NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(
+                      AND (psc IN (SELECT UNNEST(?))
+                           OR (NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(
                                base_award_description, description, ''
                            )), ?)) OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
                                CASE WHEN CONTAINS(LOWER(COALESCE(
@@ -657,7 +675,8 @@ class CapabilityDiscoveryStore:
                 """,
                 [
                     fsc_codes, str(self.paths["contracts"]), use_scope, fsc_codes,
-                    market_segments, is_dynamic, definition["item_pattern"],
+                    market_segments, complete_fsc_codes, is_dynamic,
+                    definition["item_pattern"],
                     is_dynamic, term_stems, minimum_term_matches,
                 ],
             )
@@ -675,7 +694,8 @@ class CapabilityDiscoveryStore:
                     WHERE (NOT ?
                            OR fsc_code IN (SELECT UNNEST(?))
                            OR UPPER(TRIM(COALESCE(market_segment, ''))) IN (SELECT UNNEST(?)))
-                      AND ((NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?))
+                      AND (fsc_code IN (SELECT UNNEST(?))
+                           OR (NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?))
                            OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
                                CASE WHEN CONTAINS(LOWER(COALESCE(description, '')), term)
                                     THEN 1 ELSE 0 END
@@ -692,16 +712,134 @@ class CapabilityDiscoveryStore:
                 """,
                 [
                     str(self.paths["references"]), use_scope, fsc_codes,
-                    market_segments, is_dynamic, definition["item_pattern"],
+                    market_segments, complete_fsc_codes, is_dynamic,
+                    definition["item_pattern"],
                     is_dynamic, term_stems, minimum_term_matches,
                 ],
             )
         )
+        ecosystem_fsc_codes = definition.get("ecosystem_fsc_codes", [])
+        broader_ecosystem = None
+        if ecosystem_fsc_codes:
+            classified_ecosystem_niins = int(
+                self.connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT LPAD(TRIM(niin), 9, '0'))
+                    FROM read_parquet(?)
+                    WHERE fsc_code IN (SELECT UNNEST(?))
+                      AND niin IS NOT NULL AND TRIM(niin) <> ''
+                    """,
+                    [str(self.paths["references"]), ecosystem_fsc_codes],
+                ).fetchone()[0]
+                or 0
+            )
+            ecosystem_rows = _rows(
+                self.connection.execute(
+                    """
+                    WITH observed_procurement AS (
+                        SELECT LPAD(TRIM(niin), 9, '0') AS niin,
+                               UPPER(TRIM(cage)) AS cage,
+                               MAX(vendor) AS supplier_name,
+                               SUM(COALESCE(total_revenue, 0)) AS observed_value
+                        FROM read_parquet(?)
+                        WHERE year BETWEEN 2021 AND 2026
+                          AND cage IS NOT NULL AND TRIM(cage) <> ''
+                        GROUP BY 1, 2
+                    ), relationships AS (
+                        SELECT LPAD(TRIM(r.niin), 9, '0') AS niin,
+                               UPPER(TRIM(r.cage)) AS cage,
+                               COALESCE(MAX(o.supplier_name), MAX(r.vendor_name)) AS supplier_name,
+                               BOOL_OR(COALESCE(r.is_active_authorized_source, false)) AS is_active,
+                               BOOL_OR(o.cage IS NOT NULL) AS is_observed,
+                               COALESCE(MAX(o.observed_value), 0) AS observed_value
+                        FROM read_parquet(?) r
+                        LEFT JOIN observed_procurement o
+                          ON LPAD(TRIM(r.niin), 9, '0') = o.niin
+                         AND UPPER(TRIM(r.cage)) = o.cage
+                        WHERE r.fsc_code IN (SELECT UNNEST(?))
+                          AND r.cage IS NOT NULL AND TRIM(r.cage) <> ''
+                        GROUP BY 1, 2
+                    ), locations AS (
+                        SELECT UPPER(TRIM(cage_code)) AS cage,
+                               MAX(vendor_name) AS location_name,
+                               MAX(state) AS state,
+                               MAX(latitude) AS latitude,
+                               MAX(longitude) AS longitude
+                        FROM read_parquet(?) GROUP BY 1
+                    )
+                    SELECT r.cage,
+                           COALESCE(MAX(r.supplier_name), MAX(l.location_name)) AS supplier_name,
+                           LIST(DISTINCT r.niin) AS niins,
+                           COUNT(DISTINCT r.niin) AS matching_niin_count,
+                           COUNT(DISTINCT r.niin) FILTER (WHERE r.is_active) AS active_niin_count,
+                           COUNT(DISTINCT r.niin) FILTER (WHERE r.is_observed) AS observed_niin_count,
+                           SUM(r.observed_value) AS observed_dla_procurement_value_usd
+                    FROM relationships r
+                    LEFT JOIN locations l USING (cage)
+                    WHERE (r.is_active OR r.is_observed)
+                      AND UPPER(TRIM(l.state)) IN (SELECT UNNEST(?))
+                      AND (l.latitude IS NULL OR (
+                          l.latitude BETWEEN 18 AND 72
+                          AND l.longitude BETWEEN -180 AND -60
+                      ))
+                    GROUP BY r.cage
+                    """,
+                    [
+                        str(self.paths["suppliers"]),
+                        str(self.paths["references"]),
+                        ecosystem_fsc_codes,
+                        str(self.paths["locations"]),
+                        US_STATE_CODES,
+                    ],
+                )
+            )
+            commercial_ecosystem_rows = [
+                row
+                for row in ecosystem_rows
+                if not NON_COMMERCIAL_NAME_PATTERN.search(
+                    str(row.get("supplier_name") or "")
+                )
+            ]
+            broader_ecosystem = {
+                "definition": (
+                    "All active-authorized or observed US supplier-site relationships in "
+                    "the stated broader FSC classes. This is an adjacent ecosystem, not "
+                    "a pure estimate of the narrower capability market."
+                ),
+                "fsc_codes": ecosystem_fsc_codes,
+                "supplier_sites": len(commercial_ecosystem_rows),
+                "classified_niins": classified_ecosystem_niins,
+                "active_or_observed_relationship_niins": len(
+                    {
+                        niin
+                        for row in commercial_ecosystem_rows
+                        for niin in row.get("niins", [])
+                    }
+                ),
+                "sites_with_active_authorized_items": sum(
+                    int(row.get("active_niin_count") or 0) > 0
+                    for row in commercial_ecosystem_rows
+                ),
+                "sites_with_observed_procurement": sum(
+                    int(row.get("observed_niin_count") or 0) > 0
+                    for row in commercial_ecosystem_rows
+                ),
+                "observed_dla_procurement_value_usd": sum(
+                    float(row.get("observed_dla_procurement_value_usd") or 0)
+                    for row in commercial_ecosystem_rows
+                ),
+            }
         return {
             "context_type": "capability_supplier_market",
             "scope": {
                 "capability_id": capability_id,
                 "display_name": definition["display_name"],
+                "evidence_boundary": {
+                    "classification_complete": "All records in the stated product classifications",
+                    "classification_complete_sparse_items": "All records in the stated product classifications, with limited item-procurement coverage",
+                    "description_bounded": "Description-confirmed records within the stated product classifications",
+                    "hybrid": "Complete core classifications with description-confirmed adjacent records",
+                }[definition["evidence_mode"]],
                 "observation_window": "FY2021-FY2026 observed procurement; current DLA source references",
                 "definition": definition["scope_note"],
                 "matched_product_classifications": classification_matches,
@@ -712,6 +850,7 @@ class CapabilityDiscoveryStore:
             "prime_award_sites": prime_award_sites,
             "annual_prime_activity": annual_prime_activity,
             "top_platform_activity": top_platform_activity,
+            "broader_ecosystem": broader_ecosystem,
             "coverage": {
                 "commercial_supplier_sites": len(commercial_rows),
                 "supplier_sites_with_active_authorized_items": sum(
@@ -745,17 +884,24 @@ class CapabilityDiscoveryStore:
 
 def build_precomputed_capabilities(data_root: Path, output_dir: Path) -> Dict[str, Any]:
     """Materialize governed capability evidence for fast, release-bound retrieval."""
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = output_dir.resolve()
+    staging_dir = output_dir.parent / f".{output_dir.name}.building"
+    backup_dir = output_dir.parent / f".{output_dir.name}.previous"
+    shutil.rmtree(staging_dir, ignore_errors=True)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    ontology_body = DEFAULT_ONTOLOGY_PATH.read_bytes()
+    (staging_dir / "ontology.json").write_bytes(ontology_body)
     store = CapabilityDiscoveryStore(data_root, load_precomputed=False)
     entries = []
     for capability_id in sorted(CAPABILITY_DEFINITIONS):
         pack = store.get(capability_id, limit=50)
-        path = output_dir / f"{capability_id}.json"
+        path = staging_dir / f"{capability_id}.json"
         path.write_text(json.dumps(pack, indent=2, default=str))
         entries.append(
             {
                 "capability_id": capability_id,
                 "display_name": CAPABILITY_DEFINITIONS[capability_id]["display_name"],
+                "evidence_mode": CAPABILITY_DEFINITIONS[capability_id]["evidence_mode"],
                 "path": path.name,
                 "commercial_supplier_sites": pack["coverage"]["commercial_supplier_sites"],
                 "matching_niins": pack["coverage"]["matching_niins"],
@@ -763,7 +909,19 @@ def build_precomputed_capabilities(data_root: Path, output_dir: Path) -> Dict[st
         )
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "ontology_schema_version": CAPABILITY_ONTOLOGY["schema_version"],
+        "ontology_sha256": hashlib.sha256(ontology_body).hexdigest(),
         "capabilities": entries,
     }
-    (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    (staging_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    shutil.rmtree(backup_dir, ignore_errors=True)
+    if output_dir.exists():
+        output_dir.rename(backup_dir)
+    try:
+        staging_dir.rename(output_dir)
+    except Exception:
+        if backup_dir.exists() and not output_dir.exists():
+            backup_dir.rename(output_dir)
+        raise
+    shutil.rmtree(backup_dir, ignore_errors=True)
     return manifest
