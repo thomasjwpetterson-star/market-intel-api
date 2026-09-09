@@ -123,15 +123,15 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
         for question, expected_phrase in (
             (
                 "Tell me about the aviation fuel controls market",
-                "capability:aviation fuel controls",
+                "aviation_fuel_controls",
             ),
             (
                 "Tell be about the aviation fuel controls market",
-                "capability:aviation fuel controls",
+                "aviation_fuel_controls",
             ),
             (
                 "What is the market for aircraft engine fuel controls?",
-                "capability:aircraft engine fuel controls",
+                "aviation_fuel_controls",
             ),
         ):
             with self.subTest(question=question):

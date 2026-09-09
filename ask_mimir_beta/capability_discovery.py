@@ -19,6 +19,37 @@ DEFAULT_DATA_ROOT = Path(
 DEFAULT_PRECOMPUTED_DIR = Path(__file__).resolve().parent / "validation-output" / "capability-markets"
 
 CAPABILITY_DEFINITIONS = {
+    "aviation_fuel_controls": {
+        "display_name": "Military-aircraft engine fuel controls and supporting equipment",
+        "request_pattern": (
+            r"\b(?:aircraft|aviation|aerospace|military[- ]aircraft)\b.*"
+            r"\b(?:engine[- ]fuel[- ]systems?|fuel[- ](?:control|controls|metering))\b|"
+            r"\b(?:engine[- ]fuel[- ]systems?|fuel[- ](?:control|controls|metering))\b.*"
+            r"\b(?:aircraft|aviation|aerospace|military[- ]aircraft)\b"
+        ),
+        "fsc_codes": ["2915", "4920", "J028", "J029", "J049"],
+        "market_segments": ["AIR"],
+        "item_pattern": (
+            r"FUEL.{0,50}(?:CONTROL|METER|GOVERN|HYDROMECH|REGULAT|PUMP|VALVE|"
+            r"NOZZLE|INJECT|MANIFOLD|TEST)|"
+            r"(?:CONTROL|METER|GOVERN|HYDROMECH|REGULAT|PUMP|VALVE|NOZZLE|INJECT|"
+            r"MANIFOLD|TEST).{0,50}FUEL|"
+            r"MAIN ENGINE CONTROL|HYDRO[- ]?MECHANICAL UNIT|\bHMU\b|\bFADEC\b|"
+            r"FULL AUTHORITY DIGITAL ENGINE CONTROL"
+        ),
+        "scope_note": (
+            "Military-aircraft engine fuel controls and their supporting component, "
+            "overhaul and test-equipment ecosystem. The evidence includes control and "
+            "metering units, hydromechanical and digital engine controls, pumps, valves, "
+            "nozzles, injectors, related repair activity and fuel-control test equipment."
+        ),
+        "included_lanes": [
+            "Complete fuel-control, metering and governing units",
+            "Fuel pumps, valves, nozzles, injectors and related control components",
+            "Production, repair and overhaul activity",
+            "Fuel-control test stands and specialized support equipment",
+        ],
+    },
     "aircraft_actuation": {
         "display_name": "Military-aircraft actuation and flight-control equipment",
         "request_pattern": r"\b(?:aircraft|aviation|flight[- ]?control)\b.*\bactuat(?:or|ors|ion)\b|\bactuat(?:or|ors|ion)\b.*\b(?:aircraft|aviation|flight[- ]?control)\b",
@@ -47,6 +78,13 @@ CAPABILITY_DEFINITIONS = {
         "item_pattern": r"MISSION COMPUTER|RUGGED(?:IZED|ISED)? COMPUTER|SINGLE[- ]BOARD COMPUTER|COMPUTER,?(?: DIGITAL| FLIGHT| MISSION| NAVIGATION| FIRE CONTROL)|COMPUTER SYSTEM,DIGITAL|COMPUTER SUBASSEMBLY|PROCESSOR,GATEWAY|DATA ACQUISITION UNIT",
         "scope_note": "Mission-computing and rugged-computing equipment identified through relevant product classifications and item descriptions.",
     },
+}
+
+CAPABILITY_ID_ALIASES = {
+    "capability:aviation fuel controls": "aviation_fuel_controls",
+    "capability:aircraft fuel controls": "aviation_fuel_controls",
+    "capability:aircraft engine fuel controls": "aviation_fuel_controls",
+    "capability:aerospace fuel controls": "aviation_fuel_controls",
 }
 
 DYNAMIC_CAPABILITY_PREFIX = "capability:"
@@ -240,6 +278,7 @@ class CapabilityDiscoveryStore:
 
     def get(self, capability_id: str, limit: int = 25) -> Dict[str, Any]:
         clean_id = str(capability_id or "").strip().lower()
+        clean_id = CAPABILITY_ID_ALIASES.get(clean_id, clean_id)
         definition = CAPABILITY_DEFINITIONS.get(clean_id)
         if not definition and clean_id.startswith(DYNAMIC_CAPABILITY_PREFIX):
             definition = self._dynamic_definition(clean_id)
@@ -667,6 +706,7 @@ class CapabilityDiscoveryStore:
                 "definition": definition["scope_note"],
                 "matched_product_classifications": classification_matches,
                 "matched_market_segments": market_segments,
+                "included_lanes": definition.get("included_lanes", []),
             },
             "supplier_sites": commercial_rows,
             "prime_award_sites": prime_award_sites,

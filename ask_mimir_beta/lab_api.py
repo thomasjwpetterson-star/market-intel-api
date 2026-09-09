@@ -1558,7 +1558,6 @@ def explicit_platform_query(
     capability_candidate = resolve_capability(text)
     if (
         capability_candidate
-        and capability_candidate.startswith("capability:")
         and mentions
         and all(
             re.sub(r"[^A-Z0-9&]+", " ", mention.upper()).strip()
