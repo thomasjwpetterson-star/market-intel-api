@@ -108,6 +108,35 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
             )
         )
 
+    def test_capability_clarification_selection_is_retained(self):
+        for answer in (
+            "US military",
+            "U.S. defense",
+            "the broader ecosystem",
+            "complete units",
+            "both",
+        ):
+            with self.subTest(answer=answer):
+                self.assertTrue(capability_market_follow_up_intent(answer))
+
+    def test_general_capability_market_phrasing_resolves(self):
+        for question, expected_phrase in (
+            (
+                "Tell me about the aviation fuel controls market",
+                "capability:aviation fuel controls",
+            ),
+            (
+                "Tell be about the aviation fuel controls market",
+                "capability:aviation fuel controls",
+            ),
+            (
+                "What is the market for aircraft engine fuel controls?",
+                "capability:aircraft engine fuel controls",
+            ),
+        ):
+            with self.subTest(question=question):
+                self.assertEqual(resolve_capability(question), expected_phrase)
+
     def test_state_market_follow_up_is_retained(self):
         self.assertTrue(
             state_market_follow_up_intent(

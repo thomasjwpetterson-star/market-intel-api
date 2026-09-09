@@ -51,6 +51,9 @@ CAPABILITY_DEFINITIONS = {
 
 DYNAMIC_CAPABILITY_PREFIX = "capability:"
 CAPABILITY_QUERY_PATTERNS = (
+    r"(?:tell\s+(?:me|be)\s+about)\s+(?:the\s+)?(.+?)\s+market(?:[?.]|$)",
+    r"what\s+is\s+(?:the\s+)?market\s+for\s+(.+?)(?:[?.]|$)",
+    r"what\s+is\s+(?:the\s+)?(.+?)\s+market(?:[?.]|$)",
     r"(?:market,\s*)?capability area(?:\s+or\s+industrial base)?\s*:\s*(.+?)(?:\?|$)",
     r"overview of (?:the\s+)?(?:us\s+)?(?:defen[cs]e\s+)?(?:market|capability area|industrial base)\s*:\s*(.+?)(?:\?|$)",
     r"overview of (?:the\s+)?(.+?)\s+in\s+(?:the\s+)?(?:us\s+)?defen[cs]e market(?:[?.]|$)",
@@ -140,6 +143,29 @@ def _capability_domains(phrase: str) -> tuple[List[str], List[str]]:
 def capability_market_follow_up_intent(text: str) -> bool:
     """Recognize follow-ups that should retain the selected capability market."""
     lowered = str(text or "").lower()
+    normalized = re.sub(r"[^a-z0-9]+", " ", lowered).strip()
+    if normalized in {
+        "us military",
+        "u s military",
+        "us defense",
+        "u s defense",
+        "us defence",
+        "u s defence",
+        "military",
+        "defense",
+        "defence",
+        "the broader ecosystem",
+        "broader ecosystem",
+        "complete units",
+        "complete systems",
+        "both",
+        "global",
+        "global defense",
+        "global defence",
+        "commercial and defense",
+        "commercial and defence",
+    }:
+        return True
     return any(
         phrase in lowered
         for phrase in (

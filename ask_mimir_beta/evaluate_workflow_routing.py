@@ -23,6 +23,7 @@ from market_segment import resolve_market_segment
 
 ROUTING_CASES = {
     "platform_intelligence": [
+        "Tell me about the F-16 market.",
         "Show me F-16 suppliers",
         "Who supplies the F-35?",
         "F-16 suppliers",
@@ -201,6 +202,8 @@ ROUTING_CASES = {
         "Who matters in military space systems?",
     ],
     "capability_discovery": [
+        "Tell me about the aviation fuel controls market.",
+        "What is the market for aircraft engine fuel controls?",
         "Find US manufacturers that supply braking systems to military aircraft.",
         "Which US suppliers make aircraft actuation equipment?",
         "Find suppliers of military radar components.",
@@ -311,6 +314,15 @@ FOLLOW_UP_CASES = [
             scope_name="Military-aircraft braking systems and components",
         ),
         "Which of these suppliers support multiple platforms?",
+    ),
+    (
+        "capability_discovery",
+        ActiveScope(
+            scope_type="capability_market",
+            scope_id="capability:aviation fuel controls",
+            scope_name="Aviation Fuel Controls",
+        ),
+        "US military",
     ),
     (
         "market_record_search",

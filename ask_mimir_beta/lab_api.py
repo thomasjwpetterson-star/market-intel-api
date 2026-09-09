@@ -108,6 +108,19 @@ DEFAULT_TRANSACTIONS = Path(
 )
 WEB_SOURCE_POLICY = load_web_source_policy()
 WEB_SOURCE_POLICY_PROMPT = render_web_source_policy(WEB_SOURCE_POLICY)
+BROAD_PLATFORM_MARKET_IDENTIFIERS = {
+    "AIR",
+    "AIRCRAFT",
+    "AEROSPACE",
+    "AVIATION",
+    "GROUND",
+    "GROUND VEHICLES",
+    "MARITIME",
+    "MISSILES",
+    "MISSILES & MUNITIONS",
+    "NAVAL",
+    "SPACE",
+}
 
 SYSTEM_PROMPT = f"""
 You are Ask Mimir, an evidence-led US defense-market research assistant.
@@ -770,6 +783,10 @@ matching supplier sites, NIINs, procurement activity, prime awards or platform a
 open by saying the market is fragmented, is not a clean category, cannot be sized comprehensively,
 or was not resolved into a comprehensive universe. Define the practical evidence boundary in one
 short sentence, then describe the market visible through the evidence.
+
+Ask Mimir covers the US defense market by default. When the user names a capability market without
+a geography or customer scope, answer for the US defense market; do not ask whether they meant a
+global commercial-and-defense market. Only broaden beyond US defense when the user asks explicitly.
 
 For a market overview, lead with a concise bottom line covering market structure, principal demand
 routes and the strongest observed supplier positions. Use annual_prime_activity to describe the
@@ -1538,6 +1555,18 @@ def explicit_platform_query(
     text = str(messages[-1].content or "").strip()
     intent = text.lower()
     mentions = store.mentions(text)
+    capability_candidate = resolve_capability(text)
+    if (
+        capability_candidate
+        and capability_candidate.startswith("capability:")
+        and mentions
+        and all(
+            re.sub(r"[^A-Z0-9&]+", " ", mention.upper()).strip()
+            in BROAD_PLATFORM_MARKET_IDENTIFIERS
+            for mention in mentions
+        )
+    ):
+        return None
     if len(mentions) == 1 and is_platform_centered_request(
         text,
         has_platform_mention=True,
@@ -4024,7 +4053,9 @@ def generate_answer(
                 "estimated_cost": None,
             }
         capability_input = [
-            {"role": "user", "content": latest_question},
+            {"role": message.role, "content": message.content}
+            for message in request.messages[-6:]
+        ] + [
             {
                 "role": "user",
                 "content": "MIMIR CAPABILITY-MARKET EVIDENCE\n" + json.dumps(pack, default=str),
