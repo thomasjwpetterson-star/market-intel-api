@@ -14,6 +14,7 @@ from lab_api import (
     explicit_company_name_query,
     explicit_item_query,
     explicit_platform_query,
+    routing_decision_for_request,
     runtime,
     workflow_for_request,
 )
@@ -270,6 +271,7 @@ ROUTING_CASES = {
         "How concentrated is the US defense industrial base?",
         "Where should an avionics supplier sell into US defense?",
         "What are the strongest defense growth signals right now?",
+        "Tell me about the broader defense ecosystem.",
     ],
     "out_of_domain": [
         "What is the weather forecast?",
@@ -284,6 +286,30 @@ ROUTING_CASES = {
 
 
 FOLLOW_UP_CASES = [
+    (
+        "platform_intelligence",
+        ActiveScope(scope_type="platform", scope_id="F-16", scope_name="F-16"),
+        "Why is that?",
+    ),
+    (
+        "capability_discovery",
+        ActiveScope(
+            scope_type="capability_market",
+            scope_id="aviation_fuel_controls",
+            scope_name="Aviation fuel controls",
+        ),
+        "Tell me about the broader ecosystem.",
+    ),
+    (
+        "company_site_intelligence",
+        ActiveScope(
+            scope_type="company_parent",
+            scope_id="PARENT_MOOG",
+            scope_name="MOOG INC.",
+            resolved_cages=["77777", "88888"],
+        ),
+        "Go deeper on those positions.",
+    ),
     (
         "platform_intelligence",
         ActiveScope(scope_type="platform", scope_id="F-16", scope_name="F-16"),
@@ -574,6 +600,21 @@ def main() -> None:
     )
     for expected, question, actual in failures:
         print(f"FAIL | expected={expected} actual={actual} | {question}")
+    telemetry_requests = [
+        AskRequest(messages=[ChatMessage(role="user", content="Show me F-16 suppliers")]),
+        AskRequest(messages=[ChatMessage(role="user", content="Tell me about the broader defense ecosystem.")]),
+    ]
+    telemetry_failures = []
+    for request in telemetry_requests:
+        decision = routing_decision_for_request(request)
+        if not decision.reason or not 0 <= decision.confidence <= 1:
+            telemetry_failures.append(decision.model_dump())
+    print(
+        f"Routing telemetry: {len(telemetry_requests) - len(telemetry_failures)}/"
+        f"{len(telemetry_requests)} passed."
+    )
+    for failure in telemetry_failures:
+        print(f"FAIL | routing_telemetry={failure}")
     print("Routes exercised:", dict(sorted(Counter(row[2] for row in results).items())))
     resolution_failures = _resolution_failures()
     resolution_total = (

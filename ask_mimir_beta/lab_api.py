@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
@@ -2146,6 +2146,13 @@ class AskRequest(BaseModel):
     active_scope: Optional[ActiveScope] = None
 
 
+class RoutingDecision(BaseModel):
+    workflow: str
+    reason: str
+    confidence: float = Field(ge=0, le=1)
+    fallback_used: bool = False
+
+
 class FeedbackRequest(BaseModel):
     response_id: str = Field(min_length=1, max_length=200)
     request_id: Optional[str] = Field(default=None, max_length=200)
@@ -2725,108 +2732,237 @@ app = FastAPI(title="Ask Mimir", docs_url="/api/docs", redoc_url=None)
 app.mount("/assets", StaticFiles(directory=LAB_DIR / "assets"), name="assets")
 
 
-def workflow_for_request(request: AskRequest) -> str:
+def _route(
+    workflow: str,
+    reason: str,
+    confidence: float,
+    *,
+    fallback_used: bool = False,
+) -> RoutingDecision:
+    return RoutingDecision(
+        workflow=workflow,
+        reason=reason,
+        confidence=confidence,
+        fallback_used=fallback_used,
+    )
+
+
+def _validated_company_query(request: AskRequest) -> str | None:
+    company_query = explicit_company_name_query(request.messages)
+    if not company_query:
+        return None
+    generic_tokens = {
+        "a", "about", "activity", "all", "an", "and", "are", "broader",
+        "business", "capabilities", "capability", "cage", "codes", "company",
+        "defence", "defense", "do", "ecosystem", "facilities", "facility",
+        "give", "is", "list", "me", "military", "now", "of", "operations",
+        "overview", "show", "site", "sites", "tell", "that", "the", "this",
+        "us", "what", "who", "why", "wide", "with",
+    }
+    query_token_list = [
+        token
+        for token in re.findall(r"[A-Z0-9]+", company_query.upper())
+        if token.lower() not in generic_tokens
+    ]
+    query_tokens = set(query_token_list)
+    if not query_tokens:
+        return None
+    search_query = " ".join(query_token_list)
+    try:
+        matches = runtime.company_contexts.search(search_query, limit=10).get("matches", [])
+    except Exception:
+        # Evidence retrieval will report the underlying problem. A temporary
+        # directory-search failure should not silently change a known route.
+        return search_query
+    for match in matches:
+        candidate_text = " ".join(
+            str(match.get(field) or "")
+            for field in ("scope_name", "scope_id", "city", "state", "option_label")
+        ).upper()
+        candidate_tokens = set(re.findall(r"[A-Z0-9]+", candidate_text))
+        overlap = len(query_tokens.intersection(candidate_tokens)) / len(query_tokens)
+        if overlap >= 0.6:
+            return search_query
+    return None
+
+
+def _conversational_scope_workflow(request: AskRequest) -> str | None:
+    if not request.active_scope:
+        return None
+    text = re.sub(
+        r"\s+",
+        " ",
+        str(request.messages[-1].content or "").lower(),
+    ).strip(" .?!")
+    if len(text.split()) > 16:
+        return None
+    refers_back = bool(
+        re.search(
+            r"\b(?:this|that|these|those|they|them|their|it|its|above|"
+            r"previous|former|latter)\b",
+            text,
+        )
+    ) or any(
+        phrase in text
+        for phrase in (
+            "tell me more",
+            "go deeper",
+            "show me more",
+            "why is that",
+            "why does that",
+            "how so",
+            "rank them",
+            "broader ecosystem",
+            "complete units",
+            "complete systems",
+            "the first one",
+            "the second one",
+            "the third one",
+        )
+    )
+    if not refers_back:
+        return None
+    return {
+        "product_family": "product_intelligence",
+        "record_search": "market_record_search",
+        "contract": "contract_or_opportunity",
+        "opportunity": "contract_or_opportunity",
+        "item": "item_intelligence",
+        "market_segment": "market_segment_intelligence",
+        "state_market": "state_industrial_base",
+        "capability_market": "capability_discovery",
+        "platform_comparison": "platform_comparison",
+        "platform": "platform_intelligence",
+        "company_parent": "company_site_intelligence",
+        "company_site": "company_site_intelligence",
+    }.get(request.active_scope.scope_type)
+
+
+def routing_decision_for_request(request: AskRequest) -> RoutingDecision:
     if is_article_analysis_request(request.messages):
-        return "news_article_implications"
+        return _route("news_article_implications", "article_url_or_text", 1.0)
     if is_clearly_out_of_domain(request.messages):
-        return "out_of_domain"
+        return _route("out_of_domain", "clear_non_defense_request", 0.99)
     if resolve_product_family(request.messages[-1].content):
-        return "product_intelligence"
+        return _route("product_intelligence", "recognized_product_family", 0.98)
     if product_follow_up_intent(request.messages[-1].content) and any(
         resolve_product_family(message.content) for message in request.messages[:-1]
     ):
-        return "product_intelligence"
+        return _route("product_intelligence", "product_family_conversation", 0.94)
     if (
         request.active_scope
         and request.active_scope.scope_type == "product_family"
         and product_follow_up_intent(request.messages[-1].content)
     ):
-        return "product_intelligence"
+        return _route("product_intelligence", "active_product_family", 0.98)
     if resolve_market_record_search(request.messages[-1].content):
-        return "market_record_search"
+        return _route("market_record_search", "award_or_opportunity_search", 0.98)
     if (
         request.active_scope
         and request.active_scope.scope_type == "record_search"
         and record_search_follow_up_intent(request.messages[-1].content)
     ):
-        return "market_record_search"
+        return _route("market_record_search", "active_record_search", 0.98)
     if explicit_award_or_opportunity_query(request.messages):
-        return "contract_or_opportunity"
+        return _route("contract_or_opportunity", "explicit_record_identifier", 1.0)
     if (
         request.active_scope
         and request.active_scope.scope_type in {"contract", "opportunity"}
         and award_opportunity_follow_up_intent(request.messages[-1].content)
     ):
-        return "contract_or_opportunity"
+        return _route("contract_or_opportunity", "active_contract_or_opportunity", 0.98)
     if explicit_item_query(request.messages):
-        return "item_intelligence"
+        return _route("item_intelligence", "explicit_item_identifier", 1.0)
     if (
         request.active_scope
         and request.active_scope.scope_type == "item"
         and item_follow_up_intent(request.messages[-1].content)
     ):
-        return "item_intelligence"
+        return _route("item_intelligence", "active_item", 0.98)
     if explicit_platform_comparison(request.messages, runtime.platform_contexts):
-        return "platform_comparison"
+        return _route("platform_comparison", "multiple_named_platforms", 0.99)
     if explicit_platform_query(request.messages, runtime.platform_contexts):
-        return "platform_intelligence"
+        return _route("platform_intelligence", "recognized_platform", 0.98)
     if is_ground_vehicle_power_position_request(request.messages):
-        return "defined_market_competitive_position"
+        return _route(
+            "defined_market_competitive_position",
+            "defined_competitive_market",
+            0.98,
+        )
     if resolve_market_segment(request.messages[-1].content):
-        return "market_segment_intelligence"
+        return _route("market_segment_intelligence", "recognized_market_segment", 0.97)
     if resolve_capability(request.messages[-1].content):
-        return "capability_discovery"
+        return _route("capability_discovery", "recognized_capability_request", 0.96)
     if (
         request.active_scope
         and request.active_scope.scope_type == "market_segment"
         and market_segment_follow_up_intent(request.messages[-1].content)
     ):
-        return "market_segment_intelligence"
+        return _route("market_segment_intelligence", "active_market_segment", 0.97)
     if is_geographic_market_request(request.messages[-1].content):
-        return "state_industrial_base"
+        return _route("state_industrial_base", "recognized_state_market", 0.98)
     if (
         request.active_scope
         and request.active_scope.scope_type == "state_market"
         and state_market_follow_up_intent(request.messages[-1].content)
     ):
-        return "state_industrial_base"
+        return _route("state_industrial_base", "active_state_market", 0.97)
     if (
         request.active_scope
         and request.active_scope.scope_type == "capability_market"
         and capability_market_follow_up_intent(request.messages[-1].content)
     ):
-        return "capability_discovery"
+        return _route("capability_discovery", "active_capability_market", 0.97)
     if is_eaton_competitor_request(request.messages):
-        return "competitor_discovery"
+        return _route("competitor_discovery", "recognized_competitor_request", 0.96)
     if (
         request.active_scope
         and request.active_scope.scope_type == "platform_comparison"
         and platform_comparison_follow_up_intent(request.messages[-1].content)
     ):
-        return "platform_comparison"
+        return _route("platform_comparison", "active_platform_comparison", 0.98)
     if (
         request.active_scope
         and request.active_scope.scope_type == "platform"
         and platform_follow_up_intent(request.messages[-1].content)
     ):
-        return "platform_intelligence"
+        return _route("platform_intelligence", "active_platform", 0.98)
     if company_site_dossier_cage(request.messages):
-        return "company_site_intelligence"
-    if explicit_company_name_query(request.messages):
-        return "company_site_intelligence"
+        return _route("company_site_intelligence", "explicit_cage_identifier", 1.0)
+    scope_workflow = _conversational_scope_workflow(request)
+    if scope_workflow:
+        return _route(scope_workflow, "conversational_scope_continuation", 0.82)
+    if _validated_company_query(request):
+        return _route("company_site_intelligence", "resolved_company_or_site", 0.97)
     if (
         request.active_scope
         and request.active_scope.scope_type in {"company_parent", "company_site"}
         and company_follow_up_intent(request.messages[-1].content)
     ):
-        return "company_site_intelligence"
+        return _route("company_site_intelligence", "active_company_or_site", 0.98)
     if company_site_trajectory_cage(request.messages):
-        return "company_site_trajectory"
+        return _route("company_site_trajectory", "explicit_cage_trajectory", 0.99)
     if is_program_momentum_request(request.messages):
-        return "program_momentum"
+        return _route("program_momentum", "program_momentum_language", 0.92)
     if is_open_capability_discovery_request(request.messages[-1].content):
-        return "capability_discovery"
-    return "general_defense_research"
+        return _route("capability_discovery", "open_supplier_discovery", 0.9)
+    if explicit_company_name_query(request.messages):
+        return _route(
+            "general_defense_research",
+            "company_phrasing_without_company_match",
+            0.45,
+            fallback_used=True,
+        )
+    return _route(
+        "general_defense_research",
+        "no_deterministic_workflow_match",
+        0.35,
+        fallback_used=True,
+    )
+
+
+def workflow_for_request(request: AskRequest) -> str:
+    return routing_decision_for_request(request).workflow
 
 
 def access_from_request(request: Request) -> AccessContext:
@@ -3155,9 +3291,12 @@ class AskJobManager:
         self.lock = threading.Lock()
         self.jobs: Dict[str, Dict[str, Any]] = {}
 
-    def create(self, request: AskRequest, access: AccessContext) -> Dict[str, Any]:
+    def create(
+        self, request: AskRequest, access: AccessContext
+    ) -> tuple[Dict[str, Any], RoutingDecision]:
         request_id = str(uuid.uuid4())
-        workflow = workflow_for_request(request)
+        routing = routing_decision_for_request(request)
+        workflow = routing.workflow
         allowance_exempt = is_lightweight_scope_follow_up(request)
         if allowance_exempt:
             used = runtime.beta_state.used_today(access.subject_id)
@@ -3184,6 +3323,7 @@ class AskJobManager:
                 runtime.beta_state.used_this_month(access.subject_id),
             ),
             "allowance_exempt": allowance_exempt,
+            "routing": routing.model_dump(),
         }
         with self.lock:
             self.jobs[request_id] = job
@@ -3193,7 +3333,7 @@ class AskJobManager:
             daemon=True,
         )
         thread.start()
-        return self.public_job(job)
+        return self.public_job(job), routing
 
     def update(self, request_id: str, stage: str, detail: str, percent: int) -> None:
         with self.lock:
@@ -3287,7 +3427,7 @@ class AskJobManager:
         return {
             key: value
             for key, value in job.items()
-            if key not in {"subject_id", "allowance_exempt"}
+            if key not in {"subject_id", "allowance_exempt", "routing"}
         }
 
 
@@ -3349,10 +3489,18 @@ def beta_policy(request: Request) -> Dict[str, Any]:
 
 
 @app.post("/api/ask/jobs", status_code=202)
-def create_ask_job(payload: AskRequest, request: Request) -> Dict[str, Any]:
+def create_ask_job(
+    payload: AskRequest, request: Request, response: Response
+) -> Dict[str, Any]:
     access = access_from_request(request)
     try:
-        return job_manager.create(payload, access)
+        job, routing = job_manager.create(payload, access)
+        response.headers["X-Ask-Mimir-Route-Reason"] = routing.reason
+        response.headers["X-Ask-Mimir-Route-Confidence"] = f"{routing.confidence:.2f}"
+        response.headers["X-Ask-Mimir-Route-Fallback"] = (
+            "1" if routing.fallback_used else "0"
+        )
+        return job
     except DailyQuotaExceeded as exc:
         raise HTTPException(
             status_code=429,
@@ -3707,7 +3855,7 @@ def generate_answer(
     ground_vehicle_position_request = is_ground_vehicle_power_position_request(
         request.messages
     )
-    company_query = explicit_company_name_query(request.messages)
+    company_query = _validated_company_query(request)
     if is_platform_centered_request(
         latest_question,
         has_platform_mention=bool(platform_mentions),
