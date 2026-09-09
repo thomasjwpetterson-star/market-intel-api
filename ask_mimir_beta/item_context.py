@@ -196,6 +196,7 @@ class ItemContextStore:
             raise KeyError(f"item was not found: {niin}")
 
         profile = self._profile(clean_niin)
+        reference_profile = self._reference_profile(clean_niin)
         references = self._references(clean_niin)
         financials = self._financials(clean_niin, years)
         contracts = self._contracts(clean_niin, years)
@@ -211,15 +212,15 @@ class ItemContextStore:
 
         identity = {
             "niin": clean_niin,
-            "nsn": profile.get("nsn") or next((row.get("nsn") for row in references if row.get("nsn")), None),
-            "fsc_code": profile.get("fsc_code") or next((row.get("fsc_code") for row in references if row.get("fsc_code")), None),
-            "description": profile.get("item_name") or next((row.get("description") for row in references if row.get("description")), None),
-            "unit_of_issue": profile.get("unit_of_issue"),
-            "acquisition_advice_code": profile.get("acquisition_advice_code"),
-            "government_estimated_price_usd": profile.get("govt_estimated_price"),
-            "source_of_supply": profile.get("source_of_supply"),
-            "demil_code": profile.get("demil_code"),
-            "shelf_life_code": profile.get("shelf_life_code"),
+            "nsn": profile.get("nsn") or reference_profile.get("nsn"),
+            "fsc_code": profile.get("fsc_code") or reference_profile.get("fsc_code"),
+            "description": profile.get("item_name") or reference_profile.get("description"),
+            "unit_of_issue": profile.get("unit_of_issue") or reference_profile.get("unit_of_issue"),
+            "acquisition_advice_code": profile.get("acquisition_advice_code") or reference_profile.get("acquisition_advice_code"),
+            "government_estimated_price_usd": profile.get("govt_estimated_price") or reference_profile.get("govt_estimated_price"),
+            "source_of_supply": profile.get("source_of_supply") or reference_profile.get("source_of_supply"),
+            "demil_code": profile.get("demil_code") or reference_profile.get("demil_code"),
+            "shelf_life_code": profile.get("shelf_life_code") or reference_profile.get("shelf_life_code"),
         }
         fingerprint_basis = json.dumps(
             {
@@ -399,6 +400,26 @@ class ItemContextStore:
         cursor = self.connection.execute(
             "SELECT * FROM read_parquet(?) WHERE niin=? LIMIT 1",
             [str(self.paths["profile"]), niin],
+        )
+        rows = _rows(cursor)
+        return rows[0] if rows else {}
+
+    def _reference_profile(self, niin: str) -> Dict[str, Any]:
+        cursor = self.connection.execute(
+            """
+            SELECT MAX(nsn) AS nsn,
+                   MAX(fsc_code) AS fsc_code,
+                   MAX(description) AS description,
+                   MAX(unit_of_issue) AS unit_of_issue,
+                   MAX(acquisition_advice_code) AS acquisition_advice_code,
+                   MAX(govt_estimated_price) AS govt_estimated_price,
+                   MAX(source_of_supply) AS source_of_supply,
+                   MAX(demil_code) AS demil_code,
+                   MAX(shelf_life_code) AS shelf_life_code
+            FROM read_parquet(?)
+            WHERE niin=?
+            """,
+            [str(self.paths["reference"]), niin],
         )
         rows = _rows(cursor)
         return rows[0] if rows else {}

@@ -575,7 +575,10 @@ transaction keys, hashes, local paths or ingestion identifiers.
 
 Finish with a concise "Evidence used" section naming DLA FLIS, DLA contract history, the fiscal
 years and the number of supplier, part and contract records in the pack. The downloadable evidence
-pack carries the full drill-down. Keep the answer below 1,200 words.
+pack carries the full drill-down. When no procurement or platform activity is observed, keep the
+answer compact: report the available catalog, management, source and part-reference facts once,
+then state briefly that procurement and platform activity were not observed. Do not render a
+year-by-year table containing only empty years. Keep the answer below 1,200 words.
 """.strip()
 
 AWARD_OPPORTUNITY_PROMPT = f"""
@@ -1859,6 +1862,15 @@ def company_site_dossier_cage(messages: List[ChatMessage]) -> str | None:
 
 def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     text = str(messages[-1].content or "").strip()
+    lowered_text = re.sub(r"\s+", " ", text.lower()).strip(" .?!")
+    if lowered_text in {
+        "what is the part number", "what are the part numbers", "what is its part number",
+        "what is the nsn", "what is the niin", "what is it", "what is this item",
+        "who received it", "who is the recipient", "what was the value",
+        "where is it located", "what is the deadline", "when is the deadline",
+        "show me the evidence", "show the evidence", "tell me more",
+    }:
+        return None
     if re.match(
         r"^(?:what\s+does\s+each\s+.+?\s+supplier|"
         r"which\s+.+?\s+suppliers|how\s+concentrated\s+is\s+the\s+.+?\s+supplier\s+base)",
@@ -2022,6 +2034,53 @@ def explicit_item_query(messages: List[ChatMessage]) -> str | None:
     return compact_nsn.group(0) if compact_nsn else None
 
 
+def item_follow_up_intent(text: str) -> bool:
+    lowered = str(text or "").lower().strip()
+    return any(
+        term in lowered
+        for term in (
+            "part number", "part no", "nsn", "niin", "item description",
+            "what is it", "what was it", "supplier", "source", "manufacturer",
+            "authorized", "authorised", "platform", "program", "programme",
+            "contract", "procurement", "purchase", "price", "activity", "evidence",
+        )
+    )
+
+
+def item_lightweight_follow_up_kind(text: str) -> str | None:
+    lowered = re.sub(r"\s+", " ", str(text or "").lower()).strip(" .?!")
+    if len(lowered.split()) > 12:
+        return None
+    if "part number" in lowered or "part no" in lowered:
+        return "part_number"
+    if re.fullmatch(
+        r"(?:what|which)(?:'s| is| are)?(?: the| this| its)? (?:nsn|niin)(?: number)?",
+        lowered,
+    ) or lowered in {"nsn", "niin", "what are the identifiers", "what is the identifier"}:
+        return "identifier"
+    if lowered in {
+        "what is it", "what was it", "what is this item", "what is the item",
+        "what is its description", "what is the description", "describe the item",
+    }:
+        return "description"
+    return None
+
+
+def award_opportunity_follow_up_intent(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(
+        term in lowered
+        for term in (
+            "recipient", "who received", "who won", "award value", "contract value",
+            "obligation", "action", "modification", "what was purchased", "purpose",
+            "supplier", "subcontract", "part number", "platform", "program", "programme",
+            "place of performance", "location", "competition", "offers", "solicitation",
+            "deadline", "contact", "set-aside", "set aside", "naics", "psc", "evidence",
+            "tell me more", "explain it", "this contract", "this award", "this opportunity",
+        )
+    )
+
+
 def explicit_award_or_opportunity_query(messages: List[ChatMessage]) -> str | None:
     # Prior answers routinely cite contract IDs. Only route to the bounded award
     # workflow when the user explicitly names an award in the latest message.
@@ -2068,7 +2127,7 @@ class ChatMessage(BaseModel):
 
 class ActiveScope(BaseModel):
     scope_type: str = Field(
-        pattern="^(company_parent|company_site|platform|platform_comparison|state_market|capability_market|market_segment|record_search|product_family)$"
+        pattern="^(company_parent|company_site|item|contract|opportunity|platform|platform_comparison|state_market|capability_market|market_segment|record_search|product_family)$"
     )
     scope_id: str = Field(min_length=1, max_length=200)
     scope_name: Optional[str] = Field(default=None, max_length=300)
@@ -2693,7 +2752,19 @@ def workflow_for_request(request: AskRequest) -> str:
         return "market_record_search"
     if explicit_award_or_opportunity_query(request.messages):
         return "contract_or_opportunity"
+    if (
+        request.active_scope
+        and request.active_scope.scope_type in {"contract", "opportunity"}
+        and award_opportunity_follow_up_intent(request.messages[-1].content)
+    ):
+        return "contract_or_opportunity"
     if explicit_item_query(request.messages):
+        return "item_intelligence"
+    if (
+        request.active_scope
+        and request.active_scope.scope_type == "item"
+        and item_follow_up_intent(request.messages[-1].content)
+    ):
         return "item_intelligence"
     if explicit_platform_comparison(request.messages, runtime.platform_contexts):
         return "platform_comparison"
@@ -3020,6 +3091,65 @@ def result_counts_toward_quota(result: Dict[str, Any]) -> bool:
     )
 
 
+def is_lightweight_scope_follow_up(request: AskRequest) -> bool:
+    return bool(
+        request.active_scope
+        and request.active_scope.scope_type == "item"
+        and item_lightweight_follow_up_kind(request.messages[-1].content)
+    )
+
+
+def item_lightweight_answer(
+    pack: Dict[str, Any], kind: str
+) -> str:
+    identity = pack.get("identity") or {}
+    niin = str(identity.get("niin") or "")
+    raw_nsn = re.sub(r"[^0-9]", "", str(identity.get("nsn") or ""))
+    nsn = (
+        f"{raw_nsn[:4]}-{raw_nsn[4:6]}-{raw_nsn[6:9]}-{raw_nsn[9:]}"
+        if len(raw_nsn) == 13
+        else str(identity.get("nsn") or niin)
+    )
+    description = str(identity.get("description") or "Description unavailable")
+    item_link = (
+        "https://www.mimiradvisors.org/dashboard?view=PARTS&nsn="
+        + quote(str(identity.get("nsn") or niin))
+    )
+    if kind == "identifier":
+        return (
+            f"The item is [**NSN {nsn}**]({item_link}), with **NIIN {niin}**. "
+            f"It is listed as **{description}**."
+        )
+    if kind == "description":
+        fsc_suffix = f", FSC {identity.get('fsc_code')}" if identity.get("fsc_code") else ""
+        return (
+            f"[**NSN {nsn}**]({item_link}) is listed as **{description}**"
+            f"{fsc_suffix}."
+        )
+
+    part_rows = pack.get("part_number_summary") or []
+    part_numbers = [
+        str(row.get("part_number") or "").strip()
+        for row in part_rows
+        if str(row.get("part_number") or "").strip()
+    ]
+    part_numbers = list(dict.fromkeys(part_numbers))
+    if not part_numbers:
+        return f"No part-number reference was returned for [**NSN {nsn}**]({item_link})."
+    if len(part_numbers) == 1:
+        return (
+            f"The part number referenced for [**NSN {nsn}**]({item_link}) is "
+            f"**{part_numbers[0]}**."
+        )
+    shown = ", ".join(f"**{value}**" for value in part_numbers[:10])
+    remainder = len(part_numbers) - min(len(part_numbers), 10)
+    suffix = f" There are {remainder} more in the evidence pack." if remainder else ""
+    return (
+        f"Mimir has {len(part_numbers)} part-number references for "
+        f"[**NSN {nsn}**]({item_link}): {shown}.{suffix}"
+    )
+
+
 class AskJobManager:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -3028,12 +3158,16 @@ class AskJobManager:
     def create(self, request: AskRequest, access: AccessContext) -> Dict[str, Any]:
         request_id = str(uuid.uuid4())
         workflow = workflow_for_request(request)
-        used = runtime.beta_state.reserve(
-            request_id,
-            access,
-            runtime.release_guard.release_binding_id,
-            workflow,
-        )
+        allowance_exempt = is_lightweight_scope_follow_up(request)
+        if allowance_exempt:
+            used = runtime.beta_state.used_today(access.subject_id)
+        else:
+            used = runtime.beta_state.reserve(
+                request_id,
+                access,
+                runtime.release_guard.release_binding_id,
+                workflow,
+            )
         job = {
             "request_id": request_id,
             "subject_id": access.subject_id,
@@ -3049,6 +3183,7 @@ class AskJobManager:
                 used,
                 runtime.beta_state.used_this_month(access.subject_id),
             ),
+            "allowance_exempt": allowance_exempt,
         }
         with self.lock:
             self.jobs[request_id] = job
@@ -3073,7 +3208,9 @@ class AskJobManager:
             )
 
     def _run(self, request_id: str, request: AskRequest, access: AccessContext) -> None:
-        runtime.beta_state.mark_running(request_id)
+        allowance_exempt = bool(self.jobs[request_id].get("allowance_exempt"))
+        if not allowance_exempt:
+            runtime.beta_state.mark_running(request_id)
         try:
             runtime.release_guard.assert_unchanged()
             result = generate_answer(
@@ -3090,12 +3227,13 @@ class AskJobManager:
             )
             customer_result = finalize_customer_result(result, access, request_id)
             cost = (result.get("estimated_cost") or {}).get("estimated_total_usd")
-            runtime.beta_state.complete(
-                request_id,
-                latency_ms=result.get("latency_ms"),
-                estimated_cost_usd=cost,
-                billable=result_counts_toward_quota(result),
-            )
+            if not allowance_exempt:
+                runtime.beta_state.complete(
+                    request_id,
+                    latency_ms=result.get("latency_ms"),
+                    estimated_cost_usd=cost,
+                    billable=result_counts_toward_quota(result),
+                )
             customer_result["access"] = access.public_dict(
                 runtime.beta_state.used_today(access.subject_id),
                 runtime.beta_state.used_this_month(access.subject_id),
@@ -3113,7 +3251,8 @@ class AskJobManager:
                     }
                 )
         except Exception as exc:
-            runtime.beta_state.fail(request_id, refund=True)
+            if not allowance_exempt:
+                runtime.beta_state.fail(request_id, refund=True)
             detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
             if "credit_balance_exhausted" in str(detail) or "insufficient_quota" in str(detail):
                 detail = (
@@ -3145,7 +3284,11 @@ class AskJobManager:
 
     @staticmethod
     def public_job(job: Dict[str, Any]) -> Dict[str, Any]:
-        return {key: value for key, value in job.items() if key != "subject_id"}
+        return {
+            key: value
+            for key, value in job.items()
+            if key not in {"subject_id", "allowance_exempt"}
+        }
 
 
 job_manager = AskJobManager()
@@ -3527,6 +3670,16 @@ def generate_answer(
         }
     resolved_company_scope: Dict[str, Any] | None = None
     latest_question = str(request.messages[-1].content or "")
+    active_item_follow_up = bool(
+        request.active_scope
+        and request.active_scope.scope_type == "item"
+        and item_follow_up_intent(latest_question)
+    )
+    active_award_follow_up = bool(
+        request.active_scope
+        and request.active_scope.scope_type in {"contract", "opportunity"}
+        and award_opportunity_follow_up_intent(latest_question)
+    )
     product_id = resolve_product_family(latest_question)
     if (
         not product_id
@@ -3596,6 +3749,8 @@ def generate_answer(
             segment_id,
             is_geographic_market_request(latest_question),
             explicit_item_query(request.messages),
+            active_item_follow_up,
+            active_award_follow_up,
             explicit_award_or_opportunity_query(request.messages),
             explicit_platform_comparison(request.messages, runtime.platform_contexts),
             is_article_analysis_request(request.messages),
@@ -4455,6 +4610,8 @@ def generate_answer(
         )
         return result
     award_query = explicit_award_or_opportunity_query(request.messages)
+    if not award_query and active_award_follow_up:
+        award_query = request.active_scope.scope_id
     if award_query:
         emit_progress(progress, "Resolving the public record", "Matching the award or opportunity identifier", 24)
         search_arguments = {"query": award_query, "limit": 12}
@@ -4546,7 +4703,14 @@ def generate_answer(
             )
             return result
 
+    lightweight_item_follow_up = None
     item_query = explicit_item_query(request.messages)
+    if (
+        not item_query
+        and active_item_follow_up
+    ):
+        item_query = request.active_scope.scope_id
+        lightweight_item_follow_up = item_lightweight_follow_up_kind(latest_question)
     if item_query:
         emit_progress(progress, "Resolving the item", "Matching the NSN, NIIN or part number", 24)
         search_arguments = {"query": item_query, "limit": 20}
@@ -4617,6 +4781,26 @@ def generate_answer(
                 search_trace,
                 {"tool": "get_item_context", "arguments": arguments, "result": pack},
             ]
+            if lightweight_item_follow_up:
+                return {
+                    "answer": item_lightweight_answer(pack, lightweight_item_follow_up),
+                    "response_id": "item-lightweight-follow-up",
+                    "model": "deterministic-item-follow-up",
+                    "release_id": runtime.store.manifest["release_id"],
+                    "answer_artifacts": {
+                        "item_dossier": pack,
+                        "evidence_pack": {
+                            "format": "zip",
+                            "download_url": f"/api/evidence/item/{resolved_niin}.zip",
+                        },
+                    },
+                    "tool_trace": trace,
+                    "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "response_calls": 0,
+                    "usage": None,
+                    "usage_by_response": [],
+                    "estimated_cost": None,
+                }
             input_items.append(
                 {
                     "role": "user",
@@ -5275,13 +5459,15 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
     """Backward-compatible synchronous endpoint used by the evaluation runner."""
     access = access_from_request(request)
     request_id = str(uuid.uuid4())
+    allowance_exempt = is_lightweight_scope_follow_up(payload)
     try:
-        runtime.beta_state.reserve(
-            request_id,
-            access,
-            runtime.release_guard.release_binding_id,
-            workflow_for_request(payload),
-        )
+        if not allowance_exempt:
+            runtime.beta_state.reserve(
+                request_id,
+                access,
+                runtime.release_guard.release_binding_id,
+                workflow_for_request(payload),
+            )
     except DailyQuotaExceeded as exc:
         raise HTTPException(
             status_code=429,
@@ -5293,23 +5479,26 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 ),
             },
         ) from exc
-    runtime.beta_state.mark_running(request_id)
+    if not allowance_exempt:
+        runtime.beta_state.mark_running(request_id)
     try:
         result = generate_answer(payload)
         customer_result = finalize_customer_result(result, access, request_id)
-        runtime.beta_state.complete(
-            request_id,
-            latency_ms=result.get("latency_ms"),
-            estimated_cost_usd=(result.get("estimated_cost") or {}).get(
-                "estimated_total_usd"
-            ),
-            billable=result_counts_toward_quota(result),
-        )
+        if not allowance_exempt:
+            runtime.beta_state.complete(
+                request_id,
+                latency_ms=result.get("latency_ms"),
+                estimated_cost_usd=(result.get("estimated_cost") or {}).get(
+                    "estimated_total_usd"
+                ),
+                billable=result_counts_toward_quota(result),
+            )
         customer_result["access"] = access.public_dict(
             runtime.beta_state.used_today(access.subject_id),
             runtime.beta_state.used_this_month(access.subject_id),
         )
         return customer_result
     except Exception:
-        runtime.beta_state.fail(request_id, refund=True)
+        if not allowance_exempt:
+            runtime.beta_state.fail(request_id, refund=True)
         raise

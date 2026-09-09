@@ -370,6 +370,42 @@ FOLLOW_UP_CASES = [
         ActiveScope(scope_type="platform", scope_id="F-16", scope_name="F-16"),
         "Give me the full supplier list.",
     ),
+    (
+        "item_intelligence",
+        ActiveScope(
+            scope_type="item",
+            scope_id="004050631",
+            scope_name="1280-00-405-0631",
+        ),
+        "What is the part number?",
+    ),
+    (
+        "item_intelligence",
+        ActiveScope(
+            scope_type="item",
+            scope_id="004050631",
+            scope_name="1280-00-405-0631",
+        ),
+        "Which suppliers are associated with it?",
+    ),
+    (
+        "contract_or_opportunity",
+        ActiveScope(
+            scope_type="contract",
+            scope_id="N0002417C2100",
+            scope_name="N0002417C2100",
+        ),
+        "Who received it?",
+    ),
+    (
+        "contract_or_opportunity",
+        ActiveScope(
+            scope_type="opportunity",
+            scope_id="PANRSA26P000012345",
+            scope_name="Example opportunity",
+        ),
+        "What is the deadline?",
+    ),
 ]
 
 
@@ -440,6 +476,8 @@ RESOLUTION_CASES = {
         "What does Honeywell's Clearwater facility manufacture?": "Honeywell Clearwater",
         "Which programs does Aerojet Rocketdyne's East Camden site support?": "Aerojet Rocketdyne East Camden",
         "Parker Hannifin company-wide": "Parker Hannifin",
+        "What is the part number?": None,
+        "Who received it?": None,
     },
     "item": {
         "Find vendors for 1680-01-579-4366.": "1680015794366",
