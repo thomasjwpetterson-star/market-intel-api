@@ -230,6 +230,82 @@ def _matches_reviewed_company_alias(value: Any, aliases: Sequence[str]) -> bool:
     )
 
 
+def _bounded_precomputed_context(
+    context: Dict[str, Any], row_limit: int = 5000
+) -> Dict[str, Any]:
+    """Bound persisted evidence rows without changing aggregate observations."""
+    limit = min(max(int(row_limit), 1), 5000)
+    bounded = dict(context)
+
+    identity = dict(bounded.get("identity", {}))
+    identity["sites"] = list(identity.get("sites", []))[:limit]
+    bounded["identity"] = identity
+    bounded["site_financials"] = list(bounded.get("site_financials", []))[:limit]
+    bounded["site_capability_evidence"] = list(
+        bounded.get("site_capability_evidence", [])
+    )[:limit]
+
+    location = dict(bounded.get("location_footprint", {}))
+    for key in (
+        "registered_or_contracting_sites",
+        "prime_award_places_of_performance",
+        "reported_subaward_locations",
+    ):
+        location[key] = list(location.get(key, []))[:limit]
+    bounded["location_footprint"] = location
+
+    performance = dict(bounded.get("place_of_performance_activity", {}))
+    performance["records"] = list(performance.get("records", []))[:limit]
+    bounded["place_of_performance_activity"] = performance
+
+    capability = dict(bounded.get("capability_evidence", {}))
+    for key in (
+        "psc",
+        "naics",
+        "dla_items",
+        "prime_award_descriptions",
+        "reported_subaward_descriptions",
+    ):
+        capability[key] = list(capability.get(key, []))[:limit]
+    bounded["capability_evidence"] = capability
+
+    product = dict(bounded.get("product_and_part_evidence", {}))
+    financial_rows = []
+    for row in list(product.get("niin_financial_observations", []))[:limit]:
+        financial_rows.append(
+            {**row, "contract_ids": list(row.get("contract_ids", []))[:20]}
+        )
+    product["niin_financial_observations"] = financial_rows
+    product["part_number_references"] = list(
+        product.get("part_number_references", [])
+    )[:limit]
+    qualified = dict(product.get("qualified_source_context", {}))
+    qualified["items"] = list(qualified.get("items", []))[:limit]
+    product["qualified_source_context"] = qualified
+    bounded["product_and_part_evidence"] = product
+
+    relationships = dict(bounded.get("reported_subcontract_relationships", {}))
+    relationships["as_subcontractor_to"] = list(
+        relationships.get("as_subcontractor_to", [])
+    )[:limit]
+    relationships["reported_subcontractors"] = list(
+        relationships.get("reported_subcontractors", [])
+    )[:limit]
+    bounded["reported_subcontract_relationships"] = relationships
+
+    bounded["platform_exposure"] = list(bounded.get("platform_exposure", []))[:limit]
+    bounded["customer_context"] = list(bounded.get("customer_context", []))[:limit]
+    bounded["top_awards"] = list(bounded.get("top_awards", []))[:limit]
+    solicitations = dict(bounded.get("open_solicitation_candidates", {}))
+    solicitations["candidates"] = list(solicitations.get("candidates", []))[:limit]
+    bounded["open_solicitation_candidates"] = solicitations
+    evidence_index = dict(bounded.get("evidence_index", {}))
+    evidence_index["records"] = list(evidence_index.get("records", []))[:limit]
+    bounded["evidence_index"] = evidence_index
+    bounded["precomputed_row_limit_per_table"] = limit
+    return bounded
+
+
 class CompanyContextStore:
     def __init__(
         self,
@@ -1559,7 +1635,9 @@ def build_precomputed_parent_contexts(
                 ]
                 store._dynamic_contexts.pop(("company_parent", clean_scope_id), None)
                 store._context_paths.pop(("company_parent", clean_scope_id), None)
-                context = dict(store.get_raw("company_parent", match["scope_id"]))
+                context = _bounded_precomputed_context(
+                    dict(store.get_raw("company_parent", match["scope_id"]))
+                )
                 context.pop("_artifact_path", None)
                 filename = (
                     hashlib.sha256(str(match["scope_id"]).encode()).hexdigest()[:16]
