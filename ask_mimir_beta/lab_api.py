@@ -93,7 +93,7 @@ from beta_controls import (
     validate_answer_citations,
 )
 from platform_supply_chain_store import PlatformSupplyChainStore
-from program_momentum_store import ProgramMomentumStore
+from program_momentum_store import ProgramMomentumStore, is_program_momentum_language
 from platform_intent import (
     is_open_capability_discovery_request,
     is_platform_centered_request,
@@ -362,6 +362,14 @@ Use the web-search tool to check authoritative government and first-party source
 production awards, capacity agreements and program announcements after the pack's completed-year
 window. Live web evidence can be cited directly in the answer without manual registry approval. It
 does not silently change the frozen Mimir score or become a reusable database fact.
+
+For current-market and outlook questions, prioritize recent production awards with stated multi-year
+periods of performance, current production or capacity announcements, and the supplied structured
+budget/FYDP rows. Use those sources to distinguish funded near-term activity from planned outyear
+direction. When the user asks about tactical missiles, define the scope briefly and center tactical
+air-to-air, air-to-surface, anti-ship, land-attack and battlefield-strike programs. Do not let strategic
+deterrent or missile-defense programs dominate unless they are materially relevant to the requested
+comparison.
 
 Answer with two visibly separate views:
 1. current forward acceleration, incorporating material live announcements and budget signals; and
@@ -845,6 +853,13 @@ boundary, describe coverage of that governed equipment class, while still avoidi
 market claim. When the boundary says item-procurement coverage is limited, use prime awards, program
 evidence and authoritative sources for the commercial structure instead of treating a short item list
 as the whole supplier base.
+
+For the aircraft fuel-systems market, cover the full functional chain supplied in
+scope.included_lanes: storage and containment; transfer and distribution; engine delivery and
+control; gauging, sensing and inerting; and refuel, defuel, maintenance and test equipment. Do not
+turn the market overview into a single-platform view merely because one aircraft family has the
+largest number of matched records. Use platform activity as evidence of breadth and demand, and
+organize the commercial picture by functional lane and supplier role.
 
 For equipment inherently used across most aircraft, such as landing gear, brakes or flight controls,
 broad platform coverage is expected and is not itself a market insight. Focus on supplier roles, source
@@ -1752,13 +1767,7 @@ def is_clearly_out_of_domain(messages: List[ChatMessage]) -> bool:
 
 
 def is_program_momentum_request(messages: List[ChatMessage]) -> bool:
-    text = str(messages[-1].content or "").lower()
-    has_market = any(term in text for term in ("missile", "munition", "interceptor"))
-    has_momentum = any(
-        term in text
-        for term in ("accelerat", "momentum", "growing", "growth", "fastest", "rank")
-    )
-    return has_market and has_momentum
+    return is_program_momentum_language(messages[-1].content)
 
 
 def is_ground_vehicle_power_position_request(messages: List[ChatMessage]) -> bool:
@@ -3222,7 +3231,7 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
     if is_eaton_competitor_request(request.messages):
         add(_routing_candidate("competitor_discovery", "recognized_competitor_request", 0.96))
     if is_program_momentum_request(request.messages):
-        add(_routing_candidate("program_momentum", "program_momentum_language", 0.92))
+        add(_routing_candidate("program_momentum", "program_momentum_language", 0.985))
     if is_open_capability_discovery_request(latest):
         add(_routing_candidate("capability_discovery", "open_supplier_discovery", 0.90))
 

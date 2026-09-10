@@ -17,6 +17,23 @@
         "Fuel-control test stands and specialized support equipment"
       ]
     },
+    "aircraft_fuel_systems": {
+      "display_name": "Military-aircraft fuel systems and supporting equipment",
+      "evidence_mode": "description_bounded",
+      "request_pattern": "\\b(?:aircraft|aviation|aerospace|military[- ]aircraft)\\b.*\\bfuel[- ]systems?\\b|\\bfuel[- ]systems?\\b.*\\b(?:aircraft|aviation|aerospace|military[- ]aircraft)\\b",
+      "fsc_codes": ["1560", "1680", "2915", "4710", "4720", "4730", "4810", "4920", "4930", "6680"],
+      "ecosystem_fsc_codes": ["2915"],
+      "market_segments": ["AIR"],
+      "item_pattern": "FUEL.{0,45}(?:TANK|CELL|BLADDER|RESERVOIR|PUMP|BOOST|TRANSFER|CONTROL|METER|GOVERN|REGULAT|VALVE|MANIFOLD|LINE|TUBE|HOSE|FITTING|NOZZLE|INJECT|FILTER|STRAINER|INDICATOR|GAUGE|GAGING|QUANTITY|LEVEL|SENSOR|TRANSMITTER|INERT|REFUEL|DEFUEL|VENT|TEST)|(?:TANK|CELL|BLADDER|RESERVOIR|PUMP|BOOST|TRANSFER|CONTROL|METER|GOVERN|REGULAT|VALVE|MANIFOLD|LINE|TUBE|HOSE|FITTING|NOZZLE|INJECT|FILTER|STRAINER|INDICATOR|GAUGE|GAGING|QUANTITY|LEVEL|SENSOR|TRANSMITTER|INERT|REFUEL|DEFUEL|VENT|TEST).{0,45}FUEL|MAIN ENGINE CONTROL|HYDRO[- ]?MECHANICAL UNIT|\\bHMU\\b|\\bFADEC\\b|FULL AUTHORITY DIGITAL ENGINE CONTROL",
+      "scope_note": "Military-aircraft fuel storage, transfer, distribution, engine-delivery, control, gauging, inerting, refuel/defuel and sustainment equipment identified through relevant aircraft, fuel-system, fluid-handling and support-equipment classifications with fuel-specific descriptions.",
+      "included_lanes": [
+        "Fuel tanks, cells, reservoirs and containment equipment",
+        "Fuel pumps, transfer equipment, lines, hoses, fittings, valves and manifolds",
+        "Engine fuel-control, metering and delivery equipment",
+        "Fuel quantity, gauging, sensing, venting and inerting equipment",
+        "Refuel, defuel, maintenance, overhaul and test equipment"
+      ]
+    },
     "aircraft_actuation": {
       "display_name": "Military-aircraft actuation and flight-control equipment",
       "evidence_mode": "description_bounded",
@@ -145,6 +162,10 @@
     }
   },
   "id_aliases": {
+    "capability:aircraft fuel systems": "aircraft_fuel_systems",
+    "capability:aviation fuel systems": "aircraft_fuel_systems",
+    "capability:aerospace fuel systems": "aircraft_fuel_systems",
+    "capability:military aircraft fuel systems": "aircraft_fuel_systems",
     "capability:aviation fuel controls": "aviation_fuel_controls",
     "capability:aircraft fuel controls": "aviation_fuel_controls",
     "capability:aircraft engine fuel controls": "aviation_fuel_controls",

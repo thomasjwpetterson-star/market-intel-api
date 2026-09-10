@@ -11,6 +11,23 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_PACK = ROOT / "validation-output" / "program-momentum" / "missile-program-momentum.json"
 
 
+def is_program_momentum_language(text: str) -> bool:
+    """Recognize missile-market questions that require the forward signal pack."""
+    lowered = str(text or "").lower()
+    has_market = any(
+        term in lowered for term in ("missile", "munition", "interceptor")
+    )
+    has_momentum = any(
+        term in lowered
+        for term in (
+            "accelerat", "momentum", "growing", "growth", "fastest", "rank",
+            "at the moment", "currently", "current market", "outlook",
+            "forward view", "next five years", "next 5 years",
+        )
+    )
+    return has_market and has_momentum
+
+
 class ProgramMomentumStore:
     def __init__(self, pack_path: Path = DEFAULT_PACK) -> None:
         self.pack_path = pack_path.resolve()
@@ -64,6 +81,7 @@ class ProgramMomentumStore:
             "top_reported_supplier_sites": program.get(
                 "top_reported_supplier_sites", []
             )[:4],
+            "budget_evidence": program.get("budget_evidence", [])[:16],
             "open_opportunities": program.get("open_opportunities", [])[:3],
         }
 

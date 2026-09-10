@@ -78,19 +78,20 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
             "capability:military flight recorder",
         )
 
-    def test_natural_language_aerospace_fuel_market_resolves_dynamically(self):
-        self.assertEqual(
-            resolve_capability(
-                "Give me an overview of aerospace fuel systems in the US defense market."
-            ),
-            "capability:aerospace fuel systems",
-        )
+    def test_natural_language_aircraft_fuel_market_uses_governed_definition(self):
+        for question in (
+            "Give me an overview of aerospace fuel systems in the US defense market.",
+            "Give me an overview of the US market for aircraft fuel systems.",
+            "What is happening across the military-aircraft fuel-system ecosystem?",
+        ):
+            with self.subTest(question=question):
+                self.assertEqual(resolve_capability(question), "aircraft_fuel_systems")
 
     def test_general_capability_supplier_phrasings_resolve_dynamically(self):
         cases = {
             "Who makes military-aircraft landing gear?": "aircraft_landing_gear",
             "Find companies with flight-control experience.": "capability:flight-control experience",
-            "Identify suppliers of aerospace fuel systems.": "capability:aerospace fuel systems",
+            "Identify suppliers of aerospace fuel systems.": "aircraft_fuel_systems",
             "Find suppliers capable of producing energetic components.": "energetic_components",
         }
         for question, expected in cases.items():
@@ -103,6 +104,13 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
             _capability_domains("aerospace fuel systems"),
             (["AIR"], ["aircraft", "aviation", "airborne", "aerospace"]),
         )
+
+    def test_aircraft_fuel_systems_definition_covers_the_full_functional_chain(self):
+        definition = CAPABILITY_DEFINITIONS["aircraft_fuel_systems"]
+        lanes = " ".join(definition["included_lanes"]).lower()
+        for expected_term in ("tanks", "pumps", "engine fuel-control", "gauging", "test equipment"):
+            with self.subTest(expected_term=expected_term):
+                self.assertIn(expected_term, lanes)
 
     def test_alabama_market_request_resolves(self):
         question = "Give me an overview of the defence industrial base in Alabama."

@@ -271,6 +271,8 @@ ROUTING_CASES = {
     "program_momentum": [
         "Which missile programs are accelerating fastest?",
         "Rank accelerating missile programs by procurement momentum.",
+        "What's happening in the US tactical missile market at the moment?",
+        "Give me the current outlook for US tactical missiles.",
     ],
     "general_defense_research": [
         "Who competes with Honeywell in military avionics?",
