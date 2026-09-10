@@ -430,7 +430,6 @@ def publish(
     ):
         shutil.copyfile(classification_path, serving_classification_path)
     source_depth_summary = build_platform_source_depth(DATA_ROOT)
-    build_recent_awards_search()
     for generated_dir in (
         PRECOMPUTED_COMPANY_CONTEXT_DIR,
         PLATFORM_CONTEXT_DIR,
@@ -466,6 +465,9 @@ def publish(
         KEY_PLATFORM_CONTEXTS,
         release_id=release_id,
     )
+    # Build the largest new serving artifact after spill-heavy dossier generation.
+    # This keeps release publication viable on constrained local disks.
+    build_recent_awards_search()
 
     for path, local_path in artifact_files():
         print(f"Publishing artifact: {local_path}", file=sys.stderr)
