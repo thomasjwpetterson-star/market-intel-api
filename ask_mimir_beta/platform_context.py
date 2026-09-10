@@ -568,6 +568,7 @@ class PlatformContextStore:
         if focus_id:
             return self._focused_program_projection(platform_id, focus_id, supplier_limit)
         context = self.get(platform_id)
+        resolved = context["scope"]["platform_id"]
         supplier_limit = min(max(int(supplier_limit), 1), 250)
         direct = []
         for row in context["direct_award_recipients"][:8]:

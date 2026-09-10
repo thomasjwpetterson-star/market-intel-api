@@ -2,6 +2,7 @@ import unittest
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import Mock
 
 import duckdb
 
@@ -40,6 +41,7 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             "UH-60",
             "CH-53K",
             "P-8A",
+            "NEXT GEN OPIR",
         ]
 
     def test_patriot_resolves_to_the_umbrella_system(self):
@@ -158,6 +160,45 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
         self.assertEqual(
             set(self.store.mentions("Where do Apache and Black Hawk suppliers overlap?")),
             {"AH-64", "UH-60"},
+        )
+
+    def test_next_gen_opir_is_detected_as_a_named_platform(self):
+        self.assertEqual(
+            self.store.mentions("Tell me about Next Gen OPIR and its supplier base."),
+            ["NEXT GEN OPIR"],
+        )
+
+    def test_universal_projection_uses_the_resolved_platform_for_supplier_years(self):
+        store = object.__new__(PlatformContextStore)
+        store.get = Mock(
+            return_value={
+                "scope": {"platform_id": "NEXT GEN OPIR"},
+                "calculation_version": "test",
+                "generated_at": "test",
+                "evidence_fingerprint": "test",
+                "direct_award_recipients": [],
+                "reported_supplier_sites": [{"cage": "TEST1"}],
+                "reported_component_categories": [],
+                "top_prime_awards": [],
+                "current_opportunities": [],
+                "coverage": {},
+                "item_and_component_evidence": {
+                    "top_items": [],
+                    "top_item_supplier_sites": [],
+                },
+            }
+        )
+        store._attach_supplier_annual_activity = Mock()
+
+        result = PlatformContextStore.answer_projection(
+            store,
+            "Next Gen OPIR",
+            supplier_limit=10,
+        )
+
+        store._attach_supplier_annual_activity.assert_called_once_with(
+            "NEXT GEN OPIR",
+            result["reported_supplier_sites"],
         )
 
     def test_comparison_follow_up_retains_both_platforms(self):
