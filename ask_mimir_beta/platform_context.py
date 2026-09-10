@@ -1256,9 +1256,9 @@ def build_precomputed_platform_contexts(
     """Materialize selected high-use platform dossiers for one runtime release."""
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    store = PlatformContextStore(data_root, load_precomputed=False)
     entries = []
     for requested_id in platform_ids:
+        store = PlatformContextStore(data_root, load_precomputed=False)
         resolution = store.search(requested_id)
         resolved = resolution.get("resolved_platform_id")
         if not resolved:
@@ -1281,7 +1281,7 @@ def build_precomputed_platform_contexts(
                 "evidence_fingerprint": context["evidence_fingerprint"],
             }
         )
-    store.connection.close()
+        store.connection.close()
     manifest = {
         "schema_version": "platform-context-precompute-v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
