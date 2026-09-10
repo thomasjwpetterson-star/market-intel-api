@@ -1728,10 +1728,12 @@ def build_precomputed_parent_contexts(
     entries = list(source_manifest.get("contexts", []))
     previous_cache = os.environ.get("ASK_MIMIR_CACHE_DIR")
     previous_release = os.environ.get("ASK_MIMIR_RELEASE_ID")
+    previous_memory_limit = os.environ.get("ASK_MIMIR_DUCKDB_MEMORY_LIMIT")
     try:
         with tempfile.TemporaryDirectory(prefix="ask-mimir-parent-precompute-") as cache:
             os.environ["ASK_MIMIR_CACHE_DIR"] = cache
             os.environ["ASK_MIMIR_RELEASE_ID"] = release_id
+            os.environ["ASK_MIMIR_DUCKDB_MEMORY_LIMIT"] = "2GB"
             store = CompanyContextStore(source_context_dir, data_root)
             for query in parent_queries:
                 resolution = store.search(query, scope_type="company_parent", limit=100)
@@ -1824,6 +1826,10 @@ def build_precomputed_parent_contexts(
             os.environ.pop("ASK_MIMIR_RELEASE_ID", None)
         else:
             os.environ["ASK_MIMIR_RELEASE_ID"] = previous_release
+        if previous_memory_limit is None:
+            os.environ.pop("ASK_MIMIR_DUCKDB_MEMORY_LIMIT", None)
+        else:
+            os.environ["ASK_MIMIR_DUCKDB_MEMORY_LIMIT"] = previous_memory_limit
 
     lazy_entries = []
     for entry in entries:

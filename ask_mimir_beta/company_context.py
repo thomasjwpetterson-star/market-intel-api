@@ -144,7 +144,10 @@ class CompanyContextBuilder:
         self.connection = duckdb.connect()
         self.connection.execute("SET preserve_insertion_order = false")
         self.connection.execute("SET threads = 2")
-        self.connection.execute("SET memory_limit = '1GB'")
+        memory_limit = os.getenv("ASK_MIMIR_DUCKDB_MEMORY_LIMIT", "1GB").upper()
+        if not re.fullmatch(r"\d+(?:MB|GB)", memory_limit):
+            raise ValueError("ASK_MIMIR_DUCKDB_MEMORY_LIMIT must use MB or GB")
+        self.connection.execute(f"SET memory_limit = '{memory_limit}'")
         duckdb_temp = os.getenv("ASK_MIMIR_DUCKDB_TEMP", "/tmp/ask-mimir-duckdb")
         Path(duckdb_temp).mkdir(parents=True, exist_ok=True)
         self.connection.execute("SET temp_directory = ?", [duckdb_temp])
