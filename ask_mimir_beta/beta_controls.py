@@ -9,6 +9,7 @@ import re
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
@@ -130,6 +131,85 @@ def next_utc_month_iso() -> str:
     ).isoformat()
 
 
+class RequestPerformance:
+    """Thread-local, customer-hidden timings for one Ask Mimir request."""
+
+    def __init__(self, routing_ms: float = 0.0) -> None:
+        self.routing_ms = max(float(routing_ms), 0.0)
+        self.totals: Dict[str, float] = {}
+        self.counts: Dict[str, int] = {}
+        self.operations: list[Dict[str, Any]] = []
+
+    def record(
+        self,
+        category: str,
+        name: str,
+        elapsed_ms: float,
+        *,
+        cache_hit: bool = False,
+    ) -> None:
+        duration = max(float(elapsed_ms), 0.0)
+        self.totals[category] = self.totals.get(category, 0.0) + duration
+        self.counts[category] = self.counts.get(category, 0) + 1
+        self.operations.append(
+            {
+                "category": category,
+                "name": name,
+                "elapsed_ms": round(duration, 1),
+                "cache_hit": bool(cache_hit),
+            }
+        )
+
+    def snapshot(
+        self,
+        *,
+        queue_wait_ms: float = 0.0,
+        answer_generation_ms: float,
+        validation_ms: float,
+        total_request_ms: float,
+    ) -> Dict[str, Any]:
+        return {
+            "routing_ms": round(self.routing_ms, 1),
+            "queue_wait_ms": round(max(queue_wait_ms, 0.0), 1),
+            "answer_generation_ms": round(max(answer_generation_ms, 0.0), 1),
+            "evidence_retrieval_ms": round(
+                self.totals.get("evidence_retrieval", 0.0), 1
+            ),
+            "model_ms": round(self.totals.get("model", 0.0), 1),
+            "validation_and_formatting_ms": round(max(validation_ms, 0.0), 1),
+            "total_request_ms": round(max(total_request_ms, 0.0), 1),
+            "evidence_call_count": self.counts.get("evidence_retrieval", 0),
+            "model_call_count": self.counts.get("model", 0),
+            "evidence_cache_hit_count": self.counts.get("evidence_cache_hit", 0),
+            "operations": list(self.operations),
+        }
+
+
+_REQUEST_PERFORMANCE = threading.local()
+
+
+@contextmanager
+def request_performance_scope(performance: RequestPerformance):
+    previous = getattr(_REQUEST_PERFORMANCE, "current", None)
+    _REQUEST_PERFORMANCE.current = performance
+    try:
+        yield performance
+    finally:
+        _REQUEST_PERFORMANCE.current = previous
+
+
+def record_request_timing(
+    category: str,
+    name: str,
+    elapsed_ms: float,
+    *,
+    cache_hit: bool = False,
+) -> None:
+    performance = getattr(_REQUEST_PERFORMANCE, "current", None)
+    if performance is not None:
+        performance.record(category, name, elapsed_ms, cache_hit=cache_hit)
+
+
 class DailyQuotaExceeded(RuntimeError):
     def __init__(self, policy: TierPolicy, period: str = "day") -> None:
         self.policy = policy
@@ -171,7 +251,8 @@ class BetaStateStore:
                 release_binding_id TEXT,
                 workflow TEXT,
                 latency_ms REAL,
-                estimated_cost_usd REAL
+                estimated_cost_usd REAL,
+                performance_json TEXT
             );
             CREATE INDEX IF NOT EXISTS query_events_subject_day
                 ON query_events(subject_id, utc_day, status);
@@ -217,6 +298,14 @@ class BetaStateStore:
                 ON routing_events(conversation_id, created_at);
             """
         )
+        query_columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(query_events)")
+        }
+        if "performance_json" not in query_columns:
+            self.connection.execute(
+                "ALTER TABLE query_events ADD COLUMN performance_json TEXT"
+            )
         self.connection.execute(
             """
             UPDATE query_events
@@ -450,12 +539,14 @@ class BetaStateStore:
         latency_ms: float | None,
         estimated_cost_usd: float | None,
         billable: bool = True,
+        performance: Dict[str, Any] | None = None,
     ) -> None:
         with self.lock:
             self.connection.execute(
                 """
                 UPDATE query_events
-                SET status=?, completed_at=?, latency_ms=?, estimated_cost_usd=?
+                SET status=?, completed_at=?, latency_ms=?, estimated_cost_usd=?,
+                    performance_json=?
                 WHERE request_id=?
                 """,
                 [
@@ -463,19 +554,44 @@ class BetaStateStore:
                     datetime.now(timezone.utc).isoformat(),
                     latency_ms,
                     estimated_cost_usd,
+                    json.dumps(performance, default=str) if performance else None,
                     request_id,
                 ],
             )
             self.connection.commit()
 
-    def fail(self, request_id: str, *, refund: bool = True) -> None:
-        self._set_status(request_id, "failed_refunded" if refund else "failed")
+    def fail(
+        self,
+        request_id: str,
+        *,
+        refund: bool = True,
+        performance: Dict[str, Any] | None = None,
+    ) -> None:
+        self._set_status(
+            request_id,
+            "failed_refunded" if refund else "failed",
+            performance=performance,
+        )
 
-    def _set_status(self, request_id: str, status: str) -> None:
+    def _set_status(
+        self,
+        request_id: str,
+        status: str,
+        *,
+        performance: Dict[str, Any] | None = None,
+    ) -> None:
         with self.lock:
             self.connection.execute(
-                "UPDATE query_events SET status=? WHERE request_id=?",
-                [status, request_id],
+                """
+                UPDATE query_events
+                SET status=?, performance_json=COALESCE(?, performance_json)
+                WHERE request_id=?
+                """,
+                [
+                    status,
+                    json.dumps(performance, default=str) if performance else None,
+                    request_id,
+                ],
             )
             self.connection.commit()
 

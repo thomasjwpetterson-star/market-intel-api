@@ -81,8 +81,11 @@ from beta_controls import (
     DailyQuotaExceeded,
     DataReleaseGuard,
     EvidencePackCache,
+    RequestPerformance,
     TIER_POLICIES,
     normalize_tier,
+    record_request_timing,
+    request_performance_scope,
     response_requires_clarification,
     sanitize_customer_payload,
     remove_unsafe_and_internal_answer_content,
@@ -2451,6 +2454,17 @@ class LabRuntime:
         }
 
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        started = time.perf_counter()
+        try:
+            return self._call_tool(name, arguments)
+        finally:
+            record_request_timing(
+                "evidence_retrieval",
+                name,
+                (time.perf_counter() - started) * 1000,
+            )
+
+    def _call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         self.release_guard.assert_unchanged()
         cacheable = {
             "get_program_momentum",
@@ -2493,6 +2507,7 @@ class LabRuntime:
             )
             cached = self.evidence_cache.get(cache_key)
             if cached is not None:
+                record_request_timing("evidence_cache_hit", name, 0, cache_hit=True)
                 return cached
 
         result: Dict[str, Any]
@@ -3872,6 +3887,9 @@ class AskJobManager:
         request: AskRequest,
         access: AccessContext,
         routing: RoutingDecision | None = None,
+        *,
+        routing_ms: float = 0.0,
+        request_started_perf: float | None = None,
     ) -> tuple[Dict[str, Any], RoutingDecision]:
         request_id = str(uuid.uuid4())
         routing = routing or routing_decision_for_request(request)
@@ -3910,6 +3928,8 @@ class AskJobManager:
             ),
             "allowance_exempt": allowance_exempt,
             "routing": routing.model_dump(),
+            "_routing_ms": max(float(routing_ms), 0.0),
+            "_request_started_perf": request_started_perf or time.perf_counter(),
         }
         with self.lock:
             self.jobs[request_id] = job
@@ -3941,28 +3961,62 @@ class AskJobManager:
         routing: RoutingDecision,
     ) -> None:
         allowance_exempt = bool(self.jobs[request_id].get("allowance_exempt"))
+        request_started_perf = float(
+            self.jobs[request_id].get("_request_started_perf") or time.perf_counter()
+        )
+        performance = RequestPerformance(
+            routing_ms=float(self.jobs[request_id].get("_routing_ms") or 0.0)
+        )
+        queue_wait_ms = max(
+            ((time.perf_counter() - request_started_perf) * 1000)
+            - performance.routing_ms,
+            0.0,
+        )
+        answer_generation_ms = 0.0
+        validation_ms = 0.0
         if not allowance_exempt:
             runtime.beta_state.mark_running(request_id)
         try:
-            runtime.release_guard.assert_unchanged()
-            result = (
-                routing_clarification_result(routing)
-                if routing.clarification_needed
-                else generate_answer(
-                    request,
-                    progress=lambda stage, detail, percent: self.update(
-                        request_id, stage, detail, percent
-                    ),
-                    routing=routing,
+            with request_performance_scope(performance):
+                runtime.release_guard.assert_unchanged()
+                answer_started = time.perf_counter()
+                try:
+                    result = (
+                        routing_clarification_result(routing)
+                        if routing.clarification_needed
+                        else generate_answer(
+                            request,
+                            progress=lambda stage, detail, percent: self.update(
+                                request_id, stage, detail, percent
+                            ),
+                            routing=routing,
+                        )
+                    )
+                finally:
+                    answer_generation_ms = (
+                        time.perf_counter() - answer_started
+                    ) * 1000
+                self.update(
+                    request_id,
+                    "Validating the answer",
+                    "Checking citations, drill-down links and customer-safe evidence",
+                    92,
                 )
+                validation_started = time.perf_counter()
+                try:
+                    customer_result = finalize_customer_result(
+                        result, access, request_id
+                    )
+                finally:
+                    validation_ms = (
+                        time.perf_counter() - validation_started
+                    ) * 1000
+            performance_snapshot = performance.snapshot(
+                queue_wait_ms=queue_wait_ms,
+                answer_generation_ms=answer_generation_ms,
+                validation_ms=validation_ms,
+                total_request_ms=(time.perf_counter() - request_started_perf) * 1000,
             )
-            self.update(
-                request_id,
-                "Validating the answer",
-                "Checking citations, drill-down links and customer-safe evidence",
-                92,
-            )
-            customer_result = finalize_customer_result(result, access, request_id)
             cost = (result.get("estimated_cost") or {}).get("estimated_total_usd")
             if not allowance_exempt:
                 runtime.beta_state.complete(
@@ -3970,7 +4024,18 @@ class AskJobManager:
                     latency_ms=result.get("latency_ms"),
                     estimated_cost_usd=cost,
                     billable=result_counts_toward_quota(result),
+                    performance=performance_snapshot,
                 )
+            runtime.write_audit_record(
+                {
+                    "record_type": "request_performance",
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                    "request_id": request_id,
+                    "workflow": routing.workflow,
+                    "status": "completed",
+                    "performance": performance_snapshot,
+                }
+            )
             next_scope = active_scope_from_result(result, request.active_scope)
             runtime.beta_state.save_conversation_scope(
                 request.conversation_id,
@@ -4003,8 +4068,28 @@ class AskJobManager:
                     }
                 )
         except Exception as exc:
+            performance_snapshot = performance.snapshot(
+                queue_wait_ms=queue_wait_ms,
+                answer_generation_ms=answer_generation_ms,
+                validation_ms=validation_ms,
+                total_request_ms=(time.perf_counter() - request_started_perf) * 1000,
+            )
             if not allowance_exempt:
-                runtime.beta_state.fail(request_id, refund=True)
+                runtime.beta_state.fail(
+                    request_id,
+                    refund=True,
+                    performance=performance_snapshot,
+                )
+            runtime.write_audit_record(
+                {
+                    "record_type": "request_performance",
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                    "request_id": request_id,
+                    "workflow": routing.workflow,
+                    "status": "failed",
+                    "performance": performance_snapshot,
+                }
+            )
             runtime.beta_state.complete_routing_event(
                 request_id, clarification_outcome="request_failed"
             )
@@ -4043,6 +4128,7 @@ class AskJobManager:
             key: value
             for key, value in job.items()
             if key not in {"subject_id", "allowance_exempt", "routing"}
+            and not key.startswith("_")
         }
 
 
@@ -4129,9 +4215,11 @@ def request_with_server_conversation_scope(
 def create_ask_job(
     payload: AskRequest, request: Request, response: Response
 ) -> Dict[str, Any]:
+    request_started_perf = time.perf_counter()
     access = access_from_request(request)
     payload = request_with_server_conversation_scope(payload, access)
     routing = validate_routing_decision(payload, routing_decision_for_request(payload))
+    routing_ms = (time.perf_counter() - request_started_perf) * 1000
     routing_headers = {
         "X-Ask-Mimir-Workflow": routing.workflow,
         "X-Ask-Mimir-Route-Reason": routing.reason,
@@ -4145,7 +4233,13 @@ def create_ask_job(
         ),
     }
     try:
-        job, routing = job_manager.create(payload, access, routing=routing)
+        job, routing = job_manager.create(
+            payload,
+            access,
+            routing=routing,
+            routing_ms=routing_ms,
+            request_started_perf=request_started_perf,
+        )
         for name, value in routing_headers.items():
             response.headers[name] = value
         return job
@@ -4348,6 +4442,33 @@ def emit_progress(
 ) -> None:
     if callback:
         callback(stage, detail, percent)
+
+
+class TimedResponses:
+    def __init__(self, responses: Any) -> None:
+        self._responses = responses
+
+    def create(self, **kwargs: Any) -> Any:
+        started = time.perf_counter()
+        try:
+            return self._responses.create(**kwargs)
+        finally:
+            record_request_timing(
+                "model",
+                str(kwargs.get("model") or "unknown"),
+                (time.perf_counter() - started) * 1000,
+            )
+
+
+class TimedOpenAIClient:
+    """Preserve the OpenAI client interface while measuring response calls."""
+
+    def __init__(self, client: OpenAI) -> None:
+        self._client = client
+        self.responses = TimedResponses(client.responses)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
 
 
 def complete_response_text(response: Any) -> str:
@@ -4792,7 +4913,7 @@ def generate_answer(
     input_items: List[Any] = [
         {"role": message.role, "content": message.content} for message in request.messages
     ]
-    client = OpenAI()
+    client = TimedOpenAIClient(OpenAI())
     if selected_workflow == "news_article_implications":
         emit_progress(progress, "Reading the article", "Verifying the report and resolving the entities it names", 24)
         article_tools = [*TOOLS, {"type": "web_search", "search_context_size": "low"}]
@@ -6295,10 +6416,16 @@ def generate_answer(
 @app.post("/api/ask")
 def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
     """Backward-compatible synchronous endpoint used by the evaluation runner."""
+    request_started_perf = time.perf_counter()
     access = access_from_request(request)
     payload = request_with_server_conversation_scope(payload, access)
     request_id = str(uuid.uuid4())
     routing = validate_routing_decision(payload, routing_decision_for_request(payload))
+    performance = RequestPerformance(
+        routing_ms=(time.perf_counter() - request_started_perf) * 1000
+    )
+    answer_generation_ms = 0.0
+    validation_ms = 0.0
     allowance_exempt = routing.clarification_needed or is_lightweight_scope_follow_up(payload)
     runtime.beta_state.record_routing_decision(
         request_id=request_id,
@@ -6329,12 +6456,32 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
     if not allowance_exempt:
         runtime.beta_state.mark_running(request_id)
     try:
-        result = (
-            routing_clarification_result(routing)
-            if routing.clarification_needed
-            else generate_answer(payload, routing=routing)
+        with request_performance_scope(performance):
+            answer_started = time.perf_counter()
+            try:
+                result = (
+                    routing_clarification_result(routing)
+                    if routing.clarification_needed
+                    else generate_answer(payload, routing=routing)
+                )
+            finally:
+                answer_generation_ms = (
+                    time.perf_counter() - answer_started
+                ) * 1000
+            validation_started = time.perf_counter()
+            try:
+                customer_result = finalize_customer_result(
+                    result, access, request_id
+                )
+            finally:
+                validation_ms = (
+                    time.perf_counter() - validation_started
+                ) * 1000
+        performance_snapshot = performance.snapshot(
+            answer_generation_ms=answer_generation_ms,
+            validation_ms=validation_ms,
+            total_request_ms=(time.perf_counter() - request_started_perf) * 1000,
         )
-        customer_result = finalize_customer_result(result, access, request_id)
         if not allowance_exempt:
             runtime.beta_state.complete(
                 request_id,
@@ -6343,7 +6490,18 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                     "estimated_total_usd"
                 ),
                 billable=result_counts_toward_quota(result),
+                performance=performance_snapshot,
             )
+        runtime.write_audit_record(
+            {
+                "record_type": "request_performance",
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "request_id": request_id,
+                "workflow": routing.workflow,
+                "status": "completed",
+                "performance": performance_snapshot,
+            }
+        )
         next_scope = active_scope_from_result(result, payload.active_scope)
         runtime.beta_state.save_conversation_scope(
             payload.conversation_id,
@@ -6365,8 +6523,27 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
         )
         return customer_result
     except Exception:
+        performance_snapshot = performance.snapshot(
+            answer_generation_ms=answer_generation_ms,
+            validation_ms=validation_ms,
+            total_request_ms=(time.perf_counter() - request_started_perf) * 1000,
+        )
         if not allowance_exempt:
-            runtime.beta_state.fail(request_id, refund=True)
+            runtime.beta_state.fail(
+                request_id,
+                refund=True,
+                performance=performance_snapshot,
+            )
+        runtime.write_audit_record(
+            {
+                "record_type": "request_performance",
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "request_id": request_id,
+                "workflow": routing.workflow,
+                "status": "failed",
+                "performance": performance_snapshot,
+            }
+        )
         runtime.beta_state.complete_routing_event(
             request_id, clarification_outcome="request_failed"
         )

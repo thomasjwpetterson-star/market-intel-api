@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,12 +9,35 @@ from beta_controls import (
     BetaStateStore,
     DataReleaseGuard,
     DailyQuotaExceeded,
+    RequestPerformance,
     TIER_POLICIES,
+    record_request_timing,
+    request_performance_scope,
     response_requires_clarification,
 )
 
 
 class BetaStateStoreTests(unittest.TestCase):
+    def test_completion_persists_internal_performance_breakdown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = BetaStateStore(Path(directory) / "beta-state.sqlite3")
+            access = AccessContext("test-user", "professional", True)
+            performance = {"model_ms": 1200.5, "evidence_retrieval_ms": 48.2}
+            store.reserve("request-1", access, "release-1", "company")
+            store.complete(
+                "request-1",
+                latency_ms=1300,
+                estimated_cost_usd=0.1,
+                performance=performance,
+            )
+
+            stored = store.connection.execute(
+                "SELECT performance_json FROM query_events WHERE request_id = ?",
+                ["request-1"],
+            ).fetchone()[0]
+            self.assertEqual(json.loads(stored), performance)
+            store.connection.close()
+
     def test_conversation_scope_is_server_side_and_subject_isolated(self):
         with tempfile.TemporaryDirectory() as directory:
             store = BetaStateStore(Path(directory) / "beta-state.sqlite3")
@@ -164,6 +188,34 @@ class DataReleaseGuardTests(unittest.TestCase):
             source.write_bytes(b"changed")
             with self.assertRaises(RuntimeError):
                 guard.assert_unchanged()
+
+
+class RequestPerformanceTests(unittest.TestCase):
+    def test_records_model_evidence_and_cache_timings_within_request_scope(self):
+        performance = RequestPerformance(routing_ms=12.25)
+        with request_performance_scope(performance):
+            record_request_timing("evidence_retrieval", "get_company_context", 40)
+            record_request_timing(
+                "evidence_cache_hit",
+                "get_company_context",
+                0,
+                cache_hit=True,
+            )
+            record_request_timing("model", "gpt-test", 800)
+
+        snapshot = performance.snapshot(
+            queue_wait_ms=3.5,
+            answer_generation_ms=850,
+            validation_ms=15,
+            total_request_ms=900,
+        )
+        self.assertEqual(snapshot["routing_ms"], 12.2)
+        self.assertEqual(snapshot["queue_wait_ms"], 3.5)
+        self.assertEqual(snapshot["evidence_retrieval_ms"], 40.0)
+        self.assertEqual(snapshot["model_ms"], 800.0)
+        self.assertEqual(snapshot["evidence_call_count"], 1)
+        self.assertEqual(snapshot["model_call_count"], 1)
+        self.assertEqual(snapshot["evidence_cache_hit_count"], 1)
 
 
 class ClarificationDetectionTests(unittest.TestCase):

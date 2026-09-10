@@ -292,6 +292,122 @@ ROUTING_CASES = {
 }
 
 
+FUZZY_PARAPHRASE_FAMILIES = {
+    "platform_intelligence": {
+        "subjects": ("F16", "Tomahawk", "CH53K", "Virginia class"),
+        "templates": (
+            "Can you map the firms behind {subject}?",
+            "I need the industrial picture for {subject}.",
+            "Who's actually involved with {subject}?",
+            "Walk me through {subject} suppliers and what they make.",
+            "pls show the {subject} supply chain",
+        ),
+    },
+    "company_site_intelligence": {
+        "subjects": ("Honeywell", "Moog", "Curtiss Wright", "Parker Hannifin"),
+        "templates": (
+            "What does {subject} actually do in US defence?",
+            "Build me a defence profile of {subject}.",
+            "Can u map {subject}'s military business?",
+            "Customers, facilities and programs for {subject}, please.",
+            "Give me the analyst view on {subject} in defense.",
+        ),
+    },
+    "item_intelligence": {
+        "subjects": (
+            "NSN 1560-00-817-5790",
+            "NIIN 015794366",
+            "part no UK 60A890216",
+            "1680015794366",
+        ),
+        "templates": (
+            "Can you look up {subject}?",
+            "Who makes or supplies {subject}?",
+            "Price, sources and platforms for {subject}.",
+            "Tell me what we know about {subject}.",
+            "pls find the procurement history for {subject}",
+        ),
+    },
+    "contract_or_opportunity": {
+        "subjects": (
+            "N0002417C2100",
+            "W56HZV23C0024",
+            "FA820625F0006",
+            "SPE4A626PC235",
+        ),
+        "templates": (
+            "What's behind {subject}?",
+            "Explain the work and award history for {subject}.",
+            "Who got {subject} and what was bought?",
+            "Can you pull the public record for {subject}?",
+            "diligence {subject} for me",
+        ),
+    },
+    "capability_discovery": {
+        "subjects": (
+            "aircraft fuel controls",
+            "military landing gear",
+            "radar components",
+            "rugged mission computers",
+        ),
+        "templates": (
+            "Map the US defence ecosystem for {subject}.",
+            "Which manufacturers are credible in {subject}?",
+            "I need a supplier landscape for {subject}.",
+            "Who has demonstrated military work in {subject}?",
+            "find firms making {subject} for defense",
+        ),
+    },
+    "market_segment_intelligence": {
+        "subjects": (
+            "military rotorcraft",
+            "fighter aircraft",
+            "naval shipbuilding",
+            "missiles and munitions",
+        ),
+        "templates": (
+            "What's going on in US {subject}?",
+            "Give me the market picture for {subject}.",
+            "Which programs and firms drive {subject}?",
+            "How is the {subject} industrial base changing?",
+            "pls summarise the US {subject} market",
+        ),
+    },
+    "state_industrial_base": {
+        "subjects": ("Alabama", "Connecticut", "Texas", "Arizona"),
+        "templates": (
+            "What defence work happens in {subject}?",
+            "Map the military industrial footprint in {subject}.",
+            "Which facilities matter most in {subject}?",
+            "Give me an aerospace and defense profile of {subject}.",
+            "top defence firms and programs in {subject}",
+        ),
+    },
+    "market_record_search": {
+        "subjects": (
+            "aircraft avionics",
+            "vehicle electronics",
+            "missile propulsion",
+            "electronic warfare",
+        ),
+        "templates": (
+            "What open opportunities are relevant to {subject} suppliers?",
+            "Find live Sources Sought about {subject}.",
+            "Show recent defence awards involving {subject}.",
+            "Any current RFIs for {subject}?",
+            "search open solicitations for {subject}",
+        ),
+    },
+}
+
+
+def generated_fuzzy_cases():
+    for expected, family in FUZZY_PARAPHRASE_FAMILIES.items():
+        for subject in family["subjects"]:
+            for template in family["templates"]:
+                yield expected, template.format(subject=subject)
+
+
 FOLLOW_UP_CASES = [
     (
         "platform_intelligence",
@@ -723,10 +839,16 @@ def _resolution_failures():
 
 def main() -> None:
     results = []
+    fuzzy_results = []
     for expected, questions in ROUTING_CASES.items():
         for question in questions:
             request = AskRequest(messages=[ChatMessage(role="user", content=question)])
             results.append((expected, question, workflow_for_request(request)))
+    for expected, question in generated_fuzzy_cases():
+        request = AskRequest(messages=[ChatMessage(role="user", content=question)])
+        result = (expected, question, workflow_for_request(request))
+        results.append(result)
+        fuzzy_results.append(result)
     for expected, active_scope, question in FOLLOW_UP_CASES:
         request = AskRequest(
             messages=[ChatMessage(role="user", content=question)],
@@ -744,6 +866,11 @@ def main() -> None:
     )
     for expected, question, actual in failures:
         print(f"FAIL | expected={expected} actual={actual} | {question}")
+    fuzzy_failures = [result for result in fuzzy_results if result[0] != result[2]]
+    print(
+        f"Generated fuzzy routing: {len(fuzzy_results) - len(fuzzy_failures)}/"
+        f"{len(fuzzy_results)} passed."
+    )
     telemetry_requests = [
         AskRequest(messages=[ChatMessage(role="user", content="Show me F-16 suppliers")]),
         AskRequest(messages=[ChatMessage(role="user", content="Tell me about the broader defense ecosystem.")]),
