@@ -2396,11 +2396,14 @@ class LabRuntime:
         self.release_guard = DataReleaseGuard(
             str(self.store.manifest["release_id"]), release_sources
         )
+        durable_runtime_root = Path(
+            os.getenv("ASK_MIMIR_RUNTIME_ROOT", str(ROOT / ".runtime"))
+        )
         self.evidence_cache = EvidencePackCache(
             Path(
                 os.getenv(
                     "ASK_MIMIR_CACHE_DIR",
-                    str(ROOT / ".runtime" / "evidence-cache"),
+                    str(durable_runtime_root / "evidence-cache"),
                 )
             ),
             ttl_seconds=int(os.getenv("ASK_MIMIR_CACHE_TTL_SECONDS", "86400")),
@@ -2409,7 +2412,7 @@ class LabRuntime:
             Path(
                 os.getenv(
                     "ASK_MIMIR_BETA_STATE",
-                    str(ROOT / ".runtime" / "beta-state.sqlite3"),
+                    str(durable_runtime_root / "state" / "beta-state.sqlite3"),
                 )
             )
         )

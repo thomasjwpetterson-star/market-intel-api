@@ -16,6 +16,10 @@ services:
         value: /var/data/ask-mimir
       - key: ASK_MIMIR_AUDIT_LOG
         value: /var/data/ask-mimir/audit/answers.jsonl
+      - key: ASK_MIMIR_BETA_STATE
+        value: /var/data/ask-mimir/state/beta-state.sqlite3
+      - key: ASK_MIMIR_CACHE_DIR
+        value: /var/data/ask-mimir/evidence-cache
       - key: ASK_MIMIR_ALLOW_EXTERNAL_EVIDENCE
         value: "1"
       - key: ASK_MIMIR_ALLOW_TEST_IDENTITIES
