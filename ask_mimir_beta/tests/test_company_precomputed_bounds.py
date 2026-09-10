@@ -25,6 +25,7 @@ class CompanyPrecomputedBoundsTests(unittest.TestCase):
                 "niin_financial_observations": rows,
                 "part_number_references": rows,
                 "qualified_source_context": {"items": rows},
+                "third_party_dla_procurement_routes": rows,
                 "summary": {"part_number_reference_count": 6},
             },
             "reported_subcontract_relationships": {
@@ -44,6 +45,14 @@ class CompanyPrecomputedBoundsTests(unittest.TestCase):
         self.assertEqual(len(bounded["identity"]["sites"]), 2)
         self.assertEqual(
             len(bounded["product_and_part_evidence"]["part_number_references"]),
+            2,
+        )
+        self.assertEqual(
+            len(
+                bounded["product_and_part_evidence"][
+                    "third_party_dla_procurement_routes"
+                ]
+            ),
             2,
         )
         self.assertEqual(

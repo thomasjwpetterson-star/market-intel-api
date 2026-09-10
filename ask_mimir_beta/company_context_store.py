@@ -286,6 +286,9 @@ def _bounded_precomputed_context(
     qualified = dict(product.get("qualified_source_context", {}))
     qualified["items"] = list(qualified.get("items", []))[:limit]
     product["qualified_source_context"] = qualified
+    product["third_party_dla_procurement_routes"] = list(
+        product.get("third_party_dla_procurement_routes", [])
+    )[:limit]
     bounded["product_and_part_evidence"] = product
 
     relationships = dict(bounded.get("reported_subcontract_relationships", {}))
@@ -1406,6 +1409,56 @@ class CompanyContextStore:
                         context.get("scope", {}).get("fiscal_years", []),
                     )
                 )
+        product = context.get("product_and_part_evidence", {})
+        if (
+            "product_and_part_evidence" in FOCUS_SECTIONS[focus]
+            and "third_party_dla_procurement_routes" not in product
+        ):
+            from company_context import CompanyContextBuilder
+
+            with self._dynamic_lock:
+                if self._dynamic_builder is None:
+                    self._dynamic_builder = CompanyContextBuilder(
+                        data_root=self.data_root
+                    )
+                scope = context.get("scope", {})
+                cages = scope.get("resolved_cages") or context.get(
+                    "identity", {}
+                ).get("resolved_cages", [])
+                years = scope.get("fiscal_years", [])
+                routes = (
+                    self._dynamic_builder._third_party_dla_procurement_routes(
+                        cages, years
+                    )
+                    if cages and years
+                    else []
+                )
+                product["third_party_dla_procurement_routes"] = routes
+                summary = product.setdefault("summary", {})
+                route_recipient_count = (
+                    int(routes[0].get("route_universe_recipient_count") or 0)
+                    if routes
+                    else 0
+                )
+                route_niin_count = (
+                    int(routes[0].get("route_universe_niin_count") or 0)
+                    if routes
+                    else 0
+                )
+                route_value = (
+                    float(routes[0].get("route_universe_procurement_value_usd") or 0)
+                    if routes
+                    else 0.0
+                )
+                summary.update(
+                    {
+                        "third_party_dla_recipient_count": route_recipient_count,
+                        "third_party_dla_route_niin_count": route_niin_count,
+                        "third_party_dla_procurement_value_usd": route_value,
+                    }
+                )
+                context["product_and_part_evidence"] = product
+                context["calculation_version"] = "mimir-company-context-2026-09-v8"
 
         result = {
             "context_id": context["context_id"],
@@ -1490,6 +1543,7 @@ class CompanyContextStore:
         self, scope_type: str, scope_id: str, limit: int = 5000
     ) -> Dict[str, Any]:
         """Return expanded download evidence while preserving compact answer contexts."""
+        self.get(scope_type, scope_id, "full_dossier")
         context = self.get_raw(scope_type, scope_id)
         from company_context import CompanyContextBuilder
 
@@ -1588,6 +1642,9 @@ class CompanyContextStore:
                     **qualified,
                     "items": selected_qualified,
                 },
+                "third_party_dla_procurement_routes": value.get(
+                    "third_party_dla_procurement_routes", []
+                )[:15],
             }
         if section in {"platform_exposure", "customer_context", "top_awards"}:
             return (value or [])[:8]

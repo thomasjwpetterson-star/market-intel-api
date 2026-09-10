@@ -525,6 +525,14 @@ references, then separately identify the subset for which the CAGE is a current 
 Summarize other active authorized sources where they materially explain competition. Treat broad labels such
 as "COMMON MISSILE SYSTEMS" as a market or system-family grouping, not as a discrete platform. Use fiscal
 years for recency and describe the latest year as the latest FY2026 records rather than "year to date".
+The third_party_dla_procurement_routes section identifies other CAGE sites that received DLA procurement
+for NIINs referenced to the resolved company. Use it to identify possible distributor, reseller or procurement-
+intermediary routes when the resolved company has design-control or authorized-source evidence. State the
+recipient, location, NIIN examples, time-bounded DLA value and the resolved company's source position. Never
+call the recipient an authorized distributor unless an authoritative source establishes that relationship.
+If the recipient has its own design-control or active authorized-source relationship, describe it as an
+alternate observed source rather than a distributor. "Only active authorized source" describes the current
+DLA reference for that NIIN; it is not proof that every award was sole-source.
 Do not rank COMMON MISSILE SYSTEMS beside named platforms or link it as though it were one. Where the
 underlying evidence does not resolve a named missile program, label the residual grouping "Missile systems
 (multiple programs)" and keep it separate from named-platform exposure.
@@ -4986,8 +4994,13 @@ def generate_answer(
                 "only after approving transmission of selected metric evidence."
             ),
         )
+    answer_messages = (
+        request.messages[-1:]
+        if routing and routing.subject_changed
+        else request.messages
+    )
     input_items: List[Any] = [
-        {"role": message.role, "content": message.content} for message in request.messages
+        {"role": message.role, "content": message.content} for message in answer_messages
     ]
     client = TimedOpenAIClient(OpenAI())
     if selected_workflow == "news_article_implications":
@@ -5114,7 +5127,7 @@ def generate_answer(
         trace = [{"tool": "get_product_family", "arguments": arguments, "result": pack}]
         product_input = [
             {"role": message.role, "content": message.content}
-            for message in request.messages[-8:]
+            for message in answer_messages[-8:]
         ] + [
             {
                 "role": "user",
@@ -5432,7 +5445,7 @@ def generate_answer(
             }
         capability_input = [
             {"role": message.role, "content": message.content}
-            for message in request.messages[-6:]
+            for message in answer_messages[-6:]
         ] + [
             {
                 "role": "user",

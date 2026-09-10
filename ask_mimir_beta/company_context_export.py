@@ -246,6 +246,25 @@ def build_company_evidence_zip(
             context.get("evidence_index", {}).get("records", []),
             ["evidence_type", "record_id", "title", "public_url", "supports"],
         )
+        _write_csv(
+            archive,
+            "12_observed_third_party_dla_routes.csv",
+            product.get("third_party_dla_procurement_routes", []),
+            [
+                "niin", "nsn", "description", "example_target_part_number",
+                "target_cages", "target_relationship_statuses",
+                "target_is_procurement_authorized",
+                "target_is_active_authorized_source",
+                "target_has_design_control_reference",
+                "target_is_only_active_authorized_source",
+                "active_authorized_source_count", "recipient_cage", "recipient_name",
+                "recipient_city", "recipient_state", "dla_procurement_value_usd",
+                "distinct_awards", "distinct_actions", "first_observed_date",
+                "latest_observed_date", "recipient_is_active_authorized_source",
+                "recipient_has_design_control_reference",
+                "relationship_interpretation",
+            ],
+        )
         scope = context["scope"]
         archive.writestr(
             "README.txt",

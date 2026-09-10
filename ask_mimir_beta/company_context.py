@@ -317,7 +317,7 @@ class CompanyContextBuilder:
             "context_id": context_id,
             "evidence_fingerprint": evidence_fingerprint,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "calculation_version": "mimir-company-context-2026-09-v7",
+            "calculation_version": "mimir-company-context-2026-09-v8",
             "scope": {
                 "scope_type": scope_type,
                 "scope_id": scope_id,
@@ -739,6 +739,7 @@ class CompanyContextBuilder:
                 ],
             )
         )
+        third_party_routes = self._third_party_dla_procurement_routes(cages, years)
         financial_value_by_niin = {
             row["niin"]: abs(float(row.get("dla_procurement_value_usd") or 0))
             for row in financial
@@ -782,6 +783,7 @@ class CompanyContextBuilder:
                     "it is not a substitute for AMC/AMSC technical breakout evidence."
                 ),
             },
+            "third_party_dla_procurement_routes": third_party_routes,
             "summary": {
                 "observed_financial_niin_count": len(financial),
                 "referenced_niin_count": len({row["niin"] for row in references}),
@@ -792,6 +794,17 @@ class CompanyContextBuilder:
                 "multi_platform_reference_count": sum(
                     1 for row in references if row["has_multiple_platforms"]
                 ),
+                "third_party_dla_recipient_count": int(
+                    third_party_routes[0].get("route_universe_recipient_count") or 0
+                ) if third_party_routes else 0,
+                "third_party_dla_route_niin_count": int(
+                    third_party_routes[0].get("route_universe_niin_count") or 0
+                ) if third_party_routes else 0,
+                "third_party_dla_procurement_value_usd": float(
+                    third_party_routes[0].get(
+                        "route_universe_procurement_value_usd"
+                    ) or 0
+                ) if third_party_routes else 0.0,
             },
             "financial_grain_rule": (
                 "DLA procurement value is calculated once at CAGE/NIIN over the selected fiscal years; "
@@ -802,6 +815,164 @@ class CompanyContextBuilder:
                 "snapshot and are not treated as historical status for the selected fiscal years."
             ),
         }
+
+    def _third_party_dla_procurement_routes(
+        self, cages: Sequence[str], years: Sequence[int]
+    ) -> List[Dict[str, Any]]:
+        """Find other CAGEs paid by DLA for NIINs referenced to this company scope."""
+        query = f"""
+            WITH target_relationships AS (
+                SELECT
+                    LPAD(NULLIF(TRIM(niin), ''), 9, '0') AS niin,
+                    MAX(nsn) AS nsn,
+                    MAX(description) AS description,
+                    MIN(part_number) FILTER (
+                        WHERE part_number IS NOT NULL AND TRIM(part_number) <> ''
+                    ) AS example_target_part_number,
+                    STRING_AGG(DISTINCT cage, ' | ' ORDER BY cage) AS target_cages,
+                    STRING_AGG(
+                        DISTINCT supplier_status,
+                        ' | ' ORDER BY supplier_status
+                    ) FILTER (
+                        WHERE supplier_status IS NOT NULL
+                          AND TRIM(supplier_status) <> ''
+                    ) AS target_relationship_statuses,
+                    BOOL_OR(COALESCE(is_procurement_authorized, false))
+                        AS target_is_procurement_authorized,
+                    BOOL_OR(COALESCE(is_active_authorized_source, false))
+                        AS target_is_active_authorized_source,
+                    BOOL_OR(
+                        REGEXP_MATCHES(
+                            COALESCE(rncc_codes, ''),
+                            '(^|[^A-Z0-9])3([^A-Z0-9]|$)'
+                        )
+                    ) AS target_has_design_control_reference
+                FROM read_parquet(?)
+                WHERE cage IN ({placeholders(cages)})
+                  AND niin IS NOT NULL AND TRIM(niin) <> ''
+                GROUP BY 1
+            ), source_depth AS (
+                SELECT
+                    LPAD(NULLIF(TRIM(r.niin), ''), 9, '0') AS niin,
+                    COUNT(DISTINCT r.cage) FILTER (
+                        WHERE COALESCE(r.is_active_authorized_source, false)
+                    ) AS active_authorized_source_count
+                FROM read_parquet(?) r
+                INNER JOIN target_relationships t
+                    ON LPAD(NULLIF(TRIM(r.niin), ''), 9, '0') = t.niin
+                GROUP BY 1
+            ), recipient_reference AS (
+                SELECT
+                    LPAD(NULLIF(TRIM(r.niin), ''), 9, '0') AS niin,
+                    UPPER(TRIM(r.cage)) AS recipient_cage,
+                    BOOL_OR(COALESCE(r.is_active_authorized_source, false))
+                        AS recipient_is_active_authorized_source,
+                    BOOL_OR(
+                        REGEXP_MATCHES(
+                            COALESCE(r.rncc_codes, ''),
+                            '(^|[^A-Z0-9])3([^A-Z0-9]|$)'
+                        )
+                    ) AS recipient_has_design_control_reference
+                FROM read_parquet(?) r
+                INNER JOIN target_relationships t
+                    ON LPAD(NULLIF(TRIM(r.niin), ''), 9, '0') = t.niin
+                WHERE r.cage IS NOT NULL AND TRIM(r.cage) <> ''
+                GROUP BY 1, 2
+            ), recipient_activity AS (
+                SELECT
+                    target.niin,
+                    target.nsn,
+                    target.description,
+                    target.example_target_part_number,
+                    target.target_cages,
+                    target.target_relationship_statuses,
+                    target.target_is_procurement_authorized,
+                    target.target_is_active_authorized_source,
+                    target.target_has_design_control_reference,
+                    UPPER(TRIM(activity.vendor_cage)) AS recipient_cage,
+                    MODE(activity.vendor_name) AS recipient_name,
+                    SUM(activity.spend_amount) AS dla_procurement_value_usd,
+                    COUNT(DISTINCT activity.award_key) AS distinct_awards,
+                    COUNT(DISTINCT activity.transaction_key) AS distinct_actions,
+                    MIN(TRY_CAST(activity.action_date AS DATE)) AS first_observed_date,
+                    MAX(TRY_CAST(activity.action_date AS DATE)) AS latest_observed_date
+                FROM target_relationships target
+                INNER JOIN read_parquet(?) activity
+                    ON LPAD(NULLIF(TRIM(activity.niin), ''), 9, '0') = target.niin
+                WHERE activity.source_system = 'DLA'
+                  AND activity.year IN ({placeholders(years)})
+                  AND (
+                      target.target_has_design_control_reference
+                      OR target.target_is_procurement_authorized
+                  )
+                  AND activity.vendor_cage IS NOT NULL
+                  AND TRIM(activity.vendor_cage) <> ''
+                  AND UPPER(TRIM(activity.vendor_cage)) NOT IN ({placeholders(cages)})
+                GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+            ), recipient_locations AS (
+                SELECT
+                    UPPER(TRIM(cage_code)) AS cage,
+                    MAX(city) AS city,
+                    MAX(state) AS state
+                FROM read_parquet(?)
+                GROUP BY 1
+            )
+            SELECT
+                activity.*,
+                locations.city AS recipient_city,
+                locations.state AS recipient_state,
+                COALESCE(reference.recipient_is_active_authorized_source, false)
+                    AS recipient_is_active_authorized_source,
+                COALESCE(reference.recipient_has_design_control_reference, false)
+                    AS recipient_has_design_control_reference,
+                depth.active_authorized_source_count,
+                (
+                    activity.target_is_active_authorized_source
+                    AND depth.active_authorized_source_count = 1
+                ) AS target_is_only_active_authorized_source,
+                CASE
+                    WHEN COALESCE(reference.recipient_has_design_control_reference, false)
+                        THEN 'Observed DLA recipient with its own design-control reference'
+                    WHEN COALESCE(reference.recipient_is_active_authorized_source, false)
+                        THEN 'Observed DLA recipient with its own active authorized-source relationship'
+                    WHEN activity.target_has_design_control_reference
+                        THEN 'Potential distributor or procurement intermediary'
+                    ELSE 'Observed same-item DLA procurement route'
+                END AS relationship_interpretation,
+                COUNT(DISTINCT activity.recipient_cage) OVER ()
+                    AS route_universe_recipient_count,
+                COUNT(DISTINCT activity.niin) OVER ()
+                    AS route_universe_niin_count,
+                SUM(activity.dla_procurement_value_usd) OVER ()
+                    AS route_universe_procurement_value_usd
+            FROM recipient_activity activity
+            LEFT JOIN recipient_reference reference
+              ON activity.niin = reference.niin
+             AND activity.recipient_cage = reference.recipient_cage
+            LEFT JOIN source_depth depth
+              ON activity.niin = depth.niin
+            LEFT JOIN recipient_locations locations
+              ON activity.recipient_cage = locations.cage
+            ORDER BY ABS(activity.dla_procurement_value_usd) DESC,
+                     activity.niin,
+                     activity.recipient_cage
+            LIMIT 5000
+        """
+        return rows_as_dicts(
+            self.connection.execute(
+                query,
+                [
+                    str(self.paths["nsn_reference"]),
+                    *cages,
+                    str(self.paths["nsn_reference"]),
+                    str(self.paths["nsn_reference"]),
+                    str(self.paths["transactions"]),
+                    *years,
+                    *cages,
+                    str(self.paths["geo"]),
+                ],
+            )
+        )
 
     def _annual_activity(
         self, cages: Sequence[str], years: Sequence[int]
