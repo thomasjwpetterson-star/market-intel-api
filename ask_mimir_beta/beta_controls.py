@@ -229,6 +229,10 @@ class DailyQuotaExceeded(RuntimeError):
         super().__init__(message)
 
 
+class DuplicateRequestError(RuntimeError):
+    """Raised when an active logical request is submitted more than once."""
+
+
 class BetaStateStore:
     """Small SQLite ledger for quota enforcement, jobs and answer feedback."""
 
@@ -242,6 +246,7 @@ class BetaStateStore:
             """
             CREATE TABLE IF NOT EXISTS query_events (
                 request_id TEXT PRIMARY KEY,
+                request_fingerprint TEXT,
                 subject_id TEXT NOT NULL,
                 tier TEXT NOT NULL,
                 utc_day TEXT NOT NULL,
@@ -305,6 +310,10 @@ class BetaStateStore:
         if "performance_json" not in query_columns:
             self.connection.execute(
                 "ALTER TABLE query_events ADD COLUMN performance_json TEXT"
+            )
+        if "request_fingerprint" not in query_columns:
+            self.connection.execute(
+                "ALTER TABLE query_events ADD COLUMN request_fingerprint TEXT"
             )
         self.connection.execute(
             """
@@ -476,12 +485,37 @@ class BetaStateStore:
         access: AccessContext,
         release_binding_id: str,
         workflow: str,
+        request_fingerprint: str | None = None,
     ) -> int:
         policy = access.policy
         now = datetime.now(timezone.utc).isoformat()
         with self.lock:
             self.connection.execute("BEGIN IMMEDIATE")
             try:
+                existing = self.connection.execute(
+                    """
+                    SELECT subject_id, status, request_fingerprint
+                    FROM query_events WHERE request_id = ?
+                    """,
+                    [request_id],
+                ).fetchone()
+                if existing:
+                    same_request = (
+                        existing[0] == access.subject_id
+                        and (
+                            not existing[2]
+                            or not request_fingerprint
+                            or existing[2] == request_fingerprint
+                        )
+                    )
+                    if not same_request:
+                        raise DuplicateRequestError(
+                            "That request identifier is already attached to another question."
+                        )
+                    if existing[1] != "failed_refunded":
+                        raise DuplicateRequestError(
+                            "That research request is already being processed."
+                        )
                 used = int(
                     self.connection.execute(
                         """
@@ -506,23 +540,34 @@ class BetaStateStore:
                 )
                 if used_this_month >= policy.queries_per_utc_month:
                     raise DailyQuotaExceeded(policy, period="month")
-                self.connection.execute(
-                    """
-                    INSERT INTO query_events (
-                        request_id, subject_id, tier, utc_day, status, created_at,
-                        release_binding_id, workflow
-                    ) VALUES (?, ?, ?, ?, 'reserved', ?, ?, ?)
-                    """,
-                    [
-                        request_id,
-                        access.subject_id,
-                        policy.tier,
-                        utc_day(),
-                        now,
-                        release_binding_id,
-                        workflow,
-                    ],
-                )
+                if existing:
+                    self.connection.execute(
+                        """
+                        UPDATE query_events
+                        SET request_fingerprint = ?, tier = ?, utc_day = ?,
+                            status = 'reserved', created_at = ?, completed_at = NULL,
+                            release_binding_id = ?, workflow = ?, latency_ms = NULL,
+                            estimated_cost_usd = NULL, performance_json = NULL
+                        WHERE request_id = ?
+                        """,
+                        [
+                            request_fingerprint, policy.tier, utc_day(), now,
+                            release_binding_id, workflow, request_id,
+                        ],
+                    )
+                else:
+                    self.connection.execute(
+                        """
+                        INSERT INTO query_events (
+                            request_id, request_fingerprint, subject_id, tier,
+                            utc_day, status, created_at, release_binding_id, workflow
+                        ) VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?, ?)
+                        """,
+                        [
+                            request_id, request_fingerprint, access.subject_id,
+                            policy.tier, utc_day(), now, release_binding_id, workflow,
+                        ],
+                    )
                 self.connection.commit()
                 return used + 1
             except Exception:
@@ -713,7 +758,17 @@ FORBIDDEN_ANSWER_MARKERS = (
     "/users/",
     "local_data/",
     "s3://",
+    "standardized output",
+    "platform → supplier cage/site",
+    "platform -> supplier cage/site",
 )
+
+CUSTOMER_BLOCKED_LINK_HOSTS = {
+    "github.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "raw.githubusercontent.com",
+}
 
 CUSTOMER_HIDDEN_KEYS = {
     "source_report_id",
@@ -755,8 +810,15 @@ def sanitize_customer_payload(value: Any) -> Any:
         }
     if isinstance(value, list):
         return [sanitize_customer_payload(child) for child in value]
-    if isinstance(value, str) and (value.startswith("/Users/") or value.startswith("s3://")):
-        return None
+    if isinstance(value, str):
+        if value.startswith("/Users/") or value.startswith("s3://"):
+            return None
+        if value.startswith(("http://", "https://")):
+            host = (urlparse(value).hostname or "").lower()
+            if host in CUSTOMER_BLOCKED_LINK_HOSTS or any(
+                host.endswith(f".{blocked}") for blocked in CUSTOMER_BLOCKED_LINK_HOSTS
+            ):
+                return None
     return value
 
 
@@ -843,7 +905,12 @@ def validate_answer_citations(answer: str, tool_trace: list[Dict[str, Any]]) -> 
             unsafe_links.append(raw_url)
             continue
         host = (parsed.hostname or "").lower()
-        if host in {"localhost", "127.0.0.1"} or host.endswith(".local"):
+        if (
+            host in {"localhost", "127.0.0.1"}
+            or host.endswith(".local")
+            or host in CUSTOMER_BLOCKED_LINK_HOSTS
+            or any(host.endswith(f".{blocked}") for blocked in CUSTOMER_BLOCKED_LINK_HOSTS)
+        ):
             unsafe_links.append(raw_url)
         elif host.endswith("mimiradvisors.org"):
             mimir_links += 1
@@ -924,6 +991,18 @@ def remove_unsafe_and_internal_answer_content(
         return label if raw_url.strip().rstrip("/") in unsafe else match.group(0)
 
     cleaned = MARKDOWN_LINK_WITH_LABEL.sub(replace_link, str(answer or ""))
+    cleaned = re.sub(
+        r"(?im)^.*(?:standardized output|platform\s*(?:→|->)\s*supplier cage/site).*(?:\n|$)",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"https?://(?:www\.)?(?:github\.com|gitlab\.com|bitbucket\.org|"
+        r"raw\.githubusercontent\.com)/[^\s)\]]+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     replacements = {
         "source_report_id": "public source record identifier",
         "source_dedup_key": "source record",

@@ -9,6 +9,7 @@ from beta_controls import (
     BetaStateStore,
     DataReleaseGuard,
     DailyQuotaExceeded,
+    DuplicateRequestError,
     RequestPerformance,
     TIER_POLICIES,
     record_request_timing,
@@ -18,6 +19,34 @@ from beta_controls import (
 
 
 class BetaStateStoreTests(unittest.TestCase):
+    def test_duplicate_request_id_cannot_consume_a_second_allowance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = BetaStateStore(Path(directory) / "beta-state.sqlite3")
+            access = AccessContext("test-user", "professional", True)
+            store.reserve("logical-request", access, "release-1", "platform", "hash-1")
+            with self.assertRaises(DuplicateRequestError):
+                store.reserve("logical-request", access, "release-1", "platform", "hash-1")
+            self.assertEqual(store.used_today(access.subject_id), 1)
+            store.connection.close()
+
+    def test_interrupted_request_can_resume_with_same_id_without_double_counting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "beta-state.sqlite3"
+            access = AccessContext("test-user", "professional", True)
+            first = BetaStateStore(path)
+            first.reserve("logical-request", access, "release-1", "platform", "hash-1")
+            first.mark_running("logical-request")
+            first.connection.close()
+
+            restarted = BetaStateStore(path)
+            self.assertEqual(restarted.used_today(access.subject_id), 0)
+            used = restarted.reserve(
+                "logical-request", access, "release-1", "platform", "hash-1"
+            )
+            self.assertEqual(used, 1)
+            self.assertEqual(restarted.used_today(access.subject_id), 1)
+            restarted.connection.close()
+
     def test_completion_persists_internal_performance_breakdown(self):
         with tempfile.TemporaryDirectory() as directory:
             store = BetaStateStore(Path(directory) / "beta-state.sqlite3")

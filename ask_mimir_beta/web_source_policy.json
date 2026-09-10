@@ -74,6 +74,7 @@
     "Do not use search-result snippets alone for a material claim when the underlying page can be opened.",
     "Prefer two-source corroboration for large values, production targets, program cancellations, delays or performance claims when no official source is available.",
     "State uncertainty or source disagreement rather than silently choosing the more dramatic claim.",
-    "Cite sources normally in the customer answer; do not expose internal source tiers or governance labels."
+    "Cite sources normally in the customer answer; do not expose internal source tiers or governance labels.",
+    "Do not cite GitHub, GitLab, Bitbucket or source-code repositories in customer research answers. Use the responsible agency's public documentation for government-data methodology."
   ]
 }

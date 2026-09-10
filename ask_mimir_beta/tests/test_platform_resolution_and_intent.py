@@ -3,7 +3,10 @@ import json
 import tempfile
 from pathlib import Path
 
+import duckdb
+
 from platform_context import PlatformContextStore, _canonical_fingerprint_value
+from company_intent import company_follow_up_intent
 from platform_intent import (
     is_open_capability_discovery_request,
     is_platform_centered_request,
@@ -242,6 +245,51 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
         self.assertEqual(
             _canonical_fingerprint_value(first),
             _canonical_fingerprint_value(second),
+        )
+
+    def test_supplier_annual_activity_reconciles_to_platform_total(self):
+        with tempfile.TemporaryDirectory() as directory:
+            network = Path(directory) / "network.parquet"
+            connection = duckdb.connect()
+            connection.execute(
+                """
+                COPY (
+                    SELECT * FROM (VALUES
+                        ('73293', 'AMRAAM', 2022, 56673158.0, 56673158.0, 'r1', 'a1'),
+                        ('73293', 'AMRAAM', 2023, 33510000.0, 33510000.0, 'r2', 'a2'),
+                        ('73293', 'AMRAAM', 2024, 5584500.0, 5584500.0, 'r3', 'a3'),
+                        ('73293', 'AMRAAM', 2025, 16600500.0, 16600500.0, 'r4', 'a4'),
+                        ('73293', 'AMRAAM', 2026, 1141463.0, 1141463.0, 'r5', 'a5')
+                    ) AS t(sub_cage, platform_family, year, subaward_value,
+                           subaward_value_raw, source_dedup_key, contract_id)
+                ) TO ? (FORMAT PARQUET)
+                """,
+                [str(network)],
+            )
+            store = object.__new__(PlatformContextStore)
+            store.connection = connection
+            store.paths = {"network": network}
+            suppliers = [{"cage": "73293"}]
+
+            store._attach_supplier_annual_activity("AMRAAM", suppliers)
+
+            observations = suppliers[0]["annual_reported_subcontract_activity"]
+            self.assertIsNone(
+                observations[0]["mimir_modelled_reported_subcontract_value_usd"]
+            )
+            self.assertAlmostEqual(
+                sum(
+                    row["mimir_modelled_reported_subcontract_value_usd"] or 0
+                    for row in observations
+                ),
+                113509621.0,
+            )
+
+    def test_singular_platform_value_question_retains_company_scope(self):
+        self.assertTrue(
+            company_follow_up_intent(
+                "For each platform, show reported value with this company over time."
+            )
         )
 
 

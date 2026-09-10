@@ -351,6 +351,7 @@ class PlatformContextStore:
         annual = self._annual_activity(resolved)
         direct_recipients = self._direct_award_recipients(resolved)
         reported_suppliers = self._reported_supplier_sites(resolved)
+        self._attach_supplier_annual_activity(resolved, reported_suppliers)
         items = self._item_evidence(resolved)
         opportunities = self._opportunities(resolved)
         top_awards = self._top_awards(resolved)
@@ -479,6 +480,7 @@ class PlatformContextStore:
         if not resolved:
             raise KeyError(f"platform was not found: {platform_id}")
         suppliers = self._reported_supplier_sites(resolved, limit=500)
+        self._attach_supplier_annual_activity(resolved, suppliers)
         categories = self._component_categories(resolved, limit=150)
         positive_values = [
             max(
@@ -557,6 +559,7 @@ class PlatformContextStore:
             "top_prime_awards": self._top_awards(resolved, row_limit),
             "export_row_limit_per_table": row_limit,
         }
+        self._attach_supplier_annual_activity(resolved, expanded["reported_supplier_sites"])
         return expanded
 
     def answer_projection(
@@ -583,6 +586,7 @@ class PlatformContextStore:
                 "sample_prime_contract_ids": (row.get("sample_prime_contract_ids") or [])[:4],
                 "reported_descriptions": (row.get("reported_descriptions") or [])[:4],
             })
+        self._attach_supplier_annual_activity(resolved, suppliers)
         customer_context = {
             key: value
             for key, value in context.items()
@@ -948,6 +952,59 @@ class PlatformContextStore:
                 ],
             )
         )
+
+    def _attach_supplier_annual_activity(
+        self,
+        platform: str,
+        suppliers: List[Dict[str, Any]],
+    ) -> None:
+        cages = sorted({
+            str(row.get("cage") or "").strip().upper()
+            for row in suppliers
+            if str(row.get("cage") or "").strip()
+            and "annual_reported_subcontract_activity" not in row
+        })
+        if not cages:
+            return
+        members = self._platform_members(platform)
+        rows = _rows(
+            self.connection.execute(
+                """
+                SELECT
+                    UPPER(TRIM(sub_cage)) AS cage,
+                    year AS fiscal_year,
+                    SUM(COALESCE(subaward_value, 0))
+                        AS mimir_modelled_reported_subcontract_value_usd,
+                    SUM(COALESCE(subaward_value_raw, 0)) AS source_reported_value_usd,
+                    COUNT(DISTINCT source_dedup_key) AS selected_report_count,
+                    COUNT(DISTINCT contract_id) AS prime_award_count
+                FROM read_parquet(?)
+                WHERE platform_family IN (SELECT UNNEST(?))
+                  AND year BETWEEN 2021 AND 2026
+                  AND UPPER(TRIM(sub_cage)) IN (SELECT UNNEST(?))
+                GROUP BY 1, 2
+                ORDER BY 1, 2
+                """,
+                [str(self.paths["network"]), members, cages],
+            )
+        )
+        by_cage: Dict[str, Dict[int, Dict[str, Any]]] = {}
+        for row in rows:
+            by_cage.setdefault(str(row["cage"]), {})[int(row["fiscal_year"])] = row
+        for supplier in suppliers:
+            observations = by_cage.get(str(supplier.get("cage") or "").upper(), {})
+            supplier["annual_reported_subcontract_activity"] = [
+                observations.get(year) or {
+                    "cage": str(supplier.get("cage") or "").upper(),
+                    "fiscal_year": year,
+                    "mimir_modelled_reported_subcontract_value_usd": None,
+                    "source_reported_value_usd": None,
+                    "selected_report_count": 0,
+                    "prime_award_count": 0,
+                    "observation_status": "NOT_OBSERVED",
+                }
+                for year in range(2021, 2027)
+            ]
 
     def _component_categories(self, platform: str, limit: int = 100) -> List[Dict[str, Any]]:
         members = self._platform_members(platform)

@@ -25,6 +25,7 @@ def company_follow_up_intent(text: str) -> bool:
             "largest customers",
             "prime contractors buy",
             "platforms",
+            "platform",
             "programs",
             "capabilities",
             "awards",

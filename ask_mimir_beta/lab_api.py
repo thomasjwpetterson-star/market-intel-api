@@ -79,6 +79,7 @@ from beta_controls import (
     AccessContext,
     BetaStateStore,
     DailyQuotaExceeded,
+    DuplicateRequestError,
     DataReleaseGuard,
     EvidencePackCache,
     RequestPerformance,
@@ -710,6 +711,12 @@ For every supplier mode, answer the supplier question first and omit unrelated b
 opportunity material. Never refer to a frozen rank, returned extract, supplied pack, dossier, release,
 calculation version or evidence compatibility status. Do not describe a company as an emerging or
 alternative source unless the evidence explicitly establishes that exact sourced position.
+
+When the user asks for a supplier's platform value over time, use the supplier site's
+annual_reported_subcontract_activity. Show each fiscal year separately and calculate the period total
+from those annual observations. Never replace available annual values with wording such as "included
+in cumulative value". A missing year means no selected report was observed for that year; it does not
+erase values reported in the other years.
 
 Keep these evidence lanes distinct: net prime obligations on directly mapped awards; Mimir-modelled reported
 subcontract value; attributed DLA procurement value for single-platform NIINs; and shared-use NIIN
@@ -2174,6 +2181,12 @@ class AskRequest(BaseModel):
         max_length=100,
         pattern=r"^[A-Za-z0-9_-]+$",
     )
+    client_request_id: Optional[str] = Field(
+        default=None,
+        min_length=20,
+        max_length=100,
+        pattern=r"^[A-Fa-f0-9-]+$",
+    )
 
 
 class RoutingEntity(BaseModel):
@@ -3296,8 +3309,30 @@ def routing_decision_for_request(request: AskRequest) -> RoutingDecision:
         and explicit_candidates[0].confidence >= 0.96
         and not _same_scope_entity(scope, explicit_candidates[0].resolved_entities)
     )
-    if subject_changed and selected.uses_current_scope:
+    latest = str(request.messages[-1].content or "").lower()
+    relationship_with_current_company = bool(
+        scope
+        and scope.scope_type in {"company_parent", "company_site"}
+        and selected.uses_current_scope
+        and any(
+            phrase in latest
+            for phrase in (
+                "for each platform",
+                "across each platform",
+                "across platforms",
+                "platform exposure",
+                "spend with",
+                "value with",
+                "activity with",
+                "supply to",
+                "supplies to",
+            )
+        )
+    )
+    if subject_changed and selected.uses_current_scope and not relationship_with_current_company:
         selected = explicit_candidates[0]
+    elif relationship_with_current_company:
+        subject_changed = False
 
     competing = [
         row for row in ranked[1:]
@@ -3900,47 +3935,74 @@ class AskJobManager:
         routing_ms: float = 0.0,
         request_started_perf: float | None = None,
     ) -> tuple[Dict[str, Any], RoutingDecision]:
-        request_id = str(uuid.uuid4())
+        request_id = request.client_request_id or str(uuid.uuid4())
+        request_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "messages": [message.model_dump() for message in request.messages],
+                    "active_scope": request.active_scope.model_dump()
+                    if request.active_scope else None,
+                    "conversation_id": request.conversation_id,
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
         routing = routing or routing_decision_for_request(request)
         workflow = routing.workflow
         allowance_exempt = routing.clarification_needed or is_lightweight_scope_follow_up(request)
-        runtime.beta_state.record_routing_decision(
-            request_id=request_id,
-            conversation_id=request.conversation_id,
-            subject_id=access.subject_id,
-            question=request.messages[-1].content,
-            decision=routing.model_dump(),
-        )
-        if allowance_exempt:
-            used = runtime.beta_state.used_today(access.subject_id)
-        else:
-            used = runtime.beta_state.reserve(
-                request_id,
-                access,
-                runtime.release_guard.release_binding_id,
-                workflow,
-            )
-        job = {
-            "request_id": request_id,
-            "subject_id": access.subject_id,
-            "status": "queued",
-            "workflow": workflow,
-            "stage": "Queued",
-            "detail": "Preparing the evidence workspace",
-            "percent": 2,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "result": None,
-            "error": None,
-            "access": access.public_dict(
-                used,
-                runtime.beta_state.used_this_month(access.subject_id),
-            ),
-            "allowance_exempt": allowance_exempt,
-            "routing": routing.model_dump(),
-            "_routing_ms": max(float(routing_ms), 0.0),
-            "_request_started_perf": request_started_perf or time.perf_counter(),
-        }
         with self.lock:
+            existing = self.jobs.get(request_id)
+            if existing:
+                if (
+                    existing.get("subject_id") != access.subject_id
+                    or existing.get("_request_fingerprint") != request_fingerprint
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="That request identifier is already attached to another question.",
+                    )
+                duplicate = self.public_job(existing)
+                duplicate["deduplicated"] = True
+                return duplicate, routing
+
+            runtime.beta_state.record_routing_decision(
+                request_id=request_id,
+                conversation_id=request.conversation_id,
+                subject_id=access.subject_id,
+                question=request.messages[-1].content,
+                decision=routing.model_dump(),
+            )
+            if allowance_exempt:
+                used = runtime.beta_state.used_today(access.subject_id)
+            else:
+                used = runtime.beta_state.reserve(
+                    request_id,
+                    access,
+                    runtime.release_guard.release_binding_id,
+                    workflow,
+                    request_fingerprint,
+                )
+            job = {
+                "request_id": request_id,
+                "subject_id": access.subject_id,
+                "status": "queued",
+                "workflow": workflow,
+                "stage": "Queued",
+                "detail": "Preparing the evidence workspace",
+                "percent": 2,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "result": None,
+                "error": None,
+                "access": access.public_dict(
+                    used,
+                    runtime.beta_state.used_this_month(access.subject_id),
+                ),
+                "allowance_exempt": allowance_exempt,
+                "routing": routing.model_dump(),
+                "_request_fingerprint": request_fingerprint,
+                "_routing_ms": max(float(routing_ms), 0.0),
+                "_request_started_perf": request_started_perf or time.perf_counter(),
+            }
             self.jobs[request_id] = job
         thread = threading.Thread(
             target=self._run,
@@ -4265,6 +4327,8 @@ def create_ask_job(
             },
             headers=routing_headers,
         ) from exc
+    except DuplicateRequestError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/ask/jobs/{request_id}")

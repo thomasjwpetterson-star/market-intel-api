@@ -317,6 +317,22 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
         self.assertNotIn("localhost", cleaned)
         self.assertEqual(final_validation["status"], "pass")
 
+    def test_repository_link_and_internal_output_template_are_removed(self):
+        answer = (
+            "USAspending supports the fields. "
+            "[Implementation](https://github.com/example/project/blob/main/spec.md)\n\n"
+            "For every platform, the standardized output should be: "
+            "Platform → supplier CAGE/site → fiscal year → value.\n\n"
+            "The annual values are shown above."
+        )
+        validation = validate_answer_citations(answer, [])
+        cleaned = remove_unsafe_and_internal_answer_content(answer, validation)
+        final_validation = validate_answer_citations(cleaned, [])
+        self.assertNotIn("github.com", cleaned)
+        self.assertNotIn("standardized output", cleaned.lower())
+        self.assertIn("annual values", cleaned)
+        self.assertEqual(final_validation["status"], "pass")
+
 
 if __name__ == "__main__":
     unittest.main()
