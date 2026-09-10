@@ -1883,14 +1883,16 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     ):
         return None
     patterns = (
+        r"(?:give\s+me\s+(?:an?\s+)?overview\s+of|tell\s+me\s+about)\s+(.+?)(?:['\u2019]s|s)\s+(?:defense|defence)\s+activity\s+in\s+(.+?),\s*([A-Za-z .'-]+?)(?:\?|\.|$)",
         r"which\s+(?:programs|programmes|platforms).+?associated\s+with\s+(.+?)\s+in\s+(.+?),\s*([A-Za-z .'-]+?)(?:\?|\.|$)",
+        r"which\s+(?:programs|programmes|platforms).+?associated\s+with\s+(.+?)(?:['\u2019]s|['\u2019]|s)\s+(.+?),\s*([A-Za-z .'-]+?)\s+(?:operations|site|facility)(?:\?|\.|$)",
         r"(?:give\s+me\s+an?\s+overview\s+of|overview\s+of)\s+the\s+(?:defense|defence)\s+activity\s+associated\s+with\s+(.+?)(?:['’]s|s)\s+(.+?),\s*([A-Za-z .'-]+?)\s+operations(?:\?|\.|$)",
         r"(?:give\s+me\s+an?\s+overview\s+of|overview\s+of)\s+the\s+(?:defense|defence)\s+activity\s+associated\s+with\s+(.+?)(?:['’]s|s)\s+(.+?),\s*([A-Za-z .'-]+?)\s+(?:site|facility)(?:\?|\.|$)",
         r"(?:give\s+me\s+an?\s+overview\s+of|overview\s+of)\s+(.+?)(?:['’]s|s)\s+(.+?),\s*([A-Za-z .'-]+?)\s+(?:operations|site|facility)(?:\?|\.|$)",
         r"(?:give\s+me\s+an?\s+overview\s+of|an?\s+overview\s+of|overview\s+of)\s+(.+?)(?:'s|’s)\s+(?:us\s+)?(?:defense|defence)\s+(?:business|activity)(?:\s+in\s+.+?)?(?:\?|\.|$)",
         r"(?:tell\s+me\s+about|give\s+me\s+an?\s+overview\s+of)\s+(.+?)(?:'s|’s)\s+(?:defense|defence)\s+activity(?:\s+in\s+.+?)?(?:\?|\.|$)",
         r"what\s+(?:defense|defence)\s+work\s+is\s+carried\s+out\s+at\s+(.+?)\s+(?:facilities|sites)(?:\?|\.|$)",
-        r"(?:tell\s+me\s+about|give\s+me\s+(?:an?\s+)?)\s*(.+?)(?:'s|’s)\s+(?:us\s+)?(?:defense|defence)\s+business(?:\?|\.|$)",
+        r"(?:tell\s+me\s+about|give\s+me\s+(?:an?\s+)?)\s*(.+?)(?:['\u2019]s|s)\s+(?:us\s+)?(?:defense|defence)\s+business(?:\?|\.|$)",
         r"profile\s+(.+?)(?:'s|’s)\s+observed\s+(?:us\s+)?(?:defense|defence)\s+activity(?:\s+across.+?)?(?:\?|\.|$)",
         r"(?:defense\s+supplier|defence\s+supplier|supplier|company)\s*:\s*([^\n?]+)",
         r"what\s+does\s+(.+?)\s+supply(?:\s|\?|$)",
@@ -1913,6 +1915,9 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
         r"what\s+evidence\s+(?:do\s+you\s+have\s+that|shows?(?:\s+that)?|supports?(?:\s+that)?)\s+(.+?)\s+supplies\s+",
         r"(?:give\s+me\s+)?(?:a\s+)?concise\s+(?:defense|defence)[-\s]+market\s+profile\s+of\s+(.+?)(?:\?|$)",
         r"^(.+?)\s+(?:parent|company|corporation)[- ]wide(?:\?|\.|$)",
+        r"what\s+does\s+(.+?)\s+do\s+in\s+(?:the\s+)?(?:us\s+)?(?:defense|defence|military)\s+market(?:\?|\.|$)",
+        r"(?:give|show)\s+me\s+(?:an?\s+)?(?:summary|overview|profile|full\s+picture)\s+(?:of|on)\s+(.+?)(?:\s*[-\u2014]\s*including.*)?(?:\?|\.|$)",
+        r"tell\s+me\s+(?:everything|all)\s+(?:there\s+is\s+to\s+know\s+)?about\s+(.+?)(?:\s*[-\u2014]\s*including.*)?(?:\?|\.|$)",
         r"(?:tell\s+me\s+about|what\s+about|how\s+about)\s+(.+?)(?:\?|$)",
     )
     match = next(
@@ -2754,10 +2759,12 @@ def _validated_company_query(request: AskRequest) -> str | None:
     generic_tokens = {
         "a", "about", "activity", "all", "an", "and", "are", "broader",
         "business", "capabilities", "capability", "cage", "codes", "company",
-        "defence", "defense", "do", "ecosystem", "facilities", "facility",
-        "give", "is", "list", "me", "military", "now", "of", "operations",
-        "overview", "show", "site", "sites", "tell", "that", "the", "this",
-        "us", "what", "who", "why", "wide", "with",
+        "complete", "defence", "defense", "do", "ecosystem", "everything",
+        "facilities", "facility", "footprint", "full", "give", "in", "is",
+        "list", "market", "me", "military", "now", "observed", "of",
+        "operations", "overview", "profile", "s", "show", "site", "sites", "summary",
+        "tell", "that", "the", "this", "us", "what", "who", "why", "wide",
+        "with",
     }
     query_token_list = [
         token
@@ -2765,6 +2772,7 @@ def _validated_company_query(request: AskRequest) -> str | None:
         if token.lower() not in generic_tokens
     ]
     query_tokens = set(query_token_list)
+    query_compact = "".join(query_token_list)
     if not query_tokens:
         return None
     search_query = " ".join(query_token_list)
@@ -2781,7 +2789,18 @@ def _validated_company_query(request: AskRequest) -> str | None:
         ).upper()
         candidate_tokens = set(re.findall(r"[A-Z0-9]+", candidate_text))
         overlap = len(query_tokens.intersection(candidate_tokens)) / len(query_tokens)
-        if overlap >= 0.6:
+        candidate_compact = "".join(
+            token for token in re.findall(r"[A-Z0-9]+", candidate_text)
+            if token.lower() not in generic_tokens
+        )
+        compact_match = (
+            len(query_compact) >= 5
+            and (
+                query_compact in candidate_compact
+                or candidate_compact in query_compact
+            )
+        )
+        if overlap >= 0.6 or compact_match:
             return search_query
     return None
 
@@ -2818,8 +2837,21 @@ def _conversational_scope_workflow(request: AskRequest) -> str | None:
             "the first one",
             "the second one",
             "the third one",
+            "company wide",
+            "company-wide",
+            "corporation wide",
+            "corporation-wide",
+            "parent wide",
+            "parent-wide",
+            "all sites",
+            "all facilities",
         )
     )
+    if request.active_scope.scope_type in {"company_parent", "company_site"}:
+        refers_back = refers_back or text in {
+            "all", "all of them", "both", "parent", "the parent", "company",
+            "the company", "the site", "the facility",
+        } or bool(re.match(r"^(?:what|how) about\b", text))
     if not refers_back:
         return None
     return {
@@ -2893,6 +2925,9 @@ def routing_decision_for_request(request: AskRequest) -> RoutingDecision:
         return _route("market_segment_intelligence", "recognized_market_segment", 0.97)
     if resolve_capability(request.messages[-1].content):
         return _route("capability_discovery", "recognized_capability_request", 0.96)
+    validated_company = _validated_company_query(request)
+    if validated_company:
+        return _route("company_site_intelligence", "resolved_company_or_site", 0.97)
     if (
         request.active_scope
         and request.active_scope.scope_type == "market_segment"
@@ -2932,8 +2967,6 @@ def routing_decision_for_request(request: AskRequest) -> RoutingDecision:
     scope_workflow = _conversational_scope_workflow(request)
     if scope_workflow:
         return _route(scope_workflow, "conversational_scope_continuation", 0.82)
-    if _validated_company_query(request):
-        return _route("company_site_intelligence", "resolved_company_or_site", 0.97)
     if (
         request.active_scope
         and request.active_scope.scope_type in {"company_parent", "company_site"}
@@ -3292,10 +3325,13 @@ class AskJobManager:
         self.jobs: Dict[str, Dict[str, Any]] = {}
 
     def create(
-        self, request: AskRequest, access: AccessContext
+        self,
+        request: AskRequest,
+        access: AccessContext,
+        routing: RoutingDecision | None = None,
     ) -> tuple[Dict[str, Any], RoutingDecision]:
         request_id = str(uuid.uuid4())
-        routing = routing_decision_for_request(request)
+        routing = routing or routing_decision_for_request(request)
         workflow = routing.workflow
         allowance_exempt = is_lightweight_scope_follow_up(request)
         if allowance_exempt:
@@ -3493,24 +3529,29 @@ def create_ask_job(
     payload: AskRequest, request: Request, response: Response
 ) -> Dict[str, Any]:
     access = access_from_request(request)
+    routing = routing_decision_for_request(payload)
+    routing_headers = {
+        "X-Ask-Mimir-Route-Reason": routing.reason,
+        "X-Ask-Mimir-Route-Confidence": f"{routing.confidence:.2f}",
+        "X-Ask-Mimir-Route-Fallback": "1" if routing.fallback_used else "0",
+    }
     try:
-        job, routing = job_manager.create(payload, access)
-        response.headers["X-Ask-Mimir-Route-Reason"] = routing.reason
-        response.headers["X-Ask-Mimir-Route-Confidence"] = f"{routing.confidence:.2f}"
-        response.headers["X-Ask-Mimir-Route-Fallback"] = (
-            "1" if routing.fallback_used else "0"
-        )
+        job, routing = job_manager.create(payload, access, routing=routing)
+        for name, value in routing_headers.items():
+            response.headers[name] = value
         return job
     except DailyQuotaExceeded as exc:
         raise HTTPException(
             status_code=429,
             detail={
                 "message": str(exc),
+                "workflow": routing.workflow,
                 "access": access.public_dict(
                     runtime.beta_state.used_today(access.subject_id),
                     runtime.beta_state.used_this_month(access.subject_id),
                 ),
             },
+            headers=routing_headers,
         ) from exc
 
 

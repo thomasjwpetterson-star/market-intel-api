@@ -111,6 +111,12 @@ ROUTING_CASES = {
         "Show all TransDigm CAGE codes.",
         "Give me Honeywell company wide.",
         "What does CAGE 09128 manufacture?",
+        "Give me a summary on Ontic.",
+        "Tell me everything about AeroCore X - including relevant platforms and contracts.",
+        "What does Triumph Group do in the US defense market?",
+        "Give me an overview of Collins Aerospace's defence activity in Cedar Rapids, Iowa.",
+        "Which programs and capabilities are associated with BAE Systems' York, Pennsylvania facility?",
+        "Give me an overview of RTXs defense business.",
     ],
     "company_site_trajectory": [
         "How has CAGE 19645's missile-program exposure changed since FY2021?",
@@ -431,6 +437,64 @@ FOLLOW_UP_CASES = [
             scope_name="Example opportunity",
         ),
         "What is the deadline?",
+    ),
+    (
+        "company_site_intelligence",
+        ActiveScope(
+            scope_type="company_parent",
+            scope_id="PARENT_HONEYWELL",
+            scope_name="HONEYWELL INTERNATIONAL INC.",
+            resolved_cages=["09128", "0BFA5", "99193"],
+        ),
+        "Company wide",
+    ),
+    (
+        "company_site_intelligence",
+        ActiveScope(
+            scope_type="company_parent",
+            scope_id="PARENT_HONEYWELL",
+            scope_name="HONEYWELL INTERNATIONAL INC.",
+            resolved_cages=["09128", "0BFA5", "99193"],
+        ),
+        "What prime contractors buy from them?",
+    ),
+    (
+        "platform_intelligence",
+        ActiveScope(scope_type="platform", scope_id="TOMAHAWK", scope_name="Tomahawk"),
+        "Who are the major first tier suppliers?",
+    ),
+    (
+        "platform_intelligence",
+        ActiveScope(scope_type="platform", scope_id="TOMAHAWK", scope_name="Tomahawk"),
+        "How concentrated is the supplier base?",
+    ),
+    (
+        "market_record_search",
+        ActiveScope(
+            scope_type="record_search",
+            scope_id="OPP|ANY|electronic warfare",
+            scope_name="Opportunity search: electronic warfare",
+        ),
+        "Any information on the history of any of these contracts, such as past incumbents?",
+    ),
+    (
+        "contract_or_opportunity",
+        ActiveScope(
+            scope_type="contract",
+            scope_id="N0002417C2100",
+            scope_name="N0002417C2100",
+        ),
+        "Can you analyse the action history and how the work evolved?",
+    ),
+    (
+        "platform_comparison",
+        ActiveScope(
+            scope_type="platform_comparison",
+            scope_id="UH-60 | CH-47",
+            scope_name="UH-60 and CH-47",
+            compared_platform_ids=["UH-60", "CH-47"],
+        ),
+        "Where do the two platforms share important suppliers or capabilities?",
     ),
 ]
 
