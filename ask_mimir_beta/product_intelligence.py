@@ -556,6 +556,7 @@ def build_precomputed_product_families(
                 "coverage": pack["coverage"],
             }
         )
+    store.connection.close()
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "product_families": entries,

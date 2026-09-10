@@ -1810,6 +1810,9 @@ def build_precomputed_parent_contexts(
                     }
                 )
     finally:
+        dynamic_builder = locals().get("store") and store._dynamic_builder
+        if dynamic_builder is not None:
+            dynamic_builder.connection.close()
         if previous_cache is None:
             os.environ.pop("ASK_MIMIR_CACHE_DIR", None)
         else:

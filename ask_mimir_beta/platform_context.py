@@ -1281,6 +1281,7 @@ def build_precomputed_platform_contexts(
                 "evidence_fingerprint": context["evidence_fingerprint"],
             }
         )
+    store.connection.close()
     manifest = {
         "schema_version": "platform-context-precompute-v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),

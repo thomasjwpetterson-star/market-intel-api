@@ -336,6 +336,7 @@ def build_precomputed_state_markets(
                 "coverage": pack.get("coverage", {}),
             }
         )
+    store.connection.close()
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "states": entries,

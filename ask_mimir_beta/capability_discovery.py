@@ -907,6 +907,7 @@ def build_precomputed_capabilities(data_root: Path, output_dir: Path) -> Dict[st
                 "matching_niins": pack["coverage"]["matching_niins"],
             }
         )
+    store.connection.close()
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "ontology_schema_version": CAPABILITY_ONTOLOGY["schema_version"],

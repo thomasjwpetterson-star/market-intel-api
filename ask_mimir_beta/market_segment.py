@@ -700,6 +700,7 @@ def build_precomputed_market_segments(
                 "defined_platform_count": pack["coverage"]["defined_platform_count"],
             }
         )
+    store.connection.close()
     manifest = {
         "schema_version": MARKET_SEGMENT_SCHEMA_VERSION,
         "validation_status": "pass",
