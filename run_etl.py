@@ -9,6 +9,7 @@ import duckdb
 from botocore.config import Config
 import warnings
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 
 # Suppress pandas warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -170,6 +171,23 @@ def list_s3_keys(prefix: str):
         for obj in page.get('Contents', []):
             yield obj['Key']
 
+def download_unload_parts(part_keys, destination_dir, max_workers=6):
+    """Download Athena parts concurrently without changing their contents."""
+    if not part_keys:
+        return
+
+    def download_one(key):
+        destination_name = os.path.basename(key)
+        if not destination_name.endswith(".parquet"):
+            destination_name += ".parquet"
+        destination_path = os.path.join(destination_dir, destination_name)
+        s3.download_file(BUCKET_NAME, key, destination_path)
+        return destination_path
+
+    worker_count = min(max_workers, len(part_keys))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        list(executor.map(download_one, part_keys))
+
 def upload_unload_parts_to_cache(unload_prefix: str, cache_name: str):
     """
     Upload UNLOAD parquet parts as a dataset folder:
@@ -222,12 +240,7 @@ def merge_unload_parts_with_duckdb(unload_prefix: str, output_filename: str, ord
     part_keys = [k for k in all_keys if not k.endswith("/")]
 
     print(f"   ⬇️ Downloading {len(part_keys)} parts locally...")
-    for k in part_keys:
-        dest_filename = os.path.basename(k)
-        if not dest_filename.endswith(".parquet"):
-            dest_filename += ".parquet"
-        local_part = os.path.join(parts_dir, dest_filename)
-        s3.download_file(BUCKET_NAME, k, local_part)
+    download_unload_parts(part_keys, parts_dir)
 
     print("   🔨 DuckDB is combining parts into a single Parquet file...")
     local_output = os.path.join(TEMP_DIR, output_filename)
@@ -240,7 +253,8 @@ def merge_unload_parts_with_duckdb(unload_prefix: str, output_filename: str, ord
     con = duckdb.connect('etl_temp.db')
     con.execute("PRAGMA temp_directory='./ducktmp';")
     con.execute("PRAGMA memory_limit='6GB';")
-    con.execute("PRAGMA threads=4;") 
+    con.execute("PRAGMA threads=4;")
+    con.execute("PRAGMA preserve_insertion_order=false;")
     
     # ✅ FIX: Removed the massive GROUP BY. Athena already did the math!
     # DuckDB now streams the data incredibly fast with almost 0 RAM/Disk bloat.
@@ -264,6 +278,8 @@ def merge_unload_parts_with_duckdb(unload_prefix: str, output_filename: str, ord
         os.remove(local_output)
     if os.path.exists(parts_dir):
         shutil.rmtree(parts_dir, ignore_errors=True)
+    if os.path.exists('./ducktmp'):
+        shutil.rmtree('./ducktmp', ignore_errors=True)
 
 
 # AWS Clients
@@ -1198,17 +1214,15 @@ def optimize_and_upload():
         part_keys = [k for k in all_keys if not k.endswith("/")]
 
         print(f"   ⬇️ Downloading {len(part_keys)} parts locally...")
-        for k in part_keys:
-            dest_filename = os.path.basename(k)
-            if not dest_filename.endswith(".parquet"):
-                dest_filename += ".parquet"
-            s3.download_file(BUCKET_NAME, k, os.path.join(txn_parts_dir, dest_filename))
+        download_unload_parts(part_keys, txn_parts_dir)
 
         txn_local_output = os.path.join(TEMP_DIR, "transactions.parquet")
         
         con = duckdb.connect('etl_temp.db')
         con.execute("PRAGMA temp_directory='./ducktmp';")
         con.execute("PRAGMA memory_limit='6GB';")
+        con.execute("PRAGMA threads=4;")
+        con.execute("PRAGMA preserve_insertion_order=false;")
         
         # ✅ Replaces your old Pandas logic to clean strings and cast types safely inside DuckDB
         con.execute(f"""
@@ -1273,6 +1287,8 @@ def optimize_and_upload():
             os.remove(txn_local_output)
         if os.path.exists(txn_parts_dir):
             shutil.rmtree(txn_parts_dir, ignore_errors=True)
+        if os.path.exists('./ducktmp'):
+            shutil.rmtree('./ducktmp', ignore_errors=True)
 
     # ---------------------------------------------------------
     # ### [UPDATED] FETCH ROLLED-UP CONTRACTS (Preserves ALL Business Logic) ###
@@ -1542,17 +1558,15 @@ def optimize_and_upload():
         part_keys = [k for k in all_keys if not k.endswith("/")]
 
         print(f"   ⬇️ Downloading {len(part_keys)} parts locally...")
-        for k in part_keys:
-            dest_filename = os.path.basename(k)
-            if not dest_filename.endswith(".parquet"):
-                dest_filename += ".parquet"
-            s3.download_file(BUCKET_NAME, k, os.path.join(nsn_parts_dir, dest_filename))
+        download_unload_parts(part_keys, nsn_parts_dir)
 
         nsn_local_output = os.path.join(TEMP_DIR, "nsn_summary.parquet")
         
         con = duckdb.connect('etl_temp.db')
         con.execute("PRAGMA temp_directory='./ducktmp';")
         con.execute("PRAGMA memory_limit='6GB';")
+        con.execute("PRAGMA threads=4;")
+        con.execute("PRAGMA preserve_insertion_order=false;")
         
         # We clean the null strings inside DuckDB during the COPY to replicate Pandas behavior safely
         con.execute(f"""
@@ -1582,6 +1596,8 @@ def optimize_and_upload():
 
         os.remove(nsn_local_output)
         shutil.rmtree(nsn_parts_dir)
+        if os.path.exists('./ducktmp'):
+            shutil.rmtree('./ducktmp', ignore_errors=True)
         print("   ✅ Successfully published nsn_summary.parquet!")
 
 
