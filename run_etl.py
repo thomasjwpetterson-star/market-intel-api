@@ -1,6 +1,7 @@
 import boto3
 import pandas as pd
 import os
+import hashlib
 from io import BytesIO
 import time
 import shutil
@@ -61,6 +62,26 @@ s3_config = Config(
     retries={'max_attempts': 10, 'mode': 'adaptive'}
 )
 s3 = session.client('s3', config=s3_config)
+
+
+def file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def upload_cache_file(local_path: str, output_filename: str):
+    """Upload one cache artifact with a reusable integrity hash."""
+    digest = file_sha256(local_path)
+    s3.upload_file(
+        local_path,
+        BUCKET_NAME,
+        f"{CACHE_PREFIX}{output_filename}",
+        ExtraArgs={"Metadata": {"sha256": digest}},
+    )
+    return digest
 
 # -------------------------
 # Checkpointing helpers
@@ -271,7 +292,7 @@ def merge_unload_parts_with_duckdb(unload_prefix: str, output_filename: str, ord
     con.close()
 
     print(f"   ⬆️ Uploading consolidated {output_filename} to S3...")
-    s3.upload_file(local_output, BUCKET_NAME, f"{CACHE_PREFIX}{output_filename}")
+    upload_cache_file(local_output, output_filename)
     print(f"   ✅ Successfully published consolidated {output_filename}!")
 
     if os.path.exists(local_output):
@@ -863,7 +884,7 @@ def optimize_and_upload():
         local_path = f"{TEMP_DIR}/{filename}"
         try:
             df.to_parquet(local_path, compression='snappy')
-            s3.upload_file(local_path, BUCKET_NAME, f"{CACHE_PREFIX}{filename}")
+            upload_cache_file(local_path, filename)
             print(f"   ✅ Uploaded {filename} ({len(df):,} rows)")
         except Exception as e:
             print(f"   ❌ FAILED to upload {filename}: {e}")
@@ -1280,7 +1301,7 @@ def optimize_and_upload():
         con.close()
 
         print(f"   ⬆️ Uploading transactions.parquet to S3...")
-        s3.upload_file(txn_local_output, BUCKET_NAME, f"{CACHE_PREFIX}transactions.parquet")
+        upload_cache_file(txn_local_output, "transactions.parquet")
         print("   ✅ Successfully published transactions.parquet!")
 
         if os.path.exists(txn_local_output):
@@ -1592,7 +1613,7 @@ def optimize_and_upload():
         con.close()
 
         print(f"   ⬆️ Uploading nsn_summary.parquet to S3...")
-        s3.upload_file(nsn_local_output, BUCKET_NAME, f"{CACHE_PREFIX}nsn_summary.parquet")
+        upload_cache_file(nsn_local_output, "nsn_summary.parquet")
 
         os.remove(nsn_local_output)
         shutil.rmtree(nsn_parts_dir)

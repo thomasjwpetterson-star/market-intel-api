@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 from bootstrap_data import (
     DEFAULT_CURRENT_MANIFEST_KEY,
+    _download_verified,
+    manifest_entry_signature,
     manifest_fingerprint,
     selected_manifest_key,
     verified_release_is_ready,
@@ -14,7 +16,86 @@ from bootstrap_data import (
 )
 
 
+class NoDownloadS3:
+    def download_file(self, *_args, **_kwargs):
+        raise AssertionError("unchanged pinned file should not be downloaded")
+
+
+class RecordingDownloadS3:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+        self.calls = []
+
+    def download_file(self, bucket, key, destination, **kwargs):
+        self.calls.append((bucket, key, kwargs))
+        Path(destination).write_bytes(self.payload)
+
+
 class BootstrapReleaseMarkerTests(unittest.TestCase):
+    def test_reuses_unchanged_version_pinned_file_without_sha256(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data" / "sample.parquet"
+            data.parent.mkdir(parents=True)
+            data.write_bytes(b"version-pinned")
+            entry = {
+                "local_path": "data/sample.parquet",
+                "s3_key": "app_cache/sample.parquet",
+                "s3_version_id": "version-2",
+                "s3_etag": "etag-2",
+                "size": len(b"version-pinned"),
+            }
+
+            result = _download_verified(
+                NoDownloadS3(),
+                "bucket",
+                entry,
+                root,
+                manifest_entry_signature(entry),
+            )
+
+            self.assertEqual(result.resolve(), data.resolve())
+
+    def test_downloads_changed_version_pinned_file_without_sha256(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data" / "sample.parquet"
+            data.parent.mkdir(parents=True)
+            data.write_bytes(b"old-version")
+            old_entry = {
+                "local_path": "data/sample.parquet",
+                "s3_key": "app_cache/sample.parquet",
+                "s3_version_id": "version-1",
+                "s3_etag": "etag-1",
+                "size": len(b"old-version"),
+            }
+            new_entry = {
+                **old_entry,
+                "s3_version_id": "version-2",
+                "s3_etag": "etag-2",
+            }
+            s3 = RecordingDownloadS3(b"new-version")
+
+            _download_verified(
+                s3,
+                "bucket",
+                new_entry,
+                root,
+                manifest_entry_signature(old_entry),
+            )
+
+            self.assertEqual(data.read_bytes(), b"new-version")
+            self.assertEqual(
+                s3.calls,
+                [
+                    (
+                        "bucket",
+                        "app_cache/sample.parquet",
+                        {"ExtraArgs": {"VersionId": "version-2"}},
+                    )
+                ],
+            )
+
     def test_current_release_pointer_is_the_default(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(selected_manifest_key(), DEFAULT_CURRENT_MANIFEST_KEY)

@@ -54,6 +54,29 @@ def manifest_fingerprint(manifest: Dict[str, Any]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def manifest_entry_signature(entry: Dict[str, Any]) -> str:
+    identity = {
+        key: entry.get(key)
+        for key in (
+            "local_path",
+            "s3_key",
+            "s3_version_id",
+            "size",
+            "sha256",
+            "s3_etag",
+            "s3_checksumcrc32",
+            "s3_checksumcrc32c",
+            "s3_checksumcrc64nvme",
+            "s3_checksumsha1",
+            "s3_checksumsha256",
+            "s3_checksum_type",
+        )
+    }
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def verified_release_is_ready(
     runtime_root: Path,
     manifest: Dict[str, Any],
@@ -84,6 +107,10 @@ def write_verified_release_marker(
             {
                 "release_id": manifest["release_id"],
                 "manifest_fingerprint": manifest_fingerprint(manifest),
+                "file_signatures": {
+                    entry["local_path"]: manifest_entry_signature(entry)
+                    for entry in manifest.get("files", [])
+                },
             },
             sort_keys=True,
         )
@@ -96,6 +123,7 @@ def _download_verified(
     bucket: str,
     entry: Dict[str, Any],
     runtime_root: Path,
+    prior_signature: str | None = None,
 ) -> Path:
     destination = (runtime_root / entry["local_path"]).resolve()
     if runtime_root.resolve() not in destination.parents:
@@ -103,13 +131,15 @@ def _download_verified(
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     expected_size = int(entry["size"])
-    expected_hash = str(entry["sha256"])
-    if (
-        destination.exists()
-        and destination.stat().st_size == expected_size
-        and file_sha256(destination) == expected_hash
-    ):
-        return destination
+    expected_hash = str(entry.get("sha256") or "").strip()
+    if destination.exists() and destination.stat().st_size == expected_size:
+        if (
+            prior_signature
+            and prior_signature == manifest_entry_signature(entry)
+        ):
+            return destination
+        if expected_hash and file_sha256(destination) == expected_hash:
+            return destination
 
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     temporary.unlink(missing_ok=True)
@@ -121,7 +151,7 @@ def _download_verified(
     if temporary.stat().st_size != expected_size:
         temporary.unlink(missing_ok=True)
         raise RuntimeError(f"Size mismatch for {entry['s3_key']}")
-    if file_sha256(temporary) != expected_hash:
+    if expected_hash and file_sha256(temporary) != expected_hash:
         temporary.unlink(missing_ok=True)
         raise RuntimeError(f"SHA-256 mismatch for {entry['s3_key']}")
     temporary.replace(destination)
@@ -148,8 +178,19 @@ def bootstrap() -> Dict[str, Any]:
 
     marker_path = runtime_root / ".verified-release.json"
     if not verified_release_is_ready(runtime_root, manifest, marker_path):
+        try:
+            prior_marker = json.loads(marker_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            prior_marker = {}
+        prior_signatures = prior_marker.get("file_signatures") or {}
         for entry in manifest["files"]:
-            _download_verified(s3, bucket, entry, runtime_root)
+            _download_verified(
+                s3,
+                bucket,
+                entry,
+                runtime_root,
+                prior_signatures.get(entry["local_path"]),
+            )
         write_verified_release_marker(marker_path, manifest)
 
     final_manifest = runtime_root / "runtime_manifest.json"

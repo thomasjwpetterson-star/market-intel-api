@@ -234,9 +234,12 @@ def serving_manifest_entry(
     local_path: str,
     local_file: Path,
 ) -> Dict[str, Any]:
-    remote = s3.head_object(Bucket=bucket, Key=source_key)
+    remote = s3.head_object(Bucket=bucket, Key=source_key, ChecksumMode="ENABLED")
     remote_size = int(remote["ContentLength"])
-    if local_file.exists() and local_file.stat().st_size == remote_size:
+    metadata_hash = str((remote.get("Metadata") or {}).get("sha256") or "").strip()
+    if metadata_hash:
+        digest = metadata_hash
+    elif local_file.exists() and local_file.stat().st_size == remote_size:
         digest = file_sha256(local_file)
     else:
         with tempfile.NamedTemporaryFile() as temporary_file:
@@ -255,6 +258,63 @@ def serving_manifest_entry(
             f"S3 versioning is required for atomic release input: {source_key}"
         )
     entry["s3_version_id"] = version_id
+    etag = str(remote.get("ETag") or "").strip('"')
+    if etag:
+        entry["s3_etag"] = etag
+    for field in (
+        "ChecksumCRC32",
+        "ChecksumCRC32C",
+        "ChecksumCRC64NVME",
+        "ChecksumSHA1",
+        "ChecksumSHA256",
+    ):
+        value = str(remote.get(field) or "").strip()
+        if value:
+            entry[f"s3_{field.lower()}"] = value
+    checksum_type = str(remote.get("ChecksumType") or "").strip()
+    if checksum_type:
+        entry["s3_checksum_type"] = checksum_type
+    return entry
+
+
+def remote_serving_manifest_entry(
+    s3: Any,
+    bucket: str,
+    source_key: str,
+    local_path: str,
+) -> Dict[str, Any]:
+    """Pin an app-cache object without transferring its contents locally."""
+    remote = s3.head_object(Bucket=bucket, Key=source_key, ChecksumMode="ENABLED")
+    version_id = str(remote.get("VersionId") or "").strip()
+    if not version_id or version_id == "null":
+        raise RuntimeError(
+            f"S3 versioning is required for atomic release input: {source_key}"
+        )
+    entry = {
+        "local_path": local_path,
+        "s3_key": source_key,
+        "size": int(remote["ContentLength"]),
+        "s3_version_id": version_id,
+    }
+    metadata_hash = str((remote.get("Metadata") or {}).get("sha256") or "").strip()
+    if metadata_hash:
+        entry["sha256"] = metadata_hash
+    etag = str(remote.get("ETag") or "").strip('"')
+    if etag:
+        entry["s3_etag"] = etag
+    for field in (
+        "ChecksumCRC32",
+        "ChecksumCRC32C",
+        "ChecksumCRC64NVME",
+        "ChecksumSHA1",
+        "ChecksumSHA256",
+    ):
+        value = str(remote.get(field) or "").strip()
+        if value:
+            entry[f"s3_{field.lower()}"] = value
+    checksum_type = str(remote.get("ChecksumType") or "").strip()
+    if checksum_type:
+        entry["s3_checksum_type"] = checksum_type
     return entry
 
 
@@ -418,6 +478,12 @@ def validate_release_manifest(
             raise RuntimeError(
                 f"Published object size does not match manifest: {local_path}"
             )
+        expected_etag = str(entry.get("s3_etag") or "").strip()
+        actual_etag = str(remote.get("ETag") or "").strip('"')
+        if expected_etag and actual_etag != expected_etag:
+            raise RuntimeError(
+                f"Published object ETag does not match manifest: {local_path}"
+            )
 
 
 def validate_local_inputs_against_base(
@@ -579,6 +645,7 @@ def publish(
     entries_by_path = (
         manifest_file_map(base_manifest) if base_manifest is not None else {}
     )
+    base_entries_by_path = copy.deepcopy(entries_by_path)
     for domain in selected_domains:
         remove_domain_entries(entries_by_path, domain)
 
@@ -589,14 +656,35 @@ def publish(
 
     if "serving-data" in selected_domains:
         for filename in DATA_FILES:
-            print(f"Verifying serving data: {filename}", file=sys.stderr)
-            entry = verified_serving_manifest_entry(
-                s3,
-                bucket,
-                f"app_cache/{filename}",
-                f"data/{filename}",
-                DATA_ROOT / filename,
-            )
+            local_path = f"data/{filename}"
+            source_key = f"app_cache/{filename}"
+            if verify_local_inputs:
+                print(f"Verifying serving data locally: {filename}", file=sys.stderr)
+                entry = verified_serving_manifest_entry(
+                    s3,
+                    bucket,
+                    source_key,
+                    local_path,
+                    DATA_ROOT / filename,
+                )
+            else:
+                print(f"Pinning serving data remotely: {filename}", file=sys.stderr)
+                remote_entry = remote_serving_manifest_entry(
+                    s3,
+                    bucket,
+                    source_key,
+                    local_path,
+                )
+                base_entry = base_entries_by_path.get(local_path)
+                if (
+                    base_entry
+                    and base_entry.get("s3_key") == remote_entry.get("s3_key")
+                    and base_entry.get("s3_version_id")
+                    == remote_entry.get("s3_version_id")
+                ):
+                    entry = base_entry
+                else:
+                    entry = remote_entry
             entries_by_path[entry["local_path"]] = entry
 
     classification_path = None
@@ -818,7 +906,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--skip-local-input-verification",
         action="store_true",
-        help="Skip base-release hash checks for local builder inputs.",
+        help=(
+            "Reuse verified base entries and pin serving-data inputs directly from "
+            "versioned S3 objects without downloading them locally."
+        ),
     )
     arguments = parser.parse_args()
     if arguments.promote_candidate and (arguments.only or arguments.promote):

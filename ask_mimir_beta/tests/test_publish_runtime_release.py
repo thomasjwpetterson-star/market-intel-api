@@ -5,7 +5,10 @@ import unittest
 import zlib
 from pathlib import Path
 
-from publish_runtime_release import verified_serving_manifest_entry
+from publish_runtime_release import (
+    remote_serving_manifest_entry,
+    verified_serving_manifest_entry,
+)
 
 
 def crc32_base64(value: bytes) -> str:
@@ -39,8 +42,32 @@ class FakeS3:
             "ObjectParts": {"Parts": parts, "IsTruncated": False},
         }
 
+    def head_object(self, **_kwargs):
+        return {
+            "ContentLength": len(self.payload),
+            "VersionId": "version-1",
+            "ETag": '"etag-1"',
+            "ChecksumCRC32": crc32_base64(self.payload),
+            "ChecksumType": "COMPOSITE",
+            "Metadata": {},
+        }
+
 
 class VerifiedServingManifestEntryTests(unittest.TestCase):
+    def test_pins_remote_object_without_downloading_it(self):
+        payload = b"remote-release-input"
+        entry = remote_serving_manifest_entry(
+            FakeS3(payload, [len(payload)]),
+            "bucket",
+            "app_cache/input.parquet",
+            "data/input.parquet",
+        )
+
+        self.assertEqual(entry["s3_version_id"], "version-1")
+        self.assertEqual(entry["s3_etag"], "etag-1")
+        self.assertEqual(entry["size"], len(payload))
+        self.assertNotIn("sha256", entry)
+
     def test_verifies_and_pins_a_multipart_local_file(self):
         payload = b"atomic-release-input"
         with tempfile.TemporaryDirectory() as directory:
