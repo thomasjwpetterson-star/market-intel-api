@@ -160,9 +160,13 @@ def _build_evidence(request: AskRequest, workflow: str) -> Dict[str, Any]:
         )
     if workflow == "item_intelligence":
         query = explicit_item_query(request.messages)
+        if not query and request.active_scope:
+            query = request.active_scope.scope_id
         return runtime.call_tool("search_item_contexts", {"query": query, "limit": 20})
     if workflow == "contract_or_opportunity":
         query = explicit_award_or_opportunity_query(request.messages)
+        if not query and request.active_scope:
+            query = request.active_scope.scope_id
         return runtime.call_tool(
             "search_award_opportunity_contexts", {"query": query, "limit": 20}
         )
@@ -306,6 +310,24 @@ def _evaluate_case(case: Dict[str, Any]) -> Dict[str, Any]:
             {
                 "check": f"{path} == {expected}",
                 "passed": actual == expected,
+                "actual": actual,
+            }
+        )
+    for path, minimum in case.get("minimum_list_lengths", {}).items():
+        actual = _path_value(evidence, path)
+        checks.append(
+            {
+                "check": f"{path} contains at least {minimum} records",
+                "passed": isinstance(actual, list) and len(actual) >= minimum,
+                "actual": len(actual) if isinstance(actual, list) else None,
+            }
+        )
+    for path in case.get("required_non_empty_paths", []):
+        actual = _path_value(evidence, path)
+        checks.append(
+            {
+                "check": f"{path} is populated",
+                "passed": actual not in (None, "", [], {}),
                 "actual": actual,
             }
         )

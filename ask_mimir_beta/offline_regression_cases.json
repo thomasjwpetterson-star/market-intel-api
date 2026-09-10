@@ -97,5 +97,75 @@
       "coverage.prime_awards": 1
     },
     "required_preview_terms": ["B-52", "FY2021-FY2026"]
+  },
+  {
+    "case_id": "ambiguous_ontic_company_search",
+    "question": "Tell me about Ontic's US defence business.",
+    "expected_workflow": "company_site_intelligence",
+    "minimum_list_lengths": {
+      "matches": 2
+    },
+    "required_non_empty_paths": ["matches"]
+  },
+  {
+    "case_id": "known_company_site_context",
+    "question": "What does this site do and which programs does it support?",
+    "active_scope": {
+      "scope_type": "company_site",
+      "scope_id": "19645",
+      "scope_name": "Data Device Corporation",
+      "resolved_cages": ["19645"],
+      "group_kind": "cage_site"
+    },
+    "expected_workflow": "company_site_intelligence",
+    "required_values": {
+      "scope.scope_id": "19645"
+    },
+    "minimum_list_lengths": {
+      "identity.sites": 1,
+      "top_awards": 1
+    }
+  },
+  {
+    "case_id": "known_item_resolution",
+    "question": "Tell me everything about NSN 1560-00-817-5790.",
+    "expected_workflow": "item_intelligence",
+    "minimum_list_lengths": {
+      "matches": 1
+    },
+    "required_non_empty_paths": ["resolved_niin"]
+  },
+  {
+    "case_id": "known_contract_resolution",
+    "question": "Tell me everything about contract N0002417C2100.",
+    "expected_workflow": "contract_or_opportunity",
+    "minimum_list_lengths": {
+      "matches": 1
+    },
+    "required_values": {
+      "match_type": "EXACT_IDENTIFIER"
+    }
+  },
+  {
+    "case_id": "open_opportunity_search",
+    "question": "Find currently open Sources Sought notices related to military aircraft avionics.",
+    "expected_workflow": "market_record_search",
+    "minimum_values": {
+      "coverage.matching_records": 1
+    },
+    "required_values": {
+      "scope.record_type": "opportunity",
+      "scope.notice_type": "SOURCES_SOUGHT"
+    }
+  },
+  {
+    "case_id": "rotorcraft_market_segment",
+    "question": "Give me an overview of the US military rotorcraft market.",
+    "expected_workflow": "market_segment_intelligence",
+    "minimum_list_lengths": {
+      "platform_activity": 3,
+      "leading_reported_supplier_sites": 3
+    },
+    "required_non_empty_paths": ["scope.observation_window"]
   }
 ]

@@ -105,6 +105,30 @@ PYTHONPATH=. /Users/tompetterson/Documents/my-saas-projects/market-intel-api/ven
   evaluate_lab.py --base-url http://127.0.0.1:10100
 ```
 
+Run the broad deterministic suite without calling OpenAI:
+
+```bash
+PYTHONPATH=. /Users/tompetterson/Documents/my-saas-projects/market-intel-api/venv/bin/python \
+  run_evaluation_suite.py
+```
+
+This covers baseline workflows, generated paraphrases, shorthand, misspellings, ambiguous
+company names, contextual follow-ups, subject changes, multi-entity questions, unsupported
+questions, entity resolution, evidence availability and multi-turn scope retention. Reports are
+written to `/tmp/ask-mimir-evaluation` by default.
+
+Add the six-case representative model sample only when a real-model evaluation is intended:
+
+```bash
+PYTHONPATH=. /Users/tompetterson/Documents/my-saas-projects/market-intel-api/venv/bin/python \
+  run_evaluation_suite.py \
+  --include-live \
+  --base-url http://127.0.0.1:10100
+```
+
+The live sample uses `ASK_MIMIR_TRUSTED_PROXY_SECRET` when it is set. It incurs OpenAI usage;
+the deterministic suite does not.
+
 Run the customer-launch query suite, including Tomahawk routing, platform follow-ups, company/site
 resolution and internal-language checks:
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -16,16 +17,24 @@ ROOT = Path(__file__).resolve().parent
 
 
 def post_json(
-    url: str, payload: Dict[str, Any], *, tier: str, subject: str
+    url: str,
+    payload: Dict[str, Any],
+    *,
+    tier: str,
+    subject: str,
+    proxy_secret: str | None = None,
 ) -> Dict[str, Any]:
+    headers = {
+        "Content-Type": "application/json",
+        "X-Ask-Mimir-Tier": tier,
+        "X-Ask-Mimir-Subject": subject,
+    }
+    if proxy_secret:
+        headers["X-Ask-Mimir-Proxy-Secret"] = proxy_secret
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "X-Ask-Mimir-Tier": tier,
-            "X-Ask-Mimir-Subject": subject,
-        },
+        headers=headers,
         method="POST",
     )
     try:
@@ -118,7 +127,12 @@ def score_result(case: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]
 
 
 def evaluate_case(
-    base_url: str, case: Dict[str, Any], *, tier: str, subject: str
+    base_url: str,
+    case: Dict[str, Any],
+    *,
+    tier: str,
+    subject: str,
+    proxy_secret: str | None = None,
 ) -> Dict[str, Any]:
     messages = case.get("messages") or [
         {"role": "user", "content": case["question"]}
@@ -131,6 +145,7 @@ def evaluate_case(
         payload,
         tier=tier,
         subject=subject,
+        proxy_secret=proxy_secret,
     )
     return score_result(case, result)
 
@@ -139,9 +154,17 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:10100")
     parser.add_argument("--case-id", action="append")
-    parser.add_argument("--cases-file", type=Path, default=ROOT / "eval_cases.json")
+    parser.add_argument(
+        "--cases-file",
+        type=Path,
+        default=ROOT / "representative_live_eval_cases.json",
+    )
     parser.add_argument("--tier", default="enterprise")
     parser.add_argument("--subject", default="launch-evaluation")
+    parser.add_argument(
+        "--proxy-secret",
+        default=os.getenv("ASK_MIMIR_TRUSTED_PROXY_SECRET"),
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     cases = json.loads(args.cases_file.read_text())
@@ -157,6 +180,7 @@ def main() -> None:
                 case,
                 tier=args.tier,
                 subject=f"{args.subject}:{case['case_id']}",
+                proxy_secret=args.proxy_secret,
             )
             for case in selected
         ],

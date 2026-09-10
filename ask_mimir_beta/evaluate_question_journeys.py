@@ -59,6 +59,28 @@ def _scope_from_evidence(
             scope_name=f"{scope.get('record_type')} search: {scope.get('subject')}",
             group_kind="record_search",
         )
+    if expected_type == "item":
+        resolved_niin = evidence.get("resolved_niin")
+        matches = evidence.get("matches", [])
+        match = matches[0] if len(matches) == 1 else None
+        if resolved_niin and match:
+            return ActiveScope(
+                scope_type="item",
+                scope_id=str(resolved_niin),
+                scope_name=str(match.get("nsn") or resolved_niin),
+                group_kind="item",
+            )
+    if expected_type in {"contract", "opportunity"}:
+        match = evidence.get("resolved")
+        if not match and len(evidence.get("matches", [])) == 1:
+            match = evidence["matches"][0]
+        if match and match.get("record_type") == expected_type:
+            return ActiveScope(
+                scope_type=expected_type,
+                scope_id=str(match.get("record_id") or match.get("public_identifier")),
+                scope_name=str(match.get("public_identifier") or match.get("record_id")),
+                group_kind=expected_type,
+            )
     if expected_type in {"company_site", "company_parent"}:
         name_fragment = str(expected.get("scope_name_contains") or "").upper()
         match = next(
@@ -236,7 +258,9 @@ def _markdown_summary(report: Dict[str, Any]) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--journeys-file", type=Path, default=ROOT / "beta_question_journeys.json"
+        "--journeys-file",
+        type=Path,
+        default=ROOT / "expanded_workflow_question_journeys.json",
     )
     parser.add_argument("--journey-id", action="append")
     parser.add_argument("--output", type=Path)

@@ -408,6 +408,59 @@ def generated_fuzzy_cases():
                 yield expected, template.format(subject=subject)
 
 
+ROUTING_ROBUSTNESS_CASES = {
+    "misspellings": [
+        ("platform_intelligence", "Show me the F-16 suply chain."),
+        ("platform_intelligence", "Who are the main Tomahwk suppliers?"),
+        ("company_site_intelligence", "Give me a compny profile for Honeywell."),
+        ("company_site_intelligence", "What does Curtiss Wrigth do in defence?"),
+        ("capability_discovery", "Find manufaturers of military aircraft brakes."),
+        ("capability_discovery", "Who supplies ruged mission computers for defense?"),
+        ("market_record_search", "Find open oportunities for avionics suppliers."),
+        ("state_industrial_base", "Map the defence industral base in Alabama."),
+    ],
+    "ambiguous_company_names": [
+        ("company_site_intelligence", "Tell me about Collins."),
+        ("company_site_intelligence", "What does Mercury supply to defense?"),
+        ("company_site_intelligence", "Profile RTX's US military business."),
+        ("company_site_intelligence", "Show me the defence footprint of GE Aerospace."),
+        ("company_site_intelligence", "Which sites belong to Ontic?"),
+        ("company_site_intelligence", "What does Boeing do for the US military?"),
+    ],
+    "multiple_entities": [
+        ("platform_comparison", "Compare the F-16 and F-35 supplier bases."),
+        ("platform_comparison", "Who supplies both the UH-60 and CH-47?"),
+        ("platform_comparison", "Contrast Patriot with THAAD."),
+        ("platform_comparison", "Compare Tomahawk, JASSM and LRASM suppliers."),
+        ("general_defense_research", "Compare Honeywell and Moog's US defence positions."),
+        ("general_defense_research", "Which Alabama and Florida sites support missile programs?"),
+    ],
+    "current_events": [
+        ("news_article_implications", "https://www.defensenews.com/example/article"),
+        (
+            "news_article_implications",
+            "Read this announcement and assess the supplier implications: the Navy awarded a new multiyear submarine-production contract.",
+        ),
+        (
+            "news_article_implications",
+            "What does this news mean for the industrial base? The Army announced a production increase for counter-UAS systems.",
+        ),
+        (
+            "general_defense_research",
+            "What changed after the Pentagon's latest munitions announcement?",
+        ),
+    ],
+    "unsupported_and_non_defense": [
+        ("out_of_domain", "What will the weather be in London tomorrow?"),
+        ("out_of_domain", "Recommend somewhere for dinner in Boston."),
+        ("out_of_domain", "Write a Python tutorial for beginners."),
+        ("out_of_domain", "Who won last night's basketball game?"),
+        ("general_defense_research", "Estimate the global commercial-airline seating market."),
+        ("general_defense_research", "Predict a private company's share price next month."),
+    ],
+}
+
+
 FOLLOW_UP_CASES = [
     (
         "platform_intelligence",
@@ -840,24 +893,35 @@ def _resolution_failures():
 def main() -> None:
     results = []
     fuzzy_results = []
+    results_by_dimension = {}
+
+    def record(dimension, expected, question, actual):
+        result = (expected, question, actual)
+        results.append(result)
+        results_by_dimension.setdefault(dimension, []).append(result)
+
     for expected, questions in ROUTING_CASES.items():
         for question in questions:
             request = AskRequest(messages=[ChatMessage(role="user", content=question)])
-            results.append((expected, question, workflow_for_request(request)))
+            record("baseline_workflows", expected, question, workflow_for_request(request))
     for expected, question in generated_fuzzy_cases():
         request = AskRequest(messages=[ChatMessage(role="user", content=question)])
         result = (expected, question, workflow_for_request(request))
-        results.append(result)
+        record("natural_phrasing_and_shorthand", *result)
         fuzzy_results.append(result)
+    for dimension, cases in ROUTING_ROBUSTNESS_CASES.items():
+        for expected, question in cases:
+            request = AskRequest(messages=[ChatMessage(role="user", content=question)])
+            record(dimension, expected, question, workflow_for_request(request))
     for expected, active_scope, question in FOLLOW_UP_CASES:
         request = AskRequest(
             messages=[ChatMessage(role="user", content=question)],
             active_scope=active_scope,
         )
-        results.append((expected, question, workflow_for_request(request)))
+        record("pronoun_and_context_follow_ups", expected, question, workflow_for_request(request))
     for expected, active_scope, messages in CONVERSATION_CASES:
         request = AskRequest(messages=messages, active_scope=active_scope)
-        results.append((expected, messages[-1].content, workflow_for_request(request)))
+        record("subject_changes", expected, messages[-1].content, workflow_for_request(request))
 
     failures = [result for result in results if result[0] != result[2]]
     print(
@@ -871,6 +935,13 @@ def main() -> None:
         f"Generated fuzzy routing: {len(fuzzy_results) - len(fuzzy_failures)}/"
         f"{len(fuzzy_results)} passed."
     )
+    print("Coverage by dimension:")
+    for dimension, dimension_results in sorted(results_by_dimension.items()):
+        dimension_failures = [row for row in dimension_results if row[0] != row[2]]
+        print(
+            f"  {dimension}: {len(dimension_results) - len(dimension_failures)}/"
+            f"{len(dimension_results)} passed"
+        )
     telemetry_requests = [
         AskRequest(messages=[ChatMessage(role="user", content="Show me F-16 suppliers")]),
         AskRequest(messages=[ChatMessage(role="user", content="Tell me about the broader defense ecosystem.")]),

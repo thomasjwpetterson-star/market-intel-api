@@ -131,5 +131,41 @@
       {"question": "Pick the three most interesting awards and explain what was actually purchased and which programs they support.", "expected_workflow": "market_record_search"},
       {"question": "Show me the evidence supporting that conclusion.", "expected_workflow": "market_record_search"}
     ]
+  },
+  {
+    "journey_id": "item_nsn_follow_up",
+    "label": "Item - NSN contextual follow-up",
+    "entry_variants": ["Look up 1560008175790.", "Who supplies NIIN 008175790?"],
+    "expected_scope": {"scope_type": "item", "scope_id": "008175790"},
+    "turns": [
+      {"question": "Tell me everything about NSN 1560-00-817-5790.", "expected_workflow": "item_intelligence", "minimum_list_lengths": {"matches": 1}},
+      {"question": "What is the part number?", "expected_workflow": "item_intelligence"},
+      {"question": "Who supplies it?", "expected_workflow": "item_intelligence"},
+      {"question": "Show me the underlying procurement records.", "expected_workflow": "item_intelligence"}
+    ]
+  },
+  {
+    "journey_id": "contract_award_follow_up",
+    "label": "Contract - award and evidence",
+    "entry_variants": ["Explain N0002417C2100.", "Who won contract N0002417C2100?"],
+    "expected_scope": {"scope_type": "contract", "scope_id": "N0002417C2100"},
+    "turns": [
+      {"question": "Tell me everything about contract N0002417C2100.", "expected_workflow": "contract_or_opportunity", "minimum_list_lengths": {"matches": 1}},
+      {"question": "What was purchased?", "expected_workflow": "contract_or_opportunity"},
+      {"question": "Who were the reported subcontractors?", "expected_workflow": "contract_or_opportunity"},
+      {"question": "Show me the evidence supporting that answer.", "expected_workflow": "contract_or_opportunity"}
+    ]
+  },
+  {
+    "journey_id": "platform_supplier_comparison",
+    "label": "Comparison - two platform supplier bases",
+    "entry_variants": ["Who supplies both Black Hawk and Chinook?", "Contrast the industrial bases behind UH-60 and CH-47."],
+    "expected_scope": {"scope_type": "platform_comparison", "scope_id": "UH-60 | CH-47"},
+    "turns": [
+      {"question": "Compare the supplier bases of the UH-60 Black Hawk and CH-47 Chinook.", "expected_workflow": "platform_comparison", "minimum_values": {"overlap_counts.exact_cage_site_overlap": 1}},
+      {"question": "Which suppliers support both?", "expected_workflow": "platform_comparison"},
+      {"question": "What does each shared supplier provide?", "expected_workflow": "platform_comparison"},
+      {"question": "Which parts of that comparison are inferred?", "expected_workflow": "platform_comparison"}
+    ]
   }
 ]

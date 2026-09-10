@@ -1,0 +1,54 @@
+[
+  {
+    "case_id": "platform_amraam",
+    "question": "Who supplies AMRAAM, what do they provide, and what evidence supports those positions?",
+    "required_tools": ["search_platform_contexts", "get_platform_context"],
+    "required_answer_terms": ["AMRAAM", "supplier"],
+    "required_scope_type": "platform",
+    "require_mimir_link": true,
+    "require_financial_period": true
+  },
+  {
+    "case_id": "company_curtiss_wright",
+    "question": "Give me an overview of Curtiss-Wright's US defence business.",
+    "required_tools": ["search_company_contexts"],
+    "required_answer_terms": ["Curtiss-Wright", "CAGE"],
+    "require_mimir_link": true,
+    "require_financial_period": true
+  },
+  {
+    "case_id": "site_bae_york",
+    "question": "Which programs and capabilities are associated with BAE Systems' York, Pennsylvania facility?",
+    "required_tools": ["search_company_contexts", "get_company_context"],
+    "required_answer_terms": ["York", "CAGE"],
+    "require_mimir_link": true
+  },
+  {
+    "case_id": "item_nsn",
+    "question": "Tell me everything about NSN 1560-00-817-5790.",
+    "required_tools": ["search_item_contexts", "get_item_context"],
+    "required_answer_terms": ["1560-00-817-5790", "NIIN"],
+    "require_financial_period": true
+  },
+  {
+    "case_id": "capability_fuel_controls",
+    "question": "Give me an overview of the US military aircraft engine fuel-controls market.",
+    "required_tools": ["get_capability_market"],
+    "required_answer_terms": ["fuel control", "supplier"],
+    "require_financial_period": true
+  },
+  {
+    "case_id": "opportunities_avionics",
+    "question": "Find currently open Sources Sought notices related to military aircraft avionics.",
+    "required_tools": ["get_market_record_search"],
+    "required_answer_terms": ["Sources Sought", "deadline"],
+    "require_mimir_link": true
+  },
+  {
+    "case_id": "current_event_implications",
+    "question": "Assess this announcement's implications for the industrial base: the Navy has awarded a multiyear submarine-production contract that includes supplier-capacity investment.",
+    "required_tools": [],
+    "required_answer_terms": ["submarine", "supplier"],
+    "forbidden_answer_terms": ["model returned no answer"]
+  }
+]
