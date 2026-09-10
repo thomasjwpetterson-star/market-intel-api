@@ -1517,6 +1517,8 @@ class CompanyContextStore:
     def _write_dynamic_cache(
         self, scope_type: str, scope_id: str, context: Dict[str, Any]
     ) -> None:
+        if os.getenv("ASK_MIMIR_DISABLE_DYNAMIC_CACHE", "0") == "1":
+            return
         self.dynamic_cache_dir.mkdir(parents=True, exist_ok=True)
         destination = self.dynamic_cache_dir / f"{scope_type}-{scope_id}.json"
         temporary = destination.with_suffix(".json.tmp")
@@ -1729,11 +1731,13 @@ def build_precomputed_parent_contexts(
     previous_cache = os.environ.get("ASK_MIMIR_CACHE_DIR")
     previous_release = os.environ.get("ASK_MIMIR_RELEASE_ID")
     previous_memory_limit = os.environ.get("ASK_MIMIR_DUCKDB_MEMORY_LIMIT")
+    previous_disable_cache = os.environ.get("ASK_MIMIR_DISABLE_DYNAMIC_CACHE")
     try:
         with tempfile.TemporaryDirectory(prefix="ask-mimir-parent-precompute-") as cache:
             os.environ["ASK_MIMIR_CACHE_DIR"] = cache
             os.environ["ASK_MIMIR_RELEASE_ID"] = release_id
             os.environ["ASK_MIMIR_DUCKDB_MEMORY_LIMIT"] = "2GB"
+            os.environ["ASK_MIMIR_DISABLE_DYNAMIC_CACHE"] = "1"
             store = CompanyContextStore(source_context_dir, data_root)
             for query in parent_queries:
                 resolution = store.search(query, scope_type="company_parent", limit=100)
@@ -1830,6 +1834,10 @@ def build_precomputed_parent_contexts(
             os.environ.pop("ASK_MIMIR_DUCKDB_MEMORY_LIMIT", None)
         else:
             os.environ["ASK_MIMIR_DUCKDB_MEMORY_LIMIT"] = previous_memory_limit
+        if previous_disable_cache is None:
+            os.environ.pop("ASK_MIMIR_DISABLE_DYNAMIC_CACHE", None)
+        else:
+            os.environ["ASK_MIMIR_DISABLE_DYNAMIC_CACHE"] = previous_disable_cache
 
     lazy_entries = []
     for entry in entries:
