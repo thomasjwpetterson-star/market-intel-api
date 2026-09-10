@@ -10,7 +10,7 @@ from bootstrap_data import bootstrap
 
 
 if __name__ == "__main__":
-    # Resolve the current atomic manifest before importing the API runtime.
+    # Reuse verified files and fetch only changed objects from the atomic release.
     bootstrap()
     os.environ["ASK_MIMIR_ALLOW_TEST_IDENTITIES"] = "0"
     os.environ.setdefault("ASK_MIMIR_STRICT_CITATIONS", "1")

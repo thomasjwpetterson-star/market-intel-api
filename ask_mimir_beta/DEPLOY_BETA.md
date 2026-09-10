@@ -42,7 +42,8 @@ The service follows this stable manifest pointer by default:
 `ask_mimir/runtime/current_manifest.json`
 
 Each publication first writes an immutable release manifest, including the
-exact S3 version ID and SHA-256 hash of every serving file. It updates the
+exact S3 version ID, size and available integrity metadata for every serving
+file. New ETL uploads also include a SHA-256 content hash. It updates the
 stable pointer only after the complete release has been validated and
 published. No Render environment variable changes are required for routine
 data refreshes.
@@ -68,6 +69,22 @@ This reuses unchanged objects from `ask_mimir/runtime/current_manifest.json`,
 uploads only the selected outputs, verifies every object referenced by the new
 manifest, and writes `ask_mimir/runtime/candidate_manifest.json`. It does not
 change production.
+
+After a normal ETL refresh, pin the serving cache directly from versioned S3
+without downloading the multi-gigabyte Parquet files to the publisher:
+
+```bash
+venv/bin/python ask_mimir_beta/publish_runtime_release.py \
+  --profile new-account \
+  --only serving-data \
+  --skip-local-input-verification
+```
+
+Unchanged entries retain their previously verified manifest records. After
+promotion, Render keeps matching local files and downloads only objects whose
+S3 version changed. Include dependent derived domains in a later publication
+when their precomputed outputs need rebuilding; the remote-only option applies
+to `serving-data`, not to builders that must read the refreshed Parquet data.
 
 Supported domains are:
 
