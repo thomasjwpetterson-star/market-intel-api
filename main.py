@@ -6058,7 +6058,10 @@ def get_company_parts(
         results: List[Dict] = []
         for row in page.itertuples(index=False):
             clean_niin = str(row.niin_key)
-            observed_value = float(getattr(row, "observed_value", 0) or 0)
+            raw_observed_value = _clean_optional_value(
+                getattr(row, "observed_value", None), 0
+            )
+            observed_value = float(raw_observed_value or 0)
             raw_units = getattr(row, "observed_units", None)
             observed_units = None if raw_units is None or pd.isna(raw_units) else float(raw_units)
             avg_unit_price = (
@@ -6067,28 +6070,44 @@ def get_company_parts(
                 else None
             )
 
+            nsn_value = _clean_optional_value(getattr(row, "nsn", None), clean_niin)
+            description = _clean_optional_value(getattr(row, "description", None))
+            platform_family = _clean_optional_value(
+                getattr(row, "platform_family", None)
+            )
+            fsc_code = _clean_optional_value(getattr(row, "fsc_code", None))
+            last_sold_date = _clean_optional_value(
+                getattr(row, "last_sold_date", None)
+            )
+            annual_revenue_trend = _clean_optional_value(
+                getattr(row, "annual_revenue_trend", None), ""
+            )
+            raw_share = _clean_optional_value(
+                getattr(row, "observed_dla_share_pct", None), 0
+            )
+
             results.append({
                 "niin": clean_niin,
-                "nsn": getattr(row, "nsn", None) or clean_niin,
-                "description": getattr(row, "description", None),
+                "nsn": nsn_value,
+                "description": description,
                 "part_number": "",
                 "part_numbers": getattr(row, "part_numbers", []) or [],
                 "part_numbers_count": int(getattr(row, "part_numbers_count", 0) or 0),
-                "platform_family": getattr(row, "platform_family", None),
-                "fsc_code": getattr(row, "fsc_code", None),
+                "platform_family": platform_family,
+                "fsc_code": fsc_code,
                 "total_units_sold": int(observed_units) if observed_units is not None else None,
                 "units": int(observed_units) if observed_units is not None else None,
                 "total_revenue": observed_value,
                 "amount": observed_value,
-                "last_sold": getattr(row, "last_sold_date", None),
-                "last_sold_date": getattr(row, "last_sold_date", None),
+                "last_sold": last_sold_date,
+                "last_sold_date": last_sold_date,
                 "avg_unit_price": avg_unit_price,
                 "max_unit_price": avg_unit_price,
-                "annual_revenue_trend": getattr(row, "annual_revenue_trend", "") or "",
+                "annual_revenue_trend": annual_revenue_trend,
                 "market_share_pct": 0.0,
                 "direct_sales_market_share_pct": max(
                     0.0,
-                    min(100.0, float(getattr(row, "observed_dla_share_pct", 0) or 0)),
+                    min(100.0, float(raw_share or 0)),
                 ),
                 "observed_period_start_fy": int(getattr(row, "period_start_fy", 0) or 0),
                 "observed_period_end_fy": int(getattr(row, "period_end_fy", 0) or 0),
