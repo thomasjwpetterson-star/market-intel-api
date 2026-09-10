@@ -47,20 +47,49 @@ stable pointer only after the complete release has been validated and
 published. No Render environment variable changes are required for routine
 data refreshes.
 
-For automatic activation after publication, copy the service's secret Deploy
+For automatic activation after promotion, copy the service's secret Deploy
 Hook URL from its Render Settings page and set it as
 `ASK_MIMIR_RENDER_DEPLOY_HOOK_URL` in the environment that runs
-`publish_runtime_release.py`. The publisher updates the current pointer and
-then triggers a Render restart/deploy.
+`publish_runtime_release.py`. Candidate publication does not restart Render;
+promotion updates the current pointer and then triggers the restart/deploy.
 
-Publish a validated release from the API repository with:
+Routine publications are now staged as a candidate first. Rebuild only the
+domains whose data or derived artifacts changed:
 
 ```bash
 cd /Users/tompetterson/Documents/my-saas-projects/market-intel-api
+
+venv/bin/python ask_mimir_beta/publish_runtime_release.py \
+  --profile new-account \
+  --only companies,platforms
+```
+
+This reuses unchanged objects from `ask_mimir/runtime/current_manifest.json`,
+uploads only the selected outputs, verifies every object referenced by the new
+manifest, and writes `ask_mimir/runtime/candidate_manifest.json`. It does not
+change production.
+
+Supported domains are:
+
+```text
+serving-data,references,classification,source-depth,recent-awards,metrics,
+core-packs,segments,capabilities,products,companies,platforms,states
+```
+
+After candidate checks, promote it without rebuilding:
+
+```bash
 ASK_MIMIR_RENDER_DEPLOY_HOOK_URL="<private Render deploy hook>" \
   venv/bin/python ask_mimir_beta/publish_runtime_release.py \
-  --profile new-account
+  --profile new-account \
+  --promote-candidate
 ```
+
+Use `--promote` on the first command only when an immediate candidate-to-live
+promotion is intentional. Omit `--only` for a complete rebuild. A refreshed
+ETL cache should be published with `serving-data` plus every derived domain
+that depends on the changed files; ordinary code and prompt changes require a
+normal application deployment and no artifact release.
 
 To roll back, set `ASK_MIMIR_FOLLOW_CURRENT_RELEASE=0` and set
 `ASK_MIMIR_PINNED_MANIFEST_KEY` to a previously published immutable manifest.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -15,7 +16,7 @@ import urllib.request
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, Tuple
 
 import boto3
 import duckdb
@@ -32,6 +33,7 @@ from product_intelligence import build_precomputed_product_families
 
 ROOT = Path(__file__).resolve().parent
 CURRENT_MANIFEST_KEY = "ask_mimir/runtime/current_manifest.json"
+CANDIDATE_MANIFEST_KEY = "ask_mimir/runtime/candidate_manifest.json"
 DATA_ROOT = Path(
     os.getenv("ASK_MIMIR_SERVING_DATA_ROOT", str(ROOT.parent / "local_data"))
 ).resolve()
@@ -47,11 +49,6 @@ DATA_FILES = (
     "opportunities.parquet",
     "contracts_rolled.parquet",
     "profiles.parquet",
-)
-GENERATED_DATA_FILES = (
-    "niin_source_depth.parquet",
-    "platform_source_depth.parquet",
-    "recent_awards_search.parquet",
 )
 PINNED_REFERENCE_FILES = (
     (
@@ -108,6 +105,48 @@ KEY_PLATFORM_CONTEXTS = (
     "COLUMBIA CLASS SSBN",
 )
 
+BUILD_DOMAINS = (
+    "serving-data",
+    "references",
+    "classification",
+    "source-depth",
+    "recent-awards",
+    "metrics",
+    "core-packs",
+    "segments",
+    "capabilities",
+    "products",
+    "companies",
+    "platforms",
+    "states",
+)
+
+DOMAIN_LOCAL_PATHS = {
+    "serving-data": tuple(f"data/{name}" for name in DATA_FILES),
+    "references": tuple(f"data/{name}" for _, name in PINNED_REFERENCE_FILES),
+    "classification": ("data/classification_reference.parquet",),
+    "source-depth": (
+        "data/niin_source_depth.parquet",
+        "data/platform_source_depth.parquet",
+    ),
+    "recent-awards": ("data/recent_awards_search.parquet",),
+}
+
+DOMAIN_ARTIFACT_DESTINATIONS = {
+    "metrics": ("metric-release",),
+    "core-packs": (
+        "company-opportunities",
+        "platform-supply-chains",
+        "program-momentum",
+    ),
+    "segments": ("market-segments",),
+    "capabilities": ("capability-markets",),
+    "products": ("product-families",),
+    "companies": ("company-context",),
+    "platforms": ("platform-contexts",),
+    "states": ("state-markets",),
+}
+
 
 def _artifact_source(name: str) -> Path:
     preferred = ROOT / "validation-output" / name
@@ -156,9 +195,14 @@ def artifact_source_for_destination(destination: str) -> Path:
     )
 
 
-def artifact_files() -> Iterable[Tuple[Path, str]]:
+def artifact_files(
+    destinations: Iterable[str] | None = None,
+) -> Iterable[Tuple[Path, str]]:
+    selected = None if destinations is None else set(destinations)
     included = set()
     for source_dir, destination_dir in artifact_directories():
+        if selected is not None and destination_dir not in selected:
+            continue
         for path in sorted(source_dir.rglob("*")):
             if (
                 not path.is_file()
@@ -315,6 +359,119 @@ def trigger_render_deploy(deploy_hook_url: str) -> int:
         return response.status
 
 
+def parse_domains(value: str | None) -> set[str] | None:
+    if value is None:
+        return None
+    domains = {item.strip().lower() for item in value.split(",") if item.strip()}
+    unknown = domains.difference(BUILD_DOMAINS)
+    if unknown:
+        raise ValueError(
+            "Unknown release domain(s): "
+            + ", ".join(sorted(unknown))
+            + ". Valid domains: "
+            + ", ".join(BUILD_DOMAINS)
+        )
+    if not domains:
+        raise ValueError("--only requires at least one release domain")
+    return domains
+
+
+def load_manifest(s3: Any, bucket: str, key: str) -> Dict[str, Any]:
+    response = s3.get_object(Bucket=bucket, Key=key)
+    return json.loads(response["Body"].read())
+
+
+def manifest_file_map(manifest: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    entries: Dict[str, Dict[str, Any]] = {}
+    for raw_entry in manifest.get("files", []):
+        entry = dict(raw_entry)
+        local_path = str(entry.get("local_path") or "").strip()
+        if not local_path:
+            raise RuntimeError("Runtime manifest contains a file without local_path")
+        if local_path in entries:
+            raise RuntimeError(f"Duplicate runtime path in manifest: {local_path}")
+        entries[local_path] = entry
+    return entries
+
+
+def validate_release_manifest(
+    s3: Any,
+    bucket: str,
+    manifest: Dict[str, Any],
+) -> None:
+    if not manifest.get("release_id"):
+        raise RuntimeError("Runtime manifest has no release_id")
+    entries = manifest_file_map(manifest)
+    required = {f"data/{name}" for name in DATA_FILES}
+    missing = sorted(required.difference(entries))
+    if missing:
+        raise RuntimeError(
+            "Runtime manifest is missing required serving data: " + ", ".join(missing)
+        )
+    for local_path, entry in entries.items():
+        request = {"Bucket": bucket, "Key": entry["s3_key"]}
+        version_id = str(entry.get("s3_version_id") or "").strip()
+        if version_id and version_id != "null":
+            request["VersionId"] = version_id
+        remote = s3.head_object(**request)
+        if int(remote["ContentLength"]) != int(entry["size"]):
+            raise RuntimeError(
+                f"Published object size does not match manifest: {local_path}"
+            )
+
+
+def validate_local_inputs_against_base(
+    base_manifest: Dict[str, Any],
+    filenames: Iterable[str] = DATA_FILES,
+) -> None:
+    """Ensure incremental builders consume the data pinned by the base release."""
+    entries = manifest_file_map(base_manifest)
+    for filename in filenames:
+        local_path = f"data/{filename}"
+        entry = entries.get(local_path)
+        path = DATA_ROOT / filename
+        if entry is None:
+            raise RuntimeError(f"Base manifest is missing {local_path}")
+        if not path.exists():
+            raise FileNotFoundError(f"Local release input is missing: {path}")
+        if path.stat().st_size != int(entry["size"]):
+            raise RuntimeError(
+                f"Local input differs from base release: {filename} has a different size. "
+                "Include serving-data in --only when publishing refreshed cache data."
+            )
+        if file_sha256(path) != entry["sha256"]:
+            raise RuntimeError(
+                f"Local input differs from base release: {filename} has a different hash. "
+                "Include serving-data in --only when publishing refreshed cache data."
+            )
+
+
+def remove_domain_entries(
+    entries: Dict[str, Dict[str, Any]],
+    domain: str,
+) -> None:
+    for local_path in DOMAIN_LOCAL_PATHS.get(domain, ()):
+        entries.pop(local_path, None)
+    for destination in DOMAIN_ARTIFACT_DESTINATIONS.get(domain, ()):
+        prefix = f"artifacts/{destination}/"
+        for local_path in [path for path in entries if path.startswith(prefix)]:
+            entries.pop(local_path, None)
+
+
+def write_release_pointer(
+    s3: Any,
+    bucket: str,
+    key: str,
+    manifest_body: bytes,
+) -> None:
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=manifest_body,
+        ContentType="application/json",
+    )
+
+
 def build_classification_reference() -> Path:
     summary = DATA_ROOT / "summary.parquet"
     if not summary.exists():
@@ -400,156 +557,229 @@ def publish(
     bucket: str,
     profile: str | None,
     deploy_hook_url: str | None = None,
+    domains: set[str] | None = None,
+    base_manifest_key: str = CURRENT_MANIFEST_KEY,
+    candidate_manifest_key: str = CANDIDATE_MANIFEST_KEY,
+    promote: bool = False,
+    verify_local_inputs: bool = True,
 ) -> Dict[str, Any]:
     session = boto3.Session(profile_name=profile) if profile else boto3.Session()
     s3 = session.client("s3", region_name="us-east-1")
+    selected_domains = set(BUILD_DOMAINS if domains is None else domains)
+    incremental = domains is not None
+    base_manifest = load_manifest(s3, bucket, base_manifest_key) if incremental else None
+    if incremental and "serving-data" not in selected_domains and verify_local_inputs:
+        print("Verifying local inputs against the base release", file=sys.stderr)
+        validate_local_inputs_against_base(base_manifest)
+
     generated_at = datetime.now(timezone.utc).isoformat()
     identity = hashlib.sha256(generated_at.encode()).hexdigest()[:12]
     release_id = f"ask-mimir-beta-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{identity}"
     prefix = f"ask_mimir/releases/{release_id}"
-    entries: List[Dict[str, Any]] = []
+    entries_by_path = (
+        manifest_file_map(base_manifest) if base_manifest is not None else {}
+    )
+    for domain in selected_domains:
+        remove_domain_entries(entries_by_path, domain)
 
-    pinned_serving_entries = []
-    for filename in DATA_FILES:
-        print(f"Verifying serving data: {filename}", file=sys.stderr)
-        pinned_serving_entries.append(
-            verified_serving_manifest_entry(
+    derived_release = copy.deepcopy(
+        (base_manifest or {}).get("derived_release", {})
+    )
+    metric_release_id = (base_manifest or {}).get("metric_release_id")
+
+    if "serving-data" in selected_domains:
+        for filename in DATA_FILES:
+            print(f"Verifying serving data: {filename}", file=sys.stderr)
+            entry = verified_serving_manifest_entry(
                 s3,
                 bucket,
                 f"app_cache/{filename}",
                 f"data/{filename}",
                 DATA_ROOT / filename,
             )
+            entries_by_path[entry["local_path"]] = entry
+
+    classification_path = None
+    if "classification" in selected_domains:
+        classification_path = build_classification_reference()
+        serving_classification_path = DATA_ROOT / classification_path.name
+        if (
+            not serving_classification_path.exists()
+            or file_sha256(serving_classification_path) != file_sha256(classification_path)
+        ):
+            shutil.copyfile(classification_path, serving_classification_path)
+
+    if "source-depth" in selected_domains:
+        derived_release["platform_source_depth"] = build_platform_source_depth(
+            DATA_ROOT
         )
 
-    classification_path = build_classification_reference()
-    serving_classification_path = DATA_ROOT / classification_path.name
-    if (
-        not serving_classification_path.exists()
-        or file_sha256(serving_classification_path) != file_sha256(classification_path)
-    ):
-        shutil.copyfile(classification_path, serving_classification_path)
-    source_depth_summary = build_platform_source_depth(DATA_ROOT)
-    for generated_dir in (
-        PRECOMPUTED_COMPANY_CONTEXT_DIR,
-        PLATFORM_CONTEXT_DIR,
-        STATE_MARKET_DIR,
-    ):
-        shutil.rmtree(generated_dir, ignore_errors=True)
-    market_segment_manifest = build_precomputed_market_segments(
-        DATA_ROOT,
-        MARKET_SEGMENT_DIR,
-    )
-    capability_manifest = build_precomputed_capabilities(
-        DATA_ROOT,
-        CAPABILITY_DIR,
-    )
-    product_family_manifest = build_precomputed_product_families(
-        DATA_ROOT,
-        PRODUCT_FAMILY_DIR,
-    )
-    state_market_manifest = build_precomputed_state_markets(
-        DATA_ROOT,
-        STATE_MARKET_DIR,
-    )
-    company_context_manifest = build_precomputed_parent_contexts(
-        DATA_ROOT,
-        _artifact_source("company-context"),
-        PRECOMPUTED_COMPANY_CONTEXT_DIR,
-        HIGH_VALUE_PARENT_QUERIES,
-        release_id=release_id,
-    )
-    platform_context_manifest = build_precomputed_platform_contexts(
-        DATA_ROOT,
-        PLATFORM_CONTEXT_DIR,
-        KEY_PLATFORM_CONTEXTS,
-        release_id=release_id,
-    )
-    # Build the largest new serving artifact after spill-heavy dossier generation.
-    # This keeps release publication viable on constrained local disks.
-    build_recent_awards_search()
+    if "companies" in selected_domains:
+        shutil.rmtree(PRECOMPUTED_COMPANY_CONTEXT_DIR, ignore_errors=True)
+    if "platforms" in selected_domains:
+        shutil.rmtree(PLATFORM_CONTEXT_DIR, ignore_errors=True)
+    if "states" in selected_domains:
+        shutil.rmtree(STATE_MARKET_DIR, ignore_errors=True)
 
-    for path, local_path in artifact_files():
+    if "segments" in selected_domains:
+        derived_release["market_segments"] = build_precomputed_market_segments(
+            DATA_ROOT,
+            MARKET_SEGMENT_DIR,
+        )
+    if "capabilities" in selected_domains:
+        derived_release["capability_markets"] = build_precomputed_capabilities(
+            DATA_ROOT,
+            CAPABILITY_DIR,
+        )
+    if "products" in selected_domains:
+        derived_release["product_families"] = build_precomputed_product_families(
+            DATA_ROOT,
+            PRODUCT_FAMILY_DIR,
+        )
+    if "states" in selected_domains:
+        derived_release["state_markets"] = build_precomputed_state_markets(
+            DATA_ROOT,
+            STATE_MARKET_DIR,
+        )
+    if "companies" in selected_domains:
+        company_context_manifest = build_precomputed_parent_contexts(
+            DATA_ROOT,
+            _artifact_source("company-context"),
+            PRECOMPUTED_COMPANY_CONTEXT_DIR,
+            HIGH_VALUE_PARENT_QUERIES,
+            release_id=release_id,
+        )
+        derived_release["precomputed_parent_context_count"] = len(
+            company_context_manifest.get("precomputed_parent_queries", [])
+        )
+    if "platforms" in selected_domains:
+        derived_release["precomputed_platform_contexts"] = (
+            build_precomputed_platform_contexts(
+                DATA_ROOT,
+                PLATFORM_CONTEXT_DIR,
+                KEY_PLATFORM_CONTEXTS,
+                release_id=release_id,
+            )
+        )
+
+    # This is deliberately last because it is the largest generated serving file.
+    if "recent-awards" in selected_domains:
+        build_recent_awards_search()
+
+    artifact_destinations = {
+        destination
+        for domain in selected_domains
+        for destination in DOMAIN_ARTIFACT_DESTINATIONS.get(domain, ())
+    }
+    for path, local_path in artifact_files(artifact_destinations):
         print(f"Publishing artifact: {local_path}", file=sys.stderr)
         key = f"{prefix}/{local_path}"
         s3.upload_file(str(path), bucket, key)
-        entries.append(manifest_entry(path, local_path, key))
+        entry = manifest_entry(path, local_path, key)
+        entries_by_path[local_path] = entry
 
-    entries.extend(pinned_serving_entries)
+    if "metrics" in selected_domains:
+        metric_release_id = json.loads(
+            artifact_source_for_destination("metric-release")
+            .joinpath("manifest.json")
+            .read_text()
+        )["release_id"]
 
-    for filename in GENERATED_DATA_FILES:
-        print(f"Publishing derived serving data: {filename}", file=sys.stderr)
-        path = DATA_ROOT / filename
-        key = f"{prefix}/data/{filename}"
-        s3.upload_file(str(path), bucket, key)
-        entries.append(manifest_entry(path, f"data/{filename}", key))
+    generated_by_domain = {
+        "source-depth": (
+            "niin_source_depth.parquet",
+            "platform_source_depth.parquet",
+        ),
+        "recent-awards": ("recent_awards_search.parquet",),
+    }
+    for domain, filenames in generated_by_domain.items():
+        if domain not in selected_domains:
+            continue
+        for filename in filenames:
+            print(f"Publishing derived serving data: {filename}", file=sys.stderr)
+            path = DATA_ROOT / filename
+            key = f"{prefix}/data/{filename}"
+            s3.upload_file(str(path), bucket, key)
+            entry = manifest_entry(path, f"data/{filename}", key)
+            entries_by_path[entry["local_path"]] = entry
 
-    for source_key, filename in PINNED_REFERENCE_FILES:
-        print(f"Pinning reference data: {filename}", file=sys.stderr)
-        entries.append(
-            serving_manifest_entry(
+    if "references" in selected_domains:
+        for source_key, filename in PINNED_REFERENCE_FILES:
+            print(f"Pinning reference data: {filename}", file=sys.stderr)
+            entry = serving_manifest_entry(
                 s3,
                 bucket,
                 source_key,
                 f"data/{filename}",
                 DATA_ROOT / filename,
             )
-        )
+            entries_by_path[entry["local_path"]] = entry
 
-    classification_key = f"{prefix}/data/{classification_path.name}"
-    s3.upload_file(str(classification_path), bucket, classification_key)
-    entries.append(
-        manifest_entry(
+    if classification_path is not None:
+        classification_key = f"{prefix}/data/{classification_path.name}"
+        s3.upload_file(str(classification_path), bucket, classification_key)
+        entry = manifest_entry(
             classification_path,
             f"data/{classification_path.name}",
             classification_key,
         )
-    )
+        entries_by_path[entry["local_path"]] = entry
 
     manifest = {
         "release_id": release_id,
         "generated_at": generated_at,
-        "metric_release_id": json.loads(
-            artifact_source_for_destination("metric-release")
-            .joinpath("manifest.json")
-            .read_text()
-        )["release_id"],
-        "derived_release": {
-            "platform_source_depth": source_depth_summary,
-            "market_segments": market_segment_manifest,
-            "capability_markets": capability_manifest,
-            "product_families": product_family_manifest,
-            "state_markets": state_market_manifest,
-            "precomputed_parent_context_count": len(
-                company_context_manifest.get("precomputed_parent_queries", [])
-            ),
-            "precomputed_platform_contexts": platform_context_manifest,
-        },
-        "files": entries,
+        "base_release_id": (base_manifest or {}).get("release_id"),
+        "updated_domains": sorted(selected_domains),
+        "metric_release_id": metric_release_id,
+        "derived_release": derived_release,
+        "files": [entries_by_path[path] for path in sorted(entries_by_path)],
     }
     manifest_key = f"{prefix}/runtime_manifest.json"
     manifest_body = json.dumps(manifest, indent=2).encode()
-    s3.put_object(
-        Bucket=bucket,
-        Key=manifest_key,
-        Body=manifest_body,
-        ContentType="application/json",
-    )
-    # This is the only mutable object in the release path and is written last.
-    s3.put_object(
-        Bucket=bucket,
-        Key=CURRENT_MANIFEST_KEY,
-        Body=manifest_body,
-        ContentType="application/json",
-    )
+    write_release_pointer(s3, bucket, manifest_key, manifest_body)
+    validate_release_manifest(s3, bucket, manifest)
+    write_release_pointer(s3, bucket, candidate_manifest_key, manifest_body)
+
+    current_manifest_key = None
+    if promote:
+        write_release_pointer(s3, bucket, CURRENT_MANIFEST_KEY, manifest_body)
+        current_manifest_key = CURRENT_MANIFEST_KEY
 
     deploy_status = None
-    if deploy_hook_url:
+    if deploy_hook_url and promote:
         deploy_status = trigger_render_deploy(deploy_hook_url)
     return {
         "release_id": release_id,
+        "base_release_id": (base_manifest or {}).get("release_id"),
+        "updated_domains": sorted(selected_domains),
         "immutable_manifest_key": manifest_key,
+        "candidate_manifest_key": candidate_manifest_key,
+        "current_manifest_key": current_manifest_key,
+        "promoted": promote,
+        "render_deploy_status": deploy_status,
+    }
+
+
+def promote_candidate(
+    bucket: str,
+    profile: str | None,
+    candidate_manifest_key: str = CANDIDATE_MANIFEST_KEY,
+    deploy_hook_url: str | None = None,
+) -> Dict[str, Any]:
+    session = boto3.Session(profile_name=profile) if profile else boto3.Session()
+    s3 = session.client("s3", region_name="us-east-1")
+    manifest = load_manifest(s3, bucket, candidate_manifest_key)
+    validate_release_manifest(s3, bucket, manifest)
+    manifest_body = json.dumps(manifest, indent=2).encode()
+    write_release_pointer(s3, bucket, CURRENT_MANIFEST_KEY, manifest_body)
+    deploy_status = (
+        trigger_render_deploy(deploy_hook_url) if deploy_hook_url else None
+    )
+    return {
+        "release_id": manifest["release_id"],
+        "candidate_manifest_key": candidate_manifest_key,
         "current_manifest_key": CURRENT_MANIFEST_KEY,
+        "promoted": True,
         "render_deploy_status": deploy_status,
     }
 
@@ -562,14 +792,55 @@ if __name__ == "__main__":
         "--deploy-hook-url",
         default=os.getenv("ASK_MIMIR_RENDER_DEPLOY_HOOK_URL"),
     )
+    parser.add_argument(
+        "--only",
+        help="Comma-separated release domains. Omit for a complete rebuild.",
+    )
+    parser.add_argument(
+        "--base-manifest-key",
+        default=CURRENT_MANIFEST_KEY,
+        help="Manifest whose unchanged files are reused for an incremental release.",
+    )
+    parser.add_argument(
+        "--candidate-manifest-key",
+        default=CANDIDATE_MANIFEST_KEY,
+    )
+    parser.add_argument(
+        "--promote",
+        action="store_true",
+        help="Promote the validated release to the production pointer immediately.",
+    )
+    parser.add_argument(
+        "--promote-candidate",
+        action="store_true",
+        help="Validate and promote the existing candidate without rebuilding it.",
+    )
+    parser.add_argument(
+        "--skip-local-input-verification",
+        action="store_true",
+        help="Skip base-release hash checks for local builder inputs.",
+    )
     arguments = parser.parse_args()
-    print(
-        json.dumps(
-            publish(
-                arguments.bucket,
-                arguments.profile,
-                arguments.deploy_hook_url,
-            ),
-            indent=2,
+    if arguments.promote_candidate and (arguments.only or arguments.promote):
+        parser.error("--promote-candidate cannot be combined with --only or --promote")
+    if arguments.promote_candidate:
+        result = promote_candidate(
+            arguments.bucket,
+            arguments.profile,
+            arguments.candidate_manifest_key,
+            arguments.deploy_hook_url,
         )
+    else:
+        result = publish(
+            arguments.bucket,
+            arguments.profile,
+            arguments.deploy_hook_url,
+            domains=parse_domains(arguments.only),
+            base_manifest_key=arguments.base_manifest_key,
+            candidate_manifest_key=arguments.candidate_manifest_key,
+            promote=arguments.promote,
+            verify_local_inputs=not arguments.skip_local_input_verification,
+        )
+    print(
+        json.dumps(result, indent=2)
     )
