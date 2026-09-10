@@ -1771,6 +1771,9 @@ def build_precomputed_parent_contexts(
                 context = _bounded_precomputed_context(
                     dict(store.get_raw("company_parent", match["scope_id"]))
                 )
+                if store._dynamic_builder is not None:
+                    store._dynamic_builder.connection.close()
+                    store._dynamic_builder = None
                 context.pop("_artifact_path", None)
                 filename = (
                     hashlib.sha256(str(match["scope_id"]).encode()).hexdigest()[:16]
