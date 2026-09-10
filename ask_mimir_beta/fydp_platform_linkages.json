@@ -1,0 +1,331 @@
+{
+  "definition_version": "mimir-fydp-platform-linkages-2026-09-v1",
+  "scope_note": "Explicit links between Mimir platform or system names and public FY2027 procurement budget-line titles. The broad P-1 source supplies FY2025 actual, FY2026 enacted and FY2027 request context. Published FY2028-FY2031 projections are included where structured P-40 source books are available. A link supplies program-level demand context; it does not allocate program funding to a company.",
+  "linkages": [
+    {
+      "program_id": "AEGIS_BMD",
+      "display_name": "Aegis Ballistic Missile Defense",
+      "platform_aliases": ["AEGIS COMBAT SYSTEM"],
+      "budget_title_aliases": ["AEGIS BMD", "AEGIS BMD HARDWARE AND SOFTWARE"]
+    },
+    {
+      "program_id": "AARGM_ER",
+      "display_name": "AARGM-ER",
+      "platform_aliases": ["AGM-88 HARM/AARGM", "AARGM-ER"],
+      "budget_title_aliases": ["AARGM-ER"]
+    },
+    {
+      "program_id": "AH64",
+      "display_name": "AH-64 Apache",
+      "platform_aliases": ["AH-64", "AH-64 APACHE"],
+      "budget_title_aliases": ["AH-64 APACHE BLOCK IIIA REMAN", "AH-64 MODS"]
+    },
+    {
+      "program_id": "AIM9X",
+      "display_name": "AIM-9X Sidewinder",
+      "platform_aliases": ["AIM-9 SIDEWINDER", "AIM-9X"],
+      "budget_title_aliases": ["SIDEWINDER", "SIDEWINDER (AIM-9X)", "TACTICAL AIM MISSILES"]
+    },
+    {
+      "program_id": "ALCM",
+      "display_name": "Air-Launched Cruise Missile",
+      "platform_aliases": ["ALCM"],
+      "budget_title_aliases": ["AIR LAUNCH CRUISE MISSILE (ALCM)"]
+    },
+    {
+      "program_id": "AMRAAM",
+      "display_name": "AMRAAM",
+      "platform_aliases": ["AMRAAM", "AMRAAM EPIP - BASIC", "AMRAAM (NAVY)"],
+      "budget_title_aliases": ["AMRAAM", "ADVANCED MEDIUM RANGE AIR-TO-AIR MISSILE (AMRAAM)"]
+    },
+    {
+      "program_id": "ATACMS",
+      "display_name": "ATACMS",
+      "platform_aliases": ["ATACMS"],
+      "budget_title_aliases": ["ARMY TACTICAL MSL SYS (ATACMS) - SYS SUM"]
+    },
+    {
+      "program_id": "B1B",
+      "display_name": "B-1B Lancer",
+      "platform_aliases": ["B-1B", "B-1 LANCER"],
+      "budget_title_aliases": ["B-1B"]
+    },
+    {
+      "program_id": "B2",
+      "display_name": "B-2 Spirit",
+      "platform_aliases": ["B-2", "B-2 SPIRIT"],
+      "budget_title_aliases": ["B-2A", "B-2B"]
+    },
+    {
+      "program_id": "B52",
+      "display_name": "B-52 Stratofortress",
+      "platform_aliases": ["B-52", "B-52 STRATOFORTRESS"],
+      "budget_title_aliases": ["B-52"]
+    },
+    {
+      "program_id": "C130",
+      "display_name": "C-130 family",
+      "platform_aliases": ["C-130", "C-130 HERCULES", "AC-130", "MC-130", "KC-130J"],
+      "budget_title_aliases": ["AC/MC-130J", "C-130", "C-130 SERIES", "C-130J", "C-130J MODS", "HC/MC-130 MODIFICATIONS", "HC/MC-130 POST PROD", "KC-130J"]
+    },
+    {
+      "program_id": "C17A",
+      "display_name": "C-17A Globemaster III",
+      "platform_aliases": ["C-17", "C-17A", "C-17 GLOBEMASTER III"],
+      "budget_title_aliases": ["C-17A"]
+    },
+    {
+      "program_id": "C5",
+      "display_name": "C-5 Galaxy",
+      "platform_aliases": ["C-5", "C-5 GALAXY"],
+      "budget_title_aliases": ["C-5"]
+    },
+    {
+      "program_id": "CH47",
+      "display_name": "CH-47 Chinook",
+      "platform_aliases": ["CH-47", "CH-47 CHINOOK"],
+      "budget_title_aliases": ["CH-47 CARGO HELICOPTER MODS (MYP)", "CH-47 HELICOPTER"]
+    },
+    {
+      "program_id": "CH53K",
+      "display_name": "CH-53K King Stallion",
+      "platform_aliases": ["CH-53K", "CH-53K KING STALLION"],
+      "budget_title_aliases": ["CH-53K (HEAVY LIFT)"]
+    },
+    {
+      "program_id": "COLUMBIA_CLASS",
+      "display_name": "Columbia-class submarine",
+      "platform_aliases": ["COLUMBIA CLASS SSBN", "COLUMBIA CLASS", "COLUMBIA-CLASS SUBMARINE"],
+      "budget_title_aliases": ["COLUMBIA CLASS SUBMARINE"]
+    },
+    {
+      "program_id": "ESSM",
+      "display_name": "Evolved SeaSparrow Missile",
+      "platform_aliases": ["ESSM / SEA SPARROW", "ESSM"],
+      "budget_title_aliases": ["EVOLVED SEA SPARROW MISSILE (ESSM)"]
+    },
+    {
+      "program_id": "E2D",
+      "display_name": "E-2D Advanced Hawkeye",
+      "platform_aliases": ["E-2", "E-2D", "E-2D ADVANCED HAWKEYE"],
+      "budget_title_aliases": ["E-2 SERIES", "E-2D ADV HAWKEYE"]
+    },
+    {
+      "program_id": "E3",
+      "display_name": "E-3 Sentry",
+      "platform_aliases": ["E-3", "E-3 SENTRY", "E-3 AWACS"],
+      "budget_title_aliases": ["E-3"]
+    },
+    {
+      "program_id": "F15",
+      "display_name": "F-15 family",
+      "platform_aliases": ["F-15", "F-15 EAGLE", "F-15EX"],
+      "budget_title_aliases": ["F-15", "F-15 EPAW", "F-15EX"]
+    },
+    {
+      "program_id": "F16",
+      "display_name": "F-16 Fighting Falcon",
+      "platform_aliases": ["F-16", "F-16 FIGHTING FALCON"],
+      "budget_title_aliases": ["F-16", "F-16 MODIFICATIONS", "F-16 POST PRODUCTION SUPPORT"]
+    },
+    {
+      "program_id": "F22A",
+      "display_name": "F-22A Raptor",
+      "platform_aliases": ["F-22", "F-22A", "F-22 RAPTOR"],
+      "budget_title_aliases": ["F-22A"]
+    },
+    {
+      "program_id": "F35",
+      "display_name": "F-35 Lightning II",
+      "platform_aliases": ["F-35", "F-35 LIGHTNING II"],
+      "budget_title_aliases": ["F-35", "F-35 CV SERIES", "F-35 MODIFICATIONS", "F-35 STOVL SERIES"]
+    },
+    {
+      "program_id": "FA18",
+      "display_name": "F/A-18E/F Super Hornet",
+      "platform_aliases": ["F/A-18", "F/A-18E/F", "F/A-18 SUPER HORNET"],
+      "budget_title_aliases": ["F/A-18E/F (FIGHTER) HORNET"]
+    },
+    {
+      "program_id": "GMLRS",
+      "display_name": "GMLRS",
+      "platform_aliases": ["GMLRS/GMLRS AW", "GMLRS", "MLRS"],
+      "budget_title_aliases": ["GUIDED MLRS ROCKET (GMLRS)", "GUIDED MULTIPLE-LAUNCH ROCKET SYSTEM (GMLRS)", "MLRS MODS"]
+    },
+    {
+      "program_id": "HIMARS",
+      "display_name": "HIMARS",
+      "platform_aliases": ["HIMARS"],
+      "budget_title_aliases": ["HIGH MOBILITY ARTILLERY ROCKET SYSTEM (HIMARS)", "HIMARS MODIFICATIONS"]
+    },
+    {
+      "program_id": "KC46A",
+      "display_name": "KC-46A Pegasus",
+      "platform_aliases": ["KC-46", "KC-46A", "KC-46A PEGASUS"],
+      "budget_title_aliases": ["KC-46A MDAP"]
+    },
+    {
+      "program_id": "JASSM_LRASM",
+      "display_name": "JASSM / LRASM family",
+      "platform_aliases": ["JASSM", "LRASM"],
+      "budget_title_aliases": ["JOINT AIR-SURFACE STANDOFF MISSILE", "JOINT AIR-TO-SURFACE STANDOFF MISSILE (JASSM)", "LRASM", "LRASM0"]
+    },
+    {
+      "program_id": "JAVELIN",
+      "display_name": "Javelin",
+      "platform_aliases": ["JAVELIN"],
+      "budget_title_aliases": ["JAVELIN (AAWS-M) SYSTEM SUMMARY"]
+    },
+    {
+      "program_id": "HELLFIRE_JAGM",
+      "display_name": "Hellfire / JAGM family",
+      "platform_aliases": ["HELLFIRE / JAGM", "HELLFIRE", "JAGM"],
+      "budget_title_aliases": ["PREDATOR HELLFIRE MISSILE", "JOINT AIR GROUND MISSILE (JAGM)", "JOINT AIR-TO-GROUND MSLS (JAGM)"]
+    },
+    {
+      "program_id": "MINUTEMAN_III",
+      "display_name": "Minuteman III",
+      "platform_aliases": ["MINUTEMAN III"],
+      "budget_title_aliases": ["MM III MODIFICATIONS", "ICBM FUZE MOD"]
+    },
+    {
+      "program_id": "M1_ABRAMS",
+      "display_name": "M1 Abrams",
+      "platform_aliases": ["M1 ABRAMS", "ABRAMS"],
+      "budget_title_aliases": ["ABRAMS UPGRADE PROGRAM"]
+    },
+    {
+      "program_id": "M2_BRADLEY",
+      "display_name": "Bradley fighting vehicle",
+      "platform_aliases": ["M2 BRADLEY", "BRADLEY", "BRADLEY FIGHTING VEHICLE"],
+      "budget_title_aliases": ["BRADLEY PROGRAM (MOD)"]
+    },
+    {
+      "program_id": "M109",
+      "display_name": "M109 Paladin",
+      "platform_aliases": ["M109", "M109 PALADIN", "PALADIN"],
+      "budget_title_aliases": ["M109 FOV MODIFICATIONS", "PALADIN INTEGRATED MANAGEMENT (PIM)"]
+    },
+    {
+      "program_id": "M88",
+      "display_name": "M88 Hercules",
+      "platform_aliases": ["M88", "M88 HERCULES"],
+      "budget_title_aliases": ["IMPROVED RECOVERY VEHICLE (M88 HERCULES)"]
+    },
+    {
+      "program_id": "MQ4C",
+      "display_name": "MQ-4C Triton",
+      "platform_aliases": ["MQ-4C", "MQ-4C TRITON", "TRITON"],
+      "budget_title_aliases": ["MQ-4 SERIES", "MQ-4 TRITON"]
+    },
+    {
+      "program_id": "MQ9",
+      "display_name": "MQ-9 Reaper",
+      "platform_aliases": ["MQ-9", "MQ-9 REAPER"],
+      "budget_title_aliases": ["MQ-9 MODS", "MQ-9 POST PROD", "MQ-9 UNMANNED AERIAL VEHICLE"]
+    },
+    {
+      "program_id": "MK48",
+      "display_name": "Mk 48 torpedo",
+      "platform_aliases": ["MK 48 TORPEDO"],
+      "budget_title_aliases": ["MK-48 TORPEDO", "MK-48 TORPEDO ADCAP MODS"]
+    },
+    {
+      "program_id": "MK54",
+      "display_name": "Mk 54 torpedo",
+      "platform_aliases": ["MK 54 TORPEDO"],
+      "budget_title_aliases": ["MK-54 TORPEDO MODS"]
+    },
+    {
+      "program_id": "PATRIOT",
+      "display_name": "Patriot air and missile defense system",
+      "platform_aliases": ["PATRIOT", "PATRIOT AIR DEFENSE SYSTEM", "PAC-3", "PAC-3 MSE", "AIR AND MISSILE DEFENSE RADAR"],
+      "trajectory_program_ids": ["PAC3_MSE"],
+      "budget_title_aliases": ["PATRIOT MODS", "MSE MISSILE", "LOWER TIER AIR AND MISSILE DEFENSE (AMD) SENSOR"]
+    },
+    {
+      "program_id": "P8A",
+      "display_name": "P-8A Poseidon",
+      "platform_aliases": ["P-8A", "P-8A POSEIDON"],
+      "budget_title_aliases": ["P-8 SERIES", "P-8A POSEIDON"]
+    },
+    {
+      "program_id": "PRSM",
+      "display_name": "Precision Strike Missile",
+      "platform_aliases": ["PRECISION STRIKE MISSILE (PRSM)", "PRSM"],
+      "budget_title_aliases": ["PRECISION STRIKE MISSILE (PRSM)"]
+    },
+    {
+      "program_id": "RAM",
+      "display_name": "Rolling Airframe Missile",
+      "platform_aliases": ["ROLLING AIRFRAME MISSILE (RAM)"],
+      "budget_title_aliases": ["ROLLING AIRFRAME MISSILE (RAM)"]
+    },
+    {
+      "program_id": "SENTINEL_ICBM",
+      "display_name": "Sentinel ICBM",
+      "platform_aliases": ["SENTINEL ICBM", "GROUND BASED STRATEGIC DETERRENT"],
+      "budget_title_aliases": ["GROUND BASED STRATEGIC DETERRENT", "MK21A REENTRY VEHICLE"]
+    },
+    {
+      "program_id": "SM6",
+      "display_name": "SM-6",
+      "platform_aliases": ["SM-6"],
+      "budget_title_aliases": ["STANDARD MISSILE", "STANDARD MISSILE IMPROVEMENTS", "STANDARD MISSILES MODS"]
+    },
+    {
+      "program_id": "STINGER",
+      "display_name": "Stinger",
+      "platform_aliases": ["STINGER"],
+      "budget_title_aliases": ["STINGER MODS"]
+    },
+    {
+      "program_id": "STRYKER",
+      "display_name": "Stryker family of vehicles",
+      "platform_aliases": ["STRYKER", "STRYKER FAMILY OF VEHICLES"],
+      "budget_title_aliases": ["STRYKER (MOD)", "STRYKER UPGRADE"]
+    },
+    {
+      "program_id": "THAAD",
+      "display_name": "THAAD",
+      "platform_aliases": ["THAAD"],
+      "budget_title_aliases": ["THAAD", "TERMINAL HIGH ALTITUDE AREA DEFENSE (THAAD)", "TERMINAL HIGH ALTITUDE AREA DEFENSE (THAAD) RDTE"]
+    },
+    {
+      "program_id": "TOMAHAWK",
+      "display_name": "Tomahawk",
+      "platform_aliases": ["TACTOM (TACTICAL TOMAHAWK)", "TOMAHAWK"],
+      "budget_title_aliases": ["TOMAHAWK", "TOMAHAWK MODS", "TOMAHAWK SUPPORT EQUIPMENT", "TOMAHAWK AND TOMAHAWK MISSION PLANNING CENTER (TMPC)"]
+    },
+    {
+      "program_id": "TOW",
+      "display_name": "TOW",
+      "platform_aliases": ["TOW"],
+      "budget_title_aliases": ["TOW 2 SYSTEM SUMMARY"]
+    },
+    {
+      "program_id": "TRIDENT_II",
+      "display_name": "Trident II",
+      "platform_aliases": ["TRIDENT II MISSILE"],
+      "budget_title_aliases": ["TRIDENT II MODS"]
+    },
+    {
+      "program_id": "UH60",
+      "display_name": "UH-60 Black Hawk",
+      "platform_aliases": ["UH-60", "UH-60 BLACK HAWK"],
+      "budget_title_aliases": ["UH-60 BLACKHAWK M MODEL (MYP)"]
+    },
+    {
+      "program_id": "V22",
+      "display_name": "V-22 Osprey",
+      "platform_aliases": ["V-22", "V-22 OSPREY", "CV-22"],
+      "budget_title_aliases": ["CV-22 MODIFICATION", "CV-22 MODS", "CV-22 POST PRODUCTION SUPPORT", "V-22 (MEDIUM LIFT)", "V-22 (TILT/ROTOR  ACFT) OSPREY"]
+    },
+    {
+      "program_id": "VIRGINIA_CLASS",
+      "display_name": "Virginia-class submarine",
+      "platform_aliases": ["VIRGINIA CLASS (SSN 774)", "VIRGINIA CLASS", "VIRGINIA-CLASS SUBMARINE"],
+      "budget_title_aliases": ["VIRGINIA CLASS SUBMARINE", "VIRGINIA CLASS SUPPORT EQUIPMENT"]
+    }
+  ]
+}

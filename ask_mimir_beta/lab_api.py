@@ -533,6 +533,10 @@ call the recipient an authorized distributor unless an authoritative source esta
 If the recipient has its own design-control or active authorized-source relationship, describe it as an
 alternate observed source rather than a distributor. "Only active authorized source" describes the current
 DLA reference for that NIIN; it is not proof that every award was sole-source.
+When the user asks about outlook or future demand, use future_demand_context where it contains an explicit
+link from an observed company platform to a public budget line. Describe the funding and quantity trajectory
+for that program, then explain why it may matter to the company's existing position. Do not allocate the
+program budget to the company or imply that the company will receive a fixed share.
 Do not rank COMMON MISSILE SYSTEMS beside named platforms or link it as though it were one. Where the
 underlying evidence does not resolve a named missile program, label the residual grouping "Missile systems
 (multiple programs)" and keep it separate from named-platform exposure.

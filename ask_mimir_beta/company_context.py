@@ -21,6 +21,13 @@ DEFAULT_DATA_ROOT = Path(
 )
 DEFAULT_IDENTITY_FILE = ROOT / "company_identity_overrides.json"
 DEFAULT_PROGRAM_DEFINITIONS = ROOT / "program_momentum_definitions.json"
+DEFAULT_FYDP_PLATFORM_LINKAGES = ROOT / "fydp_platform_linkages.json"
+DEFAULT_DOD_BUDGET_FILE = (
+    ROOT
+    / "budget_pipeline"
+    / "validation-output"
+    / "dod_budget_facts.parquet"
+)
 DEFAULT_FYDP_BUDGET_FILE = (
     ROOT
     / "budget_pipeline"
@@ -126,8 +133,14 @@ class CompanyContextBuilder:
         self.identity_file = identity_file.resolve()
         self.identity = json.loads(self.identity_file.read_text())
         self.program_definitions = json.loads(DEFAULT_PROGRAM_DEFINITIONS.read_text())
+        self.fydp_platform_linkages = json.loads(
+            DEFAULT_FYDP_PLATFORM_LINKAGES.read_text()
+        )
         self.fydp_budget_path = Path(
             os.getenv("ASK_MIMIR_FYDP_BUDGET_FILE", str(DEFAULT_FYDP_BUDGET_FILE))
+        ).resolve()
+        self.dod_budget_path = Path(
+            os.getenv("ASK_MIMIR_DOD_BUDGET_FILE", str(DEFAULT_DOD_BUDGET_FILE))
         ).resolve()
         self.paths = {
             key: (self.data_root / filename).resolve()
@@ -317,7 +330,7 @@ class CompanyContextBuilder:
             "context_id": context_id,
             "evidence_fingerprint": evidence_fingerprint,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "calculation_version": "mimir-company-context-2026-09-v8",
+            "calculation_version": "mimir-company-context-2026-09-v9",
             "scope": {
                 "scope_type": scope_type,
                 "scope_id": scope_id,
@@ -346,7 +359,8 @@ class CompanyContextBuilder:
             "platform_exposure": platform_exposure,
             "missile_program_trajectory": missile_program_trajectory,
             "future_demand_context": self._future_demand_context(
-                missile_program_trajectory
+                platform_exposure,
+                missile_program_trajectory,
             ),
             "customer_context": self._customer_context(cages, years),
             "reported_subcontract_relationships": network_context,
@@ -471,32 +485,168 @@ class CompanyContextBuilder:
         }
 
     def _future_demand_context(
-        self, missile_program_trajectory: Dict[str, Any]
+        self,
+        platform_exposure: Sequence[Dict[str, Any]],
+        missile_program_trajectory: Dict[str, Any],
     ) -> Dict[str, Any]:
-        if not self.fydp_budget_path.exists():
+        if not self.fydp_budget_path.exists() and not self.dod_budget_path.exists():
             return {
                 "programs": [],
-                "method": "FYDP budget projection artifact is not available",
+                "method": "Structured DoD budget artifacts are not available",
             }
-        definitions = {
-            row["program_id"]: row
-            for row in self.program_definitions.get("programs", [])
-        }
-        observed_programs = []
-        for program in missile_program_trajectory.get("programs", []):
-            observed_value = sum(
-                float(row.get("mimir_modelled_reported_subcontract_value_usd") or 0)
-                for row in program.get("annual_observations", [])
-            )
-            definition = definitions.get(program.get("program_id"))
-            if observed_value and definition and definition.get("budget_title_aliases"):
-                observed_programs.append((observed_value, program, definition))
-        observed_programs.sort(key=lambda row: row[0], reverse=True)
+        exposure_by_platform: Dict[str, List[Dict[str, Any]]] = {}
+        for row in platform_exposure:
+            platform = str(row.get("platform_family") or "").strip().upper()
+            if platform:
+                exposure_by_platform.setdefault(platform, []).append(row)
 
-        programs = []
-        for observed_value, program, definition in observed_programs:
-            aliases = [str(value).strip().upper() for value in definition["budget_title_aliases"]]
-            query = f"""
+        trajectory_by_program = {
+            str(program.get("program_id") or "").strip().upper(): program
+            for program in missile_program_trajectory.get("programs", [])
+        }
+        selected = []
+        for definition in self.fydp_platform_linkages.get("linkages", []):
+            platform_aliases = {
+                str(alias).strip().upper()
+                for alias in definition.get("platform_aliases", [])
+                if str(alias).strip()
+            }
+            matched_platform_rows = [
+                row
+                for alias in sorted(platform_aliases)
+                for row in exposure_by_platform.get(alias, [])
+            ]
+            trajectory_ids = {
+                str(value).strip().upper()
+                for value in definition.get(
+                    "trajectory_program_ids", [definition.get("program_id")]
+                )
+                if str(value or "").strip()
+            }
+            trajectory_rows = [
+                trajectory_by_program[program_id]
+                for program_id in sorted(trajectory_ids)
+                if program_id in trajectory_by_program
+            ]
+            trajectory_value = sum(
+                float(observation.get("mimir_modelled_reported_subcontract_value_usd") or 0)
+                for program in trajectory_rows
+                for observation in program.get("annual_observations", [])
+            )
+            if not matched_platform_rows and not trajectory_value:
+                continue
+            budget_aliases = {
+                str(alias).strip().upper()
+                for alias in definition.get("budget_title_aliases", [])
+                if str(alias).strip()
+            }
+            if not budget_aliases:
+                continue
+            selection_weight = max(
+                [
+                    abs(float(row.get("observed_value_usd") or 0))
+                    for row in matched_platform_rows
+                ]
+                + [abs(trajectory_value)]
+            )
+            selected.append(
+                {
+                    "definition": definition,
+                    "platform_rows": matched_platform_rows,
+                    "trajectory_value": trajectory_value,
+                    "budget_aliases": budget_aliases,
+                    "selection_weight": selection_weight,
+                }
+            )
+
+        if not selected:
+            return {
+                "programs": [],
+                "definition_version": self.fydp_platform_linkages.get(
+                    "definition_version"
+                ),
+                "method": (
+                    "No explicit link was found between the company's observed platform "
+                    "evidence and the currently structured public FYDP lines."
+                ),
+            }
+
+        all_budget_aliases = sorted(
+            {alias for item in selected for alias in item["budget_aliases"]}
+        )
+        budget_rows: List[Dict[str, Any]] = []
+        if self.dod_budget_path.exists():
+            near_term_query = f"""
+                WITH selected_rows AS (
+                    SELECT
+                        organization AS component,
+                        line_number AS p1_line_number,
+                        budget_line_item,
+                        budget_line_item_title,
+                        false AS is_advance_procurement_exhibit,
+                        fiscal_year,
+                        CASE fiscal_year
+                            WHEN 2025 THEN 'actual'
+                            WHEN 2026 THEN 'enacted_and_spend_plan_total'
+                            WHEN 2027 THEN 'total_request'
+                        END AS funding_status,
+                        measure_type,
+                        amount_usd,
+                        quantity,
+                        source_file,
+                        source_row_number
+                    FROM read_parquet(?)
+                    WHERE exhibit_type = 'P-1'
+                      AND funding_status = 'Total'
+                      AND fiscal_year BETWEEN 2025 AND 2027
+                      AND COALESCE(is_additive, true)
+                      AND UPPER(TRIM(budget_line_item_title)) IN (
+                          {placeholders(all_budget_aliases)}
+                      )
+                )
+                SELECT
+                    component,
+                    p1_line_number,
+                    budget_line_item,
+                    budget_line_item_title,
+                    is_advance_procurement_exhibit,
+                    fiscal_year,
+                    funding_status,
+                    CASE measure_type
+                        WHEN 'amount' THEN 'net_procurement_p1'
+                        WHEN 'quantity' THEN 'procurement_quantity'
+                    END AS measure_type,
+                    SUM(amount_usd) AS amount_usd,
+                    SUM(quantity) AS quantity,
+                    'PUBLISHED' AS availability_status,
+                    MAX(source_file) AS source_id,
+                    'Department of Defense FY2027 P-1 display table'
+                        AS source_document_title,
+                    NULL::BIGINT AS source_page_number,
+                    'https://comptroller.defense.gov/Budget-Materials/'
+                        AS source_landing_page,
+                    NULL::VARCHAR AS source_download_url,
+                    STRING_AGG(
+                        DISTINCT CONCAT(source_file, ' row ', source_row_number),
+                        ' | ' ORDER BY CONCAT(source_file, ' row ', source_row_number)
+                    ) AS source_locator
+                FROM selected_rows
+                WHERE measure_type IN ('amount', 'quantity')
+                GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+                ORDER BY component, p1_line_number, fiscal_year, measure_type
+            """
+            budget_rows.extend(
+                rows_as_dicts(
+                    self.connection.execute(
+                        near_term_query,
+                        [str(self.dod_budget_path), *all_budget_aliases],
+                    )
+                )
+            )
+
+        if self.fydp_budget_path.exists():
+            first_fydp_year = 2028 if self.dod_budget_path.exists() else 2025
+            fydp_query = f"""
                 SELECT
                     component,
                     p1_line_number,
@@ -516,9 +666,12 @@ class CompanyContextBuilder:
                     source_download_url,
                     source_locator
                 FROM read_parquet(?)
-                WHERE UPPER(TRIM(budget_line_item_title)) IN ({placeholders(aliases)})
+                WHERE UPPER(TRIM(budget_line_item_title)) IN (
+                    {placeholders(all_budget_aliases)}
+                )
                   AND measure_type IN ('net_procurement_p1', 'procurement_quantity')
                   AND availability_status = 'PUBLISHED'
+                  AND fiscal_year BETWEEN ? AND 2031
                   AND (
                       (fiscal_year = 2025 AND funding_status = 'actual')
                       OR (fiscal_year = 2026 AND funding_status = 'enacted')
@@ -527,30 +680,76 @@ class CompanyContextBuilder:
                   )
                 ORDER BY component, p1_line_number, fiscal_year, measure_type
             """
-            rows = rows_as_dicts(
-                self.connection.execute(query, [str(self.fydp_budget_path), *aliases])
+            budget_rows.extend(
+                rows_as_dicts(
+                    self.connection.execute(
+                        fydp_query,
+                        [
+                            str(self.fydp_budget_path),
+                            *all_budget_aliases,
+                            first_fydp_year,
+                        ],
+                    )
+                )
             )
+        rows_by_title: Dict[str, List[Dict[str, Any]]] = {}
+        for row in budget_rows:
+            title = str(row.get("budget_line_item_title") or "").strip().upper()
+            rows_by_title.setdefault(title, []).append(row)
+
+        programs = []
+        for item in sorted(
+            selected,
+            key=lambda row: row["selection_weight"],
+            reverse=True,
+        ):
+            definition = item["definition"]
+            rows = [
+                row
+                for alias in sorted(item["budget_aliases"])
+                for row in rows_by_title.get(alias, [])
+            ]
             if not rows:
                 continue
+            matched_platforms = sorted(
+                {
+                    str(row.get("platform_family") or "").strip()
+                    for row in item["platform_rows"]
+                    if str(row.get("platform_family") or "").strip()
+                }
+            )
             programs.append(
                 {
-                    "program_id": program["program_id"],
-                    "program_name": program["display_name"],
-                    "observed_site_reported_subcontract_value_usd": observed_value,
+                    "program_id": definition["program_id"],
+                    "program_name": definition["display_name"],
+                    "matched_company_platforms": matched_platforms,
+                    "company_platform_evidence": item["platform_rows"],
+                    "observed_site_reported_subcontract_value_usd": item[
+                        "trajectory_value"
+                    ],
+                    "relationship_basis": (
+                        "Explicit platform-to-budget linkage for "
+                        + ", ".join(matched_platforms or [definition["display_name"]])
+                    ),
                     "budget_projection_rows": rows,
                 }
             )
         return {
             "programs": programs,
-            "method": (
-                "Public budget projections are attached only to named programs already observed "
-                "in the site's Mimir program evidence. They are contextual program demand signals, "
-                "not a forecast of supplier revenue or accessible value."
+            "definition_version": self.fydp_platform_linkages.get(
+                "definition_version"
             ),
+            "method": (
+                "Public FY2025-FY2027 P-1 values and available FY2028-FY2031 projections "
+                "are attached through versioned explicit links to named platforms or systems "
+                "already observed for the company. They describe program-level demand and are "
+                "not allocated to the company."
+            ),
+            "coverage_note": self.fydp_platform_linkages.get("scope_note"),
             "financial_rule": (
-                "FY2027 uses total request only; FY2028-FY2031 use projected values. Net procurement "
-                "and procurement quantity remain separate, and advance-procurement exhibits retain "
-                "their own P-1 line identity."
+                "FY2025 uses actuals, FY2026 uses the published enacted and spend-plan total, "
+                "FY2027 uses total request, and FY2028-FY2031 use published projections where "
+                "available. Net procurement and procurement quantity remain separate."
             ),
         }
 
@@ -2167,6 +2366,17 @@ class CompanyContextBuilder:
                 "sha256": file_sha256(self.fydp_budget_path),
                 "size_bytes": self.fydp_budget_path.stat().st_size,
             }
+        if self.dod_budget_path.exists():
+            self._source_manifest_cache["dod_budget"] = {
+                "path": str(self.dod_budget_path),
+                "sha256": file_sha256(self.dod_budget_path),
+                "size_bytes": self.dod_budget_path.stat().st_size,
+            }
+        self._source_manifest_cache["fydp_platform_linkages"] = {
+            "path": str(DEFAULT_FYDP_PLATFORM_LINKAGES),
+            "sha256": file_sha256(DEFAULT_FYDP_PLATFORM_LINKAGES),
+            "version": self.fydp_platform_linkages.get("definition_version"),
+        }
         return self._source_manifest_cache
 
 

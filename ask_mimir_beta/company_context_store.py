@@ -18,6 +18,9 @@ import duckdb
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONTEXT_DIR = ROOT / "validation-output" / "company-context"
+FYDP_PLATFORM_LINKAGE_VERSION = json.loads(
+    (ROOT / "fydp_platform_linkages.json").read_text()
+)["definition_version"]
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
@@ -1460,6 +1463,26 @@ class CompanyContextStore:
                 context["product_and_part_evidence"] = product
                 context["calculation_version"] = "mimir-company-context-2026-09-v8"
 
+        if (
+            "future_demand_context" in FOCUS_SECTIONS[focus]
+            and context.get("future_demand_context", {}).get("definition_version")
+            != FYDP_PLATFORM_LINKAGE_VERSION
+        ):
+            from company_context import CompanyContextBuilder
+
+            with self._dynamic_lock:
+                if self._dynamic_builder is None:
+                    self._dynamic_builder = CompanyContextBuilder(
+                        data_root=self.data_root
+                    )
+                context["future_demand_context"] = (
+                    self._dynamic_builder._future_demand_context(
+                        context.get("platform_exposure", []),
+                        context.get("missile_program_trajectory", {}),
+                    )
+                )
+                context["calculation_version"] = "mimir-company-context-2026-09-v9"
+
         result = {
             "context_id": context["context_id"],
             "evidence_fingerprint": context["evidence_fingerprint"],
@@ -1707,6 +1730,13 @@ class CompanyContextStore:
                     {
                         "program_id": program.get("program_id"),
                         "program_name": program.get("program_name"),
+                        "matched_company_platforms": program.get(
+                            "matched_company_platforms", []
+                        ),
+                        "company_platform_evidence": program.get(
+                            "company_platform_evidence", []
+                        )[:6],
+                        "relationship_basis": program.get("relationship_basis"),
                         "observed_site_reported_subcontract_value_usd": program.get(
                             "observed_site_reported_subcontract_value_usd"
                         ),

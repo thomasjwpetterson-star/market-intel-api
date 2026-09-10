@@ -52,6 +52,10 @@ DATA_FILES = (
 )
 PINNED_REFERENCE_FILES = (
     (
+        "silver/dod_budget/ref_budget_facts/data/pb_fy2027/dod_budget_facts.parquet",
+        "dod_budget_facts.parquet",
+    ),
+    (
         "silver/dod_budget/ref_fydp_budget_facts/releases/pb_fy2027_v1/data/dod_fydp_budget_facts.parquet",
         "dod_fydp_budget_facts.parquet",
     ),

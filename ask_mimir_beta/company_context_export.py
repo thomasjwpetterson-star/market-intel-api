@@ -78,10 +78,10 @@ def build_company_evidence_zip(
             budget_rows.append(
                 {
                     "program": program.get("program_name"),
-                    "relationship_basis": (
-                        "Included because this company scope has observed reported "
-                        "subcontract activity linked to the program."
+                    "matched_company_platforms": program.get(
+                        "matched_company_platforms"
                     ),
+                    "relationship_basis": program.get("relationship_basis"),
                     "observed_site_reported_subcontract_value_usd": program.get(
                         "observed_site_reported_subcontract_value_usd"
                     ),
@@ -232,7 +232,8 @@ def build_company_evidence_zip(
             "10_linked_program_outlook.csv",
             budget_rows,
             [
-                "program", "relationship_basis", "component", "budget_line_item",
+                "program", "matched_company_platforms", "relationship_basis",
+                "component", "budget_line_item",
                 "budget_line_item_title",
                 "fiscal_year", "funding_status", "measure_type", "amount_usd", "quantity",
                 "source_document_title", "source_page_number", "source_landing_page",
