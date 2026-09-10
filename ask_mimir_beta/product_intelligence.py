@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -56,6 +58,93 @@ def resolve_product_family(text: str) -> str | None:
         ):
             return product_id
     return None
+
+
+def _dynamic_product_id(subject: str) -> str:
+    normalized = unicodedata.normalize("NFKD", subject).encode(
+        "ascii", "ignore"
+    ).decode("ascii")[:120]
+    encoded = base64.urlsafe_b64encode(normalized.encode("ascii")).decode("ascii")
+    return f"dynamic:{encoded.rstrip('=')}"
+
+
+def _dynamic_product_subject(product_id: str) -> str | None:
+    prefix = "dynamic:"
+    if not str(product_id or "").startswith(prefix):
+        return None
+    encoded = str(product_id)[len(prefix):]
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        subject = base64.urlsafe_b64decode(encoded + padding).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    subject = re.sub(r"\s+", " ", subject).strip(" .,:;-\u2014")
+    return subject if 3 <= len(subject) <= 120 else None
+
+
+def extract_product_subject(text: str) -> str | None:
+    """Extract an explicit product-level diligence target without guessing entities."""
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return None
+    patterns = (
+        r"(?:everything|overview|analysis|diligence|research)\s+(?:about|of|on)\s+"
+        r"(.{3,120}?)\s+(?:product\s+line|product\s+family|product\s+portfolio|portfolio)\b",
+        r"(?:tell\s+me\s+about|assess|analyse|analyze|research)\s+"
+        r"(.{3,120}?)\s+(?:product\s+line|product\s+family|product\s+portfolio|portfolio)\b",
+        r"\b(.{3,120}?)\s+(?:product\s+line|product\s+family|product\s+portfolio)\b"
+        r"(?:\s+from\s+an?\s+acquisition\s+perspective)?",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, clean, re.IGNORECASE)
+        if not match:
+            continue
+        subject = re.sub(
+            r"^(?:the|this|that)\s+", "", match.group(1), flags=re.IGNORECASE
+        ).strip(" .,:;-\u2014")
+        if 3 <= len(subject) <= 120:
+            return subject
+    if re.search(r"\b(?:acquisition|commercial)\s+diligence\b", clean, re.IGNORECASE):
+        match = re.search(
+            r"(?:on|of|for)\s+(.{3,120}?)(?:\s*[-\u2014,:;]|\s+including\b|\?|$)",
+            clean,
+            re.IGNORECASE,
+        )
+        if match:
+            return match.group(1).strip(" .,:;-\u2014")
+    return None
+
+
+def resolve_product_request(text: str) -> str | None:
+    governed = resolve_product_family(text)
+    if governed:
+        return governed
+    subject = extract_product_subject(text)
+    return _dynamic_product_id(subject) if subject else None
+
+
+def _dynamic_aliases(subject: str) -> List[str]:
+    aliases = [subject]
+    for token in re.findall(r"\b[A-Z]{2,}[A-Z0-9]*(?:[- ]+[A-Z0-9]{2,})+\b", subject):
+        if token not in aliases:
+            aliases.append(token)
+    return aliases
+
+
+def _name_tokens(value: str) -> List[str]:
+    ignored = {
+        "CO", "COMPANY", "CORP", "CORPORATION", "INC", "INCORPORATED", "LLC",
+        "LIMITED", "LTD", "LP", "THE",
+    }
+    return [
+        token for token in re.findall(r"[A-Z0-9]+", str(value or "").upper())
+        if token not in ignored
+    ]
+
+
+def _flexible_phrase_pattern(value: str) -> str:
+    pieces = [re.escape(piece) for piece in re.findall(r"[A-Z0-9]+", value.upper())]
+    return rf"(?:^|[^A-Z0-9]){'[^A-Z0-9]*'.join(pieces)}(?:[^A-Z0-9]|$)"
 
 
 def product_follow_up_intent(text: str) -> bool:
@@ -110,19 +199,75 @@ class ProductIntelligenceStore:
             else None
         )
 
+    def _dynamic_definition(self, subject: str) -> Dict[str, Any]:
+        subject_tokens = set(_name_tokens(subject))
+        first_token = next(iter(_name_tokens(subject)), "")
+        company_name = None
+        if first_token:
+            candidates = _rows(
+                self.connection.execute(
+                    """
+                    SELECT MAX(vendor_name) AS vendor_name
+                    FROM read_parquet(?)
+                    WHERE UPPER(COALESCE(vendor_name, '')) LIKE ?
+                    GROUP BY UPPER(TRIM(vendor_name))
+                    LIMIT 250
+                    """,
+                    [str(self.paths["locations"]), f"%{first_token}%"],
+                )
+            )
+            valid_names = [
+                str(row.get("vendor_name") or "").strip()
+                for row in candidates
+                if set(_name_tokens(str(row.get("vendor_name") or ""))).issubset(
+                    subject_tokens
+                )
+            ]
+            if valid_names:
+                company_name = max(valid_names, key=lambda value: len(_name_tokens(value)))
+
+        company_tokens = set(_name_tokens(company_name or ""))
+        product_tokens = [
+            token for token in _name_tokens(subject)
+            if token not in company_tokens
+            and token not in {"PRODUCT", "LINE", "FAMILY", "PORTFOLIO"}
+        ]
+        product_phrase = " ".join(product_tokens) or subject
+        aliases = [product_phrase]
+        aliases.extend(
+            token
+            for token in _dynamic_aliases(subject)
+            if any(character.isdigit() for character in token)
+            and token not in aliases
+        )
+        return {
+            "display_name": subject,
+            "manufacturer": company_name,
+            "aliases": aliases,
+            "candidate_aliases": [],
+            "official_sources": [],
+            "dynamic_scope": True,
+            "company_name": company_name,
+        }
+
     def search(self, query: str) -> Dict[str, Any]:
-        product_id = resolve_product_family(query)
+        product_id = resolve_product_request(query)
+        dynamic_subject = _dynamic_product_subject(product_id or "")
         return {
             "query": str(query or "").strip(),
             "resolved_product_id": product_id,
             "resolved_product_name": (
-                self.definitions[product_id]["display_name"] if product_id else None
+                self.definitions[product_id]["display_name"]
+                if product_id in self.definitions
+                else dynamic_subject
             ),
         }
 
     def get(self, product_id: str, limit: int = 100) -> Dict[str, Any]:
-        clean_id = str(product_id or "").strip().lower()
-        if clean_id not in self.definitions:
+        raw_id = str(product_id or "").strip()
+        dynamic_subject = _dynamic_product_subject(raw_id)
+        clean_id = raw_id if dynamic_subject else raw_id.lower()
+        if clean_id not in self.definitions and not dynamic_subject:
             raise KeyError(f"product family was not found: {product_id}")
         if clean_id not in self._cache:
             precomputed_path = (
@@ -133,8 +278,11 @@ class ProductIntelligenceStore:
             if precomputed_path is not None and precomputed_path.exists():
                 self._cache[clean_id] = json.loads(precomputed_path.read_text())
             else:
+                definition = self.definitions.get(clean_id) or self._dynamic_definition(
+                    dynamic_subject or ""
+                )
                 self._cache[clean_id] = self._build(
-                    clean_id, self.definitions[clean_id]
+                    clean_id, definition
                 )
         bounded = min(max(int(limit), 1), 250)
         pack = self._cache[clean_id]
@@ -152,6 +300,28 @@ class ProductIntelligenceStore:
             *definition.get("candidate_aliases", []),
         ]
         pattern = "|".join(_alias_pattern(alias) for alias in search_aliases)
+        dynamic_scope = bool(definition.get("dynamic_scope"))
+        company_pattern = (
+            _flexible_phrase_pattern(str(definition["company_name"]))
+            if definition.get("company_name")
+            else None
+        )
+        product_pattern = "|".join(
+            _flexible_phrase_pattern(alias) for alias in search_aliases
+        ) if dynamic_scope else pattern
+        prime_company_clause = (
+            "AND REGEXP_MATCHES(UPPER(COALESCE(vendor_name, '')), ?)"
+            if company_pattern else ""
+        )
+        network_company_clause = (
+            "AND REGEXP_MATCHES(UPPER(COALESCE(prime_name, '') || ' ' || "
+            "COALESCE(sub_name, '')), ?)"
+            if company_pattern else ""
+        )
+        item_company_clause = (
+            "AND REGEXP_MATCHES(UPPER(COALESCE(vendor_name, '')), ?)"
+            if company_pattern else ""
+        )
         opportunities = _rows(
             self.connection.execute(
                 """
@@ -162,12 +332,12 @@ class ProductIntelligenceStore:
                 WHERE REGEXP_MATCHES(UPPER(COALESCE(title, '') || ' ' || COALESCE(description, '')), ?)
                 ORDER BY TRY_CAST(LEFT(deadline, 10) AS DATE) DESC NULLS LAST
                 """,
-                [str(self.paths["opportunities"]), pattern],
+                [str(self.paths["opportunities"]), product_pattern],
             )
         )
         prime_awards = _rows(
             self.connection.execute(
-                """
+                f"""
                 SELECT contract_id, award_key, vendor_name, vendor_cage,
                        base_award_description, latest_action_description,
                        platform_family, platform_families, psc, parent_agency, sub_agency,
@@ -182,14 +352,16 @@ class ProductIntelligenceStore:
                     COALESCE(base_award_description, '') || ' ' ||
                     COALESCE(latest_action_description, '') || ' ' || COALESCE(description, '')
                 ), ?)
+                {prime_company_clause}
                 ORDER BY ABS(total_spend) DESC NULLS LAST
                 """,
-                [str(self.paths["contracts"]), pattern],
+                [str(self.paths["contracts"]), product_pattern]
+                + ([company_pattern] if company_pattern else []),
             )
         )
         reported_subawards = _rows(
             self.connection.execute(
-                """
+                f"""
                 SELECT prime_name, sub_name, prime_cage, sub_cage, contract_id,
                        prime_award_description, description AS subaward_description,
                        action_date, year AS fiscal_year, subaward_value,
@@ -199,14 +371,16 @@ class ProductIntelligenceStore:
                 WHERE REGEXP_MATCHES(UPPER(
                     COALESCE(prime_award_description, '') || ' ' || COALESCE(description, '')
                 ), ?)
+                {network_company_clause}
                 ORDER BY ABS(COALESCE(subaward_value, subaward_value_raw, 0)) DESC
                 """,
-                [str(self.paths["network"]), pattern],
+                [str(self.paths["network"]), product_pattern]
+                + ([company_pattern] if company_pattern else []),
             )
         )
         item_references = _rows(
             self.connection.execute(
-                """
+                f"""
                 WITH matched_references AS (
                     SELECT LPAD(TRIM(niin), 9, '0') AS niin,
                            MAX(nsn) AS nsn,
@@ -226,6 +400,7 @@ class ProductIntelligenceStore:
                     WHERE REGEXP_MATCHES(UPPER(
                         COALESCE(description, '') || ' ' || COALESCE(part_number, '')
                     ), ?)
+                    {item_company_clause}
                     GROUP BY 1, 3
                 ), observed_procurement AS (
                     SELECT LPAD(TRIM(niin), 9, '0') AS niin,
@@ -258,7 +433,8 @@ class ProductIntelligenceStore:
                 """,
                 [
                     str(self.paths["references"]),
-                    pattern,
+                    product_pattern,
+                    *([company_pattern] if company_pattern else []),
                     str(self.paths["suppliers"]),
                 ],
             )
@@ -326,6 +502,11 @@ class ProductIntelligenceStore:
                 "aliases": definition["aliases"],
                 "candidate_aliases_requiring_validation": definition.get(
                     "candidate_aliases", []
+                ),
+                "scope_status": (
+                    "request_defined_product_scope"
+                    if definition.get("dynamic_scope")
+                    else "governed_product_family"
                 ),
                 "observation_window": "FY2019-FY2026 public award evidence and current opportunity records",
             },

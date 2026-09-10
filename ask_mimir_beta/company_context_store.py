@@ -151,6 +151,10 @@ def _normalize_cage(value: Any) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
 
 
+def _legal_name_key(value: Any) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
 def _name_pattern(value: Any) -> str:
     tokens = re.findall(r"[A-Z0-9]+", str(value or "").upper())
     if not tokens:
@@ -354,6 +358,8 @@ class CompanyContextStore:
             path for path in self.directory_paths.values() if path.exists()
         ]
         self._directory_lock = threading.Lock()
+        self._parent_bridge_lock = threading.Lock()
+        self._parent_bridge: Dict[str, tuple[str, str | None]] | None = None
         self._dynamic_lock = threading.Lock()
         self._dynamic_builder = None
         self._dynamic_contexts: Dict[tuple[str, str], Dict[str, Any]] = {}
@@ -375,6 +381,56 @@ class CompanyContextStore:
             os.getenv("ASK_MIMIR_CACHE_DIR", str(self.context_dir / ".dynamic-cache"))
         ).resolve()
         self.dynamic_cache_dir = cache_root / "company-context" / release_namespace
+
+    def _exact_name_parent_bridge(self) -> Dict[str, tuple[str, str | None]]:
+        """Resolve blank parents only from unambiguous exact legal-name matches."""
+        if self._parent_bridge is not None:
+            return self._parent_bridge
+        profiles_path = self.directory_paths["profiles"]
+        if not profiles_path.exists():
+            self._parent_bridge = {}
+            return self._parent_bridge
+        with self._parent_bridge_lock:
+            if self._parent_bridge is not None:
+                return self._parent_bridge
+            with duckdb.connect() as connection:
+                columns = {
+                    column[0]
+                    for column in connection.execute(
+                        "SELECT * FROM read_parquet(?) LIMIT 0",
+                        [str(profiles_path)],
+                    ).description
+                }
+                if not {"ultimate_parent_name", "ultimate_parent_uei"}.issubset(columns):
+                    self._parent_bridge = {}
+                    return self._parent_bridge
+                bridge_rows = connection.execute(
+                    """
+                    WITH normalized AS (
+                        SELECT
+                            UPPER(REGEXP_REPLACE(TRIM(COALESCE(vendor_name, '')), '[^A-Za-z0-9]', '', 'g')) AS legal_name_key,
+                            NULLIF(TRIM(ultimate_parent_name), '') AS parent_name,
+                            NULLIF(TRIM(ultimate_parent_uei), '') AS parent_uei
+                        FROM read_parquet(?)
+                        WHERE NULLIF(TRIM(vendor_name), '') IS NOT NULL
+                    )
+                    SELECT
+                        legal_name_key,
+                        MIN(parent_name) AS parent_name,
+                        MODE(parent_uei) AS parent_uei
+                    FROM normalized
+                    WHERE parent_name IS NOT NULL
+                    GROUP BY legal_name_key
+                    HAVING COUNT(DISTINCT UPPER(parent_name)) = 1
+                    """,
+                    [str(profiles_path)],
+                ).fetchall()
+            self._parent_bridge = {
+                str(name_key): (str(parent_name), parent_uei)
+                for name_key, parent_name, parent_uei in bridge_rows
+                if name_key and parent_name
+            }
+        return self._parent_bridge
 
     def search(
         self, query: str, scope_type: str | None = None, limit: int = 10
@@ -760,6 +816,7 @@ class CompanyContextStore:
         if not name_pattern and not cage_is_exact:
             return []
 
+        parent_bridge = self._exact_name_parent_bridge()
         rows: Dict[str, Dict[str, Any]] = {}
         with self._directory_lock, duckdb.connect() as connection:
             connection.execute("SET preserve_insertion_order=false")
@@ -824,6 +881,9 @@ class CompanyContextStore:
                 ) in profile_rows:
                     if not cage or cage in {"UNKNOWN", "UNKNO", "00000"}:
                         continue
+                    inferred_parent = parent_bridge.get(_legal_name_key(vendor_name))
+                    if not str(ultimate_parent_name or "").strip() and inferred_parent:
+                        ultimate_parent_name, ultimate_parent_uei = inferred_parent
                     rows[cage] = {
                         "cage": cage,
                         "vendor_name": vendor_name,
@@ -1015,6 +1075,7 @@ class CompanyContextStore:
         if not parent_pattern and not exact_parent_uei:
             return []
 
+        parent_bridge = self._exact_name_parent_bridge()
         with self._directory_lock, duckdb.connect() as connection:
             connection.execute("SET preserve_insertion_order=false")
             connection.execute("SET threads=1")
@@ -1107,25 +1168,65 @@ class CompanyContextStore:
                     parameters,
                 ).fetchall()
 
-                sites = []
+                inferred_name_keys = sorted(
+                    name_key
+                    for name_key, (inferred_parent_name, _parent_uei) in parent_bridge.items()
+                    if _company_name_core(_parent_display_name(inferred_parent_name))
+                    == _company_name_core(_parent_display_name(parent_name))
+                )
+                if inferred_name_keys:
+                    placeholders = ",".join("?" for _ in inferred_name_keys)
+                    inferred_location_join = ""
+                    inferred_location_select = (
+                        "CAST(NULL AS VARCHAR) AS city, CAST(NULL AS VARCHAR) AS state"
+                    )
+                    inferred_parameters: List[Any] = [str(profiles_path)]
+                    if self.directory_paths["locations"].exists():
+                        inferred_location_join = """
+                            LEFT JOIN read_parquet(?) l
+                              ON UPPER(REGEXP_REPLACE(COALESCE(p.cage_code, ''), '[^A-Za-z0-9]', '', 'g'))
+                               = UPPER(REGEXP_REPLACE(COALESCE(l.cage_code, ''), '[^A-Za-z0-9]', '', 'g'))
+                        """
+                        inferred_location_select = "l.city, l.state"
+                        inferred_parameters.append(str(self.directory_paths["locations"]))
+                    inferred_parameters.extend(inferred_name_keys)
+                    site_rows.extend(
+                        connection.execute(
+                            f"""
+                            SELECT
+                                UPPER(REGEXP_REPLACE(COALESCE(p.cage_code, ''), '[^A-Za-z0-9]', '', 'g')) AS cage,
+                                p.vendor_name,
+                                {inferred_location_select},
+                                COALESCE(p.total_lifetime_spend, 0) AS prime_value,
+                                COALESCE(p.network_flow_total, 0) AS subcontract_value
+                            FROM read_parquet(?) p
+                            {inferred_location_join}
+                            WHERE NULLIF(TRIM(p.ultimate_parent_name), '') IS NULL
+                              AND UPPER(REGEXP_REPLACE(TRIM(COALESCE(p.vendor_name, '')), '[^A-Za-z0-9]', '', 'g'))
+                                  IN ({placeholders})
+                            """,
+                            inferred_parameters,
+                        ).fetchall()
+                    )
+
+                sites_by_cage: Dict[str, Dict[str, Any]] = {}
                 for cage, vendor_name, city, state, prime_value, subcontract_value in site_rows:
                     if not cage or cage in {"UNKNOWN", "UNKNO", "00000"}:
                         continue
-                    sites.append(
-                        {
-                            "cage": cage,
-                            "scope_id": cage,
-                            "scope_type": "company_site",
-                            "scope_name": vendor_name or f"CAGE {cage}",
-                            "vendor_name": vendor_name,
-                            "city": city,
-                            "state": state,
-                            "has_observed_profile": True,
-                            "observed_value": abs(float(prime_value or 0))
-                            + abs(float(subcontract_value or 0)),
-                            "ultimate_parent_name": parent_name,
-                        }
-                    )
+                    sites_by_cage[cage] = {
+                        "cage": cage,
+                        "scope_id": cage,
+                        "scope_type": "company_site",
+                        "scope_name": vendor_name or f"CAGE {cage}",
+                        "vendor_name": vendor_name,
+                        "city": city,
+                        "state": state,
+                        "has_observed_profile": True,
+                        "observed_value": abs(float(prime_value or 0))
+                        + abs(float(subcontract_value or 0)),
+                        "ultimate_parent_name": parent_name,
+                    }
+                sites = list(sites_by_cage.values())
                 cages = sorted({site["cage"] for site in sites})
                 if not cages:
                     continue

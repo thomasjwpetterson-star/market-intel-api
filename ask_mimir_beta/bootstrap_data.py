@@ -183,6 +183,9 @@ def bootstrap() -> Dict[str, Any]:
     os.environ["ASK_MIMIR_CAPABILITY_ONTOLOGY"] = str(
         artifact_root / "capability-markets" / "ontology.json"
     )
+    os.environ["ASK_MIMIR_STATE_MARKET_DIR"] = str(
+        artifact_root / "state-markets"
+    )
     os.environ["ASK_MIMIR_PRODUCT_DIR"] = str(
         artifact_root / "product-families"
     )

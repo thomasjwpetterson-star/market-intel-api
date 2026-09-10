@@ -24,6 +24,7 @@ from bootstrap_data import DEFAULT_BUCKET, file_sha256
 from build_platform_source_depth import build_platform_source_depth
 from capability_discovery import build_precomputed_capabilities
 from company_context_store import build_precomputed_parent_contexts
+from geographic_market import build_precomputed_state_markets
 from market_segment import build_precomputed_market_segments
 from platform_context import build_precomputed_platform_contexts
 from product_intelligence import build_precomputed_product_families
@@ -50,6 +51,7 @@ DATA_FILES = (
 GENERATED_DATA_FILES = (
     "niin_source_depth.parquet",
     "platform_source_depth.parquet",
+    "recent_awards_search.parquet",
 )
 PINNED_REFERENCE_FILES = (
     (
@@ -65,6 +67,7 @@ PRECOMPUTED_COMPANY_CONTEXT_DIR = (
     ROOT / "validation-output" / "precomputed-company-contexts"
 )
 PLATFORM_CONTEXT_DIR = ROOT / "validation-output" / "platform-contexts"
+STATE_MARKET_DIR = ROOT / "validation-output" / "state-markets"
 RUNTIME_ARTIFACT_ROOT = ROOT / ".runtime-data" / "artifacts"
 
 HIGH_VALUE_PARENT_QUERIES = (
@@ -141,6 +144,7 @@ def artifact_directories() -> Tuple[Tuple[Path, str], ...]:
         (CAPABILITY_DIR, "capability-markets"),
         (PRODUCT_FAMILY_DIR, "product-families"),
         (PLATFORM_CONTEXT_DIR, "platform-contexts"),
+        (STATE_MARKET_DIR, "state-markets"),
     )
 
 
@@ -345,6 +349,53 @@ def build_classification_reference() -> Path:
     return CLASSIFICATION_REFERENCE
 
 
+def build_recent_awards_search() -> Path:
+    """Materialize the bounded recent-award corpus used by natural-language search."""
+    source = DATA_ROOT / "contracts_rolled.parquet"
+    output = DATA_ROOT / "recent_awards_search.parquet"
+    if not source.exists():
+        raise FileNotFoundError(f"recent-award search source was not found: {source}")
+    source_sql = str(source).replace("'", "''")
+    output_sql = str(output).replace("'", "''")
+    with duckdb.connect() as connection:
+        connection.execute("SET preserve_insertion_order=false")
+        connection.execute("SET threads=4")
+        connection.execute("SET memory_limit='1GB'")
+        connection.execute(
+            f"""
+            COPY (
+                SELECT
+                    contract_id,
+                    award_key,
+                    vendor_name,
+                    vendor_cage,
+                    parent_agency,
+                    sub_agency,
+                    psc,
+                    naics_code,
+                    platform_family,
+                    total_spend,
+                    last_action_date,
+                    base_award_description,
+                    latest_action_description,
+                    description,
+                    UPPER(
+                        COALESCE(base_award_description, '') || ' ' ||
+                        COALESCE(latest_action_description, description, '')
+                    ) AS search_text
+                FROM read_parquet('{source_sql}')
+                WHERE source_system = 'USA_SPENDING'
+                  AND year BETWEEN 2025 AND 2026
+            ) TO '{output_sql}' (
+                FORMAT PARQUET,
+                COMPRESSION ZSTD,
+                ROW_GROUP_SIZE 100000
+            )
+            """
+        )
+    return output
+
+
 def publish(
     bucket: str,
     profile: str | None,
@@ -379,9 +430,11 @@ def publish(
     ):
         shutil.copyfile(classification_path, serving_classification_path)
     source_depth_summary = build_platform_source_depth(DATA_ROOT)
+    build_recent_awards_search()
     for generated_dir in (
         PRECOMPUTED_COMPANY_CONTEXT_DIR,
         PLATFORM_CONTEXT_DIR,
+        STATE_MARKET_DIR,
     ):
         shutil.rmtree(generated_dir, ignore_errors=True)
     market_segment_manifest = build_precomputed_market_segments(
@@ -395,6 +448,10 @@ def publish(
     product_family_manifest = build_precomputed_product_families(
         DATA_ROOT,
         PRODUCT_FAMILY_DIR,
+    )
+    state_market_manifest = build_precomputed_state_markets(
+        DATA_ROOT,
+        STATE_MARKET_DIR,
     )
     company_context_manifest = build_precomputed_parent_contexts(
         DATA_ROOT,
@@ -460,6 +517,7 @@ def publish(
             "market_segments": market_segment_manifest,
             "capability_markets": capability_manifest,
             "product_families": product_family_manifest,
+            "state_markets": state_market_manifest,
             "precomputed_parent_context_count": len(
                 company_context_manifest.get("precomputed_parent_queries", [])
             ),

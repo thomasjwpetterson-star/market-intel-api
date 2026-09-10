@@ -152,10 +152,14 @@ class MarketRecordSearchStore:
         self.paths = {
             "opportunities": self.data_root / "opportunities.parquet",
             "contracts": self.data_root / "contracts_rolled.parquet",
+            "recent_awards": self.data_root / "recent_awards_search.parquet",
             "classifications": self.data_root / "classification_reference.parquet",
             "locations": self.data_root / "cage_locations.parquet",
         }
-        missing = [str(path) for path in self.paths.values() if not path.exists()]
+        required_paths = {
+            key: path for key, path in self.paths.items() if key != "recent_awards"
+        }
+        missing = [str(path) for path in required_paths.values() if not path.exists()]
         if missing:
             raise FileNotFoundError(f"market-record search sources are missing: {missing}")
         self.connection = duckdb.connect()
@@ -223,9 +227,25 @@ class MarketRecordSearchStore:
             )
             window = "Open notices with response deadlines on or after the search date"
         else:
+            award_source = (
+                self.paths["recent_awards"]
+                if self.paths["recent_awards"].exists()
+                else self.paths["contracts"]
+            )
+            source_filter = (
+                "TRUE"
+                if award_source == self.paths["recent_awards"]
+                else "a.source_system = 'USA_SPENDING' AND a.year BETWEEN 2025 AND 2026"
+            )
+            search_expression = (
+                "a.search_text"
+                if award_source == self.paths["recent_awards"]
+                else "UPPER(COALESCE(a.base_award_description, '') || ' ' || "
+                     "COALESCE(a.latest_action_description, a.description, ''))"
+            )
             records = _rows(
                 self.connection.execute(
-                    """
+                    f"""
                     WITH locations AS (
                         SELECT UPPER(TRIM(cage_code)) AS cage, MAX(city) AS city,
                                MAX(state) AS state FROM read_parquet(?) GROUP BY 1
@@ -245,14 +265,13 @@ class MarketRecordSearchStore:
                     LEFT JOIN locations l ON UPPER(TRIM(a.vendor_cage)) = l.cage
                     LEFT JOIN read_parquet(?) c
                       ON c.classification_type = 'PSC' AND c.code = a.psc
-                    WHERE a.source_system = 'USA_SPENDING'
-                      AND a.year BETWEEN 2025 AND 2026
-                      AND REGEXP_MATCHES(UPPER(COALESCE(a.base_award_description, '') || ' ' || COALESCE(a.latest_action_description, a.description, '')), ?)
+                    WHERE {source_filter}
+                      AND REGEXP_MATCHES({search_expression}, ?)
                     ORDER BY relevance_score DESC, ABS(a.total_spend) DESC, latest_action_date DESC
                     LIMIT 250
                     """,
                     [str(self.paths["locations"]), pattern, pattern,
-                     str(self.paths["contracts"]), str(self.paths["classifications"]), pattern],
+                     str(award_source), str(self.paths["classifications"]), pattern],
                 )
             )
             window = "FY2025-FY2026 observed contract awards"

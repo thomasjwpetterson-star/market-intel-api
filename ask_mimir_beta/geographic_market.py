@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -11,6 +14,9 @@ import duckdb
 
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
+)
+DEFAULT_PRECOMPUTED_DIR = (
+    Path(__file__).resolve().parent / "validation-output" / "state-markets"
 )
 
 US_STATES = {
@@ -103,7 +109,13 @@ def state_market_follow_up_intent(text: str) -> bool:
 class StateIndustrialBaseStore:
     """Rank registered facilities and in-state work using separate value lanes."""
 
-    def __init__(self, data_root: Path = DEFAULT_DATA_ROOT) -> None:
+    def __init__(
+        self,
+        data_root: Path = DEFAULT_DATA_ROOT,
+        precomputed_dir: Path | None = None,
+        *,
+        load_precomputed: bool = True,
+    ) -> None:
         self.data_root = data_root.resolve()
         self.paths = {
             "transactions": self.data_root / "transactions.parquet",
@@ -118,13 +130,25 @@ class StateIndustrialBaseStore:
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")
         self._cache: Dict[str, Dict[str, Any]] = {}
+        configured_dir = precomputed_dir or Path(
+            os.getenv("ASK_MIMIR_STATE_MARKET_DIR", str(DEFAULT_PRECOMPUTED_DIR))
+        )
+        self.precomputed_dir = configured_dir.resolve() if load_precomputed else None
 
     def get(self, state_code: str, limit: int = 30) -> Dict[str, Any]:
         code = str(state_code or "").strip().upper()
         if code not in STATE_NAMES:
             raise KeyError(f"US state code was not recognized: {state_code}")
         if code not in self._cache:
-            self._cache[code] = self._build(code)
+            precomputed_path = (
+                self.precomputed_dir / f"{code.lower()}.json"
+                if self.precomputed_dir is not None
+                else None
+            )
+            if precomputed_path is not None and precomputed_path.exists():
+                self._cache[code] = json.loads(precomputed_path.read_text())
+            else:
+                self._cache[code] = self._build(code)
         pack = self._cache[code]
         bounded = min(max(int(limit), 1), 75)
         return {
@@ -290,3 +314,31 @@ class StateIndustrialBaseStore:
                 "DLA procurement and reported subcontract value remain separately labelled."
             ),
         }
+
+
+def build_precomputed_state_markets(
+    data_root: Path,
+    output_dir: Path,
+) -> Dict[str, Any]:
+    """Materialize every state dossier for a versioned runtime release."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    store = StateIndustrialBaseStore(data_root, load_precomputed=False)
+    entries = []
+    for state_code in sorted(STATE_NAMES):
+        pack = store.get(state_code, limit=75)
+        path = output_dir / f"{state_code.lower()}.json"
+        path.write_text(json.dumps(pack, indent=2, default=str))
+        entries.append(
+            {
+                "state_code": state_code,
+                "state_name": STATE_NAMES[state_code],
+                "path": path.name,
+                "coverage": pack.get("coverage", {}),
+            }
+        )
+    manifest = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "states": entries,
+    }
+    (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return manifest

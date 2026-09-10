@@ -45,7 +45,12 @@ class CompanyParentResolutionTests(unittest.TestCase):
                         ('E4444', 'EUROFINS EATON ANALYTICAL, LLC', 'EUROFINS EATON ANALYTICAL', 'EUROFINS001', 500.0, 50.0),
                         ('T1111', 'DATA DEVICE CORPORATION', 'TRANSDIGM GROUP INCORPORATED', 'TRANSDIGM001', 900.0, 90.0),
                         ('T2222', 'ARMTEC DEFENSE PRODUCTS CO.', 'TRANSDIGM', 'TRANSDIGM002', 800.0, 80.0),
-                        ('T3333', 'TRANSDIGM INC.', NULL, NULL, 700.0, 70.0)
+                        ('T3333', 'TRANSDIGM INC.', NULL, NULL, 700.0, 70.0),
+                        ('L1111', 'L3HARRIS TECHNOLOGIES, INC.', 'L3HARRIS TECHNOLOGIES, INC.', 'L3HARRIS001', 600.0, 60.0),
+                        ('L2222', 'L3HARRIS TECHNOLOGIES, INC.', NULL, NULL, 500.0, 50.0),
+                        ('X1111', 'CONFLICTING SYSTEMS, INC.', 'PARENT ALPHA', 'ALPHAUEI001', 100.0, 10.0),
+                        ('X2222', 'CONFLICTING SYSTEMS, INC.', 'PARENT BRAVO', 'BRAVOUEI001', 90.0, 9.0),
+                        ('X3333', 'CONFLICTING SYSTEMS, INC.', NULL, NULL, 80.0, 8.0)
                     ) AS t(
                         cage_code,
                         vendor_name,
@@ -106,6 +111,11 @@ class CompanyParentResolutionTests(unittest.TestCase):
                     ,('T1111', 'DATA DEVICE CORPORATION', 'BOHEMIA', 'NY', 'A', NULL)
                     ,('T2222', 'ARMTEC DEFENSE PRODUCTS CO.', 'COACHELLA', 'CA', 'A', NULL)
                     ,('T3333', 'TRANSDIGM INC.', 'CLEVELAND', 'OH', 'A', NULL)
+                    ,('L1111', 'L3HARRIS TECHNOLOGIES, INC.', 'MELBOURNE', 'FL', 'A', NULL)
+                    ,('L2222', 'L3HARRIS TECHNOLOGIES, INC.', 'PALM BAY', 'FL', 'A', NULL)
+                    ,('X1111', 'CONFLICTING SYSTEMS, INC.', 'ALPHA', 'VA', 'A', NULL)
+                    ,('X2222', 'CONFLICTING SYSTEMS, INC.', 'BRAVO', 'VA', 'A', NULL)
+                    ,('X3333', 'CONFLICTING SYSTEMS, INC.', 'CHARLIE', 'VA', 'A', NULL)
                 ) AS t(cage_code, vendor_name, city, state, cage_status, replacement_cage)
             ) TO ? (FORMAT PARQUET)
             """,
@@ -126,6 +136,26 @@ class CompanyParentResolutionTests(unittest.TestCase):
             self.assertEqual(parent["site_count"], 2)
             self.assertEqual(parent["resolved_cages"], ["11111", "22222"])
             self.assertEqual(parent["group_kind"], "reported_ultimate_parent")
+
+    def test_exact_legal_name_recovers_missing_parent_without_fuzzy_matching(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            result = store.search("L3Harris", limit=20)
+
+            parent = next(
+                row for row in result["matches"] if row["scope_type"] == "company_parent"
+            )
+            self.assertEqual(parent["resolved_cages"], ["L1111", "L2222"])
+
+    def test_exact_legal_name_does_not_infer_a_conflicting_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            result = store.search("Conflicting Systems", limit=20)
+
+            inferred_site = next(
+                row for row in result["matches"] if row.get("scope_id") == "X3333"
+            )
+            self.assertIsNone(inferred_site.get("ultimate_parent_name"))
 
     def test_parent_scope_identifier_is_stable_for_the_normalized_parent(self):
         with tempfile.TemporaryDirectory() as directory:

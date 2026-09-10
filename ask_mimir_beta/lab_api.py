@@ -52,7 +52,7 @@ from market_record_search import (
 from product_intelligence import (
     ProductIntelligenceStore,
     product_follow_up_intent,
-    resolve_product_family,
+    resolve_product_request,
 )
 from competitor_discovery_export import build_competitor_discovery_zip
 from metric_store import MetricStore
@@ -868,6 +868,13 @@ variants, upgrades and adjacent equipment. Use first-party sources for product i
 functions. Treat candidate_aliases_requiring_validation as user-supplied leads until an authoritative
 source confirms that identity. Use government records for customers, platforms, contract activity, competition status,
 contracting entities and places of performance.
+
+When scope.scope_status is request_defined_product_scope, the user's product phrase defines the
+initial search boundary rather than a pre-approved Mimir product family. Verify the product identity,
+manufacturer and named variants with authoritative web sources before describing them as facts.
+Use the structured government matches as evidence leads, rank exact product/model matches above
+generic terminology, and omit irrelevant broad matches rather than presenting an empty company
+profile or silently changing to a different workflow.
 
 Treat contracting location and place of performance as separate facts. A prime recipient, OEM,
 design authority, manufacturing site and integration site may be different organizations or
@@ -3078,7 +3085,7 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
             entities=[_routing_entity("company_site", cage, source="identifier", confidence=1.0)],
         ))
 
-    product_id = resolve_product_family(latest)
+    product_id = resolve_product_request(latest)
     if product_id:
         add(_routing_candidate(
             "product_intelligence",
@@ -3093,7 +3100,7 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
             (
                 resolved
                 for message in reversed(request.messages[:-1])
-                if (resolved := resolve_product_family(message.content))
+                if (resolved := resolve_product_request(message.content))
             ),
             None,
         )
@@ -4483,7 +4490,7 @@ def generate_answer(
         and award_opportunity_follow_up_intent(latest_question)
     )
     product_id = (
-        resolve_product_family(latest_question)
+        resolve_product_request(latest_question)
         if selected_workflow == "product_intelligence"
         else None
     )
@@ -4499,7 +4506,7 @@ def generate_answer(
             (
                 resolved
                 for message in reversed(request.messages[:-1])
-                if (resolved := resolve_product_family(message.content))
+                if (resolved := resolve_product_request(message.content))
             ),
             None,
         )
