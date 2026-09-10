@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
@@ -2149,6 +2149,28 @@ class ActiveScope(BaseModel):
 class AskRequest(BaseModel):
     messages: List[ChatMessage] = Field(min_length=1, max_length=20)
     active_scope: Optional[ActiveScope] = None
+    conversation_id: Optional[str] = Field(
+        default=None,
+        min_length=12,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+
+
+class RoutingEntity(BaseModel):
+    entity_type: str
+    entity_id: str
+    entity_name: Optional[str] = None
+    source: str
+    confidence: float = Field(ge=0, le=1)
+
+
+class RoutingCandidate(BaseModel):
+    workflow: str
+    reason: str
+    confidence: float = Field(ge=0, le=1)
+    resolved_entities: List[RoutingEntity] = Field(default_factory=list)
+    uses_current_scope: bool = False
 
 
 class RoutingDecision(BaseModel):
@@ -2156,6 +2178,13 @@ class RoutingDecision(BaseModel):
     reason: str
     confidence: float = Field(ge=0, le=1)
     fallback_used: bool = False
+    intended_workflow: Optional[str] = None
+    resolved_entities: List[RoutingEntity] = Field(default_factory=list)
+    subject_changed: bool = False
+    user_correction: bool = False
+    clarification_needed: bool = False
+    current_scope: Optional[ActiveScope] = None
+    candidates: List[RoutingCandidate] = Field(default_factory=list)
 
 
 class FeedbackRequest(BaseModel):
@@ -2743,12 +2772,76 @@ def _route(
     confidence: float,
     *,
     fallback_used: bool = False,
+    intended_workflow: str | None = None,
+    resolved_entities: List[RoutingEntity] | None = None,
+    subject_changed: bool = False,
+    user_correction: bool = False,
+    clarification_needed: bool = False,
+    current_scope: ActiveScope | None = None,
+    candidates: List[RoutingCandidate] | None = None,
 ) -> RoutingDecision:
     return RoutingDecision(
         workflow=workflow,
         reason=reason,
         confidence=confidence,
         fallback_used=fallback_used,
+        intended_workflow=intended_workflow or workflow,
+        resolved_entities=resolved_entities or [],
+        subject_changed=subject_changed,
+        user_correction=user_correction,
+        clarification_needed=clarification_needed,
+        current_scope=current_scope,
+        candidates=candidates or [],
+    )
+
+
+SCOPE_WORKFLOWS = {
+    "product_family": "product_intelligence",
+    "record_search": "market_record_search",
+    "contract": "contract_or_opportunity",
+    "opportunity": "contract_or_opportunity",
+    "item": "item_intelligence",
+    "market_segment": "market_segment_intelligence",
+    "state_market": "state_industrial_base",
+    "capability_market": "capability_discovery",
+    "platform_comparison": "platform_comparison",
+    "platform": "platform_intelligence",
+    "company_parent": "company_site_intelligence",
+    "company_site": "company_site_intelligence",
+}
+
+
+def _routing_entity(
+    entity_type: str,
+    entity_id: Any,
+    *,
+    entity_name: Any = None,
+    source: str,
+    confidence: float,
+) -> RoutingEntity:
+    return RoutingEntity(
+        entity_type=entity_type,
+        entity_id=str(entity_id),
+        entity_name=str(entity_name) if entity_name else None,
+        source=source,
+        confidence=confidence,
+    )
+
+
+def _routing_candidate(
+    workflow: str,
+    reason: str,
+    confidence: float,
+    *,
+    entities: List[RoutingEntity] | None = None,
+    uses_current_scope: bool = False,
+) -> RoutingCandidate:
+    return RoutingCandidate(
+        workflow=workflow,
+        reason=reason,
+        confidence=confidence,
+        resolved_entities=entities or [],
+        uses_current_scope=uses_current_scope,
     )
 
 
@@ -2854,144 +2947,417 @@ def _conversational_scope_workflow(request: AskRequest) -> str | None:
         } or bool(re.match(r"^(?:what|how) about\b", text))
     if not refers_back:
         return None
-    return {
-        "product_family": "product_intelligence",
-        "record_search": "market_record_search",
-        "contract": "contract_or_opportunity",
-        "opportunity": "contract_or_opportunity",
-        "item": "item_intelligence",
-        "market_segment": "market_segment_intelligence",
-        "state_market": "state_industrial_base",
-        "capability_market": "capability_discovery",
-        "platform_comparison": "platform_comparison",
-        "platform": "platform_intelligence",
-        "company_parent": "company_site_intelligence",
-        "company_site": "company_site_intelligence",
-    }.get(request.active_scope.scope_type)
+    return SCOPE_WORKFLOWS.get(request.active_scope.scope_type)
 
 
-def routing_decision_for_request(request: AskRequest) -> RoutingDecision:
+def _scope_follow_up_workflow(request: AskRequest) -> str | None:
+    scope = request.active_scope
+    if not scope:
+        return None
+    latest = request.messages[-1].content
+    if _conversational_scope_workflow(request):
+        return SCOPE_WORKFLOWS.get(scope.scope_type)
+    predicates = {
+        "product_family": product_follow_up_intent,
+        "record_search": record_search_follow_up_intent,
+        "contract": award_opportunity_follow_up_intent,
+        "opportunity": award_opportunity_follow_up_intent,
+        "item": item_follow_up_intent,
+        "market_segment": market_segment_follow_up_intent,
+        "state_market": state_market_follow_up_intent,
+        "capability_market": capability_market_follow_up_intent,
+        "platform_comparison": platform_comparison_follow_up_intent,
+        "platform": platform_follow_up_intent,
+        "company_parent": company_follow_up_intent,
+        "company_site": company_follow_up_intent,
+    }
+    predicate = predicates.get(scope.scope_type)
+    return SCOPE_WORKFLOWS.get(scope.scope_type) if predicate and predicate(latest) else None
+
+
+def _scope_entity(scope: ActiveScope) -> RoutingEntity:
+    return _routing_entity(
+        scope.scope_type,
+        scope.scope_id,
+        entity_name=scope.scope_name,
+        source="conversation_scope",
+        confidence=1.0,
+    )
+
+
+def _same_scope_entity(scope: ActiveScope, entities: List[RoutingEntity]) -> bool:
+    scope_id = re.sub(r"[^A-Z0-9]", "", scope.scope_id.upper())
+    if not scope_id:
+        return False
+    return any(
+        re.sub(r"[^A-Z0-9]", "", entity.entity_id.upper()) == scope_id
+        for entity in entities
+    )
+
+
+def _company_routing_candidate(request: AskRequest) -> RoutingCandidate | None:
+    query = explicit_company_name_query(request.messages)
+    if not query:
+        return None
+    generic_tokens = {
+        "a", "about", "all", "an", "and", "answer", "broader", "contract", "deadline",
+        "defence", "defense", "do", "evidence", "give", "is", "it", "market",
+        "me", "military", "no", "number", "of", "part", "record", "ecosystem",
+        "pls", "please", "show", "tell", "us",
+        "that", "the", "this", "what", "which", "who", "why",
+    }
+    meaningful = [
+        token for token in re.findall(r"[A-Z0-9]+", query.upper())
+        if token.lower() not in generic_tokens
+    ]
+    if not meaningful:
+        return None
+    normalized_query = " ".join(meaningful)
+    entities = [_routing_entity(
+        "company_candidate",
+        normalized_query,
+        entity_name=query.strip(),
+        source="natural_language_classifier",
+        confidence=0.985,
+    )]
+    return _routing_candidate(
+        "company_site_intelligence",
+        "company_or_site_language",
+        0.985,
+        entities=entities,
+    )
+
+
+def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
+    latest = str(request.messages[-1].content or "")
+    candidates: List[RoutingCandidate] = []
+
+    def add(candidate: RoutingCandidate | None) -> None:
+        if candidate:
+            candidates.append(candidate)
+
     if is_article_analysis_request(request.messages):
-        return _route("news_article_implications", "article_url_or_text", 1.0)
+        add(_routing_candidate("news_article_implications", "article_url_or_text", 1.0))
     if is_clearly_out_of_domain(request.messages):
-        return _route("out_of_domain", "clear_non_defense_request", 0.99)
-    if resolve_product_family(request.messages[-1].content):
-        return _route("product_intelligence", "recognized_product_family", 0.98)
-    if product_follow_up_intent(request.messages[-1].content) and any(
-        resolve_product_family(message.content) for message in request.messages[:-1]
-    ):
-        return _route("product_intelligence", "product_family_conversation", 0.94)
-    if (
-        request.active_scope
-        and request.active_scope.scope_type == "product_family"
-        and product_follow_up_intent(request.messages[-1].content)
-    ):
-        return _route("product_intelligence", "active_product_family", 0.98)
-    if resolve_market_record_search(request.messages[-1].content):
-        return _route("market_record_search", "award_or_opportunity_search", 0.98)
-    if (
-        request.active_scope
-        and request.active_scope.scope_type == "record_search"
-        and record_search_follow_up_intent(request.messages[-1].content)
-    ):
-        return _route("market_record_search", "active_record_search", 0.98)
-    if explicit_award_or_opportunity_query(request.messages):
-        return _route("contract_or_opportunity", "explicit_record_identifier", 1.0)
-    if (
-        request.active_scope
-        and request.active_scope.scope_type in {"contract", "opportunity"}
-        and award_opportunity_follow_up_intent(request.messages[-1].content)
-    ):
-        return _route("contract_or_opportunity", "active_contract_or_opportunity", 0.98)
-    if explicit_item_query(request.messages):
-        return _route("item_intelligence", "explicit_item_identifier", 1.0)
-    if (
-        request.active_scope
-        and request.active_scope.scope_type == "item"
-        and item_follow_up_intent(request.messages[-1].content)
-    ):
-        return _route("item_intelligence", "active_item", 0.98)
-    if explicit_platform_comparison(request.messages, runtime.platform_contexts):
-        return _route("platform_comparison", "multiple_named_platforms", 0.99)
-    if explicit_platform_query(request.messages, runtime.platform_contexts):
-        return _route("platform_intelligence", "recognized_platform", 0.98)
+        add(_routing_candidate("out_of_domain", "clear_non_defense_request", 0.99))
+
+    award_id = explicit_award_or_opportunity_query(request.messages)
+    if award_id:
+        add(_routing_candidate(
+            "contract_or_opportunity",
+            "explicit_record_identifier",
+            1.0,
+            entities=[_routing_entity(
+                "contract_or_opportunity", award_id, source="identifier", confidence=1.0
+            )],
+        ))
+    item_id = explicit_item_query(request.messages)
+    if item_id:
+        add(_routing_candidate(
+            "item_intelligence",
+            "explicit_item_identifier",
+            1.0,
+            entities=[_routing_entity("item", item_id, source="identifier", confidence=1.0)],
+        ))
+    cage = company_site_dossier_cage(request.messages)
+    trajectory_cage = company_site_trajectory_cage(request.messages)
+    if trajectory_cage:
+        add(_routing_candidate(
+            "company_site_trajectory",
+            "explicit_cage_trajectory",
+            1.0,
+            entities=[_routing_entity(
+                "company_site", trajectory_cage, source="identifier", confidence=1.0
+            )],
+        ))
+    elif cage:
+        add(_routing_candidate(
+            "company_site_intelligence",
+            "explicit_cage_identifier",
+            1.0,
+            entities=[_routing_entity("company_site", cage, source="identifier", confidence=1.0)],
+        ))
+
+    product_id = resolve_product_family(latest)
+    if product_id:
+        add(_routing_candidate(
+            "product_intelligence",
+            "recognized_product_family",
+            0.98,
+            entities=[_routing_entity(
+                "product_family", product_id, source="product_ontology", confidence=0.98
+            )],
+        ))
+    elif product_follow_up_intent(latest):
+        prior_product = next(
+            (
+                resolved
+                for message in reversed(request.messages[:-1])
+                if (resolved := resolve_product_family(message.content))
+            ),
+            None,
+        )
+        if prior_product:
+            add(_routing_candidate(
+                "product_intelligence",
+                "product_family_conversation",
+                0.94,
+                entities=[_routing_entity(
+                    "product_family", prior_product,
+                    source="conversation_history", confidence=0.94,
+                )],
+            ))
+    record_search = resolve_market_record_search(latest)
+    if record_search:
+        add(_routing_candidate(
+            "market_record_search",
+            "award_or_opportunity_search",
+            0.98,
+            entities=[_routing_entity(
+                "record_search",
+                record_search.get("subject") or record_search.get("query") or latest,
+                source="record_search_parser",
+                confidence=0.98,
+            )],
+        ))
+    compared_platforms = explicit_platform_comparison(request.messages, runtime.platform_contexts)
+    if compared_platforms:
+        add(_routing_candidate(
+            "platform_comparison",
+            "multiple_named_platforms",
+            0.99,
+            entities=[
+                _routing_entity("platform", value, source="platform_ontology", confidence=0.99)
+                for value in compared_platforms
+            ],
+        ))
+    platform_id = explicit_platform_query(request.messages, runtime.platform_contexts)
+    if platform_id and not compared_platforms:
+        add(_routing_candidate(
+            "platform_intelligence",
+            "recognized_platform",
+            0.98,
+            entities=[_routing_entity(
+                "platform", platform_id, source="platform_ontology", confidence=0.98
+            )],
+        ))
     if is_ground_vehicle_power_position_request(request.messages):
-        return _route(
+        add(_routing_candidate(
             "defined_market_competitive_position",
             "defined_competitive_market",
             0.98,
-        )
-    if resolve_market_segment(request.messages[-1].content):
-        return _route("market_segment_intelligence", "recognized_market_segment", 0.97)
-    if resolve_capability(request.messages[-1].content):
-        return _route("capability_discovery", "recognized_capability_request", 0.96)
-    validated_company = _validated_company_query(request)
-    if validated_company:
-        return _route("company_site_intelligence", "resolved_company_or_site", 0.97)
-    if (
-        request.active_scope
-        and request.active_scope.scope_type == "market_segment"
-        and market_segment_follow_up_intent(request.messages[-1].content)
-    ):
-        return _route("market_segment_intelligence", "active_market_segment", 0.97)
-    if is_geographic_market_request(request.messages[-1].content):
-        return _route("state_industrial_base", "recognized_state_market", 0.98)
-    if (
-        request.active_scope
-        and request.active_scope.scope_type == "state_market"
-        and state_market_follow_up_intent(request.messages[-1].content)
-    ):
-        return _route("state_industrial_base", "active_state_market", 0.97)
-    if (
-        request.active_scope
-        and request.active_scope.scope_type == "capability_market"
-        and capability_market_follow_up_intent(request.messages[-1].content)
-    ):
-        return _route("capability_discovery", "active_capability_market", 0.97)
+        ))
+    segment_id = resolve_market_segment(latest)
+    if segment_id:
+        add(_routing_candidate(
+            "market_segment_intelligence",
+            "recognized_market_segment",
+            0.97,
+            entities=[_routing_entity(
+                "market_segment", segment_id, source="market_segment_ontology", confidence=0.97
+            )],
+        ))
+    capability_id = resolve_capability(latest)
+    if capability_id:
+        add(_routing_candidate(
+            "capability_discovery",
+            "recognized_capability_request",
+            0.96,
+            entities=[_routing_entity(
+                "capability_market", capability_id, source="capability_ontology", confidence=0.96
+            )],
+        ))
+    state_code = resolve_state(latest) if is_geographic_market_request(latest) else None
+    company_phrase = explicit_company_name_query(request.messages)
+    company_phrase_is_platform = bool(
+        company_phrase and runtime.platform_contexts.mentions(company_phrase)
+    )
+    explicit_company_language = bool(re.search(
+        r"\b(?:company|supplier|business|facility|facilities|site|sites|cage|"
+        r"customers?|buys? from|sells? to|footprint|defen[cs]e activity|"
+        r"evidence.+suppl(?:y|ies))\b",
+        latest,
+        re.IGNORECASE,
+    ))
+    conflicting_entity_route = bool(
+        award_id or item_id or product_id or record_search or compared_platforms
+        or (platform_id and (not explicit_company_language or company_phrase_is_platform))
+        or (state_code and not explicit_company_language)
+        or (segment_id and not explicit_company_language)
+        or (capability_id and not explicit_company_language)
+    )
+    if company_phrase and not conflicting_entity_route:
+        add(_company_routing_candidate(request))
+    if state_code:
+        add(_routing_candidate(
+            "state_industrial_base",
+            "recognized_state_market",
+            0.98,
+            entities=[_routing_entity(
+                "state_market", state_code, source="state_parser", confidence=0.98
+            )],
+        ))
     if is_eaton_competitor_request(request.messages):
-        return _route("competitor_discovery", "recognized_competitor_request", 0.96)
-    if (
-        request.active_scope
-        and request.active_scope.scope_type == "platform_comparison"
-        and platform_comparison_follow_up_intent(request.messages[-1].content)
-    ):
-        return _route("platform_comparison", "active_platform_comparison", 0.98)
-    if (
-        request.active_scope
-        and request.active_scope.scope_type == "platform"
-        and platform_follow_up_intent(request.messages[-1].content)
-    ):
-        return _route("platform_intelligence", "active_platform", 0.98)
-    if company_site_dossier_cage(request.messages):
-        return _route("company_site_intelligence", "explicit_cage_identifier", 1.0)
-    scope_workflow = _conversational_scope_workflow(request)
-    if scope_workflow:
-        return _route(scope_workflow, "conversational_scope_continuation", 0.82)
-    if (
-        request.active_scope
-        and request.active_scope.scope_type in {"company_parent", "company_site"}
-        and company_follow_up_intent(request.messages[-1].content)
-    ):
-        return _route("company_site_intelligence", "active_company_or_site", 0.98)
-    if company_site_trajectory_cage(request.messages):
-        return _route("company_site_trajectory", "explicit_cage_trajectory", 0.99)
+        add(_routing_candidate("competitor_discovery", "recognized_competitor_request", 0.96))
     if is_program_momentum_request(request.messages):
-        return _route("program_momentum", "program_momentum_language", 0.92)
-    if is_open_capability_discovery_request(request.messages[-1].content):
-        return _route("capability_discovery", "open_supplier_discovery", 0.9)
-    if explicit_company_name_query(request.messages):
+        add(_routing_candidate("program_momentum", "program_momentum_language", 0.92))
+    if is_open_capability_discovery_request(latest):
+        add(_routing_candidate("capability_discovery", "open_supplier_discovery", 0.90))
+
+    scope_workflow = _scope_follow_up_workflow(request)
+    if request.active_scope and scope_workflow:
+        add(_routing_candidate(
+            scope_workflow,
+            "conversation_scope_continuation",
+            0.995,
+            entities=[_scope_entity(request.active_scope)],
+            uses_current_scope=True,
+        ))
+    elif request.active_scope and len(latest.split()) <= 10:
+        has_explicit_new_entity = any(
+            candidate.confidence >= 0.96
+            and candidate.resolved_entities
+            and not _same_scope_entity(request.active_scope, candidate.resolved_entities)
+            for candidate in candidates
+        )
+        if not has_explicit_new_entity and not any(
+            candidate.workflow in {"news_article_implications", "out_of_domain"}
+            for candidate in candidates
+        ):
+            add(_routing_candidate(
+                SCOPE_WORKFLOWS[request.active_scope.scope_type],
+                "short_follow_up_uses_conversation_scope",
+                0.93,
+                entities=[_scope_entity(request.active_scope)],
+                uses_current_scope=True,
+            ))
+    return candidates
+
+
+def routing_decision_for_request(request: AskRequest) -> RoutingDecision:
+    candidates = _candidate_workflows(request)
+    scope = request.active_scope
+    if not candidates:
+        reason = (
+            "company_phrasing_without_company_match"
+            if explicit_company_name_query(request.messages)
+            else "no_structured_workflow_match"
+        )
         return _route(
             "general_defense_research",
-            "company_phrasing_without_company_match",
-            0.45,
+            reason,
+            0.45 if "company" in reason else 0.35,
             fallback_used=True,
+            current_scope=scope,
+            clarification_needed="company" in reason,
         )
-    return _route(
-        "general_defense_research",
-        "no_deterministic_workflow_match",
-        0.35,
-        fallback_used=True,
+
+    ranked = sorted(
+        candidates,
+        key=lambda row: (row.confidence, row.uses_current_scope),
+        reverse=True,
     )
+    selected = ranked[0]
+    explicit_candidates = [row for row in ranked if not row.uses_current_scope]
+    subject_changed = bool(
+        scope
+        and explicit_candidates
+        and explicit_candidates[0].confidence >= 0.96
+        and not _same_scope_entity(scope, explicit_candidates[0].resolved_entities)
+    )
+    if subject_changed and selected.uses_current_scope:
+        selected = explicit_candidates[0]
+
+    competing = [
+        row for row in ranked[1:]
+        if row.workflow != selected.workflow
+        and abs(selected.confidence - row.confidence) < 0.025
+        and not {selected.workflow, row.workflow}.intersection({"out_of_domain"})
+    ]
+    clarification_needed = bool(
+        competing
+        and selected.confidence < 0.99
+        and not selected.uses_current_scope
+    )
+    return _route(
+        selected.workflow,
+        selected.reason,
+        selected.confidence,
+        fallback_used=selected.workflow == "general_defense_research",
+        intended_workflow=(
+            SCOPE_WORKFLOWS.get(scope.scope_type)
+            if scope and selected.uses_current_scope
+            else selected.workflow
+        ),
+        resolved_entities=selected.resolved_entities,
+        subject_changed=subject_changed,
+        user_correction=bool(
+            subject_changed
+            and re.match(
+                r"\s*(?:actually|no[, ]|not that|i meant|sorry)",
+                request.messages[-1].content,
+                re.IGNORECASE,
+            )
+        ),
+        clarification_needed=clarification_needed,
+        current_scope=scope,
+        candidates=ranked[:8],
+    )
+
+
+def validate_routing_decision(
+    request: AskRequest,
+    decision: RoutingDecision,
+) -> RoutingDecision:
+    if (
+        decision.workflow != "company_site_intelligence"
+        or decision.reason in {
+            "explicit_cage_identifier",
+            "conversation_scope_continuation",
+            "short_follow_up_uses_conversation_scope",
+        }
+    ):
+        return decision
+    company_query = explicit_company_name_query(request.messages)
+    if not company_query:
+        return decision.model_copy(update={
+            "confidence": min(decision.confidence, 0.45),
+            "clarification_needed": True,
+            "reason": "company_subject_missing",
+        })
+    try:
+        matches = runtime.company_contexts.search(company_query, limit=8).get("matches", [])
+    except Exception:
+        # A transient directory problem belongs to the research error path rather
+        # than being presented as an entity mismatch.
+        return decision
+    if not matches:
+        return decision.model_copy(update={
+            "confidence": 0.45,
+            "clarification_needed": True,
+            "reason": "company_not_resolved",
+            "resolved_entities": [],
+        })
+    entities = [
+        _routing_entity(
+            str(row.get("scope_type") or "company"),
+            row.get("scope_id") or company_query,
+            entity_name=row.get("option_label") or row.get("scope_name"),
+            source="company_directory",
+            confidence=0.98,
+        )
+        for row in matches[:5]
+    ]
+    candidates = list(decision.candidates)
+    for index, candidate in enumerate(candidates):
+        if candidate.workflow == decision.workflow:
+            candidates[index] = candidate.model_copy(update={"resolved_entities": entities})
+            break
+    return decision.model_copy(update={
+        "confidence": max(decision.confidence, 0.98),
+        "resolved_entities": entities,
+        "candidates": candidates,
+    })
 
 
 def workflow_for_request(request: AskRequest) -> str:
@@ -3247,6 +3613,7 @@ NON_BILLABLE_RESPONSE_IDS = frozenset(
         "item-disambiguation",
         "item-identifier-mismatch",
         "platform-disambiguation",
+        "routing-clarification",
         "capability-index-insufficient",
         "out-of-domain",
     }
@@ -3266,6 +3633,175 @@ def is_lightweight_scope_follow_up(request: AskRequest) -> bool:
         and request.active_scope.scope_type == "item"
         and item_lightweight_follow_up_kind(request.messages[-1].content)
     )
+
+
+def active_scope_from_result(
+    result: Dict[str, Any],
+    previous_scope: ActiveScope | None = None,
+) -> ActiveScope | None:
+    artifacts = result.get("answer_artifacts") or {}
+    company = artifacts.get("company_site_dossier") or artifacts.get("company_site_context")
+    if company and (company.get("scope") or {}).get("scope_id"):
+        scope = company["scope"]
+        identity = company.get("identity") or {}
+        is_parent = scope.get("scope_type") == "company_parent"
+        return ActiveScope(
+            scope_type=scope.get("scope_type") or "company_site",
+            scope_id=str(scope["scope_id"]),
+            scope_name=scope.get("scope_name"),
+            resolved_cages=identity.get("resolved_cages") or [],
+            group_kind=identity.get("scope_kind"),
+            parent_scope_id=(
+                str(scope["scope_id"])
+                if is_parent
+                else previous_scope.parent_scope_id if previous_scope else None
+            ),
+            parent_scope_name=(
+                scope.get("scope_name")
+                if is_parent
+                else previous_scope.parent_scope_name if previous_scope else None
+            ),
+            parent_resolved_cages=(
+                identity.get("resolved_cages") or []
+                if is_parent
+                else previous_scope.parent_resolved_cages if previous_scope else []
+            ),
+            parent_group_kind=(
+                identity.get("scope_kind")
+                if is_parent
+                else previous_scope.parent_group_kind if previous_scope else None
+            ),
+        )
+    item = artifacts.get("item_dossier") or {}
+    if (item.get("identity") or {}).get("niin"):
+        identity = item["identity"]
+        return ActiveScope(
+            scope_type="item",
+            scope_id=str(identity["niin"]),
+            scope_name=identity.get("nsn") or identity.get("niin"),
+            group_kind="nsn_niin_item",
+        )
+    contract = artifacts.get("contract_dossier") or {}
+    if (contract.get("identity") or {}).get("contract_id"):
+        contract_id = str(contract["identity"]["contract_id"])
+        return ActiveScope(
+            scope_type="contract", scope_id=contract_id,
+            scope_name=contract_id, group_kind="contract_award",
+        )
+    opportunity = artifacts.get("opportunity_dossier") or {}
+    if opportunity.get("identity"):
+        identity = opportunity["identity"]
+        opportunity_id = identity.get("solicitation_number") or identity.get("opportunity_id")
+        if opportunity_id:
+            return ActiveScope(
+                scope_type="opportunity", scope_id=str(opportunity_id),
+                scope_name=identity.get("title") or str(opportunity_id),
+                group_kind="contract_opportunity",
+            )
+    mappings = (
+        ("product_family", "product_id", "display_name", "product_family", "product_family"),
+        ("state_industrial_base", "state_code", "state_name", "state_market", "state_market"),
+        ("capability_market", "capability_id", "display_name", "capability_market", "capability_market"),
+        ("market_segment", "segment_id", "display_name", "market_segment", "market_segment"),
+    )
+    for artifact_name, id_key, name_key, scope_type, group_kind in mappings:
+        pack = artifacts.get(artifact_name) or {}
+        scope = pack.get("scope") or pack
+        if scope.get(id_key):
+            return ActiveScope(
+                scope_type=scope_type,
+                scope_id=str(scope[id_key]),
+                scope_name=scope.get(name_key) or str(scope[id_key]),
+                group_kind=group_kind,
+            )
+    platform = artifacts.get("platform_dossier") or {}
+    platform_scope = platform.get("scope") or {}
+    if platform_scope.get("platform_id"):
+        requested_focus = platform_scope.get("requested_focus") or {}
+        return ActiveScope(
+            scope_type="platform",
+            scope_id=str(platform_scope["platform_id"]),
+            scope_name=platform_scope.get("display_name") or str(platform_scope["platform_id"]),
+            group_kind="platform_or_program",
+            platform_focus=requested_focus.get("focus_id"),
+        )
+    record_search = artifacts.get("market_record_search") or {}
+    record_scope = record_search.get("scope") or {}
+    if record_scope.get("scope_id"):
+        return ActiveScope(
+            scope_type="record_search", scope_id=str(record_scope["scope_id"]),
+            scope_name=f"{record_scope.get('record_type', 'record')} search: {record_scope.get('subject', '')}".strip(),
+            group_kind="record_search",
+        )
+    comparison = artifacts.get("platform_comparison_dossier") or {}
+    platform_ids = comparison.get("platform_ids") or []
+    if len(platform_ids) >= 2:
+        return ActiveScope(
+            scope_type="platform_comparison",
+            scope_id=" | ".join(platform_ids),
+            scope_name=" and ".join(platform_ids),
+            group_kind="platform_comparison",
+            compared_platform_ids=platform_ids,
+        )
+    return previous_scope
+
+
+def routing_clarification_result(decision: RoutingDecision) -> Dict[str, Any]:
+    options = []
+    seen = set()
+    for candidate in decision.candidates:
+        if candidate.workflow in seen:
+            continue
+        seen.add(candidate.workflow)
+        entity = candidate.resolved_entities[0] if candidate.resolved_entities else None
+        label = entity.entity_name or entity.entity_id if entity else {
+            "company_site_intelligence": "A company or supplier site",
+            "platform_intelligence": "A platform or program",
+            "capability_discovery": "A capability market",
+            "market_segment_intelligence": "A defense market segment",
+            "state_industrial_base": "A state industrial base",
+        }.get(candidate.workflow, candidate.workflow.replace("_", " ").title())
+        if entity and str(label).startswith("capability:"):
+            label = unquote(str(label).split(":", 1)[1]).title()
+        value = str(label)
+        prompt = {
+            "company_site_intelligence": f"Tell me about this defense supplier: {value}",
+            "platform_intelligence": f"Tell me about this defense platform or program: {value}",
+            "capability_discovery": f"Give me an overview of this US defense capability area: {value}",
+            "market_segment_intelligence": f"Give me an overview of this US defense market: {value}",
+            "state_industrial_base": f"Give me an overview of the defense industrial base in {value}",
+        }.get(candidate.workflow, f"Continue with {value}.")
+        options.append({
+            "label": label,
+            "prompt": prompt,
+            "workflow": candidate.workflow,
+            "entity": entity.model_dump() if entity else None,
+        })
+        if len(options) == 3:
+            break
+    if options:
+        labels = " or ".join(option["label"] for option in options[:2])
+        answer = f"I found more than one plausible meaning. Did you mean {labels}?"
+    else:
+        answer = (
+            "I could not identify the intended company or research scope confidently. "
+            "Please choose a result or add the company name, CAGE code, location, platform, "
+            "item identifier, or contract number."
+        )
+    return {
+        "answer": answer,
+        "response_id": "routing-clarification",
+        "model": "structured-intent-classifier",
+        "release_id": runtime.store.manifest["release_id"],
+        "requires_clarification": True,
+        "answer_artifacts": {"routing_clarification": {"options": options}},
+        "tool_trace": [],
+        "latency_ms": 0.0,
+        "response_calls": 0,
+        "usage": None,
+        "usage_by_response": [],
+        "estimated_cost": None,
+    }
 
 
 def item_lightweight_answer(
@@ -3333,7 +3869,14 @@ class AskJobManager:
         request_id = str(uuid.uuid4())
         routing = routing or routing_decision_for_request(request)
         workflow = routing.workflow
-        allowance_exempt = is_lightweight_scope_follow_up(request)
+        allowance_exempt = routing.clarification_needed or is_lightweight_scope_follow_up(request)
+        runtime.beta_state.record_routing_decision(
+            request_id=request_id,
+            conversation_id=request.conversation_id,
+            subject_id=access.subject_id,
+            question=request.messages[-1].content,
+            decision=routing.model_dump(),
+        )
         if allowance_exempt:
             used = runtime.beta_state.used_today(access.subject_id)
         else:
@@ -3365,7 +3908,7 @@ class AskJobManager:
             self.jobs[request_id] = job
         thread = threading.Thread(
             target=self._run,
-            args=(request_id, request, access),
+            args=(request_id, request, access, routing),
             daemon=True,
         )
         thread.start()
@@ -3383,17 +3926,28 @@ class AskJobManager:
                 }
             )
 
-    def _run(self, request_id: str, request: AskRequest, access: AccessContext) -> None:
+    def _run(
+        self,
+        request_id: str,
+        request: AskRequest,
+        access: AccessContext,
+        routing: RoutingDecision,
+    ) -> None:
         allowance_exempt = bool(self.jobs[request_id].get("allowance_exempt"))
         if not allowance_exempt:
             runtime.beta_state.mark_running(request_id)
         try:
             runtime.release_guard.assert_unchanged()
-            result = generate_answer(
-                request,
-                progress=lambda stage, detail, percent: self.update(
-                    request_id, stage, detail, percent
-                ),
+            result = (
+                routing_clarification_result(routing)
+                if routing.clarification_needed
+                else generate_answer(
+                    request,
+                    progress=lambda stage, detail, percent: self.update(
+                        request_id, stage, detail, percent
+                    ),
+                    routing=routing,
+                )
             )
             self.update(
                 request_id,
@@ -3410,6 +3964,21 @@ class AskJobManager:
                     estimated_cost_usd=cost,
                     billable=result_counts_toward_quota(result),
                 )
+            next_scope = active_scope_from_result(result, request.active_scope)
+            runtime.beta_state.save_conversation_scope(
+                request.conversation_id,
+                access.subject_id,
+                next_scope.model_dump() if next_scope else None,
+                routing.workflow,
+            )
+            runtime.beta_state.complete_routing_event(
+                request_id,
+                clarification_outcome=(
+                    "clarification_requested"
+                    if response_requires_clarification(result)
+                    else "research_completed"
+                ),
+            )
             customer_result["access"] = access.public_dict(
                 runtime.beta_state.used_today(access.subject_id),
                 runtime.beta_state.used_this_month(access.subject_id),
@@ -3429,6 +3998,9 @@ class AskJobManager:
         except Exception as exc:
             if not allowance_exempt:
                 runtime.beta_state.fail(request_id, refund=True)
+            runtime.beta_state.complete_routing_event(
+                request_id, clarification_outcome="request_failed"
+            )
             detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
             if "credit_balance_exhausted" in str(detail) or "insufficient_quota" in str(detail):
                 detail = (
@@ -3524,16 +4096,46 @@ def beta_policy(request: Request) -> Dict[str, Any]:
     }
 
 
+def request_with_server_conversation_scope(
+    payload: AskRequest,
+    access: AccessContext,
+) -> AskRequest:
+    stored_scope = runtime.beta_state.load_conversation_scope(
+        payload.conversation_id, access.subject_id
+    )
+    if stored_scope:
+        try:
+            return payload.model_copy(update={"active_scope": ActiveScope(**stored_scope)})
+        except ValueError:
+            return payload
+    if payload.conversation_id and payload.active_scope:
+        runtime.beta_state.save_conversation_scope(
+            payload.conversation_id,
+            access.subject_id,
+            payload.active_scope.model_dump(),
+            SCOPE_WORKFLOWS.get(payload.active_scope.scope_type),
+        )
+    return payload
+
+
 @app.post("/api/ask/jobs", status_code=202)
 def create_ask_job(
     payload: AskRequest, request: Request, response: Response
 ) -> Dict[str, Any]:
     access = access_from_request(request)
-    routing = routing_decision_for_request(payload)
+    payload = request_with_server_conversation_scope(payload, access)
+    routing = validate_routing_decision(payload, routing_decision_for_request(payload))
     routing_headers = {
+        "X-Ask-Mimir-Workflow": routing.workflow,
         "X-Ask-Mimir-Route-Reason": routing.reason,
         "X-Ask-Mimir-Route-Confidence": f"{routing.confidence:.2f}",
         "X-Ask-Mimir-Route-Fallback": "1" if routing.fallback_used else "0",
+        "X-Ask-Mimir-Subject-Changed": "1" if routing.subject_changed else "0",
+        "X-Ask-Mimir-User-Correction": "1" if routing.user_correction else "0",
+        "X-Ask-Mimir-Clarification": "1" if routing.clarification_needed else "0",
+        "X-Ask-Mimir-Candidates": ",".join(
+            candidate.workflow for candidate in routing.candidates[:5]
+        ),
     }
     try:
         job, routing = job_manager.create(payload, access, routing=routing)
@@ -3585,6 +4187,8 @@ def add_answer_feedback(payload: FeedbackRequest, request: Request) -> Dict[str,
         reason=payload.reason,
         release_binding_id=runtime.release_guard.release_binding_id,
     )
+    if payload.rating == "wrong_entity":
+        runtime.beta_state.mark_routing_correction(payload.request_id)
     return {"feedback_id": feedback_id, "status": "recorded"}
 
 
@@ -3829,6 +4433,7 @@ def finalize_response(
 def generate_answer(
     request: AskRequest,
     progress: Callable[[str, str, int], None] | None = None,
+    routing: RoutingDecision | None = None,
 ) -> Dict[str, Any]:
     emit_progress(
         progress,
@@ -3836,10 +4441,14 @@ def generate_answer(
         "Identifying the entity, record and analytical scope",
         12,
     )
+    routing = routing or routing_decision_for_request(request)
+    if routing.clarification_needed:
+        return routing_clarification_result(routing)
+    selected_workflow = routing.workflow
     if runtime.mock_mode:
         return runtime.mock_answer(request)
     started = time.perf_counter()
-    if is_clearly_out_of_domain(request.messages):
+    if selected_workflow == "out_of_domain":
         return {
             "answer": (
                 "Ask Mimir is focused on the defense industrial base, government acquisition and "
@@ -3860,16 +4469,24 @@ def generate_answer(
     resolved_company_scope: Dict[str, Any] | None = None
     latest_question = str(request.messages[-1].content or "")
     active_item_follow_up = bool(
+        selected_workflow == "item_intelligence"
+        and
         request.active_scope
         and request.active_scope.scope_type == "item"
         and item_follow_up_intent(latest_question)
     )
     active_award_follow_up = bool(
+        selected_workflow == "contract_or_opportunity"
+        and
         request.active_scope
         and request.active_scope.scope_type in {"contract", "opportunity"}
         and award_opportunity_follow_up_intent(latest_question)
     )
-    product_id = resolve_product_family(latest_question)
+    product_id = (
+        resolve_product_family(latest_question)
+        if selected_workflow == "product_intelligence"
+        else None
+    )
     if (
         not product_id
         and request.active_scope
@@ -3887,22 +4504,29 @@ def generate_answer(
             None,
         )
     platform_mentions = runtime.platform_contexts.mentions(latest_question)
-    platform_comparison_candidate = explicit_platform_comparison(
-        request.messages, runtime.platform_contexts
+    platform_comparison_candidate = (
+        explicit_platform_comparison(request.messages, runtime.platform_contexts)
+        if selected_workflow == "platform_comparison"
+        else []
     )
-    platform_query_candidate = explicit_platform_query(
-        request.messages, runtime.platform_contexts
+    platform_query_candidate = (
+        explicit_platform_query(request.messages, runtime.platform_contexts)
+        if selected_workflow == "platform_intelligence"
+        else None
     )
-    ground_vehicle_position_request = is_ground_vehicle_power_position_request(
-        request.messages
+    ground_vehicle_position_request = (
+        selected_workflow == "defined_market_competitive_position"
     )
-    company_query = _validated_company_query(request)
-    if is_platform_centered_request(
-        latest_question,
-        has_platform_mention=bool(platform_mentions),
-    ):
-        company_query = None
-    record_search_spec = resolve_market_record_search(latest_question)
+    company_query = (
+        _validated_company_query(request)
+        if selected_workflow == "company_site_intelligence"
+        else None
+    )
+    record_search_spec = (
+        resolve_market_record_search(latest_question)
+        if selected_workflow == "market_record_search"
+        else None
+    )
     if (
         not record_search_spec
         and request.active_scope
@@ -3910,8 +4534,16 @@ def generate_answer(
         and record_search_follow_up_intent(latest_question)
     ):
         record_search_spec = record_search_from_scope_id(request.active_scope.scope_id)
-    capability_id = resolve_capability(latest_question)
-    segment_id = resolve_market_segment(latest_question)
+    capability_id = (
+        resolve_capability(latest_question)
+        if selected_workflow == "capability_discovery"
+        else None
+    )
+    segment_id = (
+        resolve_market_segment(latest_question)
+        if selected_workflow == "market_segment_intelligence"
+        else None
+    )
     if platform_query_candidate or platform_comparison_candidate or ground_vehicle_position_request:
         capability_id = None
     if ground_vehicle_position_request:
@@ -3930,23 +4562,9 @@ def generate_answer(
         and capability_market_follow_up_intent(latest_question)
     ):
         capability_id = request.active_scope.scope_id
-    if any(
-        (
-            product_id,
-            record_search_spec,
-            capability_id,
-            segment_id,
-            is_geographic_market_request(latest_question),
-            explicit_item_query(request.messages),
-            active_item_follow_up,
-            active_award_follow_up,
-            explicit_award_or_opportunity_query(request.messages),
-            explicit_platform_comparison(request.messages, runtime.platform_contexts),
-            is_article_analysis_request(request.messages),
-        )
-    ):
-        company_query = None
     if (
+        selected_workflow == "capability_discovery"
+        and
         is_open_capability_discovery_request(latest_question)
         and not runtime.platform_contexts.mentions(latest_question)
         and not capability_id
@@ -4168,7 +4786,7 @@ def generate_answer(
         {"role": message.role, "content": message.content} for message in request.messages
     ]
     client = OpenAI()
-    if is_article_analysis_request(request.messages):
+    if selected_workflow == "news_article_implications":
         emit_progress(progress, "Reading the article", "Verifying the report and resolving the entities it names", 24)
         article_tools = [*TOOLS, {"type": "web_search", "search_context_size": "low"}]
         response = client.responses.create(
@@ -4482,7 +5100,11 @@ def generate_answer(
         )
         return result
 
-    state_code = resolve_state(latest_question)
+    state_code = (
+        resolve_state(latest_question)
+        if selected_workflow == "state_industrial_base"
+        else None
+    )
     if (
         not state_code
         and request.active_scope
@@ -4662,7 +5284,7 @@ def generate_answer(
         )
         return result
 
-    if is_eaton_competitor_request(request.messages):
+    if selected_workflow == "competitor_discovery":
         arguments = {"target_id": "eaton_aerospace", "limit": 15}
         emit_progress(
             progress,
@@ -4730,7 +5352,7 @@ def generate_answer(
             }
         )
         return result
-    if is_ground_vehicle_power_position_request(request.messages):
+    if selected_workflow == "defined_market_competitive_position":
         arguments = {"market_id": "army_ground_vehicle_power", "limit": 15}
         emit_progress(
             progress,
@@ -4798,7 +5420,11 @@ def generate_answer(
             }
         )
         return result
-    award_query = explicit_award_or_opportunity_query(request.messages)
+    award_query = (
+        explicit_award_or_opportunity_query(request.messages)
+        if selected_workflow == "contract_or_opportunity"
+        else None
+    )
     if not award_query and active_award_follow_up:
         award_query = request.active_scope.scope_id
     if award_query:
@@ -4893,7 +5519,11 @@ def generate_answer(
             return result
 
     lightweight_item_follow_up = None
-    item_query = explicit_item_query(request.messages)
+    item_query = (
+        explicit_item_query(request.messages)
+        if selected_workflow == "item_intelligence"
+        else None
+    )
     if (
         not item_query
         and active_item_follow_up
@@ -5264,7 +5894,10 @@ def generate_answer(
             )
             return result
 
-    if is_supported_platform_supply_chain_request(request.messages):
+    if (
+        selected_workflow == "platform_intelligence"
+        and is_supported_platform_supply_chain_request(request.messages)
+    ):
         arguments = {
             "platform_id": "CH-53K",
             "capability_filter": None,
@@ -5324,7 +5957,11 @@ def generate_answer(
         )
         return result
 
-    dossier_cage = company_site_dossier_cage(request.messages)
+    dossier_cage = (
+        company_site_dossier_cage(request.messages)
+        if selected_workflow in {"company_site_intelligence", "company_site_trajectory"}
+        else None
+    )
     dossier_scope_type = (
         str(resolved_company_scope.get("scope_type"))
         if resolved_company_scope
@@ -5333,6 +5970,7 @@ def generate_answer(
     dossier_scope_id = (
         str(resolved_company_scope.get("scope_id"))
         if resolved_company_scope
+        and selected_workflow in {"company_site_intelligence", "company_site_trajectory"}
         else dossier_cage
     )
     if dossier_scope_id:
@@ -5416,7 +6054,11 @@ def generate_answer(
             )
             return result
 
-    trajectory_cage = company_site_trajectory_cage(request.messages)
+    trajectory_cage = (
+        company_site_trajectory_cage(request.messages)
+        if selected_workflow == "company_site_trajectory"
+        else None
+    )
     if trajectory_cage:
         arguments = {
             "scope_type": "company_site",
@@ -5489,7 +6131,7 @@ def generate_answer(
             )
             return result
 
-    if is_program_momentum_request(request.messages):
+    if selected_workflow == "program_momentum":
         arguments = {"market": "missiles", "limit": 10}
         pack = runtime.call_tool("get_program_momentum", arguments)
         emit_progress(progress, "Assembling momentum signals", "Separating obligations, budgets, suppliers and production events", 46)
@@ -5647,15 +6289,24 @@ def generate_answer(
 def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
     """Backward-compatible synchronous endpoint used by the evaluation runner."""
     access = access_from_request(request)
+    payload = request_with_server_conversation_scope(payload, access)
     request_id = str(uuid.uuid4())
-    allowance_exempt = is_lightweight_scope_follow_up(payload)
+    routing = validate_routing_decision(payload, routing_decision_for_request(payload))
+    allowance_exempt = routing.clarification_needed or is_lightweight_scope_follow_up(payload)
+    runtime.beta_state.record_routing_decision(
+        request_id=request_id,
+        conversation_id=payload.conversation_id,
+        subject_id=access.subject_id,
+        question=payload.messages[-1].content,
+        decision=routing.model_dump(),
+    )
     try:
         if not allowance_exempt:
             runtime.beta_state.reserve(
                 request_id,
                 access,
                 runtime.release_guard.release_binding_id,
-                workflow_for_request(payload),
+                routing.workflow,
             )
     except DailyQuotaExceeded as exc:
         raise HTTPException(
@@ -5671,7 +6322,11 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
     if not allowance_exempt:
         runtime.beta_state.mark_running(request_id)
     try:
-        result = generate_answer(payload)
+        result = (
+            routing_clarification_result(routing)
+            if routing.clarification_needed
+            else generate_answer(payload, routing=routing)
+        )
         customer_result = finalize_customer_result(result, access, request_id)
         if not allowance_exempt:
             runtime.beta_state.complete(
@@ -5682,6 +6337,21 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 ),
                 billable=result_counts_toward_quota(result),
             )
+        next_scope = active_scope_from_result(result, payload.active_scope)
+        runtime.beta_state.save_conversation_scope(
+            payload.conversation_id,
+            access.subject_id,
+            next_scope.model_dump() if next_scope else None,
+            routing.workflow,
+        )
+        runtime.beta_state.complete_routing_event(
+            request_id,
+            clarification_outcome=(
+                "clarification_requested"
+                if response_requires_clarification(result)
+                else "research_completed"
+            ),
+        )
         customer_result["access"] = access.public_dict(
             runtime.beta_state.used_today(access.subject_id),
             runtime.beta_state.used_this_month(access.subject_id),
@@ -5690,4 +6360,7 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
     except Exception:
         if not allowance_exempt:
             runtime.beta_state.fail(request_id, refund=True)
+        runtime.beta_state.complete_routing_event(
+            request_id, clarification_outcome="request_failed"
+        )
         raise

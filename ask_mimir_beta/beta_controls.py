@@ -185,6 +185,36 @@ class BetaStateStore:
                 created_at TEXT NOT NULL,
                 release_binding_id TEXT
             );
+            CREATE TABLE IF NOT EXISTS ask_conversations (
+                conversation_id TEXT PRIMARY KEY,
+                subject_id TEXT NOT NULL,
+                active_scope_json TEXT,
+                last_workflow TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ask_conversations_subject
+                ON ask_conversations(subject_id, updated_at);
+            CREATE TABLE IF NOT EXISTS routing_events (
+                request_id TEXT PRIMARY KEY,
+                conversation_id TEXT,
+                subject_id TEXT NOT NULL,
+                question TEXT NOT NULL,
+                intended_workflow TEXT,
+                selected_workflow TEXT NOT NULL,
+                candidates_json TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                active_scope_json TEXT,
+                resolved_entities_json TEXT NOT NULL,
+                subject_changed INTEGER NOT NULL DEFAULT 0,
+                clarification_needed INTEGER NOT NULL DEFAULT 0,
+                clarification_outcome TEXT,
+                user_correction INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS routing_events_conversation
+                ON routing_events(conversation_id, created_at);
             """
         )
         self.connection.execute(
@@ -196,6 +226,136 @@ class BetaStateStore:
             [datetime.now(timezone.utc).isoformat()],
         )
         self.connection.commit()
+
+    def load_conversation_scope(
+        self,
+        conversation_id: str | None,
+        subject_id: str,
+    ) -> Dict[str, Any] | None:
+        if not conversation_id:
+            return None
+        with self.lock:
+            row = self.connection.execute(
+                """
+                SELECT active_scope_json
+                FROM ask_conversations
+                WHERE conversation_id = ? AND subject_id = ?
+                """,
+                [conversation_id, subject_id],
+            ).fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            value = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def save_conversation_scope(
+        self,
+        conversation_id: str | None,
+        subject_id: str,
+        active_scope: Dict[str, Any] | None,
+        workflow: str | None,
+    ) -> None:
+        if not conversation_id:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        scope_json = json.dumps(active_scope, default=str) if active_scope else None
+        with self.lock:
+            self.connection.execute(
+                """
+                INSERT INTO ask_conversations (
+                    conversation_id, subject_id, active_scope_json, last_workflow,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    active_scope_json = excluded.active_scope_json,
+                    last_workflow = excluded.last_workflow,
+                    updated_at = excluded.updated_at
+                WHERE ask_conversations.subject_id = excluded.subject_id
+                """,
+                [conversation_id, subject_id, scope_json, workflow, now, now],
+            )
+            self.connection.commit()
+
+    def record_routing_decision(
+        self,
+        *,
+        request_id: str,
+        conversation_id: str | None,
+        subject_id: str,
+        question: str,
+        decision: Dict[str, Any],
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.lock:
+            self.connection.execute(
+                """
+                INSERT OR REPLACE INTO routing_events (
+                    request_id, conversation_id, subject_id, question,
+                    intended_workflow, selected_workflow, candidates_json,
+                    confidence, active_scope_json, resolved_entities_json,
+                    subject_changed, clarification_needed, clarification_outcome,
+                    user_correction, created_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
+                """,
+                [
+                    request_id,
+                    conversation_id,
+                    subject_id,
+                    question,
+                    decision.get("intended_workflow"),
+                    decision.get("workflow"),
+                    json.dumps(decision.get("candidates") or [], default=str),
+                    float(decision.get("confidence") or 0),
+                    json.dumps(decision.get("current_scope"), default=str)
+                    if decision.get("current_scope")
+                    else None,
+                    json.dumps(decision.get("resolved_entities") or [], default=str),
+                    int(bool(decision.get("subject_changed"))),
+                    int(bool(decision.get("clarification_needed"))),
+                    int(bool(decision.get("user_correction"))),
+                    now,
+                ],
+            )
+            self.connection.commit()
+
+    def complete_routing_event(
+        self,
+        request_id: str,
+        *,
+        clarification_outcome: str | None = None,
+    ) -> None:
+        with self.lock:
+            self.connection.execute(
+                """
+                UPDATE routing_events
+                SET clarification_outcome = COALESCE(?, clarification_outcome),
+                    completed_at = ?
+                WHERE request_id = ?
+                """,
+                [
+                    clarification_outcome,
+                    datetime.now(timezone.utc).isoformat(),
+                    request_id,
+                ],
+            )
+            self.connection.commit()
+
+    def mark_routing_correction(self, request_id: str | None) -> None:
+        if not request_id:
+            return
+        with self.lock:
+            self.connection.execute(
+                """
+                UPDATE routing_events
+                SET user_correction = 1
+                WHERE request_id = ?
+                """,
+                [request_id],
+            )
+            self.connection.commit()
 
     def used_today(self, subject_id: str) -> int:
         with self.lock:

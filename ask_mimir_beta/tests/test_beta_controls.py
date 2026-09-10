@@ -14,6 +14,63 @@ from beta_controls import (
 
 
 class BetaStateStoreTests(unittest.TestCase):
+    def test_conversation_scope_is_server_side_and_subject_isolated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = BetaStateStore(Path(directory) / "beta-state.sqlite3")
+            scope = {
+                "scope_type": "item",
+                "scope_id": "004050631",
+                "scope_name": "1280-00-405-0631",
+            }
+            store.save_conversation_scope(
+                "conversation-123", "guest-a", scope, "item_intelligence"
+            )
+
+            self.assertEqual(
+                store.load_conversation_scope("conversation-123", "guest-a"), scope
+            )
+            self.assertIsNone(
+                store.load_conversation_scope("conversation-123", "guest-b")
+            )
+            store.connection.close()
+
+    def test_routing_decision_records_clarification_and_correction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = BetaStateStore(Path(directory) / "beta-state.sqlite3")
+            store.record_routing_decision(
+                request_id="request-1",
+                conversation_id="conversation-123",
+                subject_id="guest-a",
+                question="Which one?",
+                decision={
+                    "intended_workflow": "platform_intelligence",
+                    "workflow": "platform_intelligence",
+                    "candidates": [{"workflow": "platform_intelligence"}],
+                    "confidence": 0.7,
+                    "current_scope": {"scope_type": "platform", "scope_id": "F-16"},
+                    "resolved_entities": [],
+                    "subject_changed": False,
+                    "clarification_needed": True,
+                },
+            )
+            store.complete_routing_event(
+                "request-1", clarification_outcome="clarification_requested"
+            )
+            store.mark_routing_correction("request-1")
+
+            row = store.connection.execute(
+                """
+                SELECT selected_workflow, clarification_outcome, user_correction
+                FROM routing_events WHERE request_id = ?
+                """,
+                ["request-1"],
+            ).fetchone()
+            self.assertEqual(
+                row,
+                ("platform_intelligence", "clarification_requested", 1),
+            )
+            store.connection.close()
+
     def test_unbilled_clarification_restores_public_query_allowance(self):
         with tempfile.TemporaryDirectory() as directory:
             store = BetaStateStore(Path(directory) / "beta-state.sqlite3")

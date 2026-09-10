@@ -16,6 +16,7 @@ from lab_api import (
     explicit_platform_query,
     routing_decision_for_request,
     runtime,
+    validate_routing_decision,
     workflow_for_request,
 )
 from market_record_search import resolve_market_record_search
@@ -496,6 +497,62 @@ FOLLOW_UP_CASES = [
         ),
         "Where do the two platforms share important suppliers or capabilities?",
     ),
+    (
+        "item_intelligence",
+        ActiveScope(
+            scope_type="item",
+            scope_id="004050631",
+            scope_name="1280-00-405-0631",
+        ),
+        "What is the part number?",
+    ),
+    (
+        "item_intelligence",
+        ActiveScope(
+            scope_type="item",
+            scope_id="004050631",
+            scope_name="1280-00-405-0631",
+        ),
+        "part no?",
+    ),
+    (
+        "capability_discovery",
+        ActiveScope(
+            scope_type="capability_market",
+            scope_id="capability:aircraft engine fuel controls",
+            scope_name="Aircraft engine fuel controls",
+        ),
+        "US military",
+    ),
+    (
+        "capability_discovery",
+        ActiveScope(
+            scope_type="capability_market",
+            scope_id="capability:aircraft engine fuel controls",
+            scope_name="Aircraft engine fuel controls",
+        ),
+        "broader ecosystem pls",
+    ),
+    (
+        "company_site_intelligence",
+        ActiveScope(
+            scope_type="company_parent",
+            scope_id="PARENT_MOOG",
+            scope_name="MOOG INC.",
+            resolved_cages=["94697"],
+        ),
+        "Which platforms matter most?",
+    ),
+    (
+        "company_site_intelligence",
+        ActiveScope(
+            scope_type="company_parent",
+            scope_id="PARENT_MOOG",
+            scope_name="MOOG INC.",
+            resolved_cages=["94697"],
+        ),
+        "How has activity changed since FY21?",
+    ),
 ]
 
 
@@ -548,6 +605,29 @@ CONVERSATION_CASES = [
             ChatMessage(role="user", content="Tell me about Honeywell's US defense business."),
             ChatMessage(role="assistant", content="Here is Honeywell's observed footprint."),
             ChatMessage(role="user", content="Who supplies the Virginia class?"),
+        ],
+    ),
+    (
+        "platform_intelligence",
+        ActiveScope(
+            scope_type="company_parent",
+            scope_id="PARENT_MOOG",
+            scope_name="MOOG INC.",
+            resolved_cages=["94697"],
+        ),
+        [
+            ChatMessage(role="user", content="Tell me about Moog's defense business."),
+            ChatMessage(role="assistant", content="Here is Moog's observed footprint."),
+            ChatMessage(role="user", content="Now show me F16 suppliers"),
+        ],
+    ),
+    (
+        "company_site_intelligence",
+        ActiveScope(scope_type="platform", scope_id="F-16", scope_name="F-16"),
+        [
+            ChatMessage(role="user", content="Who supplies the F-16?"),
+            ChatMessage(role="assistant", content="Here is the observed supplier base."),
+            ChatMessage(role="user", content="Actually, tell me about Moog Blacksburg."),
         ],
     ),
 ]
@@ -667,11 +747,38 @@ def main() -> None:
     telemetry_requests = [
         AskRequest(messages=[ChatMessage(role="user", content="Show me F-16 suppliers")]),
         AskRequest(messages=[ChatMessage(role="user", content="Tell me about the broader defense ecosystem.")]),
+        AskRequest(
+            messages=[ChatMessage(role="user", content="What is the part number?")],
+            active_scope=ActiveScope(
+                scope_type="item",
+                scope_id="004050631",
+                scope_name="1280-00-405-0631",
+            ),
+        ),
+        AskRequest(
+            messages=[ChatMessage(role="user", content="Actually, show me F-16 suppliers")],
+            active_scope=ActiveScope(
+                scope_type="company_parent",
+                scope_id="PARENT_MOOG",
+                scope_name="MOOG INC.",
+                resolved_cages=["94697"],
+            ),
+        ),
     ]
     telemetry_failures = []
     for request in telemetry_requests:
         decision = routing_decision_for_request(request)
-        if not decision.reason or not 0 <= decision.confidence <= 1:
+        if (
+            not decision.reason
+            or not 0 <= decision.confidence <= 1
+            or decision.intended_workflow is None
+            or (request.active_scope and decision.current_scope is None)
+            or (decision.workflow != "general_defense_research" and not decision.candidates)
+            or (
+                request.messages[-1].content.lower().startswith("actually")
+                and not (decision.subject_changed and decision.user_correction)
+            )
+        ):
             telemetry_failures.append(decision.model_dump())
     print(
         f"Routing telemetry: {len(telemetry_requests) - len(telemetry_failures)}/"
@@ -679,6 +786,24 @@ def main() -> None:
     )
     for failure in telemetry_failures:
         print(f"FAIL | routing_telemetry={failure}")
+    validation_cases = [
+        ("Tell me about Ontic", False),
+        ("Tell me about ZZQX Nonexistent Aerostructures", True),
+    ]
+    validation_failures = []
+    for question, expected_clarification in validation_cases:
+        request = AskRequest(messages=[ChatMessage(role="user", content=question)])
+        decision = validate_routing_decision(
+            request, routing_decision_for_request(request)
+        )
+        if decision.clarification_needed != expected_clarification:
+            validation_failures.append(decision.model_dump())
+    print(
+        f"Routing validation gate: {len(validation_cases) - len(validation_failures)}/"
+        f"{len(validation_cases)} passed."
+    )
+    for failure in validation_failures:
+        print(f"FAIL | routing_validation={failure}")
     print("Routes exercised:", dict(sorted(Counter(row[2] for row in results).items())))
     resolution_failures = _resolution_failures()
     resolution_total = (
@@ -693,7 +818,7 @@ def main() -> None:
         print(
             f"FAIL | resolver={kind} expected={expected!r} actual={actual!r} | {question}"
         )
-    if failures or resolution_failures:
+    if failures or resolution_failures or telemetry_failures or validation_failures:
         raise SystemExit(1)
 
 
