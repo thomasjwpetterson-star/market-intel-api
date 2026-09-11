@@ -1,13 +1,17 @@
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ingest_dod_contract_announcements import (
+    _merge_records,
     discover_articles,
     fetch_article_text,
     parse_announcement,
@@ -15,6 +19,37 @@ from ingest_dod_contract_announcements import (
 
 
 class DodContractAnnouncementTests(unittest.TestCase):
+    def test_merge_preserves_first_observed_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "announcements.parquet"
+            pd.DataFrame(
+                [
+                    {
+                        "announcement_id": "ANN-1",
+                        "announcement_date": "2026-09-10",
+                        "source_article_id": "ARTICLE-1",
+                        "entry_index": 1,
+                        "retrieved_at": "first",
+                    }
+                ]
+            ).to_parquet(output, index=False)
+
+            merged = _merge_records(
+                output,
+                [
+                    {
+                        "announcement_id": "ANN-1",
+                        "announcement_date": "2026-09-10",
+                        "source_article_id": "ARTICLE-1",
+                        "entry_index": 1,
+                        "retrieved_at": "second",
+                    }
+                ],
+            )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged.iloc[0]["retrieved_at"], "first")
+
     @patch("ingest_dod_contract_announcements._fetch")
     def test_html_official_response_uses_text_renderer(self, fetch):
         fetch.side_effect = [

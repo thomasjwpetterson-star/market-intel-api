@@ -54,6 +54,7 @@ DATA_FILES = (
     "contracts_rolled.parquet",
     "profiles.parquet",
 )
+ANNOUNCEMENT_FILENAME = "dod_contract_announcements.parquet"
 PINNED_REFERENCE_FILES = (
     (
         "silver/dod_budget/ref_budget_facts/data/pb_fy2027/dod_budget_facts.parquet",
@@ -115,6 +116,7 @@ KEY_PLATFORM_CONTEXTS = (
 
 BUILD_DOMAINS = (
     "serving-data",
+    "announcements",
     "references",
     "classification",
     "source-depth",
@@ -131,6 +133,7 @@ BUILD_DOMAINS = (
 
 DOMAIN_LOCAL_PATHS = {
     "serving-data": tuple(f"data/{name}" for name in DATA_FILES),
+    "announcements": (f"data/{ANNOUNCEMENT_FILENAME}",),
     "references": tuple(f"data/{name}" for _, name in PINNED_REFERENCE_FILES),
     "classification": ("data/classification_reference.parquet",),
     "source-depth": (
@@ -652,11 +655,12 @@ def build_classification_reference() -> Path:
 def build_recent_awards_search() -> Path:
     """Materialize the bounded recent-award corpus used by natural-language search."""
     source = DATA_ROOT / "contracts_rolled.parquet"
-    announcements = (
-        DATA_ROOT
-        / "dod-contract-announcements"
-        / "dod_contract_announcements.parquet"
+    announcements = DATA_ROOT / ANNOUNCEMENT_FILENAME
+    legacy_announcements = (
+        DATA_ROOT / "dod-contract-announcements" / ANNOUNCEMENT_FILENAME
     )
+    if not announcements.exists() and legacy_announcements.exists():
+        announcements = legacy_announcements
     output = DATA_ROOT / "recent_awards_search.parquet"
     if not source.exists():
         raise FileNotFoundError(f"recent-award search source was not found: {source}")
@@ -843,6 +847,26 @@ def publish(
                 else:
                     entry = remote_entry
             entries_by_path[entry["local_path"]] = entry
+
+    if "announcements" in selected_domains:
+        local_path = f"data/{ANNOUNCEMENT_FILENAME}"
+        source_key = f"app_cache/{ANNOUNCEMENT_FILENAME}"
+        if verify_local_inputs:
+            entry = verified_serving_manifest_entry(
+                s3,
+                bucket,
+                source_key,
+                local_path,
+                DATA_ROOT / ANNOUNCEMENT_FILENAME,
+            )
+        else:
+            entry = remote_serving_manifest_entry(
+                s3,
+                bucket,
+                source_key,
+                local_path,
+            )
+        entries_by_path[entry["local_path"]] = entry
 
     classification_path = None
     if "classification" in selected_domains:

@@ -281,7 +281,10 @@ def _merge_records(output: Path, records: Iterable[Dict[str, Any]]) -> pd.DataFr
         incoming = pd.concat([existing, incoming], ignore_index=True)
     if incoming.empty:
         return incoming
-    incoming = incoming.drop_duplicates(subset=["announcement_id"], keep="last")
+    # The first observed copy is the immutable record. If Defense.gov changes an
+    # entry, its content-derived ID changes and the corrected text is retained as
+    # a separate record instead of rewriting the original observation.
+    incoming = incoming.drop_duplicates(subset=["announcement_id"], keep="first")
     return incoming.sort_values(
         ["announcement_date", "source_article_id", "entry_index"],
         ascending=[False, False, True],
@@ -296,6 +299,7 @@ def _upload(
     *,
     bucket: str,
     profile: str | None,
+    release_id: str,
 ) -> None:
     session = boto3.Session(profile_name=profile) if profile else boto3.Session()
     s3 = session.client("s3", region_name="us-east-1")
@@ -307,11 +311,13 @@ def _upload(
             f"bronze/dod/contract_announcements/{relative.as_posix()}",
         )
     for path in (parquet_path, manifest_path):
-        s3.upload_file(
-            str(path),
-            bucket,
-            f"silver/dod/ref_contract_announcements/{path.name}",
+        stable_key = f"silver/dod/ref_contract_announcements/{path.name}"
+        release_key = (
+            "silver/dod/ref_contract_announcements/releases/"
+            f"{release_id}/{path.name}"
         )
+        s3.upload_file(str(path), bucket, release_key)
+        s3.upload_file(str(path), bucket, stable_key)
 
 
 def ingest(
@@ -322,10 +328,12 @@ def ingest(
     allow_text_renderer: bool = True,
     bucket: str | None = None,
     profile: str | None = None,
+    fail_on_fetch_error: bool = False,
 ) -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     retrieved_at = datetime.now(timezone.utc)
     stamp = retrieved_at.strftime("%Y%m%dT%H%M%SZ")
+    release_id = f"dod-contract-announcements-{stamp}"
     rss_body = _fetch(RSS_URL)
     rss_path = output_dir / "raw" / "rss" / f"contracts-{stamp}.xml"
     rss_path.parent.mkdir(parents=True, exist_ok=True)
@@ -370,6 +378,7 @@ def ingest(
     if not merged.empty:
         merged.to_parquet(parquet_path, index=False, compression="zstd")
     manifest = {
+        "release_id": release_id,
         "generated_at": retrieved_at.isoformat(),
         "official_feed_url": RSS_URL,
         "articles_discovered": len(articles),
@@ -389,6 +398,10 @@ def ingest(
     }
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    if failures and fail_on_fetch_error:
+        raise RuntimeError(
+            f"{len(failures)} of {len(articles)} DoD announcement pages failed to load"
+        )
     if bucket and parquet_path.exists():
         _upload(
             output_dir,
@@ -397,6 +410,7 @@ def ingest(
             raw_paths,
             bucket=bucket,
             profile=profile,
+            release_id=release_id,
         )
     return manifest
 
@@ -409,6 +423,7 @@ def main() -> None:
     parser.add_argument("--bucket")
     parser.add_argument("--profile")
     parser.add_argument("--direct-only", action="store_true")
+    parser.add_argument("--fail-on-fetch-error", action="store_true")
     args = parser.parse_args()
     result = ingest(
         args.output_dir.resolve(),
@@ -417,6 +432,7 @@ def main() -> None:
         allow_text_renderer=not args.direct_only,
         bucket=args.bucket,
         profile=args.profile,
+        fail_on_fetch_error=args.fail_on_fetch_error,
     )
     print(json.dumps(result, indent=2))
 

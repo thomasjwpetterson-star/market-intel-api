@@ -36,6 +36,11 @@ import csv
 from fastapi import APIRouter
 from dotenv import load_dotenv
 
+from dod_contract_enrichment import (
+    lookup_contract_announcements,
+    lookup_scope_announcements,
+)
+
 load_dotenv()
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -1129,6 +1134,7 @@ def reload_all_data():
             "nsn_profile_lookup.parquet",
             "nsn_supplier_lookup.parquet",
             "nsn_cage_reference.parquet",
+            "dod_contract_announcements.parquet",
             "platform_bom.parquet" # unrelated to NSN/CAGE reference, leave only if another feature uses it
         ]
 
@@ -7804,6 +7810,61 @@ def get_award_profile(id: str):
     except Exception as e:
         logger.error(f"Profile API Error: {e}")
         return None
+
+
+@app.get("/api/award/announcements")
+def get_award_announcements(id: str):
+    if not id:
+        return []
+    try:
+        return lookup_contract_announcements(
+            LOCAL_CACHE_DIR / "dod_contract_announcements.parquet",
+            id,
+        )
+    except Exception:
+        logger.exception("Official DoD announcement lookup failed for contract %s", id)
+        return []
+
+
+@app.get("/api/company/announcements")
+def get_company_announcements(
+    cage: Optional[str] = None,
+    name: Optional[str] = None,
+    limit: int = 10,
+):
+    if not cage and not name:
+        return []
+    try:
+        return lookup_scope_announcements(
+            LOCAL_CACHE_DIR / "dod_contract_announcements.parquet",
+            LOCAL_CACHE_DIR / "transactions.parquet",
+            cage=sanitize(cage),
+            company_name=sanitize(name),
+            limit=limit,
+        )
+    except Exception:
+        logger.exception(
+            "Official DoD announcement lookup failed for company cage=%s name=%s",
+            cage,
+            name,
+        )
+        return []
+
+
+@app.get("/api/platform/announcements")
+def get_platform_announcements(name: str, limit: int = 10):
+    if not name:
+        return []
+    try:
+        return lookup_scope_announcements(
+            LOCAL_CACHE_DIR / "dod_contract_announcements.parquet",
+            LOCAL_CACHE_DIR / "transactions.parquet",
+            platform=sanitize(name),
+            limit=limit,
+        )
+    except Exception:
+        logger.exception("Official DoD announcement lookup failed for platform %s", name)
+        return []
 
 
 # --- ADD THIS NEW FUNCTION ---

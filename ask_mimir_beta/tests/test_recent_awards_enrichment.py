@@ -113,6 +113,38 @@ class RecentAwardsEnrichmentTests(unittest.TestCase):
             )
             connection.execute(
                 """
+                COPY (
+                    SELECT 'ANN-1' announcement_id,
+                           DATE '2026-09-11' announcement_date,
+                           'AIR FORCE' service,
+                           1 entry_index,
+                           'award' entry_type,
+                           'ANNOUNCED VENDOR' recipient_text,
+                           'FA0000-26-C-0001' primary_contract_id,
+                           ['FA0000-26-C-0001'] contract_ids,
+                           600000000.0 announced_value_usd,
+                           30000000.0 obligated_at_announcement_usd,
+                           'Work will be performed in Dayton.' work_locations,
+                           'Expected completion is 2031.' completion_text,
+                           'Three offers were received.' competition_text,
+                           'Air Force office is the contracting activity.' contracting_activity,
+                           'MISSILE PROPULSION PRODUCTION' description,
+                           'MISSILE PROPULSION PRODUCTION' search_text,
+                           '4597000' source_article_id,
+                           'Contracts for Sept. 11, 2026' source_title,
+                           'https://www.defense.gov/current' source_url,
+                           '2026-09-11T21:00:00+00:00' source_published_at,
+                           'https://r.jina.ai/http://www.defense.gov/current' source_fetch_url,
+                           'text_renderer' source_fetch_method,
+                           'current-hash' source_content_sha256,
+                           '2026-09-11T22:00:00+00:00' retrieved_at,
+                           'MISSILE PROPULSION PRODUCTION' raw_text
+                ) TO ? (FORMAT PARQUET)
+                """,
+                [str(root / "dod_contract_announcements.parquet")],
+            )
+            connection.execute(
+                """
                 COPY (SELECT 'USA-1' contract_id, 'A1' award_key, 'OLD' vendor_name,
                              '11111' vendor_cage, 'DOD' parent_agency, 'AIR FORCE' sub_agency,
                              '1234' psc, '123456' naics_code, NULL platform_family,
@@ -158,13 +190,14 @@ class RecentAwardsEnrichmentTests(unittest.TestCase):
                 }
             )
             row = result["records"][0]
+            self.assertEqual(len(result["records"]), 1)
             self.assertEqual(row["source_type"], "DOD_CONTRACT_ANNOUNCEMENT")
             self.assertEqual(
                 row["source_name"],
                 "Official U.S. Department of Defense contract announcement",
             )
-            self.assertEqual(row["source_url"], "https://www.defense.gov/example")
-            self.assertEqual(row["announced_value_usd"], 500000000.0)
+            self.assertEqual(row["source_url"], "https://www.defense.gov/current")
+            self.assertEqual(row["announced_value_usd"], 600000000.0)
             self.assertIsNone(row["net_prime_obligations_usd"])
 
 

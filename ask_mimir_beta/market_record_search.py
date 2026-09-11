@@ -161,11 +161,14 @@ class MarketRecordSearchStore:
             "opportunities": self.data_root / "opportunities.parquet",
             "contracts": self.data_root / "contracts_rolled.parquet",
             "recent_awards": self.data_root / "recent_awards_search.parquet",
+            "announcements": self.data_root / "dod_contract_announcements.parquet",
             "classifications": self.data_root / "classification_reference.parquet",
             "locations": self.data_root / "cage_locations.parquet",
         }
         required_paths = {
-            key: path for key, path in self.paths.items() if key != "recent_awards"
+            key: path
+            for key, path in self.paths.items()
+            if key not in {"recent_awards", "announcements"}
         }
         missing = [str(path) for path in required_paths.values() if not path.exists()]
         if missing:
@@ -261,6 +264,12 @@ class MarketRecordSearchStore:
                      "COALESCE(a.latest_action_description, a.description, ''))"
             )
             optional = self.recent_award_columns if award_source == self.paths["recent_awards"] else set()
+            has_current_announcements = self.paths["announcements"].exists()
+            if has_current_announcements and "source_type" in optional:
+                source_filter = (
+                    "COALESCE(a.source_type, 'USA_SPENDING') "
+                    "<> 'DOD_CONTRACT_ANNOUNCEMENT'"
+                )
             source_type = "a.source_type" if "source_type" in optional else "'USA_SPENDING'"
             source_url = "a.source_url" if "source_url" in optional else "CAST(NULL AS VARCHAR)"
             announced_value = (
@@ -341,10 +350,78 @@ class MarketRecordSearchStore:
                      str(award_source), str(self.paths["classifications"]), pattern],
                 )
             )
+            matching_records = (
+                int(records[0].get("total_available") or 0) if records else 0
+            )
+            if has_current_announcements:
+                announcement_records = _rows(
+                    self.connection.execute(
+                        """
+                        SELECT a.primary_contract_id AS record_id,
+                               a.description AS title,
+                               a.recipient_text AS recipient,
+                               CAST(NULL AS VARCHAR) AS vendor_cage,
+                               CAST(NULL AS VARCHAR) AS city,
+                               CAST(NULL AS VARCHAR) AS state,
+                               'DEPARTMENT OF DEFENSE' AS customer,
+                               a.service AS sub_agency,
+                               CAST(NULL AS VARCHAR) AS psc,
+                               CAST(NULL AS VARCHAR) AS psc_description,
+                               CAST(NULL AS VARCHAR) AS naics,
+                               CAST(NULL AS VARCHAR) AS platform_family,
+                               CAST(NULL AS DOUBLE) AS net_prime_obligations_usd,
+                               SUBSTR(CAST(a.announcement_date AS VARCHAR), 1, 10)
+                                   AS latest_action_date,
+                               'DOD_CONTRACT_ANNOUNCEMENT' AS source_type,
+                               'Official U.S. Department of Defense contract announcement'
+                                   AS source_name,
+                               a.source_url,
+                               a.announced_value_usd,
+                               a.obligated_at_announcement_usd,
+                               a.service AS service_section,
+                               a.work_locations,
+                               a.completion_text,
+                               a.competition_text,
+                               a.contracting_activity,
+                               CASE WHEN REGEXP_MATCHES(
+                                   UPPER(COALESCE(a.description, '')), ?
+                               ) THEN 6 ELSE 0 END AS relevance_score,
+                               COUNT(*) OVER () AS total_available
+                        FROM read_parquet(?) a
+                        WHERE REGEXP_MATCHES(
+                            UPPER(COALESCE(a.search_text, a.description, '')), ?
+                        )
+                        ORDER BY relevance_score DESC,
+                                 COALESCE(ABS(a.announced_value_usd), 0) DESC,
+                                 latest_action_date DESC
+                        LIMIT 250
+                        """,
+                        [pattern, str(self.paths["announcements"]), pattern],
+                    )
+                )
+                if announcement_records:
+                    matching_records += int(
+                        announcement_records[0].get("total_available") or 0
+                    )
+                records.extend(announcement_records)
+                records.sort(
+                    key=lambda row: (
+                        int(row.get("relevance_score") or 0),
+                        max(
+                            abs(float(row.get("net_prime_obligations_usd") or 0)),
+                            abs(float(row.get("announced_value_usd") or 0)),
+                        ),
+                        str(row.get("latest_action_date") or ""),
+                    ),
+                    reverse=True,
+                )
+                records = records[:250]
+                for row in records:
+                    row["total_available"] = matching_records
             window = (
                 "FY2025-FY2026 observed contract awards and current official DoD "
                 "contract announcements"
-                if "source_type" in optional
+                if has_current_announcements or "source_type" in optional
                 else "FY2025-FY2026 observed contract awards"
             )
         return {
