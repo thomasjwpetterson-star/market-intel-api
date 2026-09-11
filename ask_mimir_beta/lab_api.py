@@ -871,6 +871,12 @@ sites with exact item, authorized-source, observed-procurement or directly relev
 Platform associations can show where matched items are used; do not invent component roles from a
 broad classification alone.
 
+Use platform_breadth when describing concentration. NIIN-to-platform association counts are evidence
+of coverage, not financial market share. Do not characterize a capability market as centered on one
+platform unless single_platform_dominates_associations_shown is true. When it is false, describe the
+market as cross-platform and name several materially represented platform families rather than
+promoting the first ranked platform into the market headline.
+
 Use scope.evidence_boundary to calibrate the answer without repeating internal classification labels.
 For a description-confirmed boundary, describe the visible supplier and award market rather than
 claiming a complete market universe or calculating market share. For a complete product-classification

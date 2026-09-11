@@ -117,6 +117,33 @@ def _rows(cursor: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+def summarize_platform_breadth(
+    platform_rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Describe platform breadth without treating NIIN associations as financial share."""
+    total_associations = sum(
+        int(row.get("matching_niin_count") or 0) for row in platform_rows
+    )
+    leading = platform_rows[0] if platform_rows else {}
+    leading_count = int(leading.get("matching_niin_count") or 0)
+    leading_share = (
+        leading_count / total_associations if total_associations > 0 else 0.0
+    )
+    return {
+        "platforms_shown": len(platform_rows),
+        "total_niin_platform_associations_shown": total_associations,
+        "leading_platform": leading.get("platform"),
+        "leading_platform_niin_count": leading_count,
+        "leading_platform_share_of_associations_shown": leading_share,
+        "single_platform_dominates_associations_shown": leading_share >= 0.5,
+        "interpretation": (
+            "Counts describe item-to-platform associations, not procurement value or "
+            "market share. A market should not be characterized as centered on the "
+            "leading platform unless single_platform_dominates_associations_shown is true."
+        ),
+    }
+
+
 def resolve_capability(text: str) -> str | None:
     clean = str(text or "")
     if re.search(r"\bwho\s+competes\s+with\b|\bwhere\s+should\b", clean, re.IGNORECASE):
@@ -850,6 +877,7 @@ class CapabilityDiscoveryStore:
             "prime_award_sites": prime_award_sites,
             "annual_prime_activity": annual_prime_activity,
             "top_platform_activity": top_platform_activity,
+            "platform_breadth": summarize_platform_breadth(top_platform_activity),
             "broader_ecosystem": broader_ecosystem,
             "coverage": {
                 "commercial_supplier_sites": len(commercial_rows),

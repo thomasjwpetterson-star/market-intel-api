@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import json
 import struct
 import tempfile
 import unittest
@@ -6,7 +8,10 @@ import zlib
 from pathlib import Path
 
 from publish_runtime_release import (
+    CAPABILITY_DEFINITIONS,
+    refresh_prebuilt_capability_metadata,
     remote_serving_manifest_entry,
+    validate_prebuilt_capability_bundle,
     verified_serving_manifest_entry,
 )
 
@@ -101,6 +106,82 @@ class VerifiedServingManifestEntryTests(unittest.TestCase):
                     "data/input.parquet",
                     local_file,
                 )
+
+
+class PrebuiltCapabilityBundleTests(unittest.TestCase):
+    def _write_bundle(self, directory: Path) -> None:
+        ontology_path = Path(__file__).resolve().parents[1] / "capability_ontology.json"
+        ontology_body = ontology_path.read_bytes()
+        (directory / "ontology.json").write_bytes(ontology_body)
+        entries = []
+        for capability_id, definition in CAPABILITY_DEFINITIONS.items():
+            pack_path = directory / f"{capability_id}.json"
+            pack_path.write_text(
+                json.dumps(
+                    {
+                        "scope": {"capability_id": capability_id},
+                        "coverage": {"matching_niins": 1},
+                    }
+                )
+            )
+            entries.append(
+                {
+                    "capability_id": capability_id,
+                    "display_name": definition["display_name"],
+                    "path": pack_path.name,
+                    "matching_niins": 1,
+                }
+            )
+        (directory / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "ontology_sha256": hashlib.sha256(ontology_body).hexdigest(),
+                    "capabilities": entries,
+                }
+            )
+        )
+
+    def test_accepts_complete_bundle_matching_source_ontology(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            self._write_bundle(path)
+            manifest = validate_prebuilt_capability_bundle(path)
+        self.assertEqual(len(manifest["capabilities"]), len(CAPABILITY_DEFINITIONS))
+
+    def test_rejects_bundle_missing_a_capability(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            self._write_bundle(path)
+            manifest_path = path / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["capabilities"].pop()
+            manifest_path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(RuntimeError, "contents do not match"):
+                validate_prebuilt_capability_bundle(path)
+
+    def test_refreshes_platform_breadth_without_rebuilding_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            self._write_bundle(path)
+            fuel_pack = path / "aircraft_fuel_systems.json"
+            pack = json.loads(fuel_pack.read_text())
+            pack["top_platform_activity"] = [
+                {"platform": "F-15", "matching_niin_count": 10},
+                {"platform": "C-130", "matching_niin_count": 9},
+                {"platform": "F-16", "matching_niin_count": 8},
+            ]
+            fuel_pack.write_text(json.dumps(pack))
+
+            manifest = refresh_prebuilt_capability_metadata(path)
+            refreshed = json.loads(fuel_pack.read_text())
+
+        self.assertIn("metadata_refreshed_at", manifest)
+        self.assertEqual(refreshed["platform_breadth"]["platforms_shown"], 3)
+        self.assertFalse(
+            refreshed["platform_breadth"][
+                "single_platform_dominates_associations_shown"
+            ]
+        )
 
 
 if __name__ == "__main__":

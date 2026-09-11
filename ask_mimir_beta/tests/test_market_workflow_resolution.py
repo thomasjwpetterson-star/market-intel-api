@@ -11,6 +11,7 @@ from capability_discovery import (
     capability_market_follow_up_intent,
     load_capability_ontology,
     resolve_capability,
+    summarize_platform_breadth,
 )
 from geographic_market import (
     is_geographic_market_request,
@@ -111,6 +112,19 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
         for expected_term in ("tanks", "pumps", "engine fuel-control", "gauging", "test equipment"):
             with self.subTest(expected_term=expected_term):
                 self.assertIn(expected_term, lanes)
+
+    def test_platform_breadth_does_not_make_the_leader_a_market_center(self):
+        summary = summarize_platform_breadth(
+            [
+                {"platform": "F-15", "matching_niin_count": 615},
+                {"platform": "F-16", "matching_niin_count": 359},
+                {"platform": "C-130", "matching_niin_count": 249},
+                {"platform": "C/KC-135", "matching_niin_count": 220},
+            ]
+        )
+        self.assertEqual(summary["leading_platform"], "F-15")
+        self.assertFalse(summary["single_platform_dominates_associations_shown"])
+        self.assertLess(summary["leading_platform_share_of_associations_shown"], 0.5)
 
     def test_alabama_market_request_resolves(self):
         question = "Give me an overview of the defence industrial base in Alabama."

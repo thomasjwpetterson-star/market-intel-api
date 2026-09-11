@@ -23,7 +23,11 @@ import duckdb
 
 from bootstrap_data import DEFAULT_BUCKET, file_sha256
 from build_platform_source_depth import build_platform_source_depth
-from capability_discovery import build_precomputed_capabilities
+from capability_discovery import (
+    CAPABILITY_DEFINITIONS,
+    build_precomputed_capabilities,
+    summarize_platform_breadth,
+)
 from company_context_store import build_precomputed_parent_contexts
 from geographic_market import build_precomputed_state_markets
 from market_segment import build_precomputed_market_segments
@@ -516,6 +520,75 @@ def validate_local_inputs_against_base(
             )
 
 
+def validate_prebuilt_capability_bundle(
+    directory: Path = CAPABILITY_DIR,
+) -> Dict[str, Any]:
+    """Validate a materialized capability bundle before an incremental publish."""
+    manifest_path = directory / "manifest.json"
+    ontology_path = directory / "ontology.json"
+    if not manifest_path.is_file() or not ontology_path.is_file():
+        raise RuntimeError("Prebuilt capability bundle is missing its manifest or ontology")
+
+    manifest = json.loads(manifest_path.read_text())
+    ontology_body = ontology_path.read_bytes()
+    ontology_hash = hashlib.sha256(ontology_body).hexdigest()
+    if manifest.get("ontology_sha256") != ontology_hash:
+        raise RuntimeError("Capability manifest does not match the bundled ontology")
+
+    source_ontology_hash = file_sha256(ROOT / "capability_ontology.json")
+    if ontology_hash != source_ontology_hash:
+        raise RuntimeError(
+            "Prebuilt capability ontology is stale; rebuild capability artifacts first"
+        )
+
+    expected_ids = set(CAPABILITY_DEFINITIONS)
+    entries = manifest.get("capabilities") or []
+    actual_ids = {str(entry.get("capability_id") or "") for entry in entries}
+    if actual_ids != expected_ids:
+        missing = sorted(expected_ids.difference(actual_ids))
+        extra = sorted(actual_ids.difference(expected_ids))
+        raise RuntimeError(
+            f"Capability bundle contents do not match the ontology; missing={missing}, extra={extra}"
+        )
+
+    for entry in entries:
+        capability_id = str(entry["capability_id"])
+        pack_path = directory / str(entry.get("path") or f"{capability_id}.json")
+        if not pack_path.is_file():
+            raise RuntimeError(f"Capability pack is missing: {pack_path}")
+        pack = json.loads(pack_path.read_text())
+        if (pack.get("scope") or {}).get("capability_id") != capability_id:
+            raise RuntimeError(f"Capability pack has the wrong scope: {pack_path}")
+        coverage = pack.get("coverage") or {}
+        if int(coverage.get("matching_niins") or 0) != int(
+            entry.get("matching_niins") or 0
+        ):
+            raise RuntimeError(f"Capability coverage differs from manifest: {pack_path}")
+    return manifest
+
+
+def refresh_prebuilt_capability_metadata(
+    directory: Path = CAPABILITY_DIR,
+) -> Dict[str, Any]:
+    """Add derived presentation controls without re-querying the serving Parquets."""
+    manifest = validate_prebuilt_capability_bundle(directory)
+    changed = False
+    for entry in manifest["capabilities"]:
+        pack_path = directory / str(entry["path"])
+        pack = json.loads(pack_path.read_text())
+        platform_breadth = summarize_platform_breadth(
+            pack.get("top_platform_activity") or []
+        )
+        if pack.get("platform_breadth") != platform_breadth:
+            pack["platform_breadth"] = platform_breadth
+            pack_path.write_text(json.dumps(pack, indent=2, default=str))
+            changed = True
+    if changed:
+        manifest["metadata_refreshed_at"] = datetime.now(timezone.utc).isoformat()
+        (directory / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return validate_prebuilt_capability_bundle(directory)
+
+
 def remove_domain_entries(
     entries: Dict[str, Dict[str, Any]],
     domain: str,
@@ -711,6 +784,7 @@ def publish(
     candidate_manifest_key: str = CANDIDATE_MANIFEST_KEY,
     promote: bool = False,
     verify_local_inputs: bool = True,
+    reuse_prebuilt_capabilities: bool = False,
 ) -> Dict[str, Any]:
     session = boto3.Session(profile_name=profile) if profile else boto3.Session()
     s3 = session.client("s3", region_name="us-east-1")
@@ -798,10 +872,15 @@ def publish(
             MARKET_SEGMENT_DIR,
         )
     if "capabilities" in selected_domains:
-        derived_release["capability_markets"] = build_precomputed_capabilities(
-            DATA_ROOT,
-            CAPABILITY_DIR,
-        )
+        if reuse_prebuilt_capabilities:
+            derived_release["capability_markets"] = refresh_prebuilt_capability_metadata(
+                CAPABILITY_DIR
+            )
+        else:
+            derived_release["capability_markets"] = build_precomputed_capabilities(
+                DATA_ROOT,
+                CAPABILITY_DIR,
+            )
     if "products" in selected_domains:
         derived_release["product_families"] = build_precomputed_product_families(
             DATA_ROOT,
@@ -994,9 +1073,23 @@ if __name__ == "__main__":
             "versioned S3 objects without downloading them locally."
         ),
     )
+    parser.add_argument(
+        "--reuse-prebuilt-capabilities",
+        action="store_true",
+        help=(
+            "Validate and publish the existing capability artifact bundle without "
+            "rebuilding it. Use only for an incremental capabilities release."
+        ),
+    )
     arguments = parser.parse_args()
     if arguments.promote_candidate and (arguments.only or arguments.promote):
         parser.error("--promote-candidate cannot be combined with --only or --promote")
+    if arguments.reuse_prebuilt_capabilities:
+        selected = parse_domains(arguments.only)
+        if selected != {"capabilities"}:
+            parser.error(
+                "--reuse-prebuilt-capabilities requires --only capabilities"
+            )
     if arguments.promote_candidate:
         result = promote_candidate(
             arguments.bucket,
@@ -1014,6 +1107,7 @@ if __name__ == "__main__":
             candidate_manifest_key=arguments.candidate_manifest_key,
             promote=arguments.promote,
             verify_local_inputs=not arguments.skip_local_input_verification,
+            reuse_prebuilt_capabilities=arguments.reuse_prebuilt_capabilities,
         )
     print(
         json.dumps(result, indent=2)
