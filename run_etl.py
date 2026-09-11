@@ -2010,7 +2010,20 @@ def optimize_and_upload():
                             )
                             THEN LPAD(TRIM(CAST(fsc AS VARCHAR)), 4, '0')
                         END
-                    ) AS fsc_code
+                    ) AS fsc_code,
+                    MAX(NULLIF(TRIM(CAST(item_name AS VARCHAR)), '')) AS item_name,
+                    ARRAY_JOIN(
+                        ARRAY_SORT(ARRAY_DISTINCT(ARRAY_AGG(
+                            NULLIF(TRIM(CAST(inc AS VARCHAR)), '')
+                        ) FILTER (WHERE NULLIF(TRIM(CAST(inc AS VARCHAR)), '') IS NOT NULL))),
+                        ' | '
+                    ) AS item_name_codes,
+                    ARRAY_JOIN(
+                        ARRAY_SORT(ARRAY_DISTINCT(ARRAY_AGG(
+                            NULLIF(TRIM(CAST(end_item_name AS VARCHAR)), '')
+                        ) FILTER (WHERE NULLIF(TRIM(CAST(end_item_name AS VARCHAR)), '') IS NOT NULL))),
+                        ' | '
+                    ) AS reported_end_item_context
                 FROM "market_intel_silver"."ref_flis_nsn"
                 WHERE niin IS NOT NULL
                 GROUP BY 1
@@ -2168,8 +2181,11 @@ def optimize_and_upload():
                 vn.vendor_name,
 
                 -- Part metadata
-                pb.description,
+                COALESCE(NULLIF(TRIM(CAST(pb.description AS VARCHAR)), ''), fn.item_name)
+                    AS description,
                 pb.part_number,
+                fn.item_name_codes,
+                fn.reported_end_item_context,
 
                 -- Authoritative FLIS reference/source status. These fields describe
                 -- this exact NIIN + CAGE + part-number relationship.

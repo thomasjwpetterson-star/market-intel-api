@@ -570,6 +570,10 @@ Answer for the exact resolved item. Start with a compact identity summary showin
 description and FSC. Then cover current active-authorized source sites, other observed DLA
 procurement recipients, part-number relationships, item-platform associations and material
 contract activity. Use the returned CAGE location for each supplier site when available.
+When reported_end_item_context is populated, use it as additional component or assembly context.
+It may name a higher assembly, end item, related NSN, manufacturer or part reference as reported by
+FLIS; describe exactly what it says and do not silently convert it into a confirmed platform or
+variant assignment. Item Name Codes may support classification but are not customer-facing labels.
 
 Keep three concepts distinct:
 - a source authorized by DLA for procurement;

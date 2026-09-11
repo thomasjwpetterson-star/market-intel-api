@@ -99,6 +99,13 @@ class ItemContextStore:
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")
+        self.reference_columns = {
+            str(row[0]).lower()
+            for row in self.connection.execute(
+                "DESCRIBE SELECT * FROM read_parquet(?)",
+                [str(self.paths["reference"])],
+            ).fetchall()
+        }
         self._cache: Dict[tuple[str, tuple[int, ...]], Dict[str, Any]] = {}
 
     def search(self, query: str, limit: int = 20) -> Dict[str, Any]:
@@ -221,6 +228,8 @@ class ItemContextStore:
             "source_of_supply": profile.get("source_of_supply") or reference_profile.get("source_of_supply"),
             "demil_code": profile.get("demil_code") or reference_profile.get("demil_code"),
             "shelf_life_code": profile.get("shelf_life_code") or reference_profile.get("shelf_life_code"),
+            "item_name_codes": reference_profile.get("item_name_codes"),
+            "reported_end_item_context": reference_profile.get("reported_end_item_context"),
         }
         fingerprint_basis = json.dumps(
             {
@@ -405,8 +414,16 @@ class ItemContextStore:
         return rows[0] if rows else {}
 
     def _reference_profile(self, niin: str) -> Dict[str, Any]:
+        optional_fields = []
+        if "item_name_codes" in self.reference_columns:
+            optional_fields.append("MAX(item_name_codes) AS item_name_codes")
+        if "reported_end_item_context" in self.reference_columns:
+            optional_fields.append(
+                "MAX(reported_end_item_context) AS reported_end_item_context"
+            )
+        optional_sql = ",\n                   " + ",\n                   ".join(optional_fields) if optional_fields else ""
         cursor = self.connection.execute(
-            """
+            f"""
             SELECT MAX(nsn) AS nsn,
                    MAX(fsc_code) AS fsc_code,
                    MAX(description) AS description,
@@ -415,7 +432,7 @@ class ItemContextStore:
                    MAX(govt_estimated_price) AS govt_estimated_price,
                    MAX(source_of_supply) AS source_of_supply,
                    MAX(demil_code) AS demil_code,
-                   MAX(shelf_life_code) AS shelf_life_code
+                   MAX(shelf_life_code) AS shelf_life_code{optional_sql}
             FROM read_parquet(?)
             WHERE niin=?
             """,
