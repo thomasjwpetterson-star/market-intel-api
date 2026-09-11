@@ -40,6 +40,67 @@ def _rows(cursor: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+def _normalized_contract_id(value: Any) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def merge_official_announcements(
+    award_records: List[Dict[str, Any]],
+    announcement_records: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Collapse exact contract matches while preserving announcement detail."""
+
+    awards_by_contract = {
+        normalized: row
+        for row in award_records
+        if row.get("source_type") != "DOD_CONTRACT_ANNOUNCEMENT"
+        and (normalized := _normalized_contract_id(row.get("record_id")))
+    }
+    unmatched: List[Dict[str, Any]] = []
+    for announcement in announcement_records:
+        contract_ids = [announcement.get("record_id")]
+        contract_ids.extend(announcement.get("contract_ids") or [])
+        matched_award = next(
+            (
+                awards_by_contract.get(normalized)
+                for value in contract_ids
+                if (normalized := _normalized_contract_id(value))
+                and normalized in awards_by_contract
+            ),
+            None,
+        )
+        if matched_award is None:
+            unmatched.append(announcement)
+            continue
+
+        enrichment = {
+            "announcement_id": announcement.get("announcement_id"),
+            "announcement_date": announcement.get("latest_action_date"),
+            "source_name": announcement.get("source_name"),
+            "source_url": announcement.get("source_url"),
+            "recipient": announcement.get("recipient"),
+            "announced_value_usd": announcement.get("announced_value_usd"),
+            "obligated_at_announcement_usd": announcement.get(
+                "obligated_at_announcement_usd"
+            ),
+            "service_section": announcement.get("service_section"),
+            "work_locations": announcement.get("work_locations"),
+            "completion_text": announcement.get("completion_text"),
+            "competition_text": announcement.get("competition_text"),
+            "contracting_activity": announcement.get("contracting_activity"),
+            "description": announcement.get("title"),
+            "match_basis": "exact_contract_id",
+        }
+        linked = matched_award.setdefault("official_announcements", [])
+        if not any(
+            row.get("announcement_id") == enrichment["announcement_id"]
+            for row in linked
+        ):
+            linked.append(enrichment)
+
+    return [*award_records, *unmatched]
+
+
 def _search_terms(phrase: str) -> List[str]:
     clean = re.sub(r"[^a-z0-9]+", " ", str(phrase or "").lower())
     normalized_tokens = []
@@ -358,6 +419,8 @@ class MarketRecordSearchStore:
                     self.connection.execute(
                         """
                         SELECT a.primary_contract_id AS record_id,
+                               a.announcement_id,
+                               a.contract_ids,
                                a.description AS title,
                                a.recipient_text AS recipient,
                                CAST(NULL AS VARCHAR) AS vendor_cage,
@@ -403,7 +466,12 @@ class MarketRecordSearchStore:
                     matching_records += int(
                         announcement_records[0].get("total_available") or 0
                     )
-                records.extend(announcement_records)
+                combined_count = len(records) + len(announcement_records)
+                records = merge_official_announcements(records, announcement_records)
+                matching_records = max(
+                    0,
+                    matching_records - (combined_count - len(records)),
+                )
                 records.sort(
                     key=lambda row: (
                         int(row.get("relevance_score") or 0),

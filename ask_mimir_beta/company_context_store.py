@@ -35,6 +35,24 @@ CANONICAL_CONSOLIDATED_PARENT_NAMES = {
 # Reviewed trading-name aliases prevent common surnames from sweeping unrelated
 # legal entities into an automatically generated company-wide scope.
 REVIEWED_COMPANY_ALIASES = {
+    "VSE": (
+        "VSE",
+        "VSE CORPORATION",
+        "VSE AVIATION",
+        "VSE AVIATION SERVICES",
+        "TURBINE CONTROLS",
+        "TURBINE WELD",
+        "KELLSTROM",
+        "DESSER",
+        "AERO WHEEL AND BRAKE",
+        "AERO WHEEL BRAKE",
+        "CEE BAILEY",
+        "GLOBAL PARTS GROUP",
+        "PRECISION FUEL COMPONENTS",
+        "ROTABLE REPAIRS",
+        "TAG ONE",
+        "VORTEX AVIATION",
+    ),
     "ONTIC": (
         "ONTIC ENGINEERING",
         "ONTIC ENGINEERING MANUFACTURING",

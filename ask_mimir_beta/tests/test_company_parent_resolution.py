@@ -50,7 +50,13 @@ class CompanyParentResolutionTests(unittest.TestCase):
                         ('L2222', 'L3HARRIS TECHNOLOGIES, INC.', NULL, NULL, 500.0, 50.0),
                         ('X1111', 'CONFLICTING SYSTEMS, INC.', 'PARENT ALPHA', 'ALPHAUEI001', 100.0, 10.0),
                         ('X2222', 'CONFLICTING SYSTEMS, INC.', 'PARENT BRAVO', 'BRAVOUEI001', 90.0, 9.0),
-                        ('X3333', 'CONFLICTING SYSTEMS, INC.', NULL, NULL, 80.0, 8.0)
+                        ('X3333', 'CONFLICTING SYSTEMS, INC.', NULL, NULL, 80.0, 8.0),
+                        ('V1111', 'VSE CORPORATION', 'VSE', 'VSEUEI00001', 700.0, 70.0),
+                        ('V2222', 'WHEELER FLEET SOLUTIONS, CO.', 'VSE', 'VSEUEI00001', 600.0, 60.0),
+                        ('V3333', 'AKIMEKA, LLC', 'VSE', 'VSEUEI00001', 500.0, 50.0),
+                        ('V4444', 'VSE AVIATION, INC.', 'VSE AVIATION,', 'VSEAVUEI001', 400.0, 40.0),
+                        ('V5555', 'TURBINE CONTROLS, INC.', 'VSE', 'VSEUEI00001', 300.0, 30.0),
+                        ('V6666', 'VSE TEK', NULL, NULL, 200.0, 20.0)
                     ) AS t(
                         cage_code,
                         vendor_name,
@@ -116,6 +122,12 @@ class CompanyParentResolutionTests(unittest.TestCase):
                     ,('X1111', 'CONFLICTING SYSTEMS, INC.', 'ALPHA', 'VA', 'A', NULL)
                     ,('X2222', 'CONFLICTING SYSTEMS, INC.', 'BRAVO', 'VA', 'A', NULL)
                     ,('X3333', 'CONFLICTING SYSTEMS, INC.', 'CHARLIE', 'VA', 'A', NULL)
+                    ,('V1111', 'VSE CORPORATION', 'MIRAMAR', 'FL', 'A', NULL)
+                    ,('V2222', 'WHEELER FLEET SOLUTIONS, CO.', 'SOMERSET', 'PA', 'A', NULL)
+                    ,('V3333', 'AKIMEKA, LLC', 'MAITLAND', 'FL', 'A', NULL)
+                    ,('V4444', 'VSE AVIATION, INC.', 'MIAMI', 'FL', 'A', NULL)
+                    ,('V5555', 'TURBINE CONTROLS, INC.', 'BLOOMFIELD', 'CT', 'A', NULL)
+                    ,('V6666', 'VSE TEK', 'TAUNTON', 'MA', 'A', NULL)
                 ) AS t(cage_code, vendor_name, city, state, cage_status, replacement_cage)
             ) TO ? (FORMAT PARQUET)
             """,
@@ -291,6 +303,19 @@ class CompanyParentResolutionTests(unittest.TestCase):
             )
             self.assertEqual(parent["resolved_cages"], ["E1111", "E2222", "E3333"])
             self.assertNotIn("E4444", parent["resolved_cages"])
+
+    def test_reviewed_vse_group_excludes_divested_legacy_businesses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            result = store.search("VSE Corporation", limit=20)
+
+            parent = next(
+                row for row in result["matches"] if row["scope_type"] == "company_parent"
+            )
+            self.assertEqual(parent["resolved_cages"], ["V1111", "V4444", "V5555"])
+            self.assertNotIn("V2222", parent["resolved_cages"])
+            self.assertNotIn("V3333", parent["resolved_cages"])
+            self.assertNotIn("V6666", parent["resolved_cages"])
 
     def test_reported_parent_variants_and_direct_named_sites_are_consolidated(self):
         with tempfile.TemporaryDirectory() as directory:

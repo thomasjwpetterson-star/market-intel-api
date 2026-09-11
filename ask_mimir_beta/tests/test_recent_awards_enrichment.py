@@ -10,10 +10,43 @@ import duckdb
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import publish_runtime_release
-from market_record_search import MarketRecordSearchStore
+from market_record_search import MarketRecordSearchStore, merge_official_announcements
 
 
 class RecentAwardsEnrichmentTests(unittest.TestCase):
+    def test_exact_contract_match_becomes_qualitative_enrichment(self):
+        award = {
+            "record_id": "FA-0000-26-C-0001",
+            "source_type": "USA_SPENDING",
+            "net_prime_obligations_usd": 125.0,
+        }
+        announcement = {
+            "record_id": "FA000026C0001",
+            "announcement_id": "ANN-1",
+            "contract_ids": ["FA0000-26-C-0001"],
+            "source_type": "DOD_CONTRACT_ANNOUNCEMENT",
+            "source_name": "Official U.S. Department of Defense contract announcement",
+            "source_url": "https://www.defense.gov/example",
+            "latest_action_date": "2026-09-10",
+            "title": "Missile production award with work and completion detail.",
+            "announced_value_usd": 500000000.0,
+            "obligated_at_announcement_usd": 25000000.0,
+        }
+
+        merged = merge_official_announcements([award], [announcement])
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["source_type"], "USA_SPENDING")
+        self.assertEqual(merged[0]["net_prime_obligations_usd"], 125.0)
+        self.assertEqual(
+            merged[0]["official_announcements"][0]["match_basis"],
+            "exact_contract_id",
+        )
+        self.assertEqual(
+            merged[0]["official_announcements"][0]["announced_value_usd"],
+            500000000.0,
+        )
+
     def test_build_keeps_announcement_values_separate_from_obligations(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

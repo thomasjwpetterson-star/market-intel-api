@@ -67,11 +67,11 @@ DYNAMIC_CAPABILITY_PREFIX = "capability:"
 CAPABILITY_QUERY_PATTERNS = (
     r"(?:tell\s+(?:me|be)\s+about)\s+(?:the\s+)?(.+?)\s+market(?:[?.]|$)",
     r"what\s+is\s+(?:the\s+)?market\s+for\s+(.+?)(?:[?.]|$)",
+    r"(?:what is happening in|describe|analyse|analyze)\s+(?:the\s+)?(?:us\s+)?(.+?)\s+(?:defen[cs]e\s+)?market(?:[?.]|$)",
     r"what\s+is\s+(?:the\s+)?(.+?)\s+market(?:[?.]|$)",
     r"(?:market,\s*)?capability area(?:\s+or\s+industrial base)?\s*:\s*(.+?)(?:\?|$)",
     r"overview of (?:the\s+)?(?:us\s+)?(?:defen[cs]e\s+)?(?:market|capability area|industrial base)\s*:\s*(.+?)(?:\?|$)",
     r"overview of (?:the\s+)?(.+?)\s+in\s+(?:the\s+)?(?:us\s+)?defen[cs]e market(?:[?.]|$)",
-    r"(?:what is happening in|describe|analyse|analyze)\s+(?:the\s+)?(?:us\s+)?(.+?)\s+(?:defen[cs]e\s+)?market(?:[?.]|$)",
     r"(?:give me an?\s+)?overview of\s+(?:the\s+)?(.+?)\s+market(?:[?.]|$)",
     r"(?:find|identify|show)\s+(?:us\s+)?(?:manufacturers|suppliers|companies)\s+(?:that\s+)?(?:supply|provide|make|manufacture)\s+(.+?)(?:\s+to|\s+for)\s+(?:the\s+)?(?:us\s+)?military",
     r"(?:which|what)\s+(?:us\s+)?(?:manufacturers|suppliers|companies)\s+(?:supply|provide|make|manufacture)\s+(.+?)(?:\?|$)",

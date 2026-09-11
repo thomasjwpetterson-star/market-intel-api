@@ -496,6 +496,9 @@ activity reported as performed in the registered site's city and state by the sa
 cases where the recipient CAGE differs from the registered facility CAGE. Use it to explain work associated
 with the location, but preserve both CAGEs and never move the recipient-CAGE obligations into the registered
 CAGE's own contracting total. State the distinction only when it materially helps explain the facility record.
+Never present a contract-reported place of performance as an additional registered company site. If a place
+of performance does not appear in the identity/site table, say explicitly that it is contract-reported
+performance activity rather than a resolved CAGE site in the current company scope.
 
 When asked how important one facility is to the wider company, compare that facility with the other resolved
 sites using the complete company scope: financial activity, breadth of capabilities, platform exposure,
@@ -1021,7 +1024,10 @@ award value or ceiling, and the amount explicitly obligated when that announceme
 three different measures. Label each by its exact meaning, include its date or observation window,
 and never add or substitute them. If a DoD announcement has no corresponding USAspending value in
 the evidence, present the announcement as current award context without inventing cumulative
-obligations. Link its official source_url and describe the source as an official DoD contract
+obligations. When a USAspending record contains official_announcements, present one award row and use
+those announcements only as qualitative enrichment for scope, work location, completion, competition
+and other current context; do not repeat them as separate awards. Link the official source_url and
+describe the source as an official DoD contract
 announcement; never expose source_type codes or retrieval machinery. When asked for a numbered item
 such as 'the third one', use the ordering in the immediately preceding answer. Hyperlink public
 notices and Mimir company, award and platform records. Do not expose release identifiers or
@@ -1944,7 +1950,7 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     ):
         return None
     patterns = (
-        r"what\s+does\s+(.+?)\s+(?:actually\s+)?do\s+(?:in|for)\s+(?:the\s+)?(?:us\s+)?(?:defense|defence|military)(?:\?|\.|$)",
+        r"what\s+does\s+(.+?)\s+(?:actually\s+)?do\s+(?:in|for)\s+(?:the\s+)?(?:us\s+)?(?:defense|defence|military)(?:\s+market)?(?:\?|\.|$)",
         r"(?:build|give|show)\s+me\s+(?:an?\s+)?(?:defense|defence|military)\s+(?:profile|view|footprint)\s+(?:of|for)\s+(.+?)(?:\?|\.|$)",
         r"(?:can\s+u|can\s+you|please)\s+map\s+(.+?)(?:['’]s|s)\s+(?:defense|defence|military)\s+(?:business|footprint|activity)(?:\?|\.|$)",
         r"(?:customers?|facilities|sites)\b.+?\bfor\s+(.+?)(?:,?\s+please)?(?:\?|\.|$)",
@@ -3243,7 +3249,7 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
             )],
         ))
     capability_id = resolve_capability(latest)
-    if capability_id:
+    if capability_id and not segment_id:
         add(_routing_candidate(
             "capability_discovery",
             "recognized_capability_request",

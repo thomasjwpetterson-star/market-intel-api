@@ -248,6 +248,11 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
             with self.subTest(question=question):
                 self.assertEqual(resolve_market_segment(question), expected)
 
+    def test_space_launch_market_does_not_capture_happening_in_prefix(self):
+        question = "What is happening in the US military space-launch market?"
+        self.assertEqual(resolve_market_segment(question), "US_MILITARY_SPACE_SYSTEMS")
+        self.assertEqual(resolve_capability(question), "capability:military space-launch")
+
     def test_named_submarine_platform_is_not_broadened_to_market(self):
         self.assertIsNone(
             resolve_market_segment(
