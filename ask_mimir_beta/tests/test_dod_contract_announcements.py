@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -11,7 +11,9 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ingest_dod_contract_announcements import (
+    CATALOG_CURRENT_KEY,
     _merge_records,
+    _upload,
     discover_articles,
     fetch_article_text,
     parse_announcement,
@@ -19,6 +21,38 @@ from ingest_dod_contract_announcements import (
 
 
 class DodContractAnnouncementTests(unittest.TestCase):
+    @patch("ingest_dod_contract_announcements.boto3.Session")
+    def test_upload_separates_catalog_current_data_from_release_history(self, session):
+        s3 = MagicMock()
+        session.return_value.client.return_value = s3
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            parquet_path = output_dir / "dod_contract_announcements.parquet"
+            manifest_path = output_dir / "manifest.json"
+            raw_path = output_dir / "raw" / "rss" / "contracts.xml"
+            raw_path.parent.mkdir(parents=True)
+            parquet_path.write_bytes(b"parquet")
+            manifest_path.write_text("{}")
+            raw_path.write_bytes(b"rss")
+
+            _upload(
+                output_dir,
+                parquet_path,
+                manifest_path,
+                [raw_path],
+                bucket="bucket",
+                profile=None,
+                release_id="release-1",
+            )
+
+        uploaded_keys = [call.args[2] for call in s3.upload_file.call_args_list]
+        self.assertIn(CATALOG_CURRENT_KEY, uploaded_keys)
+        self.assertIn(
+            "silver/dod/ref_contract_announcements/releases/release-1/"
+            "dod_contract_announcements.parquet",
+            uploaded_keys,
+        )
+
     def test_merge_preserves_first_observed_record(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "announcements.parquet"

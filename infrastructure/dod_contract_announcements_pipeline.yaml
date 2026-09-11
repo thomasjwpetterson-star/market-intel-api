@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AWS-native daily DoD contract-announcement ingestion and publication.
+
+Parameters:
+  DataBucket:
+    Type: String
+    Default: a-and-d-intel-lake-newaccount
+  GlueExecutionRoleArn:
+    Type: String
+    Default: arn:aws:iam::868631722720:role/GlueBronzeToSilverRole
+  GlueExecutionRoleName:
+    Type: String
+    Default: GlueBronzeToSilverRole
+  AskMimirDeployHookSecretArn:
+    Type: String
+  AskMimirDeployHookSecretName:
+    Type: String
+  MainApiDeployHookSecretArn:
+    Type: String
+  MainApiDeployHookSecretName:
+    Type: String
+
+Resources:
+  DeployHookSecretAccess:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: MimirDodAnnouncementDeployHookAccess
+      Roles:
+        - !Ref GlueExecutionRoleName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              - !Ref AskMimirDeployHookSecretArn
+              - !Ref MainApiDeployHookSecretArn
+
+  DailyAnnouncementJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: dod_contract_announcements_daily
+      Description: Fetch, normalize, publish, and activate official DoD contract announcements.
+      Role: !Ref GlueExecutionRoleArn
+      GlueVersion: "5.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 2
+      Timeout: 30
+      MaxRetries: 1
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub s3://${DataBucket}/glue-scripts/glue_dod_contract_announcements_daily.py
+      DefaultArguments:
+        "--job-language": python
+        "--enable-metrics": "true"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--TempDir": !Sub s3://${DataBucket}/glue-temp/
+        "--additional-python-modules": pandas==2.2.2,pyarrow==16.1.0
+        "--extra-py-files": !Sub s3://${DataBucket}/glue-libs/dod_contract_announcements_pipeline.zip
+        "--BUCKET": !Ref DataBucket
+        "--ASK_MIMIR_HOOK_SECRET": !Ref AskMimirDeployHookSecretName
+        "--MAIN_API_HOOK_SECRET": !Ref MainApiDeployHookSecretName
+        "--SINCE_DAYS": "7"
+        "--MAX_ARTICLES": "20"
+
+  DailyAnnouncementTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: dod_contract_announcements_daily
+      Description: Run the official DoD contract-announcement pipeline daily at 23:30 UTC.
+      Type: SCHEDULED
+      Schedule: cron(30 23 * * ? *)
+      StartOnCreation: true
+      Actions:
+        - JobName: !Ref DailyAnnouncementJob
+
+  AnnouncementCatalogTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: market_intel_silver
+      TableInput:
+        Name: ref_dod_contract_announcements
+        Description: Current normalized official DoD contract announcements with source lineage.
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: parquet
+          EXTERNAL: "TRUE"
+        StorageDescriptor:
+          Location: !Sub s3://${DataBucket}/silver/dod/ref_contract_announcements/current/
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+          Columns:
+            - {Name: announcement_id, Type: string}
+            - {Name: announcement_date, Type: string}
+            - {Name: service, Type: string}
+            - {Name: entry_index, Type: bigint}
+            - {Name: entry_type, Type: string}
+            - {Name: recipient_text, Type: string}
+            - {Name: primary_contract_id, Type: string}
+            - {Name: contract_ids, Type: "array<string>"}
+            - {Name: announced_value_usd, Type: double}
+            - {Name: obligated_at_announcement_usd, Type: double}
+            - {Name: work_locations, Type: string}
+            - {Name: completion_text, Type: string}
+            - {Name: competition_text, Type: string}
+            - {Name: contracting_activity, Type: string}
+            - {Name: description, Type: string}
+            - {Name: search_text, Type: string}
+            - {Name: source_article_id, Type: string}
+            - {Name: source_title, Type: string}
+            - {Name: source_url, Type: string}
+            - {Name: source_published_at, Type: string}
+            - {Name: source_fetch_url, Type: string}
+            - {Name: source_fetch_method, Type: string}
+            - {Name: source_content_sha256, Type: string}
+            - {Name: retrieved_at, Type: string}
+            - {Name: raw_text, Type: string}
+
+Outputs:
+  GlueJobName:
+    Value: !Ref DailyAnnouncementJob
+  GlueTriggerName:
+    Value: !Ref DailyAnnouncementTrigger
+  GlueTableName:
+    Value: !Ref AnnouncementCatalogTable

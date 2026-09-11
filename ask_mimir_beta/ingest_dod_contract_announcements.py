@@ -21,6 +21,10 @@ RSS_URL = (
     "https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx?"
     "ContentType=400&Site=945&max=100"
 )
+CATALOG_CURRENT_KEY = (
+    "silver/dod/ref_contract_announcements/current/"
+    "dod_contract_announcements.parquet"
+)
 DIRECT_USER_AGENT = "MimirDataBot/1.0 (+https://www.mimiradvisors.org)"
 TEXT_RENDER_PREFIX = "https://r.jina.ai/http://"
 ARTICLE_ID_PATTERN = re.compile(r"/Article/(\d+)", re.IGNORECASE)
@@ -318,6 +322,9 @@ def _upload(
         )
         s3.upload_file(str(path), bucket, release_key)
         s3.upload_file(str(path), bucket, stable_key)
+    # Keep the catalog-facing location isolated from immutable releases so an
+    # Athena table can read the current dataset without double-counting history.
+    s3.upload_file(str(parquet_path), bucket, CATALOG_CURRENT_KEY)
 
 
 def ingest(

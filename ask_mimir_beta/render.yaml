@@ -54,26 +54,3 @@ services:
         generateValue: true
       - key: ASK_MIMIR_TRUSTED_PROXY_SECRET
         sync: false
-  - type: cron
-    name: mimir-dod-contract-announcements
-    runtime: python
-    plan: 0.5c-512mb
-    rootDir: ask_mimir_beta
-    buildCommand: pip install -r requirements.txt
-    startCommand: python refresh_dod_contract_announcements.py --promote --since-days 7 --max-articles 20
-    schedule: "30 23 * * *"
-    envVars:
-      - key: AWS_REGION
-        value: us-east-1
-      - key: PYTHON_VERSION
-        value: 3.12.8
-      - key: ASK_MIMIR_BUCKET
-        value: a-and-d-intel-lake-newaccount
-      - key: AWS_ACCESS_KEY_ID
-        sync: false
-      - key: AWS_SECRET_ACCESS_KEY
-        sync: false
-      - key: ASK_MIMIR_RENDER_DEPLOY_HOOK_URL
-        sync: false
-      - key: MIMIR_API_RENDER_DEPLOY_HOOK_URL
-        sync: false
