@@ -1,9 +1,16 @@
 import unittest
 
-from company_intent import company_follow_up_intent
+from company_intent import company_follow_up_intent, company_wide_intent
 
 
 class CompanyIntentTests(unittest.TestCase):
+    def test_what_company_actually_does_is_company_wide(self):
+        self.assertTrue(
+            company_wide_intent(
+                "What does VSE Corporation actually do in the defense market?"
+            )
+        )
+
     def test_company_change_question_retains_active_company_scope(self):
         self.assertTrue(
             company_follow_up_intent(

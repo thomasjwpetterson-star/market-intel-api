@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 
 def company_follow_up_intent(text: str) -> bool:
     lowered = str(text or "").lower()
@@ -43,5 +45,45 @@ def company_follow_up_intent(text: str) -> bool:
             "most important conclusions",
             "key conclusions",
             "main conclusions",
+        )
+    )
+
+
+def company_wide_intent(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if lowered.strip(" .?") in {"all", "all of them", "both"}:
+        return True
+    if re.search(
+        r"\bwhat\s+does\s+.+?\s+(?:actually\s+)?do\s+(?:in|for)\s+"
+        r"(?:the\s+)?(?:us\s+)?(?:defense|defence|military)(?:\s+market)?\b",
+        lowered,
+    ):
+        return True
+    return any(
+        phrase in lowered
+        for phrase in (
+            "parent-wide",
+            "parent wide",
+            "company-wide",
+            "company wide",
+            "corporation-wide",
+            "corporation wide",
+            "whole company",
+            "entire company",
+            "all sites",
+            "all facilities",
+            "us defence business",
+            "us defense business",
+            "into the us defence market",
+            "into the us defense market",
+            "largest defence customers",
+            "largest defense customers",
+            "largest visible defence positions",
+            "largest visible defense positions",
+            "which cage codes",
+            "which facilities belong",
+            "work is carried out at",
+            "concise defence-market profile",
+            "concise defense-market profile",
         )
     )

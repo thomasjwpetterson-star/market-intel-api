@@ -23,7 +23,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 
 from company_context_store import CompanyContextStore
-from company_intent import company_follow_up_intent
+from company_intent import company_follow_up_intent, company_wide_intent
 from company_opportunity_store import CompanyOpportunityStore
 from competitive_position import CompetitivePositionStore
 from competitive_position_export import build_competitive_position_zip
@@ -2041,40 +2041,6 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     ):
         return None
     return query or None
-
-
-def company_wide_intent(text: str) -> bool:
-    lowered = str(text or "").lower()
-    if lowered.strip(" .?") in {"all", "all of them", "both"}:
-        return True
-    return any(
-        phrase in lowered
-        for phrase in (
-            "parent-wide",
-            "parent wide",
-            "company-wide",
-            "company wide",
-            "corporation-wide",
-            "corporation wide",
-            "whole company",
-            "entire company",
-            "all sites",
-            "all facilities",
-            "us defence business",
-            "us defense business",
-            "into the us defence market",
-            "into the us defense market",
-            "largest defence customers",
-            "largest defense customers",
-            "largest visible defence positions",
-            "largest visible defense positions",
-            "which cage codes",
-            "which facilities belong",
-            "work is carried out at",
-            "concise defence-market profile",
-            "concise defense-market profile",
-        )
-    )
 
 
 def explicit_item_query(messages: List[ChatMessage]) -> str | None:
