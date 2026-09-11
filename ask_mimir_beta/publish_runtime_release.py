@@ -579,11 +579,74 @@ def build_classification_reference() -> Path:
 def build_recent_awards_search() -> Path:
     """Materialize the bounded recent-award corpus used by natural-language search."""
     source = DATA_ROOT / "contracts_rolled.parquet"
+    announcements = (
+        DATA_ROOT
+        / "dod-contract-announcements"
+        / "dod_contract_announcements.parquet"
+    )
     output = DATA_ROOT / "recent_awards_search.parquet"
     if not source.exists():
         raise FileNotFoundError(f"recent-award search source was not found: {source}")
     source_sql = str(source).replace("'", "''")
     output_sql = str(output).replace("'", "''")
+    announcement_sql = """
+        SELECT
+            CAST(NULL AS VARCHAR) AS contract_id,
+            CAST(NULL AS VARCHAR) AS award_key,
+            CAST(NULL AS VARCHAR) AS vendor_name,
+            CAST(NULL AS VARCHAR) AS vendor_cage,
+            CAST(NULL AS VARCHAR) AS parent_agency,
+            CAST(NULL AS VARCHAR) AS sub_agency,
+            CAST(NULL AS VARCHAR) AS psc,
+            CAST(NULL AS VARCHAR) AS naics_code,
+            CAST(NULL AS VARCHAR) AS platform_family,
+            CAST(NULL AS DOUBLE) AS total_spend,
+            CAST(NULL AS VARCHAR) AS last_action_date,
+            CAST(NULL AS VARCHAR) AS base_award_description,
+            CAST(NULL AS VARCHAR) AS latest_action_description,
+            CAST(NULL AS VARCHAR) AS description,
+            CAST(NULL AS VARCHAR) AS search_text,
+            CAST(NULL AS VARCHAR) AS source_type,
+            CAST(NULL AS VARCHAR) AS source_url,
+            CAST(NULL AS DOUBLE) AS announced_value_usd,
+            CAST(NULL AS DOUBLE) AS obligated_at_announcement_usd,
+            CAST(NULL AS VARCHAR) AS service_section,
+            CAST(NULL AS VARCHAR) AS work_locations,
+            CAST(NULL AS VARCHAR) AS completion_text,
+            CAST(NULL AS VARCHAR) AS competition_text,
+            CAST(NULL AS VARCHAR) AS contracting_activity
+        WHERE FALSE
+    """
+    if announcements.exists():
+        announcement_path = str(announcements).replace("'", "''")
+        announcement_sql = f"""
+            SELECT
+                primary_contract_id AS contract_id,
+                announcement_id AS award_key,
+                recipient_text AS vendor_name,
+                CAST(NULL AS VARCHAR) AS vendor_cage,
+                'DEPARTMENT OF DEFENSE' AS parent_agency,
+                service AS sub_agency,
+                CAST(NULL AS VARCHAR) AS psc,
+                CAST(NULL AS VARCHAR) AS naics_code,
+                CAST(NULL AS VARCHAR) AS platform_family,
+                CAST(NULL AS DOUBLE) AS total_spend,
+                CAST(announcement_date AS VARCHAR) AS last_action_date,
+                description AS base_award_description,
+                description AS latest_action_description,
+                description,
+                search_text,
+                'DOD_CONTRACT_ANNOUNCEMENT' AS source_type,
+                source_url,
+                announced_value_usd,
+                obligated_at_announcement_usd,
+                service AS service_section,
+                work_locations,
+                completion_text,
+                competition_text,
+                contracting_activity
+            FROM read_parquet('{announcement_path}')
+        """
     with duckdb.connect() as connection:
         connection.execute("SET preserve_insertion_order=false")
         connection.execute("SET threads=4")
@@ -591,28 +654,44 @@ def build_recent_awards_search() -> Path:
         connection.execute(
             f"""
             COPY (
-                SELECT
-                    contract_id,
-                    award_key,
-                    vendor_name,
-                    vendor_cage,
-                    parent_agency,
-                    sub_agency,
-                    psc,
-                    naics_code,
-                    platform_family,
-                    total_spend,
-                    last_action_date,
-                    base_award_description,
-                    latest_action_description,
-                    description,
-                    UPPER(
-                        COALESCE(base_award_description, '') || ' ' ||
-                        COALESCE(latest_action_description, description, '')
-                    ) AS search_text
-                FROM read_parquet('{source_sql}')
-                WHERE source_system = 'USA_SPENDING'
-                  AND year BETWEEN 2025 AND 2026
+                WITH usa_spending AS (
+                    SELECT
+                        contract_id,
+                        award_key,
+                        vendor_name,
+                        vendor_cage,
+                        parent_agency,
+                        sub_agency,
+                        psc,
+                        CAST(naics_code AS VARCHAR) AS naics_code,
+                        platform_family,
+                        total_spend,
+                        CAST(last_action_date AS VARCHAR) AS last_action_date,
+                        base_award_description,
+                        latest_action_description,
+                        description,
+                        UPPER(
+                            COALESCE(base_award_description, '') || ' ' ||
+                            COALESCE(latest_action_description, description, '')
+                        ) AS search_text,
+                        'USA_SPENDING' AS source_type,
+                        CAST(NULL AS VARCHAR) AS source_url,
+                        CAST(NULL AS DOUBLE) AS announced_value_usd,
+                        CAST(NULL AS DOUBLE) AS obligated_at_announcement_usd,
+                        CAST(NULL AS VARCHAR) AS service_section,
+                        CAST(NULL AS VARCHAR) AS work_locations,
+                        CAST(NULL AS VARCHAR) AS completion_text,
+                        CAST(NULL AS VARCHAR) AS competition_text,
+                        CAST(NULL AS VARCHAR) AS contracting_activity
+                    FROM read_parquet('{source_sql}')
+                    WHERE source_system = 'USA_SPENDING'
+                      AND year BETWEEN 2025 AND 2026
+                ), dod_announcements AS (
+                    {announcement_sql}
+                )
+                SELECT * FROM usa_spending
+                UNION ALL BY NAME
+                SELECT * FROM dod_announcements
             ) TO '{output_sql}' (
                 FORMAT PARQUET,
                 COMPRESSION ZSTD,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import os
 import re
 import threading
@@ -117,6 +118,11 @@ DEFAULT_TRANSACTIONS = Path(
 )
 WEB_SOURCE_POLICY = load_web_source_policy()
 WEB_SOURCE_POLICY_PROMPT = render_web_source_policy(WEB_SOURCE_POLICY)
+LOGGER = logging.getLogger("ask-mimir")
+PUBLIC_REQUEST_FAILURE = (
+    "Ask Mimir could not complete this request. Your query allowance has been "
+    "restored; please try again."
+)
 BROAD_PLATFORM_MARKET_IDENTIFIERS = {
     "AIR",
     "AIRCRAFT",
@@ -999,12 +1005,17 @@ PSC description and public notice link. Rank relevance from the actual requireme
 classification evidence. Do not imply win probability. Distinguish Sources Sought and RFIs from
 solicitations.
 
-For awards, show the recipient and site, award identifier, latest action date, observed obligations,
-PSC description, supported program where identified, and what was purchased. State the observation
-window beside financial values. When asked for a numbered item such as 'the third one', use the
-ordering in the immediately preceding answer. Hyperlink public notices and Mimir company, award and
-platform records. Do not expose release identifiers or implementation terminology. Keep the answer
-below 1,100 words.
+For awards, show the recipient and site, award identifier, date, supported program where identified,
+and what was purchased. USAspending net prime obligations, an official DoD announcement's stated
+award value or ceiling, and the amount explicitly obligated when that announcement was issued are
+three different measures. Label each by its exact meaning, include its date or observation window,
+and never add or substitute them. If a DoD announcement has no corresponding USAspending value in
+the evidence, present the announcement as current award context without inventing cumulative
+obligations. Link its official source_url and describe the source as an official DoD contract
+announcement; never expose source_type codes or retrieval machinery. When asked for a numbered item
+such as 'the third one', use the ordering in the immediately preceding answer. Hyperlink public
+notices and Mimir company, award and platform records. Do not expose release identifiers or
+implementation terminology. Keep the answer below 1,100 words.
 
 When web research materially improves program or requirement context, apply this source hierarchy:
 {WEB_SOURCE_POLICY_PROMPT}
@@ -1781,6 +1792,8 @@ def is_clearly_out_of_domain(messages: List[ChatMessage]) -> bool:
         "write an essay", "write my essay", "homework help", "translate this",
         "capital of france", "capital of england", "capital of italy",
         "premier league score", "super bowl score", "world cup score",
+        "what will the weather", "somewhere for dinner",
+        "python tutorial", "javascript tutorial",
     )
     return any(phrase in text for phrase in unrelated_phrases)
 
@@ -1921,6 +1934,13 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     ):
         return None
     patterns = (
+        r"what\s+does\s+(.+?)\s+(?:actually\s+)?do\s+(?:in|for)\s+(?:the\s+)?(?:us\s+)?(?:defense|defence|military)(?:\?|\.|$)",
+        r"(?:build|give|show)\s+me\s+(?:an?\s+)?(?:defense|defence|military)\s+(?:profile|view|footprint)\s+(?:of|for)\s+(.+?)(?:\?|\.|$)",
+        r"(?:can\s+u|can\s+you|please)\s+map\s+(.+?)(?:['’]s|s)\s+(?:defense|defence|military)\s+(?:business|footprint|activity)(?:\?|\.|$)",
+        r"(?:customers?|facilities|sites)\b.+?\bfor\s+(.+?)(?:,?\s+please)?(?:\?|\.|$)",
+        r"(?:give|show)\s+me\s+the\s+analyst\s+view\s+(?:of|on)\s+(.+?)\s+in\s+(?:the\s+)?(?:us\s+)?(?:defense|defence|military)(?:\?|\.|$)",
+        r"(?:give|show)\s+me\s+(?:a\s+)?(?:compny|company)\s+profile\s+(?:of|for)\s+(.+?)(?:\?|\.|$)",
+        r"(?:give|show|map)\s+me\s+the\s+(?:defense|defence|military)\s+footprint\s+of\s+(.+?)(?:\?|\.|$)",
         r"(?:give\s+me\s+(?:an?\s+)?overview\s+of|tell\s+me\s+about)\s+(.+?)(?:['\u2019]s|s)\s+(?:defense|defence)\s+activity\s+in\s+(.+?),\s*([A-Za-z .'-]+?)(?:\?|\.|$)",
         r"which\s+(?:programs|programmes|platforms).+?associated\s+with\s+(.+?)\s+in\s+(.+?),\s*([A-Za-z .'-]+?)(?:\?|\.|$)",
         r"which\s+(?:programs|programmes|platforms).+?associated\s+with\s+(.+?)(?:['\u2019]s|['\u2019]|s)\s+(.+?),\s*([A-Za-z .'-]+?)\s+(?:operations|site|facility)(?:\?|\.|$)",
@@ -2053,6 +2073,9 @@ def explicit_item_query(messages: List[ChatMessage]) -> str | None:
     inline_nsn = re.search(r"\b\d{4}[ -]\d{2}[ -]\d{3}[ -]\d{4}\b", text)
     if inline_nsn:
         return re.sub(r"[ -]", "", inline_nsn.group(0))
+    compact_nsn = re.search(r"\b\d{13}\b", text)
+    if compact_nsn:
+        return compact_nsn.group(0)
     if not any(term in intent for term in ("nsn", "niin", "part number", "part no", "item")):
         return None
     identifier_patterns = (
@@ -2073,8 +2096,7 @@ def explicit_item_query(messages: List[ChatMessage]) -> str | None:
         candidate = part_number.group(1).strip()
         if 3 <= len(candidate) <= 80 and re.search(r"\d", candidate):
             return candidate
-    compact_nsn = re.search(r"\b\d{13}\b", re.sub(r"(?<=\d)[ -](?=\d)", "", text))
-    return compact_nsn.group(0) if compact_nsn else None
+    return None
 
 
 def item_follow_up_intent(text: str) -> bool:
@@ -2141,13 +2163,7 @@ def explicit_award_or_opportunity_query(messages: List[ChatMessage]) -> str | No
         text,
         re.IGNORECASE,
     )
-    if inline_identifier and any(
-        phrase in intent
-        for phrase in (
-            "purchased under", "bought under", "awarded under", "who won",
-            "recipient", "awardee",
-        )
-    ):
+    if inline_identifier and re.search(r"\d", inline_identifier.group(1)):
         return inline_identifier.group(1)
     if not any(term in intent for term in ("contract", "award", "solicitation", "opportunity", "notice")):
         return None
@@ -4174,12 +4190,23 @@ class AskJobManager:
                     "workflow": routing.workflow,
                     "status": "failed",
                     "performance": performance_snapshot,
+                    "error_type": type(exc).__name__,
+                    "error_detail": str(exc),
                 }
+            )
+            LOGGER.exception(
+                "Ask Mimir request failed request_id=%s workflow=%s",
+                request_id,
+                routing.workflow,
             )
             runtime.beta_state.complete_routing_event(
                 request_id, clarification_outcome="request_failed"
             )
-            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            detail = (
+                exc.detail
+                if isinstance(exc, HTTPException) and isinstance(exc.detail, str)
+                else PUBLIC_REQUEST_FAILURE
+            )
             if "credit_balance_exhausted" in str(detail) or "insufficient_quota" in str(detail):
                 detail = (
                     "Ask Mimir is temporarily unavailable. Your query allowance has been "

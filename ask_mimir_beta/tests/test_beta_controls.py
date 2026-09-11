@@ -15,6 +15,8 @@ from beta_controls import (
     record_request_timing,
     request_performance_scope,
     response_requires_clarification,
+    sanitize_customer_payload,
+    validate_answer_citations,
 )
 
 
@@ -265,6 +267,32 @@ class ClarificationDetectionTests(unittest.TestCase):
             )
         }
         self.assertFalse(response_requires_clarification(result))
+
+
+class CustomerProvenanceTests(unittest.TestCase):
+    def test_internal_fetch_fields_are_hidden_but_public_source_is_retained(self):
+        payload = sanitize_customer_payload(
+            {
+                "source_type": "DOD_CONTRACT_ANNOUNCEMENT",
+                "source_name": "Official U.S. Department of Defense contract announcement",
+                "source_url": "https://www.defense.gov/example",
+                "source_fetch_url": "https://r.jina.ai/http://www.defense.gov/example",
+                "source_fetch_method": "text_renderer",
+            }
+        )
+        self.assertNotIn("source_type", payload)
+        self.assertNotIn("source_fetch_url", payload)
+        self.assertNotIn("source_fetch_method", payload)
+        self.assertEqual(payload["source_url"], "https://www.defense.gov/example")
+
+    def test_official_source_url_is_recognized_as_supplied_evidence(self):
+        answer = "See the [official announcement](https://www.defense.gov/example)."
+        validation = validate_answer_citations(
+            answer,
+            [{"result": {"source_url": "https://www.defense.gov/example"}}],
+        )
+        self.assertEqual(validation["external_source_link_count"], 1)
+        self.assertEqual(validation["external_links_in_deterministic_pack"], 1)
 
 
 if __name__ == "__main__":

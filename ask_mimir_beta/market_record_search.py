@@ -18,7 +18,8 @@ SEARCH_STOPWORDS = {
     "and", "or", "the", "a", "an", "for", "to", "of", "in", "with", "that",
     "us", "u", "s", "military", "defense", "defence", "current", "currently",
     "open", "recent", "related", "relevant", "companies", "company", "supplying",
-    "supply", "manufacturer", "manufacturers", "platform", "platforms", "system",
+    "supply", "supplier", "suppliers", "manufacturer", "manufacturers",
+    "platform", "platforms", "system",
     "systems", "equipment", "component", "components",
 }
 
@@ -62,6 +63,7 @@ def _subject(text: str) -> str:
     patterns = (
         r"relevant\s+to\s*:?\s*(?:companies\s+supplying\s+)?(.+?)(?:\?|\.|$)",
         r"related\s+to\s+(.+?)(?:\?|\.|$)",
+        r"awards?\s+(?:involving|covering)\s+(.+?)(?:\?|\.|$)",
         r"(?:opportunities|notices|sources?\s+sought|rfis?|requests?\s+for\s+information|solicitations)\s+(?:for|about|cover(?:ing)?|concern(?:ing)?)\s+(.+?)(?:\?|\.|$)",
         r"opportunities\s+(?:are\s+)?open\s+for\s+(.+?)(?:\?|\.|$)",
         r"(?:search|show|find)\s+(?:current|open|active|recent)?\s*(.+?)\s+(?:contracting\s+)?opportunities(?:\?|\.|$)",
@@ -80,9 +82,15 @@ def _subject(text: str) -> str:
 
 def resolve_market_record_search(text: str) -> Dict[str, Any] | None:
     clean = str(text or "").strip()
+    clean = re.sub(r"\boportunities\b", "opportunities", clean, flags=re.IGNORECASE)
     lowered = clean.lower()
-    has_search = any(term in lowered for term in ("find", "show", "which", "search")) or bool(
-        re.search(r"\bwhat\s+(?:defen[sc]e\s+)?opportunities\s+are\s+open\b", lowered)
+    has_search = any(
+        term in lowered for term in ("find", "show", "which", "search", "any")
+    ) or bool(
+        re.search(
+            r"\bwhat\s+(?:open\s+)?(?:defen[sc]e\s+)?opportunities(?:\s+are\s+open)?\b",
+            lowered,
+        )
     )
     if not has_search:
         return None
@@ -166,6 +174,15 @@ class MarketRecordSearchStore:
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")
+        self.recent_award_columns = set()
+        if self.paths["recent_awards"].exists():
+            escaped = str(self.paths["recent_awards"]).replace("'", "''")
+            self.recent_award_columns = {
+                row[0]
+                for row in self.connection.execute(
+                    f"DESCRIBE SELECT * FROM read_parquet('{escaped}')"
+                ).fetchall()
+            }
         self._cache: Dict[str, Dict[str, Any]] = {}
 
     @staticmethod
@@ -243,6 +260,42 @@ class MarketRecordSearchStore:
                 else "UPPER(COALESCE(a.base_award_description, '') || ' ' || "
                      "COALESCE(a.latest_action_description, a.description, ''))"
             )
+            optional = self.recent_award_columns if award_source == self.paths["recent_awards"] else set()
+            source_type = "a.source_type" if "source_type" in optional else "'USA_SPENDING'"
+            source_url = "a.source_url" if "source_url" in optional else "CAST(NULL AS VARCHAR)"
+            announced_value = (
+                "a.announced_value_usd"
+                if "announced_value_usd" in optional
+                else "CAST(NULL AS DOUBLE)"
+            )
+            obligated_at_announcement = (
+                "a.obligated_at_announcement_usd"
+                if "obligated_at_announcement_usd" in optional
+                else "CAST(NULL AS DOUBLE)"
+            )
+            service_section = (
+                "a.service_section" if "service_section" in optional else "CAST(NULL AS VARCHAR)"
+            )
+            work_locations = (
+                "a.work_locations" if "work_locations" in optional else "CAST(NULL AS VARCHAR)"
+            )
+            completion_text = (
+                "a.completion_text" if "completion_text" in optional else "CAST(NULL AS VARCHAR)"
+            )
+            competition_text = (
+                "a.competition_text" if "competition_text" in optional else "CAST(NULL AS VARCHAR)"
+            )
+            contracting_activity = (
+                "a.contracting_activity"
+                if "contracting_activity" in optional
+                else "CAST(NULL AS VARCHAR)"
+            )
+            ranking_value = (
+                "GREATEST(COALESCE(ABS(a.total_spend), 0), "
+                "COALESCE(ABS(a.announced_value_usd), 0))"
+                if "announced_value_usd" in optional
+                else "COALESCE(ABS(a.total_spend), 0)"
+            )
             records = _rows(
                 self.connection.execute(
                     f"""
@@ -257,6 +310,20 @@ class MarketRecordSearchStore:
                            a.psc, c.description AS psc_description, a.naics_code AS naics,
                            a.platform_family, a.total_spend AS net_prime_obligations_usd,
                            SUBSTR(a.last_action_date, 1, 10) AS latest_action_date,
+                           {source_type} AS source_type,
+                           CASE
+                               WHEN {source_type} = 'DOD_CONTRACT_ANNOUNCEMENT'
+                                   THEN 'Official U.S. Department of Defense contract announcement'
+                               ELSE 'USAspending.gov'
+                           END AS source_name,
+                           {source_url} AS source_url,
+                           {announced_value} AS announced_value_usd,
+                           {obligated_at_announcement} AS obligated_at_announcement_usd,
+                           {service_section} AS service_section,
+                           {work_locations} AS work_locations,
+                           {completion_text} AS completion_text,
+                           {competition_text} AS competition_text,
+                           {contracting_activity} AS contracting_activity,
                            CASE WHEN REGEXP_MATCHES(UPPER(COALESCE(a.base_award_description, '')), ?) THEN 4 ELSE 0 END
                            + CASE WHEN REGEXP_MATCHES(UPPER(COALESCE(a.latest_action_description, a.description, '')), ?) THEN 2 ELSE 0 END
                            AS relevance_score,
@@ -267,14 +334,19 @@ class MarketRecordSearchStore:
                       ON c.classification_type = 'PSC' AND c.code = a.psc
                     WHERE {source_filter}
                       AND REGEXP_MATCHES({search_expression}, ?)
-                    ORDER BY relevance_score DESC, ABS(a.total_spend) DESC, latest_action_date DESC
+                    ORDER BY relevance_score DESC, {ranking_value} DESC, latest_action_date DESC
                     LIMIT 250
                     """,
                     [str(self.paths["locations"]), pattern, pattern,
                      str(award_source), str(self.paths["classifications"]), pattern],
                 )
             )
-            window = "FY2025-FY2026 observed contract awards"
+            window = (
+                "FY2025-FY2026 observed contract awards and current official DoD "
+                "contract announcements"
+                if "source_type" in optional
+                else "FY2025-FY2026 observed contract awards"
+            )
         return {
             "context_type": "market_record_search",
             "scope": {

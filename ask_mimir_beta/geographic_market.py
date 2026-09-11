@@ -57,7 +57,7 @@ def resolve_state(text: str) -> str | None:
 
 
 def is_geographic_market_request(text: str) -> bool:
-    lowered = str(text or "").lower()
+    lowered = str(text or "").lower().replace("industral", "industrial")
     company_site_request = bool(
         re.search(
             r"\bassociated\s+with\b.+?(?:['’]s|s)\s+.+?\b(?:operations|site|facility)\b",
@@ -78,6 +78,9 @@ def is_geographic_market_request(text: str) -> bool:
             "defence activity", "defense activity",
             "important in the state", "state's defense", "state's defence",
             "military industry", "defence industry", "defense industry",
+            "industrial footprint", "defence work", "defense work",
+            "aerospace and defense profile", "aerospace and defence profile",
+            "facilities matter most",
         )
     )
     entity_phrasing = (

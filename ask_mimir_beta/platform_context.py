@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+from difflib import get_close_matches
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
@@ -320,6 +321,26 @@ class PlatformContextStore:
             ):
                 matches.append(platform)
         matches.extend(alias_matches)
+        if not matches:
+            single_token_targets: Dict[str, str] = {}
+            for alias, target in PLATFORM_ALIASES.items():
+                if " " not in alias and len(alias) >= 6 and target in self.platforms:
+                    single_token_targets[alias] = target
+            for platform in self.platforms:
+                candidate = _normalize(platform)
+                if " " not in candidate and len(candidate) >= 6:
+                    single_token_targets.setdefault(candidate, platform)
+            for token in normalized.split():
+                if len(token) < 6:
+                    continue
+                fuzzy = get_close_matches(
+                    token,
+                    single_token_targets,
+                    n=1,
+                    cutoff=0.86,
+                )
+                if fuzzy:
+                    matches.append(single_token_targets[fuzzy[0]])
         ordered = sorted(set(matches), key=lambda value: len(_normalize(value)), reverse=True)
         return [
             platform

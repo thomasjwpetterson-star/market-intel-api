@@ -142,6 +142,9 @@ MARKET_SEGMENTS = {
         "request_pattern": (
             r"\b(?:us|u\.?s\.?)?\s*(?:missiles?|munitions?|guided weapons?)\s+"
             r"(?:market|industrial\s+base|segment)\b"
+            r"|\b(?:us|u\.?s\.?)?\s*missiles?\s+and\s+munitions?\b"
+            r"|\b(?:market\s+picture|industrial\s+picture)\s+for\s+missiles?\s+and\s+munitions?\b"
+            r"|\b(?:programs?|programmes?)\s+and\s+firms?\s+driv(?:e|ing)\s+missiles?\s+and\s+munitions?\b"
             r"|\bwhich\s+(?:us\s+)?missile\s+programs?\s+(?:are\s+)?driv(?:e|ing)\b"
             r"|\bwhat\s+is\s+happening\s+in\s+(?:the\s+)?(?:us\s+)?(?:tactical\s+)?missiles?\b"
         ),

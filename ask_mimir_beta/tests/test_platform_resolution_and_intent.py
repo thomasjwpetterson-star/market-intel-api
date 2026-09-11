@@ -42,6 +42,7 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             "CH-53K",
             "P-8A",
             "NEXT GEN OPIR",
+            "VIRGINIA CLASS (SSN 774)",
         ]
 
     def test_patriot_resolves_to_the_umbrella_system(self):
@@ -246,6 +247,9 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             "How is B-52 modernization progressing?",
             "What does Raytheon provide on AMRAAM?",
             "Which facilities support Tomahawk?",
+            "I need the industrial picture for Virginia class.",
+            "Who's actually involved with Tomahawk?",
+            "Show me the F-16 suply chain.",
         ):
             with self.subTest(question=question):
                 self.assertTrue(
@@ -254,6 +258,12 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
                         has_platform_mention=bool(self.store.mentions(question)),
                     )
                 )
+
+    def test_minor_platform_name_typo_is_resolved(self):
+        self.assertEqual(
+            self.store.mentions("Who are the main Tomahwk suppliers?"),
+            ["TOMAHAWK"],
+        )
 
     def test_company_platform_evidence_question_is_not_reclassified(self):
         self.assertFalse(

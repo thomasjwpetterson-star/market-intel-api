@@ -838,7 +838,7 @@ RESOLUTION_CASES = {
         "Which missile programs are driving the most activity?": "US_MISSILES_AND_MUNITIONS",
     },
     "capability": {
-        "Identify suppliers of aerospace fuel systems.": "capability:aerospace fuel systems",
+        "Identify suppliers of aerospace fuel systems.": "aircraft_fuel_systems",
         "Who makes military-aircraft landing gear?": "aircraft_landing_gear",
     },
 }

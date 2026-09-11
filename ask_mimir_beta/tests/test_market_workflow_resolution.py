@@ -304,6 +304,31 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
         self.assertEqual(result["record_type"], "award")
         self.assertEqual(result["subject"], "electronic warfare")
 
+    def test_market_record_search_accepts_common_natural_phrasings(self):
+        cases = (
+            (
+                "What open opportunities are relevant to aircraft avionics suppliers?",
+                "opportunity",
+            ),
+            (
+                "Any current RFIs for electronic warfare?",
+                "opportunity",
+            ),
+            (
+                "Show recent defence awards involving missile propulsion.",
+                "award",
+            ),
+            (
+                "Find open oportunities for avionics suppliers.",
+                "opportunity",
+            ),
+        )
+        for question, record_type in cases:
+            with self.subTest(question=question):
+                result = resolve_market_record_search(question)
+                self.assertIsNotNone(result)
+                self.assertEqual(result["record_type"], record_type)
+
     def test_internal_identifier_is_removed_without_discarding_answer(self):
         answer = (
             "The leading supplier is supported by source_report_id 123. "

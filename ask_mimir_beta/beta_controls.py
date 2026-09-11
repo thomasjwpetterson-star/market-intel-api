@@ -796,6 +796,12 @@ CUSTOMER_HIDDEN_KEYS = {
     "source_locator",
     "source_file",
     "ingestion_date",
+    "source_type",
+    "source_fetch_url",
+    "source_fetch_method",
+    "source_content_sha256",
+    "search_text",
+    "raw_text",
 }
 
 
@@ -826,7 +832,13 @@ def _trace_urls(value: Any) -> set[str]:
     urls: set[str] = set()
     if isinstance(value, dict):
         for key, child in value.items():
-            if key in {"url", "canonical_url", "public_record_url", "public_notice_url"}:
+            if key in {
+                "url",
+                "canonical_url",
+                "public_record_url",
+                "public_notice_url",
+                "source_url",
+            }:
                 if isinstance(child, str) and child.startswith("https://"):
                     urls.add(child.rstrip("/"))
             urls.update(_trace_urls(child))

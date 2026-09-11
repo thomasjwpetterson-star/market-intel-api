@@ -9,7 +9,13 @@ def is_platform_centered_request(text: str, *, has_platform_mention: bool) -> bo
     """Keep named-platform questions out of the company-name resolver."""
     if not has_platform_mention:
         return False
-    lowered = str(text or "").lower().strip()
+    lowered = (
+        str(text or "")
+        .lower()
+        .replace("suply", "supply")
+        .replace("modernisation", "modernization")
+        .strip()
+    )
     supplier_request = any(
         phrase in lowered
         for phrase in (
@@ -72,7 +78,10 @@ def is_platform_centered_request(text: str, *, has_platform_mention: bool) -> bo
             lowered,
         )
     )
-    compact_platform_request = len(lowered.split()) <= 7 and any(
+    compact_platform_request = (
+        "industrial picture" in lowered
+        or len(lowered.split()) <= 7
+    ) and any(
         term in lowered
         for term in (
             "supplier",
@@ -89,6 +98,9 @@ def is_platform_centered_request(text: str, *, has_platform_mention: bool) -> bo
             "modernisation",
             "progress",
             "trajectory",
+            "industrial picture",
+            "involved with",
+            "involved in",
         )
     )
     return supplier_request or direct_platform_request or compact_platform_request
