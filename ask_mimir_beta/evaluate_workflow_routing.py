@@ -422,6 +422,10 @@ ROUTING_ROBUSTNESS_CASES = {
         ("state_industrial_base", "Map the defence industral base in Alabama."),
     ],
     "ambiguous_company_names": [
+        (
+            "capability_discovery",
+            "microchips/semiconductors as a defense-market category",
+        ),
         ("company_site_intelligence", "Tell me about Collins."),
         ("company_site_intelligence", "What does Mercury supply to defense?"),
         ("company_site_intelligence", "Profile RTX's US military business."),
@@ -1004,6 +1008,28 @@ def main() -> None:
     )
     for failure in validation_failures:
         print(f"FAIL | routing_validation={failure}")
+    incomplete_templates = [
+        "Tell me everything about this defense supplier:",
+        "Tell me everything about this NSN, NIIN or part number:",
+        "Tell me everything about this defense platform or program:",
+        "Tell me everything about this defense contract award:",
+        "Analyse this defense news article and explain the implications:",
+        "Find current US defense opportunities relevant to:",
+    ]
+    template_validation_failures = []
+    for question in incomplete_templates:
+        try:
+            AskRequest(messages=[ChatMessage(role="user", content=question)])
+        except ValueError:
+            continue
+        template_validation_failures.append(question)
+    print(
+        f"Incomplete template validation: "
+        f"{len(incomplete_templates) - len(template_validation_failures)}/"
+        f"{len(incomplete_templates)} passed."
+    )
+    for failure in template_validation_failures:
+        print(f"FAIL | incomplete_template_accepted={failure}")
     print("Routes exercised:", dict(sorted(Counter(row[2] for row in results).items())))
     resolution_failures = _resolution_failures()
     resolution_total = (
@@ -1018,7 +1044,13 @@ def main() -> None:
         print(
             f"FAIL | resolver={kind} expected={expected!r} actual={actual!r} | {question}"
         )
-    if failures or resolution_failures or telemetry_failures or validation_failures:
+    if (
+        failures
+        or resolution_failures
+        or telemetry_failures
+        or validation_failures
+        or template_validation_failures
+    ):
         raise SystemExit(1)
 
 

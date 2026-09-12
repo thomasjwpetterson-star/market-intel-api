@@ -268,6 +268,25 @@ class ClarificationDetectionTests(unittest.TestCase):
         }
         self.assertFalse(response_requires_clarification(result))
 
+    def test_context_preface_followed_by_scope_question_is_a_clarification(self):
+        result = {
+            "answer": (
+                "Ask Mimir focuses on the U.S. defense industrial base. "
+                "Are you looking for electrician jobs with defense contractors, "
+                "military installations, or shipyards? If so, provide your city/state."
+            )
+        }
+        self.assertTrue(response_requires_clarification(result))
+
+    def test_category_menu_question_is_a_clarification(self):
+        result = {
+            "answer": (
+                "What would you like to analyze in the U.S. defense semiconductor "
+                "market? Key suppliers, awards, programs, or DLA demand?"
+            )
+        }
+        self.assertTrue(response_requires_clarification(result))
+
 
 class CustomerProvenanceTests(unittest.TestCase):
     def test_internal_fetch_fields_are_hidden_but_public_source_is_retained(self):

@@ -65,6 +65,7 @@ CAPABILITY_ID_ALIASES = CAPABILITY_ONTOLOGY.get("id_aliases", {})
 
 DYNAMIC_CAPABILITY_PREFIX = "capability:"
 CAPABILITY_QUERY_PATTERNS = (
+    r"(.+?)\s+as\s+(?:a\s+)?(?:u\.?s\.?\s+)?(?:defen[cs]e[- ]market|defen[cs]e|market)\s+category(?:[?.]|$)",
     r"(?:tell\s+(?:me|be)\s+about)\s+(?:the\s+)?(.+?)\s+market(?:[?.]|$)",
     r"what\s+is\s+(?:the\s+)?market\s+for\s+(.+?)(?:[?.]|$)",
     r"(?:what is happening in|describe|analyse|analyze)\s+(?:the\s+)?(?:us\s+)?(.+?)\s+(?:defen[cs]e\s+)?market(?:[?.]|$)",

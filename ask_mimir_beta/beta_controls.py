@@ -46,6 +46,14 @@ CLARIFICATION_OPENING_PATTERNS = (
     r"i need (?:a|one) (?:quick |short )?clarification\b",
 )
 
+CLARIFICATION_QUESTION_PATTERNS = (
+    r"\bare you looking for\b",
+    r"\bwhat would you like to (?:analy[sz]e|explore|know|find)\b",
+    r"\bwhich (?:company|supplier|site|platform|program|programme|market|category) "
+    r"(?:are you asking about|should i use)\b",
+    r"\bif so, (?:please )?(?:provide|specify|choose|confirm|enter)\b",
+)
+
 
 def response_requires_clarification(result: Dict[str, Any]) -> bool:
     """Identify a scope question that should not consume an Ask Mimir allowance."""
@@ -57,7 +65,10 @@ def response_requires_clarification(result: Dict[str, Any]) -> bool:
         return False
 
     answer = re.sub(r"^[#>*_`\-\s]+", "", answer).strip().lower()
-    return any(re.match(pattern, answer) for pattern in CLARIFICATION_OPENING_PATTERNS)
+    return (
+        any(re.match(pattern, answer) for pattern in CLARIFICATION_OPENING_PATTERNS)
+        or any(re.search(pattern, answer) for pattern in CLARIFICATION_QUESTION_PATTERNS)
+    )
 
 
 def normalize_tier(value: str | None) -> str:

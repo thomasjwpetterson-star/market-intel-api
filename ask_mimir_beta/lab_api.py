@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from company_context_store import CompanyContextStore
 from company_intent import company_follow_up_intent, company_wide_intent
@@ -2166,6 +2166,27 @@ class ChatMessage(BaseModel):
     content: str = Field(min_length=1, max_length=12000)
 
 
+INCOMPLETE_TEMPLATE_MESSAGES = {
+    "tell me everything about this defense supplier:":
+        "Enter a company name or CAGE code first.",
+    "tell me everything about this nsn, niin or part number:":
+        "Enter an NSN, NIIN or part number first.",
+    "tell me everything about this defense platform or program:":
+        "Enter a platform or program name first.",
+    "tell me everything about this defense contract award:":
+        "Enter a contract or award identifier first.",
+    "analyse this defense news article and explain the implications:":
+        "Paste an article URL or article text first.",
+    "find current us defense opportunities relevant to:":
+        "Enter a capability, product area or customer first.",
+}
+
+
+def incomplete_template_message(text: str) -> str | None:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    return INCOMPLETE_TEMPLATE_MESSAGES.get(normalized)
+
+
 class ActiveScope(BaseModel):
     scope_type: str = Field(
         pattern="^(company_parent|company_site|item|contract|opportunity|platform|platform_comparison|state_market|capability_market|market_segment|record_search|product_family)$"
@@ -2197,6 +2218,20 @@ class AskRequest(BaseModel):
         max_length=100,
         pattern=r"^[A-Fa-f0-9-]+$",
     )
+    intent_hint: Optional[str] = Field(
+        default=None,
+        pattern=(
+            "^(company_site_intelligence|item_intelligence|platform_intelligence|"
+            "contract_or_opportunity|news_article_implications|market_record_search|"
+            "capability_discovery|market_segment_intelligence|state_industrial_base)$"
+        ),
+    )
+    @model_validator(mode="after")
+    def required_template_value_is_present(self) -> "AskRequest":
+        message = incomplete_template_message(self.messages[-1].content)
+        if message:
+            raise ValueError(message)
+        return self
 
 
 class RoutingEntity(BaseModel):
@@ -3093,6 +3128,13 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
         if candidate:
             candidates.append(candidate)
 
+    if request.intent_hint:
+        add(_routing_candidate(
+            request.intent_hint,
+            "explicit_clarification_selection",
+            1.0,
+        ))
+
     if is_article_analysis_request(request.messages):
         add(_routing_candidate("news_article_implications", "article_url_or_text", 1.0))
     if is_clearly_out_of_domain(request.messages):
@@ -3956,13 +3998,17 @@ class AskJobManager:
                     "active_scope": request.active_scope.model_dump()
                     if request.active_scope else None,
                     "conversation_id": request.conversation_id,
+                    "intent_hint": request.intent_hint,
                 },
                 sort_keys=True,
             ).encode()
         ).hexdigest()
         routing = routing or routing_decision_for_request(request)
         workflow = routing.workflow
-        allowance_exempt = routing.clarification_needed or is_lightweight_scope_follow_up(request)
+        allowance_exempt = (
+            routing.clarification_needed
+            or is_lightweight_scope_follow_up(request)
+        )
         with self.lock:
             existing = self.jobs.get(request_id)
             if existing:
@@ -4080,6 +4126,9 @@ class AskJobManager:
                     answer_generation_ms = (
                         time.perf_counter() - answer_started
                     ) * 1000
+                requires_clarification = response_requires_clarification(result)
+                if requires_clarification:
+                    result["requires_clarification"] = True
                 self.update(
                     request_id,
                     "Validating the answer",
@@ -4131,7 +4180,7 @@ class AskJobManager:
                 request_id,
                 clarification_outcome=(
                     "clarification_requested"
-                    if response_requires_clarification(result)
+                    if requires_clarification
                     else "research_completed"
                 ),
             )
@@ -6528,7 +6577,10 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
     )
     answer_generation_ms = 0.0
     validation_ms = 0.0
-    allowance_exempt = routing.clarification_needed or is_lightweight_scope_follow_up(payload)
+    allowance_exempt = (
+        routing.clarification_needed
+        or is_lightweight_scope_follow_up(payload)
+    )
     runtime.beta_state.record_routing_decision(
         request_id=request_id,
         conversation_id=payload.conversation_id,
@@ -6570,6 +6622,9 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 answer_generation_ms = (
                     time.perf_counter() - answer_started
                 ) * 1000
+            requires_clarification = response_requires_clarification(result)
+            if requires_clarification:
+                result["requires_clarification"] = True
             validation_started = time.perf_counter()
             try:
                 customer_result = finalize_customer_result(
@@ -6615,7 +6670,7 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
             request_id,
             clarification_outcome=(
                 "clarification_requested"
-                if response_requires_clarification(result)
+                if requires_clarification
                 else "research_completed"
             ),
         )
