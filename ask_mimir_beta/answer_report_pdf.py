@@ -28,12 +28,17 @@ from reportlab.platypus import (
 
 NAVY = colors.HexColor("#12283A")
 CYAN = colors.HexColor("#2E9FCB")
+BRAND_CHARCOAL = colors.HexColor("#312F2F")
 LIGHT_CYAN = colors.HexColor("#EAF5FA")
 INK = colors.HexColor("#1D2933")
 MUTED = colors.HexColor("#62717D")
 RULE = colors.HexColor("#D9E2E8")
 PAPER = colors.HexColor("#FFFFFF")
 SOFT = colors.HexColor("#F4F7F9")
+BRAND_LOGO_PATH = Path(__file__).with_name("assets") / "mimir-advisors-logo-white-on-charcoal.jpg"
+# Pixel crop within the supplied 2000x2000 master. It preserves the official
+# symbol, custom wordmark and their spacing while removing the large canvas.
+BRAND_LOGO_CROP = (420, 800, 1580, 1200)
 
 
 class _BrandedDocTemplate(SimpleDocTemplate):
@@ -220,54 +225,41 @@ def _styles(regular_font: str, bold_font: str) -> dict[str, ParagraphStyle]:
     }
 
 
-def _draw_mimir_symbol(canvas, x: float, y: float, size: float) -> None:
-    """Draw the Mimir mountain-and-monogram mark used by the website lockup."""
+def _draw_mimir_lockup(canvas, x: float, y: float, width: float) -> None:
+    """Draw the exact supplied logo master, clipped to its official lockup."""
+    if not BRAND_LOGO_PATH.is_file():
+        raise FileNotFoundError(f"Mimir logo asset not found: {BRAND_LOGO_PATH}")
+
+    image_width = 2000.0
+    image_height = 2000.0
+    crop_left, crop_top, crop_right, crop_bottom = BRAND_LOGO_CROP
+    crop_width = float(crop_right - crop_left)
+    crop_height = float(crop_bottom - crop_top)
+    scale = width / crop_width
+    height = crop_height * scale
+
     canvas.saveState()
-    canvas.setStrokeColor(colors.white)
-    canvas.setLineWidth(max(size * 0.055, 0.8))
-    canvas.setLineJoin(1)
-    canvas.setLineCap(1)
-
-    outer = canvas.beginPath()
-    outer.moveTo(x, y + size * 0.18)
-    outer.lineTo(x + size * 0.5, y + size)
-    outer.lineTo(x + size, y + size * 0.18)
-    outer.lineTo(x, y + size * 0.18)
-    canvas.drawPath(outer, stroke=1, fill=0)
-
-    upper = canvas.beginPath()
-    upper.moveTo(x + size * 0.37, y + size * 0.46)
-    upper.lineTo(x + size * 0.5, y + size * 0.68)
-    upper.lineTo(x + size * 0.63, y + size * 0.46)
-    canvas.drawPath(upper, stroke=1, fill=0)
-
-    monogram = canvas.beginPath()
-    monogram.moveTo(x + size * 0.13, y + size * 0.18)
-    monogram.lineTo(x + size * 0.3, y - size * 0.08)
-    monogram.lineTo(x + size * 0.43, y + size * 0.27)
-    monogram.lineTo(x + size * 0.58, y - size * 0.02)
-    monogram.lineTo(x + size * 0.72, y + size * 0.27)
-    monogram.lineTo(x + size * 0.88, y - size * 0.08)
-    monogram.lineTo(x + size * 0.3, y - size * 0.08)
-    canvas.drawPath(monogram, stroke=1, fill=0)
+    clipping_path = canvas.beginPath()
+    clipping_path.rect(x, y, width, height)
+    canvas.clipPath(clipping_path, stroke=0, fill=0)
+    canvas.drawImage(
+        str(BRAND_LOGO_PATH),
+        x - crop_left * scale,
+        y - (image_height - crop_bottom) * scale,
+        width=image_width * scale,
+        height=image_height * scale,
+        preserveAspectRatio=True,
+        anchor="c",
+    )
     canvas.restoreState()
 
 
 def _draw_page(canvas, document) -> None:
     canvas.saveState()
     width, height = LETTER
-    canvas.setFillColor(NAVY)
-    canvas.rect(0, height - 36, width, 36, stroke=0, fill=1)
-    canvas.setFillColor(CYAN)
-    canvas.rect(0, height - 39, width, 3, stroke=0, fill=1)
-    _draw_mimir_symbol(canvas, document.leftMargin, height - 30, 20)
-    lockup_x = document.leftMargin + 28
-    canvas.setFont("Helvetica-Bold", 8.5)
-    canvas.setFillColor(colors.white)
-    canvas.drawString(lockup_x, height - 18, "MIMIR")
-    canvas.setFont("Helvetica", 5.2)
-    canvas.setFillColor(colors.HexColor("#C7CBC8"))
-    canvas.drawString(lockup_x, height - 26, "A D V I S O R S")
+    canvas.setFillColor(BRAND_CHARCOAL)
+    canvas.rect(0, height - 42, width, 42, stroke=0, fill=1)
+    _draw_mimir_lockup(canvas, document.leftMargin, height - 38.2, 98)
     canvas.setFont("Helvetica", 7)
     canvas.setFillColor(MUTED)
     canvas.drawString(document.leftMargin, 24, "Ask Mimir research brief")
