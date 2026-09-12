@@ -559,7 +559,9 @@ in the relevant historical lane, then use forward_funding_summary and its named 
 whether the linked program's funding is growing, declining or broadly level. Keep prime obligations, DLA
 procurement and reported subcontract evidence distinct, and do not imply that program funding belongs to the
 company. Make that distinction through precise wording rather than adding a generic forecast or revenue
-disclaimer. Omit this section cleanly when no explicit company-platform-budget linkage is present.
+disclaimer. For every linked program included, show the percentage beside each non-zero historical exposure
+value; do not give the dollar exposure without its share of the corresponding company-wide historical lane.
+Omit this section cleanly when no explicit company-platform-budget linkage is present.
 Do not rank COMMON MISSILE SYSTEMS beside named platforms or link it as though it were one. Where the
 underlying evidence does not resolve a named missile program, call it "Missile-related activity not
 attributable to one named program". Include it only when material and explain the wording in plain language.
