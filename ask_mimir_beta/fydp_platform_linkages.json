@@ -1,5 +1,5 @@
 {
-  "definition_version": "mimir-fydp-platform-linkages-2026-09-v1",
+  "definition_version": "mimir-fydp-platform-linkages-2026-09-v2",
   "scope_note": "Explicit links between Mimir platform or system names and public FY2027 procurement budget-line titles. The broad P-1 source supplies FY2025 actual, FY2026 enacted and FY2027 request context. Published FY2028-FY2031 projections are included where structured P-40 source books are available. A link supplies program-level demand context; it does not allocate program funding to a company.",
   "linkages": [
     {
@@ -33,6 +33,12 @@
       "budget_title_aliases": ["AIR LAUNCH CRUISE MISSILE (ALCM)"]
     },
     {
+      "program_id": "ARRW",
+      "display_name": "AGM-183A Air-Launched Rapid Response Weapon",
+      "platform_aliases": ["ARRW", "AGM-183A", "AGM-183A ARRW"],
+      "budget_title_aliases": ["AGM-183A AIR-LAUNCHED RAPID RESPONSE WEAPON"]
+    },
+    {
       "program_id": "AMRAAM",
       "display_name": "AMRAAM",
       "platform_aliases": ["AMRAAM", "AMRAAM EPIP - BASIC", "AMRAAM (NAVY)"],
@@ -45,6 +51,12 @@
       "budget_title_aliases": ["ARMY TACTICAL MSL SYS (ATACMS) - SYS SUM"]
     },
     {
+      "program_id": "AVENGER_AIR_DEFENSE",
+      "display_name": "Avenger air defense system",
+      "platform_aliases": ["AVENGER (FAADS LOS-R)", "AN/TWQ-1 AVENGER", "AVENGER AIR DEFENSE"],
+      "budget_title_aliases": ["AVENGER MODS"]
+    },
+    {
       "program_id": "B1B",
       "display_name": "B-1B Lancer",
       "platform_aliases": ["B-1B", "B-1 LANCER"],
@@ -55,6 +67,12 @@
       "display_name": "B-2 Spirit",
       "platform_aliases": ["B-2", "B-2 SPIRIT"],
       "budget_title_aliases": ["B-2A", "B-2B"]
+    },
+    {
+      "program_id": "BMDS_SENSORS",
+      "display_name": "Ballistic Missile Defense System sensors",
+      "platform_aliases": ["BMDS"],
+      "budget_title_aliases": ["BMDS SENSORS"]
     },
     {
       "program_id": "B52",
@@ -97,6 +115,18 @@
       "display_name": "Columbia-class submarine",
       "platform_aliases": ["COLUMBIA CLASS SSBN", "COLUMBIA CLASS", "COLUMBIA-CLASS SUBMARINE"],
       "budget_title_aliases": ["COLUMBIA CLASS SUBMARINE"]
+    },
+    {
+      "program_id": "CIWS",
+      "display_name": "Mk 15 Close-In Weapon System",
+      "platform_aliases": ["MK15 CLOSE IN WPN SYS", "CIWS", "CLOSE-IN WEAPON SYSTEM"],
+      "budget_title_aliases": ["CLOSE-IN WPNS SYS (CIWS) MODS"]
+    },
+    {
+      "program_id": "CONVENTIONAL_PROMPT_STRIKE",
+      "display_name": "Conventional Prompt Strike",
+      "platform_aliases": ["INTERMEDIATE RANGE CONVENTIONAL PROMPT STRIKE (IRCPS)", "CONVENTIONAL PROMPT STRIKE", "CPS"],
+      "budget_title_aliases": ["CONVENTIONAL PROMPT STRIKE"]
     },
     {
       "program_id": "ESSM",
@@ -153,10 +183,22 @@
       "budget_title_aliases": ["GUIDED MLRS ROCKET (GMLRS)", "GUIDED MULTIPLE-LAUNCH ROCKET SYSTEM (GMLRS)", "MLRS MODS"]
     },
     {
+      "program_id": "HACM",
+      "display_name": "Hypersonic Attack Cruise Missile",
+      "platform_aliases": ["HACM", "HYPERSONIC ATTACK CRUISE MISSILE"],
+      "budget_title_aliases": ["HYPERSONIC ATTACK CRUISE MISSILE"]
+    },
+    {
       "program_id": "HIMARS",
       "display_name": "HIMARS",
       "platform_aliases": ["HIMARS"],
       "budget_title_aliases": ["HIGH MOBILITY ARTILLERY ROCKET SYSTEM (HIMARS)", "HIMARS MODIFICATIONS"]
+    },
+    {
+      "program_id": "IFPC_INC_2",
+      "display_name": "Indirect Fire Protection Capability Increment 2",
+      "platform_aliases": ["IFPC INC 2", "IFPC", "INDIRECT FIRE PROTECTION CAPABILITY"],
+      "budget_title_aliases": ["INDIRECT FIRE PROTECTION CAPABILITY INC 2-I"]
     },
     {
       "program_id": "KC46A",
@@ -165,10 +207,22 @@
       "budget_title_aliases": ["KC-46A MDAP"]
     },
     {
+      "program_id": "LRSO",
+      "display_name": "Long Range Stand-Off Weapon",
+      "platform_aliases": ["LRSO", "LONG RANGE STAND-OFF WEAPON"],
+      "budget_title_aliases": ["LONG RANGE STAND-OFF WEAPON"]
+    },
+    {
       "program_id": "JASSM_LRASM",
       "display_name": "JASSM / LRASM family",
       "platform_aliases": ["JASSM", "LRASM"],
       "budget_title_aliases": ["JOINT AIR-SURFACE STANDOFF MISSILE", "JOINT AIR-TO-SURFACE STANDOFF MISSILE (JASSM)", "LRASM", "LRASM0"]
+    },
+    {
+      "program_id": "JATM",
+      "display_name": "AIM-260 Joint Advanced Tactical Missile",
+      "platform_aliases": ["AIM-260 JATM", "AIM-260", "JATM"],
+      "budget_title_aliases": ["JOINT ADVANCE TACTICAL MISSILE (JATM)", "JOINT ADVANCED TACTICAL MISSILE"]
     },
     {
       "program_id": "JAVELIN",
@@ -268,6 +322,18 @@
       "budget_title_aliases": ["GROUND BASED STRATEGIC DETERRENT", "MK21A REENTRY VEHICLE"]
     },
     {
+      "program_id": "SDB_I",
+      "display_name": "GBU-39 Small Diameter Bomb",
+      "platform_aliases": ["GBU-39 SMALL DIAMETER BOMB", "SDB I", "SMALL DIAMETER BOMB"],
+      "budget_title_aliases": ["SMALL DIAMETER BOMB"]
+    },
+    {
+      "program_id": "SDB_II",
+      "display_name": "Small Diameter Bomb II",
+      "platform_aliases": ["SDB II", "SMALL DIAMETER BOMB II"],
+      "budget_title_aliases": ["SMALL DIAMETER BOMB II", "SMALL DIAMETER BOMB II (SDB II)"]
+    },
+    {
       "program_id": "SM6",
       "display_name": "SM-6",
       "platform_aliases": ["SM-6"],
@@ -278,6 +344,12 @@
       "display_name": "Stinger",
       "platform_aliases": ["STINGER"],
       "budget_title_aliases": ["STINGER MODS"]
+    },
+    {
+      "program_id": "SSTD",
+      "display_name": "Surface Ship Torpedo Defense",
+      "platform_aliases": ["AN/SLQ-25 TORPEDO COUNTERMEASURE", "SURFACE SHIP TORPEDO DEFENSE", "SSTD"],
+      "budget_title_aliases": ["SURFACE SHIP TORPEDO DEF (SSTD)"]
     },
     {
       "program_id": "STRYKER",

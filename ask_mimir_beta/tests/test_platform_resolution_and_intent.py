@@ -43,6 +43,18 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             "P-8A",
             "NEXT GEN OPIR",
             "VIRGINIA CLASS (SSN 774)",
+            "ARRW",
+            "AVENGER (FAADS LOS-R)",
+            "MK15 CLOSE IN WPN SYS",
+            "INTERMEDIATE RANGE CONVENTIONAL PROMPT STRIKE (IRCPS)",
+            "HACM",
+            "IFPC INC 2",
+            "AIM-260 JATM",
+            "LRSO",
+            "GBU-39 SMALL DIAMETER BOMB",
+            "SDB I",
+            "SDB II",
+            "AN/SLQ-25 TORPEDO COUNTERMEASURE",
         ]
 
     def test_patriot_resolves_to_the_umbrella_system(self):
@@ -168,6 +180,20 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             self.store.mentions("Tell me about Next Gen OPIR and its supplier base."),
             ["NEXT GEN OPIR"],
         )
+
+    def test_budget_program_aliases_resolve_to_existing_platform_records(self):
+        cases = {
+            "What is the outlook for AGM-183A ARRW?": ["ARRW"],
+            "Show the CIWS budget trajectory.": ["MK15 CLOSE IN WPN SYS"],
+            "What lies ahead for Conventional Prompt Strike?": [
+                "INTERMEDIATE RANGE CONVENTIONAL PROMPT STRIKE (IRCPS)"
+            ],
+            "Show the JATM production outlook.": ["AIM-260 JATM"],
+            "What is the future funding for SDB II?": ["SDB II"],
+        }
+        for question, expected in cases.items():
+            with self.subTest(question=question):
+                self.assertEqual(self.store.mentions(question), expected)
 
     def test_universal_projection_uses_the_resolved_platform_for_supplier_years(self):
         store = object.__new__(PlatformContextStore)

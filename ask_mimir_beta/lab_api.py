@@ -96,7 +96,7 @@ from beta_controls import (
 )
 from platform_supply_chain_store import PlatformSupplyChainStore
 from program_momentum_store import ProgramMomentumStore, is_program_momentum_language
-from program_outlook_store import ProgramOutlookStore, is_program_outlook_language
+from program_outlook_store import ProgramOutlookStore
 from platform_intent import (
     is_open_capability_discovery_request,
     is_platform_centered_request,
@@ -723,8 +723,8 @@ Answer for the resolved platform or program. Follow requested_answer_mode exactl
   scope. Weight conclusions by financial significance, supplier dependency and evidence strength;
   do not revive a specialist market lens from an earlier question unless the latest question asks for it.
 - platform_overview: provide a compact summary table, then cover observed procurement trajectory,
-  direct award recipients, reported supplier sites, components or capabilities, major awards and
-  current opportunities.
+  direct award recipients, reported supplier sites, components or capabilities, major awards,
+  current opportunities and a concise forward view when forward evidence is present.
 
 When scope.requested_focus is present, use the resolved platform as the industrial and financial
 baseline but answer specifically for that named variant or related program. Use the explicit named
@@ -749,7 +749,10 @@ subcontract value; attributed DLA procurement value for single-platform NIINs; a
 exposure, which is associated with this platform but not allocated to it.
 
 When a MIMIR STRUCTURED PROGRAM OUTLOOK is supplied, use it as the primary evidence for an outlook,
-future-demand, funding or five-year question. Present a compact year-by-year view and keep the following
+future-demand, funding or five-year question. For platform_overview, include a concise Forward view
+section containing only the most decision-useful funding, quantity, announcement or opportunity signals.
+For narrower questions, use forward evidence only when it helps answer the requested point. Present a
+compact year-by-year view when the question asks for a trajectory and keep the following
 lanes visibly separate: completed-year and partial-year prime obligations; official DoD contract
 announcements and their stated periods of performance; actual, enacted, requested and projected budget
 facts; explicit procurement quantities; and open SAM.gov solicitations. Never add values across those
@@ -759,6 +762,11 @@ use it as qualitative and schedule enrichment rather than a second financial tra
 structured source locators and public URLs supplied in the outlook; use live web research only for material
 developments that post-date those records. State gaps briefly instead of asking the model to reconstruct a
 missing forecast from generic web material.
+
+Do not mention internal linkage catalogues, mappings, structured-data availability, workflow selection or
+tool coverage to the customer. If forward evidence is absent, answer naturally from the other supported
+platform evidence and authoritative current sources. Discuss methodology or data coverage only when the
+user explicitly asks about it.
 
 For platform_overview, lead with the time-bounded totals supplied in financial_totals. For supplier
 roles or overview, include financial values only when they help rank or size the reported positions.
@@ -4491,7 +4499,12 @@ def universal_platform_evidence_export(platform_id: str, request: Request) -> St
     require_evidence_download(request)
     try:
         context = runtime.platform_contexts.get_export_context(platform_id, limit=5000)
-        payload = build_platform_context_zip(context)
+        outlook = (
+            runtime.program_outlook.get(platform_id=platform_id)
+            if runtime.program_outlook.supports(platform_id)
+            else None
+        )
+        payload = build_platform_context_zip(context, outlook=outlook)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return StreamingResponse(
@@ -6128,10 +6141,11 @@ def generate_answer(
                 search_trace,
                 {"tool": "get_platform_context", "arguments": arguments, "result": pack},
             ]
-            if (
-                is_program_outlook_language(latest_platform_question)
-                and runtime.program_outlook.supports(resolved_platform)
-            ):
+            # Forward evidence is a reusable section of the universal platform dossier,
+            # not a separate user-facing workflow. Supplying it for every supported
+            # platform lets the answer mode decide whether a concise overview, a full
+            # trajectory, or no forward discussion is pertinent to the question.
+            if runtime.program_outlook.supports(resolved_platform):
                 outlook_arguments = {"platform_id": resolved_platform}
                 outlook = runtime.call_tool("get_program_outlook", outlook_arguments)
                 pack["structured_program_outlook"] = outlook

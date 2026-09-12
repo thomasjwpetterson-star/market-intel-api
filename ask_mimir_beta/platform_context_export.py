@@ -24,7 +24,10 @@ def _write(archive: zipfile.ZipFile, name: str, rows: Iterable[Dict[str, Any]], 
     archive.writestr(name, stream.getvalue().encode("utf-8-sig"))
 
 
-def build_platform_context_zip(context: Dict[str, Any]) -> bytes:
+def build_platform_context_zip(
+    context: Dict[str, Any],
+    outlook: Dict[str, Any] | None = None,
+) -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         _write(archive, "01_annual_activity.csv", context["annual_activity"]["records"], [
@@ -85,11 +88,34 @@ def build_platform_context_zip(context: Dict[str, Any]) -> bytes:
         _write(archive, "09_source_guide.csv", context["evidence_index"], [
             "source", "supports", "public_record_ids",
         ])
+        if outlook:
+            lanes = outlook.get("evidence_lanes") or {}
+            _write(archive, "10_budget_and_fydp.csv", lanes.get("budget_and_fydp", []), [
+                "fiscal_year", "planning_phase", "funding_status", "component",
+                "appropriation_title", "exhibit_type", "budget_line_number",
+                "budget_line_item", "budget_line_item_title", "measure_type",
+                "amount_usd", "quantity", "availability_status", "source_document_title",
+                "source_page_number", "source_landing_page", "source_download_url",
+                "source_locator",
+            ])
+            _write(
+                archive,
+                "11_official_contract_announcements.csv",
+                lanes.get("official_contract_announcements", []),
+                [
+                    "announcement_date", "service", "recipient_text", "primary_contract_id",
+                    "contract_ids", "announced_value_usd", "obligated_at_announcement_usd",
+                    "work_locations", "period_of_performance_text", "competition_text",
+                    "contracting_activity", "description", "source_title", "source_url",
+                    "match_basis",
+                ],
+            )
         archive.writestr(
             "README.txt",
             (
                 f"Mimir platform evidence pack: {context['scope']['display_name']}\n\n"
                 "Prime obligations, reported subcontract value, attributed DLA procurement and shared-use NIIN exposure are separate evidence lanes.\n"
+                "Budget actuals, enacted funding, requests, projections and official contract-announcement values retain their stated status and are not added to obligations.\n"
                 "Reported descriptions support bounded capability language. Exact component claims require platform-specific source evidence.\n"
             ),
         )

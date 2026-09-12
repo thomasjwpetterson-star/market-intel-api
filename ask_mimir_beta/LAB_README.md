@@ -201,7 +201,7 @@ The evidence drawer offers a customer-safe ZIP of separate CSVs without internal
 
 Named platform and program outlook questions use `ProgramOutlookStore` to assemble a reusable
 forward view from the current atomic runtime release. The explicit linkage catalogue currently
-covers 54 programs. Each outlook keeps these evidence lanes separate:
+covers 66 programs. Each outlook keeps these evidence lanes separate:
 
 - completed-year and partial-year USAspending prime obligations;
 - official DoD contract announcements, stated values and periods of performance;
