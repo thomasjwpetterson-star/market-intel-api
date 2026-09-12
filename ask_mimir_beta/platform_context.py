@@ -318,12 +318,25 @@ class PlatformContextStore:
 
     def mentions(self, text: str) -> List[str]:
         normalized = f" {_normalize(text)} "
-        alias_matches = [
-            target
+        alias_hits = [
+            (alias, target)
             for alias, target in sorted(
                 PLATFORM_ALIASES.items(), key=lambda item: len(item[0]), reverse=True
             )
             if f" {alias} " in normalized and target in self.platforms
+        ]
+        # Prefer the most specific phrase when aliases overlap. Without this,
+        # "Small Diameter Bomb II" also activates the shorter
+        # "Small Diameter Bomb" alias and creates a false two-platform match.
+        alias_matches = [
+            target
+            for alias, target in alias_hits
+            if not any(
+                alias != other_alias
+                and target != other_target
+                and f" {alias} " in f" {other_alias} "
+                for other_alias, other_target in alias_hits
+            )
         ]
         grouped_alias_matches = [
             target for target in alias_matches if target in PLATFORM_GROUPS

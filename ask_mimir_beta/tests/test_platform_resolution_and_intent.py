@@ -190,6 +190,7 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             ],
             "Show the JATM production outlook.": ["AIM-260 JATM"],
             "What is the future funding for SDB II?": ["SDB II"],
+            "What is the outlook for Small Diameter Bomb II?": ["SDB II"],
         }
         for question, expected in cases.items():
             with self.subTest(question=question):

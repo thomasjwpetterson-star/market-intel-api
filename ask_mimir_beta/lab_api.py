@@ -2566,6 +2566,26 @@ class LabRuntime:
                 (time.perf_counter() - started) * 1000,
             )
 
+    def optional_program_outlook(
+        self,
+        platform_id: str,
+        *,
+        export: bool = False,
+    ) -> Dict[str, Any] | None:
+        """Load forward evidence without making the core platform answer depend on it."""
+        try:
+            if not self.program_outlook.supports(platform_id):
+                return None
+            if export:
+                return self.program_outlook.get(platform_id=platform_id)
+            return self.call_tool("get_program_outlook", {"platform_id": platform_id})
+        except Exception:
+            LOGGER.exception(
+                "Optional program outlook failed for platform %s",
+                platform_id,
+            )
+            return None
+
     def _call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         self.release_guard.assert_unchanged()
         cacheable = {
@@ -4499,11 +4519,7 @@ def universal_platform_evidence_export(platform_id: str, request: Request) -> St
     require_evidence_download(request)
     try:
         context = runtime.platform_contexts.get_export_context(platform_id, limit=5000)
-        outlook = (
-            runtime.program_outlook.get(platform_id=platform_id)
-            if runtime.program_outlook.supports(platform_id)
-            else None
-        )
+        outlook = runtime.optional_program_outlook(platform_id, export=True)
         payload = build_platform_context_zip(context, outlook=outlook)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -6145,9 +6161,9 @@ def generate_answer(
             # not a separate user-facing workflow. Supplying it for every supported
             # platform lets the answer mode decide whether a concise overview, a full
             # trajectory, or no forward discussion is pertinent to the question.
-            if runtime.program_outlook.supports(resolved_platform):
+            outlook = runtime.optional_program_outlook(resolved_platform)
+            if outlook is not None:
                 outlook_arguments = {"platform_id": resolved_platform}
-                outlook = runtime.call_tool("get_program_outlook", outlook_arguments)
                 pack["structured_program_outlook"] = outlook
                 trace.append(
                     {
