@@ -473,7 +473,9 @@ For a company-wide scope, describe the identity count as the "resolved CAGE site
 in the current Mimir company scope. Do not call that count the company's complete registration footprint.
 
 Start with a concise identity and commercial-position summary. Follow it with a compact table of material
-sites containing company/site name, CAGE, city/state and the principal supported capabilities at that site.
+sites containing company/site name, CAGE, city/state, principal supported capabilities and net prime
+obligations for the stated fiscal-year window. Use material_site_summary for the financial column and show
+"No prime obligations observed" rather than leaving the value blank when no prime activity was returned.
 For a direct request for CAGE codes or facilities, list every site returned in the identity section and say
 how many are shown. Never return CAGE codes without their locations when a location is available.
 
@@ -516,11 +518,14 @@ https://www.mimiradvisors.org/dashboard?view=PLATFORM&platform=<PLATFORM>, and N
 https://www.mimiradvisors.org/dashboard?view=PARTS&nsn=<NSN>.
 
 Call the financial section "Observed U.S. defense contracting activity". Label the three financial lanes
-"Prime obligations", "DLA procurement value" and "Mimir-modelled reported subcontract value". Keep them
+"Prime obligations", "DLA procurement value" and "Reported subcontract value". Keep them
 clearly separated, do not name USAspending in the customer-facing measure label, and state the fiscal-year
 observation window. Do not write phrases such as "not company revenue", "not site revenue", "non-additive",
 "not a general representation" or equivalent generic disclaimers. Describe signed totals simply as net prime
 obligations; explain positive actions and de-obligations only when the user asks about the calculation.
+For a standard company profile, follow the period totals with a compact fiscal-year table using
+annual_financial_summary. Show each available year and the three lanes separately, label the latest fiscal
+year as the latest available records, and use "Not observed" for a missing lane rather than zero.
 
 Call federal departments, agencies and offices "awarding organizations" or "government buyers". Reserve
 "prime customer" for reported subcontract routes to a prime-contractor CAGE. Do not include tangential broad
@@ -531,8 +536,12 @@ Include registered locations for material prime-customer CAGEs where supplied, w
 from prime-award place of performance and reported subaward location. Use source-reported descriptions as
 the evidence for capability wording. Where the place of performance matches or materially clarifies a site,
 state it directly. Do not repeat a generic warning about CAGE addresses and manufacturing locations unless a
-specific mismatch changes the interpretation. For product coverage, lead with all associated NIINs and part-number
-references, then separately identify the subset for which the CAGE is a current active authorized source.
+specific mismatch changes the interpretation. For product coverage, lead with the aggregate
+supplier_referenced_niin_count, observed_dla_procurement_niin_count, part-number reference count and
+active_authorized_niin_count. Do not describe two or three arbitrarily selected records as "key NIINs".
+Use representative_niin_examples only when examples add value, state that they are ranked by observed DLA
+procurement activity, include their time-bounded value, and explain what makes each example representative.
+Then separately identify the subset for which the CAGE is a current active authorized source.
 Summarize other active authorized sources where they materially explain competition. Treat broad labels such
 as "COMMON MISSILE SYSTEMS" as a market or system-family grouping, not as a discrete platform. Use fiscal
 years for recency and describe the latest year as the latest FY2026 records rather than "year to date".
@@ -544,13 +553,18 @@ call the recipient an authorized distributor unless an authoritative source esta
 If the recipient has its own design-control or active authorized-source relationship, describe it as an
 alternate observed source rather than a distributor. "Only active authorized source" describes the current
 DLA reference for that NIIN; it is not proof that every award was sole-source.
-When the user asks about outlook or future demand, use future_demand_context where it contains an explicit
-link from an observed company platform to a public budget line. Describe the funding and quantity trajectory
-for that program, then explain why it may matter to the company's existing position. Do not allocate the
-program budget to the company or imply that the company will receive a fixed share.
+For a standard company profile, include a concise "Forward exposure" section whenever future_demand_context
+contains linked programs. Use historical_company_exposure to state the company's time-bounded value and share
+in the relevant historical lane, then use forward_funding_summary and its named public budget source to say
+whether the linked program's funding is growing, declining or broadly level. Keep prime obligations, DLA
+procurement and reported subcontract evidence distinct, and do not imply that program funding belongs to the
+company. Make that distinction through precise wording rather than adding a generic forecast or revenue
+disclaimer. Omit this section cleanly when no explicit company-platform-budget linkage is present.
 Do not rank COMMON MISSILE SYSTEMS beside named platforms or link it as though it were one. Where the
-underlying evidence does not resolve a named missile program, label the residual grouping "Missile systems
-(multiple programs)" and keep it separate from named-platform exposure.
+underlying evidence does not resolve a named missile program, call it "Missile-related activity not
+attributable to one named program". Include it only when material and explain the wording in plain language.
+Never use "residual", "Mimir-modelled", "modelled reported subcontract value" or similar internal analytical
+language in the customer-facing answer.
 
 Every dollar value, including values grouped by PSC, NAICS, customer, platform or capability, must state the
 fiscal-year period it covers in the heading, table label or immediately adjacent sentence. Do not let a
@@ -3711,6 +3725,24 @@ def sanitize_answer_text(answer: str) -> str:
     cleaned = re.sub(
         r"\bover the loaded period\b",
         "over the stated fiscal-year period",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\bMimir[- ]modelled reported subcontract value\b",
+        "reported subcontract value",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\bMimir[- ]modelled subcontract value\b",
+        "reported subcontract value",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\b(?:a\s+)?residual\s+Missile systems\s*\(multiple programs\)\s+grouping\b",
+        "Missile-related activity not attributable to one named program",
         cleaned,
         flags=re.IGNORECASE,
     )

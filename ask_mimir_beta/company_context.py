@@ -330,7 +330,7 @@ class CompanyContextBuilder:
             "context_id": context_id,
             "evidence_fingerprint": evidence_fingerprint,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "calculation_version": "mimir-company-context-2026-09-v9",
+            "calculation_version": "mimir-company-context-2026-09-v10",
             "scope": {
                 "scope_type": scope_type,
                 "scope_id": scope_id,
@@ -985,6 +985,12 @@ class CompanyContextBuilder:
             "third_party_dla_procurement_routes": third_party_routes,
             "summary": {
                 "observed_financial_niin_count": len(financial),
+                "supplier_referenced_niin_count": len(competition_rows),
+                "active_authorized_niin_count": sum(
+                    1
+                    for row in competition_rows
+                    if bool(row.get("target_is_active_authorized_source"))
+                ),
                 "referenced_niin_count": len({row["niin"] for row in references}),
                 "part_number_reference_count": len(references),
                 "active_authorized_reference_count": sum(

@@ -377,6 +377,22 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
         self.assertIn("annual values", cleaned)
         self.assertEqual(final_validation["status"], "pass")
 
+    def test_internal_company_modelling_language_is_customerized(self):
+        answer = (
+            "A residual Missile systems (multiple programs) grouping represents "
+            "$120.7 million of FY2021-FY2026 Mimir-modelled reported subcontract value."
+        )
+        validation = validate_answer_citations(answer, [])
+        cleaned = remove_unsafe_and_internal_answer_content(answer, validation)
+
+        self.assertIn(
+            "Missile-related activity not attributable to one named program",
+            cleaned,
+        )
+        self.assertIn("reported subcontract value", cleaned)
+        self.assertNotIn("residual", cleaned.lower())
+        self.assertNotIn("Mimir-modelled", cleaned)
+
 
 if __name__ == "__main__":
     unittest.main()

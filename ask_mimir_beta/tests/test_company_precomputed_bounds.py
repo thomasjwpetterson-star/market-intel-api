@@ -2,6 +2,10 @@ import unittest
 
 from company_context_store import (
     _bounded_precomputed_context,
+    _company_annual_financial_summary,
+    _company_forward_context,
+    _company_material_site_summary,
+    _customer_product_evidence,
     _matching_parent_scope_ids,
 )
 
@@ -122,6 +126,100 @@ class CompanyPrecomputedBoundsTests(unittest.TestCase):
         self.assertEqual(
             {entry["scope"]["scope_id"] for entry in retained},
             {"UNRELATED_PARENT", "19645"},
+        )
+
+    def test_company_profile_summaries_are_customer_ready(self):
+        context = {
+            "scope": {
+                "fiscal_years": [2025, 2026],
+                "observation_window": "FY2025-FY2026 observed records",
+            },
+            "identity": {
+                "sites": [
+                    {"cage": "AAAA1", "vendor_name": "Alpha", "city": "A", "state": "VA"},
+                    {"cage": "BBBB2", "vendor_name": "Beta", "city": "B", "state": "CA"},
+                ]
+            },
+            "observed_financials": [
+                {"measure_type": "prime_obligations", "net_value_usd": 1000.0},
+                {"measure_type": "dla_procurement_value", "net_value_usd": 100.0},
+            ],
+            "annual_activity": [
+                {"fiscal_year": 2025, "measure_type": "prime_obligations", "net_value_usd": 600.0},
+                {"fiscal_year": 2026, "measure_type": "prime_obligations", "net_value_usd": 400.0},
+                {
+                    "fiscal_year": 2025,
+                    "measure_type": "mimir_modelled_reported_subcontract_value",
+                    "net_value_usd": 50.0,
+                },
+            ],
+            "site_financials": [
+                {"cage": "AAAA1", "measure_type": "prime_obligations", "net_value_usd": 800.0, "distinct_awards": 2},
+                {"cage": "BBBB2", "measure_type": "prime_obligations", "net_value_usd": 200.0, "distinct_awards": 1},
+            ],
+            "future_demand_context": {
+                "programs": [
+                    {
+                        "program_id": "PROGRAM_A",
+                        "company_platform_evidence": [
+                            {
+                                "evidence_layer": "prime_or_dla_action",
+                                "source_system": "USA_SPENDING",
+                                "observed_value_usd": 250.0,
+                            }
+                        ],
+                        "budget_projection_rows": [
+                            {"fiscal_year": 2027, "measure_type": "net_procurement_p1", "amount_usd": 100.0, "source_document_title": "DoD P-1"},
+                            {"fiscal_year": 2031, "measure_type": "net_procurement_p1", "amount_usd": 150.0, "source_document_title": "DoD P-1"},
+                        ],
+                    }
+                ]
+            },
+        }
+
+        annual = _company_annual_financial_summary(context)
+        sites = _company_material_site_summary(context)
+        forward = _company_forward_context(context)
+
+        self.assertEqual(annual[0]["net_prime_obligations_usd"], 600.0)
+        self.assertIsNone(annual[1]["reported_subcontract_value_usd"])
+        self.assertEqual(sites[0]["cage"], "AAAA1")
+        self.assertEqual(sites[0]["share_of_company_net_prime_obligations_pct"], 80.0)
+        program = forward["programs"][0]
+        self.assertEqual(
+            program["historical_company_exposure"][
+                "share_of_company_prime_obligations_pct"
+            ],
+            25.0,
+        )
+        self.assertEqual(program["forward_funding_summary"]["direction"], "growing")
+        self.assertEqual(program["forward_funding_summary"]["change_pct"], 50.0)
+
+    def test_product_summary_counts_full_niin_universe_and_ranks_examples(self):
+        product = _customer_product_evidence(
+            {
+                "summary": {"observed_financial_niin_count": 2},
+                "qualified_source_context": {
+                    "summary": {
+                        "target_sole_active_source_niin_count": 3,
+                        "target_multi_source_niin_count": 2,
+                        "target_not_active_authorized_source_niin_count": 5,
+                    }
+                },
+                "niin_financial_observations": [
+                    {"niin": "000000001", "dla_procurement_value_usd": 75.0},
+                    {"niin": "000000002", "dla_procurement_value_usd": 25.0},
+                ],
+            }
+        )
+
+        self.assertEqual(product["summary"]["supplier_referenced_niin_count"], 10)
+        self.assertEqual(product["summary"]["active_authorized_niin_count"], 5)
+        self.assertEqual(
+            product["representative_niin_examples"][0][
+                "share_of_observed_dla_procurement_pct"
+            ],
+            75.0,
         )
 
 

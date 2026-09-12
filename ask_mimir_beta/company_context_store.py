@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -332,6 +333,258 @@ def _bounded_precomputed_context(
     bounded["evidence_index"] = evidence_index
     bounded["precomputed_row_limit_per_table"] = limit
     return bounded
+
+
+def _company_annual_financial_summary(context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return a customer-ready annual view with the three evidence lanes aligned."""
+    years = [int(year) for year in context.get("scope", {}).get("fiscal_years", [])]
+    values: Dict[int, Dict[str, Any]] = {year: {} for year in years}
+    field_by_measure = {
+        "prime_obligations": "net_prime_obligations_usd",
+        "dla_procurement_value": "dla_procurement_value_usd",
+        "mimir_modelled_reported_subcontract_value": "reported_subcontract_value_usd",
+    }
+    for row in context.get("annual_activity", []):
+        year = int(row.get("fiscal_year") or 0)
+        field = field_by_measure.get(str(row.get("measure_type") or ""))
+        if year and field:
+            values.setdefault(year, {})[field] = row.get("net_value_usd")
+    latest_year = max(values) if values else None
+    return [
+        {
+            "fiscal_year": year,
+            "net_prime_obligations_usd": values[year].get(
+                "net_prime_obligations_usd"
+            ),
+            "dla_procurement_value_usd": values[year].get(
+                "dla_procurement_value_usd"
+            ),
+            "reported_subcontract_value_usd": values[year].get(
+                "reported_subcontract_value_usd"
+            ),
+            "observation_status": (
+                "latest available records"
+                if year == latest_year
+                else "completed fiscal year"
+            ),
+        }
+        for year in sorted(values)
+    ]
+
+
+def _company_material_site_summary(
+    context: Dict[str, Any], limit: int = 15
+) -> List[Dict[str, Any]]:
+    """Join site identity to time-bounded prime and DLA activity for display."""
+    window = context.get("scope", {}).get("observation_window")
+    sites = {
+        str(site.get("cage") or "").strip().upper(): site
+        for site in context.get("identity", {}).get("sites", [])
+        if str(site.get("cage") or "").strip()
+    }
+    financials: Dict[str, Dict[str, Any]] = {}
+    for row in context.get("site_financials", []):
+        cage = str(row.get("cage") or "").strip().upper()
+        if not cage:
+            continue
+        entry = financials.setdefault(cage, {})
+        if row.get("measure_type") == "prime_obligations":
+            entry["net_prime_obligations_usd"] = row.get("net_value_usd")
+            entry["prime_award_count"] = row.get("distinct_awards")
+        elif row.get("measure_type") == "dla_procurement_value":
+            entry["dla_procurement_value_usd"] = row.get("net_value_usd")
+            entry["dla_award_count"] = row.get("distinct_awards")
+
+    company_prime_total = sum(
+        float(row.get("net_value_usd") or 0)
+        for row in context.get("observed_financials", [])
+        if row.get("measure_type") == "prime_obligations"
+    )
+    rows = []
+    for cage, site in sites.items():
+        financial = financials.get(cage, {})
+        prime_value = financial.get("net_prime_obligations_usd")
+        dla_value = financial.get("dla_procurement_value_usd")
+        materiality = max(abs(float(prime_value or 0)), abs(float(dla_value or 0)))
+        rows.append(
+            {
+                "cage": cage,
+                "site_name": site.get("official_site_label")
+                or site.get("vendor_name")
+                or cage,
+                "city": site.get("city"),
+                "state": site.get("state"),
+                "net_prime_obligations_usd": prime_value,
+                "share_of_company_net_prime_obligations_pct": (
+                    round(float(prime_value or 0) / company_prime_total * 100, 2)
+                    if prime_value is not None and company_prime_total
+                    else None
+                ),
+                "dla_procurement_value_usd": dla_value,
+                "prime_award_count": financial.get("prime_award_count"),
+                "dla_award_count": financial.get("dla_award_count"),
+                "observation_window": window,
+                "materiality_sort_value_usd": materiality,
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            float(row.get("materiality_sort_value_usd") or 0),
+            abs(float(row.get("net_prime_obligations_usd") or 0)),
+        ),
+        reverse=True,
+    )
+    for rank, row in enumerate(rows[:limit], start=1):
+        row["materiality_rank"] = rank
+    return rows[:limit]
+
+
+def _customer_product_evidence(value: Any) -> Any:
+    """Add complete NIIN counts and explicitly ranked examples to older contexts."""
+    if not isinstance(value, dict):
+        return value
+    product = dict(value)
+    summary = dict(product.get("summary", {}))
+    qualified = product.get("qualified_source_context", {}).get("summary", {})
+    sole = int(qualified.get("target_sole_active_source_niin_count") or 0)
+    multi = int(qualified.get("target_multi_source_niin_count") or 0)
+    not_active = int(
+        qualified.get("target_not_active_authorized_source_niin_count") or 0
+    )
+    summary.setdefault("supplier_referenced_niin_count", sole + multi + not_active)
+    summary.setdefault("active_authorized_niin_count", sole + multi)
+    summary.setdefault(
+        "observed_dla_procurement_niin_count",
+        int(summary.get("observed_financial_niin_count") or 0),
+    )
+    financial_rows = list(product.get("niin_financial_observations", []))
+    observed_total = sum(
+        abs(float(row.get("dla_procurement_value_usd") or 0))
+        for row in financial_rows
+    )
+    product["representative_niin_examples"] = [
+        {
+            **row,
+            "share_of_observed_dla_procurement_pct": (
+                round(
+                    abs(float(row.get("dla_procurement_value_usd") or 0))
+                    / observed_total
+                    * 100,
+                    2,
+                )
+                if observed_total
+                else None
+            ),
+            "selection_basis": (
+                "Ranked by absolute observed DLA procurement value in the stated "
+                "fiscal-year window"
+            ),
+        }
+        for row in financial_rows[:5]
+    ]
+    product["summary"] = summary
+    return product
+
+
+def _company_forward_context(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach historical exposure shares and a deterministic funding direction."""
+    forward = copy.deepcopy(context.get("future_demand_context") or {})
+    lane_totals = {
+        "prime_obligations_usd": sum(
+            float(row.get("net_value_usd") or 0)
+            for row in context.get("observed_financials", [])
+            if row.get("measure_type") == "prime_obligations"
+        ),
+        "dla_procurement_value_usd": sum(
+            float(row.get("net_value_usd") or 0)
+            for row in context.get("observed_financials", [])
+            if row.get("measure_type") == "dla_procurement_value"
+        ),
+        "reported_subcontract_value_usd": sum(
+            float(row.get("net_value_usd") or 0)
+            for row in context.get("annual_activity", [])
+            if row.get("measure_type")
+            == "mimir_modelled_reported_subcontract_value"
+        ),
+    }
+    for program in forward.get("programs", []):
+        exposure = {
+            "prime_obligations_usd": 0.0,
+            "dla_procurement_value_usd": 0.0,
+            "reported_subcontract_value_usd": 0.0,
+        }
+        for row in program.get("company_platform_evidence", []):
+            observed_value = float(row.get("observed_value_usd") or 0)
+            if row.get("evidence_layer") == "reported_subaward":
+                exposure["reported_subcontract_value_usd"] += observed_value
+            elif str(row.get("source_system") or "").upper() == "DLA":
+                exposure["dla_procurement_value_usd"] += observed_value
+            else:
+                exposure["prime_obligations_usd"] += observed_value
+        exposure.update(
+            {
+                f"share_of_company_{lane.replace('_usd', '')}_pct": (
+                    round(observed_value / lane_totals[lane] * 100, 2)
+                    if lane_totals[lane]
+                    else None
+                )
+                for lane, observed_value in list(exposure.items())
+            }
+        )
+        program["historical_company_exposure"] = exposure
+
+        funding_by_year: Dict[int, float] = {}
+        source_titles = set()
+        for row in program.get("budget_projection_rows", []):
+            if row.get("measure_type") != "net_procurement_p1":
+                continue
+            year = int(row.get("fiscal_year") or 0)
+            if not year:
+                continue
+            funding_by_year[year] = funding_by_year.get(year, 0.0) + float(
+                row.get("amount_usd") or 0
+            )
+            if row.get("source_document_title"):
+                source_titles.add(str(row["source_document_title"]))
+        years = sorted(funding_by_year)
+        if len(years) >= 2:
+            baseline_year = (
+                2027 if 2027 in funding_by_year and years[-1] > 2027 else years[0]
+            )
+            latest_year = years[-1]
+            baseline_value = funding_by_year[baseline_year]
+            latest_value = funding_by_year[latest_year]
+            change_pct = (
+                (latest_value - baseline_value) / abs(baseline_value) * 100
+                if baseline_value
+                else None
+            )
+            if change_pct is None:
+                direction = "not comparable"
+            elif change_pct > 5:
+                direction = "growing"
+            elif change_pct < -5:
+                direction = "declining"
+            else:
+                direction = "broadly level"
+            program["forward_funding_summary"] = {
+                "direction": direction,
+                "baseline_fiscal_year": baseline_year,
+                "baseline_funding_usd": baseline_value,
+                "latest_fiscal_year": latest_year,
+                "latest_funding_usd": latest_value,
+                "change_pct": round(change_pct, 2) if change_pct is not None else None,
+                "annual_funding_usd": [
+                    {"fiscal_year": year, "funding_usd": funding_by_year[year]}
+                    for year in years
+                ],
+                "source_document_titles": sorted(source_titles),
+            }
+    forward["company_lane_totals"] = lane_totals
+    forward["company_observation_window"] = context.get("scope", {}).get(
+        "observation_window"
+    )
+    return forward
 
 
 class CompanyContextStore:
@@ -1501,6 +1754,12 @@ class CompanyContextStore:
                 )
                 context["calculation_version"] = "mimir-company-context-2026-09-v9"
 
+        customer_context = dict(context)
+        customer_context["product_and_part_evidence"] = _customer_product_evidence(
+            context.get("product_and_part_evidence")
+        )
+        customer_context["future_demand_context"] = _company_forward_context(context)
+
         result = {
             "context_id": context["context_id"],
             "evidence_fingerprint": context["evidence_fingerprint"],
@@ -1510,7 +1769,14 @@ class CompanyContextStore:
             "focus": focus,
         }
         for section in FOCUS_SECTIONS[focus]:
-            result[section] = self._compact_section(section, context.get(section))
+            result[section] = self._compact_section(
+                section, customer_context.get(section)
+            )
+        if focus in {"profile", "full_dossier"}:
+            result["annual_financial_summary"] = _company_annual_financial_summary(
+                context
+            )
+            result["material_site_summary"] = _company_material_site_summary(context)
         result["evidence_chain"] = {
             "identity_definition_version": context.get("source_manifest", {})
             .get("identity_definition", {})
@@ -1755,6 +2021,12 @@ class CompanyContextStore:
                             "company_platform_evidence", []
                         )[:6],
                         "relationship_basis": program.get("relationship_basis"),
+                        "historical_company_exposure": program.get(
+                            "historical_company_exposure", {}
+                        ),
+                        "forward_funding_summary": program.get(
+                            "forward_funding_summary", {}
+                        ),
                         "observed_site_reported_subcontract_value_usd": program.get(
                             "observed_site_reported_subcontract_value_usd"
                         ),

@@ -1036,5 +1036,17 @@ def remove_unsafe_and_internal_answer_content(
     for marker in validation.get("forbidden_markers", []):
         replacement = replacements.get(str(marker).lower(), "")
         cleaned = re.sub(re.escape(str(marker)), replacement, cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"\bMimir[- ]modelled (?:reported )?subcontract value\b",
+        "reported subcontract value",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\b(?:a\s+)?residual\s+Missile systems\s*\(multiple programs\)\s+grouping\b",
+        "Missile-related activity not attributable to one named program",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(r"(?:s3://|file://|/Users/|local_data/)[^\s)`\]]+", "", cleaned, flags=re.IGNORECASE)
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
