@@ -25,7 +25,7 @@ FYDP_PLATFORM_LINKAGE_VERSION = json.loads(
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
-DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v9"
+DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v11"
 
 CANONICAL_CONSOLIDATED_PARENT_NAMES = {
     "CURTISS WRIGHT": "CURTISS-WRIGHT CORPORATION",
@@ -437,6 +437,203 @@ def _company_material_site_summary(
     for rank, row in enumerate(rows[:limit], start=1):
         row["materiality_rank"] = rank
     return rows[:limit]
+
+
+NON_PLATFORM_CLASSIFICATIONS = {
+    "",
+    "NONE",
+    "NOT APPLICABLE",
+    "STATUS OF FORCES AGREEMENT",
+    "UNKNOWN",
+    "UNMAPPED",
+}
+
+
+def _condense_customer_description(value: Any) -> str:
+    """Remove repeated source-report fragments without inventing capability detail."""
+    segments = re.split(r"\s*[,;]\s*|\.\s*", str(value or "").strip())
+    selected = []
+    seen = set()
+    for segment in segments:
+        clean = re.sub(r"\s+", " ", segment).strip(" .")
+        key = re.sub(r"[^A-Z0-9]+", " ", clean.upper()).strip()
+        if not clean or not key or key in seen:
+            continue
+        seen.add(key)
+        selected.append(clean)
+    return ", ".join(selected)[:320]
+
+
+def _company_platform_exposure_summary(
+    context: Dict[str, Any], limit: int = 12
+) -> Dict[str, Any]:
+    """Group company platform evidence into customer-ready, non-additive lanes."""
+    lane_totals = {
+        "net_prime_obligations_usd": sum(
+            float(row.get("net_value_usd") or 0)
+            for row in context.get("observed_financials", [])
+            if row.get("measure_type") == "prime_obligations"
+        ),
+        "dla_procurement_value_usd": sum(
+            float(row.get("net_value_usd") or 0)
+            for row in context.get("observed_financials", [])
+            if row.get("measure_type") == "dla_procurement_value"
+        ),
+        "reported_subcontract_value_usd": sum(
+            float(row.get("net_value_usd") or 0)
+            for row in context.get("annual_activity", [])
+            if row.get("measure_type")
+            == "mimir_modelled_reported_subcontract_value"
+        ),
+    }
+    identity_by_cage = {
+        str(site.get("cage") or "").strip().upper(): site
+        for site in context.get("identity", {}).get("sites", [])
+    }
+    capabilities: Dict[str, List[Dict[str, Any]]] = {}
+    for site in context.get("site_capability_evidence", []):
+        cage = str(site.get("cage") or "").strip().upper()
+        identity = identity_by_cage.get(cage, {})
+        for evidence_lane, key in (
+            ("Prime award or DLA activity", "prime_award_and_dla_examples"),
+            ("Reported subcontract activity", "reported_subcontract_examples"),
+        ):
+            for row in site.get(key, []):
+                platform = str(row.get("platform_family") or "").strip().upper()
+                description = _condense_customer_description(
+                    row.get("reported_description")
+                )
+                if platform in NON_PLATFORM_CLASSIFICATIONS or not description:
+                    continue
+                capabilities.setdefault(platform, []).append(
+                    {
+                        "description": description,
+                        "site_cage": cage,
+                        "site_name": identity.get("official_site_label")
+                        or identity.get("vendor_name"),
+                        "evidence_lane": evidence_lane,
+                        "observed_value_usd": row.get("observed_value_usd"),
+                    }
+                )
+
+    grouped: Dict[str, Dict[str, Any]] = {}
+    excluded = set()
+    for row in context.get("platform_exposure", []):
+        platform = str(row.get("platform_family") or "").strip().upper()
+        if platform in NON_PLATFORM_CLASSIFICATIONS:
+            if platform:
+                excluded.add(platform)
+            continue
+        entry = grouped.setdefault(
+            platform,
+            {
+                "platform_id": platform,
+                "platform_name": platform,
+                "evidence_lanes": {},
+                "reported_capabilities": [],
+                "observation_window": context.get("scope", {}).get(
+                    "observation_window"
+                ),
+            },
+        )
+        if row.get("evidence_layer") == "reported_subaward":
+            measure = "reported_subcontract_value_usd"
+            label = "Reported subcontract value"
+        elif str(row.get("source_system") or "").upper() == "DLA":
+            measure = "dla_procurement_value_usd"
+            label = "DLA procurement value"
+        else:
+            measure = "net_prime_obligations_usd"
+            label = "Net prime obligations"
+        lane = entry["evidence_lanes"].setdefault(
+            measure,
+            {
+                "measure": measure,
+                "label": label,
+                "observed_value_usd": 0.0,
+                "distinct_awards": 0,
+                "contributing_sites": 0,
+            },
+        )
+        lane["observed_value_usd"] += float(row.get("observed_value_usd") or 0)
+        lane["distinct_awards"] += int(row.get("distinct_awards") or 0)
+        lane["contributing_sites"] += int(row.get("contributing_sites") or 0)
+        lane["latest_date"] = max(
+            str(lane.get("latest_date") or ""), str(row.get("latest_date") or "")
+        ) or None
+        reported_capabilities = row.get("reported_capabilities") or []
+        if isinstance(reported_capabilities, str):
+            reported_capabilities = [reported_capabilities]
+        for description in reported_capabilities:
+            clean_description = _condense_customer_description(description)
+            if clean_description and clean_description not in entry["reported_capabilities"]:
+                entry["reported_capabilities"].append(clean_description)
+
+    rows = []
+    groupings = []
+    for platform, entry in grouped.items():
+        lanes = []
+        for measure, lane in entry.pop("evidence_lanes").items():
+            total = lane_totals.get(measure) or 0
+            lane["share_of_company_lane_pct"] = (
+                round(float(lane["observed_value_usd"]) / total * 100, 2)
+                if total
+                else None
+            )
+            lanes.append(lane)
+        lanes.sort(
+            key=lambda lane: abs(float(lane.get("observed_value_usd") or 0)),
+            reverse=True,
+        )
+        capability_rows = sorted(
+            capabilities.get(platform, []),
+            key=lambda row: abs(float(row.get("observed_value_usd") or 0)),
+            reverse=True,
+        )
+        seen_descriptions = set()
+        selected_capabilities = []
+        for row in capability_rows:
+            description_key = str(row.get("description") or "").upper()
+            if description_key in seen_descriptions:
+                continue
+            seen_descriptions.add(description_key)
+            selected_capabilities.append(row)
+            if len(selected_capabilities) == 3:
+                break
+        if not selected_capabilities:
+            selected_capabilities = [
+                {"description": description, "evidence_lane": "Platform-linked activity"}
+                for description in entry.pop("reported_capabilities", [])[:3]
+            ]
+        else:
+            entry.pop("reported_capabilities", None)
+        customer_row = {
+            **entry,
+            "evidence_lanes": lanes,
+            "capability_evidence": selected_capabilities,
+            "materiality_sort_value_usd": max(
+                (abs(float(lane.get("observed_value_usd") or 0)) for lane in lanes),
+                default=0.0,
+            ),
+        }
+        if platform == "COMMON MISSILE SYSTEMS":
+            customer_row["platform_name"] = (
+                "Missile-related activity not attributable to one named program"
+            )
+            groupings.append(customer_row)
+        else:
+            rows.append(customer_row)
+    rows.sort(key=lambda row: row["materiality_sort_value_usd"], reverse=True)
+    groupings.sort(
+        key=lambda row: row["materiality_sort_value_usd"], reverse=True
+    )
+    return {
+        "platforms": rows[:limit],
+        "non_specific_groupings": groupings,
+        "excluded_non_platform_classifications": sorted(excluded),
+        "observation_window": context.get("scope", {}).get("observation_window"),
+        "lane_totals": lane_totals,
+    }
 
 
 def _customer_product_evidence(value: Any) -> Any:
@@ -1777,6 +1974,9 @@ class CompanyContextStore:
                 context
             )
             result["material_site_summary"] = _company_material_site_summary(context)
+            result["platform_exposure_summary"] = (
+                _company_platform_exposure_summary(context)
+            )
         result["evidence_chain"] = {
             "identity_definition_version": context.get("source_manifest", {})
             .get("identity_definition", {})

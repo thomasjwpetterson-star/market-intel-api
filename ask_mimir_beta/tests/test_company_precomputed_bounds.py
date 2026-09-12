@@ -5,6 +5,7 @@ from company_context_store import (
     _company_annual_financial_summary,
     _company_forward_context,
     _company_material_site_summary,
+    _company_platform_exposure_summary,
     _customer_product_evidence,
     _matching_parent_scope_ids,
 )
@@ -220,6 +221,87 @@ class CompanyPrecomputedBoundsTests(unittest.TestCase):
                 "share_of_observed_dla_procurement_pct"
             ],
             75.0,
+        )
+
+    def test_platform_summary_keeps_lanes_separate_and_excludes_non_platforms(self):
+        context = {
+            "scope": {"observation_window": "FY2021-FY2026 observed records"},
+            "identity": {
+                "sites": [{"cage": "AAAA1", "vendor_name": "Alpha Systems"}]
+            },
+            "observed_financials": [
+                {"measure_type": "prime_obligations", "net_value_usd": 1000.0},
+                {"measure_type": "dla_procurement_value", "net_value_usd": 200.0},
+            ],
+            "annual_activity": [
+                {
+                    "measure_type": "mimir_modelled_reported_subcontract_value",
+                    "net_value_usd": 500.0,
+                }
+            ],
+            "platform_exposure": [
+                {
+                    "platform_family": "F-16",
+                    "evidence_layer": "prime_or_dla_action",
+                    "source_system": "USA_SPENDING",
+                    "observed_value_usd": 250.0,
+                    "distinct_awards": 2,
+                    "contributing_sites": 1,
+                },
+                {
+                    "platform_family": "F-16",
+                    "evidence_layer": "reported_subaward",
+                    "source_system": "USA_SPENDING_SUBAWARD",
+                    "observed_value_usd": 100.0,
+                    "distinct_awards": 3,
+                    "contributing_sites": 1,
+                },
+                {
+                    "platform_family": "STATUS OF FORCES AGREEMENT",
+                    "evidence_layer": "prime_or_dla_action",
+                    "source_system": "USA_SPENDING",
+                    "observed_value_usd": 900.0,
+                },
+                {
+                    "platform_family": "COMMON MISSILE SYSTEMS",
+                    "evidence_layer": "reported_subaward",
+                    "source_system": "USA_SPENDING_SUBAWARD",
+                    "observed_value_usd": 50.0,
+                },
+            ],
+            "site_capability_evidence": [
+                {
+                    "cage": "AAAA1",
+                    "prime_award_and_dla_examples": [
+                        {
+                            "platform_family": "F-16",
+                            "reported_description": "Radar-frequency amplifier repair",
+                            "observed_value_usd": 80.0,
+                        }
+                    ],
+                    "reported_subcontract_examples": [],
+                }
+            ],
+        }
+
+        summary = _company_platform_exposure_summary(context)
+
+        self.assertEqual([row["platform_id"] for row in summary["platforms"]], ["F-16"])
+        self.assertEqual(len(summary["platforms"][0]["evidence_lanes"]), 2)
+        self.assertEqual(
+            summary["platforms"][0]["evidence_lanes"][0][
+                "share_of_company_lane_pct"
+            ],
+            25.0,
+        )
+        self.assertEqual(
+            summary["platforms"][0]["capability_evidence"][0]["description"],
+            "Radar-frequency amplifier repair",
+        )
+        self.assertEqual(len(summary["non_specific_groupings"]), 1)
+        self.assertIn(
+            "STATUS OF FORCES AGREEMENT",
+            summary["excluded_non_platform_classifications"],
         )
 
 

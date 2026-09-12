@@ -527,6 +527,16 @@ For a standard company profile, follow the period totals with a compact fiscal-y
 annual_financial_summary. Show each available year and the three lanes separately, label the latest fiscal
 year as the latest available records, and use "Not observed" for a missing lane rather than zero.
 
+For a standard company profile, include a distinct "Platform exposure" section after the financial section
+and before product/NIIN coverage. Build it from platform_exposure_summary.platforms, not the unfiltered raw
+platform_exposure rows. Use a compact table with platform/program, the source-reported capability or role,
+and FY2021-FY2026 historical materiality. For each non-zero evidence lane, show its value and its
+share_of_company_lane_pct, with prime obligations, DLA procurement and reported subcontract value labelled
+separately. Do not merge these lanes into one total. Do not substitute the forward view for this historical
+platform section. If non_specific_groupings contains material missile-related activity, explain it separately
+below the named-platform table rather than ranking it as a named platform. Never present values listed in
+excluded_non_platform_classifications as platforms or programs.
+
 Call federal departments, agencies and offices "awarding organizations" or "government buyers". Reserve
 "prime customer" for reported subcontract routes to a prime-contractor CAGE. Do not include tangential broad
 NAICS-only solicitation matches in a company profile; include opportunity research only when the user asks

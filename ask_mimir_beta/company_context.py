@@ -330,7 +330,7 @@ class CompanyContextBuilder:
             "context_id": context_id,
             "evidence_fingerprint": evidence_fingerprint,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "calculation_version": "mimir-company-context-2026-09-v10",
+            "calculation_version": "mimir-company-context-2026-09-v11",
             "scope": {
                 "scope_type": scope_type,
                 "scope_id": scope_id,
@@ -1885,7 +1885,20 @@ class CompanyContextBuilder:
                 SUM(spend_amount) AS observed_value_usd,
                 COUNT(DISTINCT award_key) AS distinct_awards,
                 COUNT(DISTINCT vendor_cage) AS contributing_sites,
-                MAX(TRY_CAST(action_date AS DATE)) AS latest_date
+                MAX(TRY_CAST(action_date AS DATE)) AS latest_date,
+                ARRAY_SLICE(
+                    ARRAY_AGG(
+                        DISTINCT COALESCE(
+                            NULLIF(TRIM(base_award_description), ''),
+                            NULLIF(TRIM(description), '')
+                        )
+                    ) FILTER (
+                        WHERE COALESCE(
+                            NULLIF(TRIM(base_award_description), ''),
+                            NULLIF(TRIM(description), '')
+                        ) IS NOT NULL
+                    ), 1, 6
+                ) AS reported_capabilities
             FROM read_parquet(?)
             WHERE vendor_cage IN ({placeholders(cages)})
               AND year IN ({placeholders(years)})
@@ -1900,7 +1913,12 @@ class CompanyContextBuilder:
                 SUM(subaward_value) AS observed_value_usd,
                 COUNT(DISTINCT source_dedup_key) AS distinct_awards,
                 COUNT(DISTINCT sub_cage) AS contributing_sites,
-                MAX(TRY_CAST(action_date AS DATE)) AS latest_date
+                MAX(TRY_CAST(action_date AS DATE)) AS latest_date,
+                ARRAY_SLICE(
+                    ARRAY_AGG(DISTINCT NULLIF(TRIM(description), '')) FILTER (
+                        WHERE NULLIF(TRIM(description), '') IS NOT NULL
+                    ), 1, 6
+                ) AS reported_capabilities
             FROM read_parquet(?)
             WHERE sub_cage IN ({placeholders(cages)})
               AND year IN ({placeholders(years)})
