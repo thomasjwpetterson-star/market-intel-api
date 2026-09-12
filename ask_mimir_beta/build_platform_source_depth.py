@@ -56,6 +56,33 @@ def build_platform_source_depth(data_root: Path) -> Dict[str, Any]:
                             WHERE COALESCE(r.is_active_authorized_source, false)
                               AND COALESCE(TRIM(r.vendor_name), '') <> ''
                         ) AS active_authorized_source_names,
+                    COUNT(DISTINCT UPPER(TRIM(r.cage))) FILTER (
+                        WHERE REGEXP_MATCHES(
+                            COALESCE(r.rncc_codes, ''),
+                            '(^|[,| ]+)3($|[,| ]+)'
+                        )
+                          AND REGEXP_MATCHES(
+                            COALESCE(r.rnvc_codes, ''),
+                            '(^|[,| ]+)2($|[,| ]+)'
+                        )
+                          AND REGEXP_MATCHES(
+                            COALESCE(r.cage_status_codes, ''),
+                            '(^|[,| ]+)A($|[,| ]+)'
+                        )
+                    ) AS active_manufacturer_reference_count,
+                    STRING_AGG(DISTINCT UPPER(TRIM(r.cage)), ' | ' ORDER BY UPPER(TRIM(r.cage)))
+                        FILTER (
+                            WHERE REGEXP_MATCHES(COALESCE(r.rncc_codes, ''), '(^|[,| ]+)3($|[,| ]+)')
+                              AND REGEXP_MATCHES(COALESCE(r.rnvc_codes, ''), '(^|[,| ]+)2($|[,| ]+)')
+                              AND REGEXP_MATCHES(COALESCE(r.cage_status_codes, ''), '(^|[,| ]+)A($|[,| ]+)')
+                        ) AS active_manufacturer_reference_cages,
+                    STRING_AGG(DISTINCT TRIM(r.vendor_name), ' | ' ORDER BY TRIM(r.vendor_name))
+                        FILTER (
+                            WHERE REGEXP_MATCHES(COALESCE(r.rncc_codes, ''), '(^|[,| ]+)3($|[,| ]+)')
+                              AND REGEXP_MATCHES(COALESCE(r.rnvc_codes, ''), '(^|[,| ]+)2($|[,| ]+)')
+                              AND REGEXP_MATCHES(COALESCE(r.cage_status_codes, ''), '(^|[,| ]+)A($|[,| ]+)')
+                              AND COALESCE(TRIM(r.vendor_name), '') <> ''
+                        ) AS active_manufacturer_reference_names,
                     MAX(r.nsn) AS nsn,
                     MAX(r.description) AS description,
                     MAX(r.fsc_code) AS fsc_code
@@ -75,13 +102,24 @@ def build_platform_source_depth(data_root: Path) -> Dict[str, Any]:
                     AS active_authorized_source_count,
                 s.active_authorized_source_cages,
                 s.active_authorized_source_names,
+                COALESCE(s.active_manufacturer_reference_count, 0)
+                    AS active_manufacturer_reference_count,
+                s.active_manufacturer_reference_cages,
+                s.active_manufacturer_reference_names,
                 CASE
                     WHEN COALESCE(s.active_authorized_source_count, 0) = 0
                         THEN 'No active authorized source found'
                     WHEN s.active_authorized_source_count = 1
                         THEN 'One active authorized source'
                     ELSE 'Multiple active authorized sources'
-                END AS source_depth
+                END AS source_depth,
+                CASE
+                    WHEN COALESCE(s.active_manufacturer_reference_count, 0) = 0
+                        THEN 'No active item-identifying manufacturer reference found'
+                    WHEN s.active_manufacturer_reference_count = 1
+                        THEN 'One active item-identifying manufacturer reference'
+                    ELSE 'Multiple active item-identifying manufacturer references'
+                END AS manufacturer_reference_depth
             FROM platform_niins p
             LEFT JOIN source_rollup s USING (niin)
         ) TO '{_sql_path(niin_output)}' (FORMAT PARQUET, COMPRESSION ZSTD)
@@ -109,7 +147,19 @@ def build_platform_source_depth(data_root: Path) -> Dict[str, Any]:
                 COUNT(*) FILTER (WHERE s.active_authorized_source_count > 1)
                     AS niin_count_with_multiple_active_authorized_sources,
                 CAST(SUM(s.active_authorized_source_count) AS BIGINT)
-                    AS active_authorized_source_relationship_count
+                    AS active_authorized_source_relationship_count,
+                COUNT(*) FILTER (WHERE s.active_manufacturer_reference_count = 0)
+                    AS niin_count_without_active_manufacturer_reference,
+                COUNT(*) FILTER (WHERE s.active_manufacturer_reference_count = 1)
+                    AS niin_count_with_one_active_manufacturer_reference,
+                COUNT(*) FILTER (WHERE s.active_manufacturer_reference_count > 1)
+                    AS niin_count_with_multiple_active_manufacturer_references,
+                CAST(SUM(s.active_manufacturer_reference_count) AS BIGINT)
+                    AS active_manufacturer_reference_relationship_count,
+                COUNT(*) FILTER (
+                    WHERE s.active_authorized_source_count = 0
+                      AND s.active_manufacturer_reference_count > 0
+                ) AS niin_count_without_active_authorized_but_with_active_manufacturer_reference
             FROM platform_items p
             JOIN read_parquet('{_sql_path(niin_output)}') s USING (niin)
             GROUP BY 1
@@ -123,7 +173,8 @@ def build_platform_source_depth(data_root: Path) -> Dict[str, Any]:
         SELECT COUNT(*),
                COUNT(*) FILTER (WHERE active_authorized_source_count = 0),
                COUNT(*) FILTER (WHERE active_authorized_source_count = 1),
-               COUNT(*) FILTER (WHERE active_authorized_source_count > 1)
+               COUNT(*) FILTER (WHERE active_authorized_source_count > 1),
+               COUNT(*) FILTER (WHERE active_manufacturer_reference_count > 0)
         FROM read_parquet('{_sql_path(niin_output)}')
         """
     ).fetchone()
@@ -137,6 +188,7 @@ def build_platform_source_depth(data_root: Path) -> Dict[str, Any]:
         "niins_without_active_authorized_source": int(niin_stats[1]),
         "niins_with_one_active_authorized_source": int(niin_stats[2]),
         "niins_with_multiple_active_authorized_sources": int(niin_stats[3]),
+        "niins_with_active_manufacturer_reference": int(niin_stats[4]),
         "outputs": [niin_output.name, platform_output.name],
     }
 

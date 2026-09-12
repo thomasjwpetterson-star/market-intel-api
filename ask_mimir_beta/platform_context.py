@@ -215,6 +215,13 @@ class PlatformContextStore:
         self.connection.execute("SET memory_limit='1GB'")
         duckdb_temp = os.getenv("ASK_MIMIR_DUCKDB_TEMP", "/tmp/ask-mimir-duckdb")
         self.connection.execute("SET temp_directory = ?", [duckdb_temp])
+        self.niin_source_depth_columns = {
+            str(row[0]).lower()
+            for row in self.connection.execute(
+                "DESCRIBE SELECT * FROM read_parquet(?)",
+                [str(self.paths["niin_source_depth"])],
+            ).fetchall()
+        }
         self.platforms = self._load_platform_catalog()
         self._cache: Dict[str, Dict[str, Any]] = {}
         configured_dir = os.getenv("ASK_MIMIR_PLATFORM_CONTEXT_DIR", "").strip()
@@ -403,6 +410,7 @@ class PlatformContextStore:
         if precomputed_path is not None and precomputed_path.exists():
             context = json.loads(precomputed_path.read_text())
             if context.get("scope", {}).get("platform_id") == resolved:
+                self._refresh_precomputed_source_depth(context)
                 self._cache[resolved] = context
                 return context
 
@@ -517,6 +525,7 @@ class PlatformContextStore:
                 "direct_award_lane": "Prime obligations on awards mapped directly to this platform or program.",
                 "reported_supplier_lane": "Mimir-modelled reported first-tier subcontract value on mapped prime awards; kept separate from prime obligations.",
                 "item_lane": "NIIN relationships mapped through the WSDC/platform bridge. Attributed procurement and shared-use exposure are reported separately.",
+                "manufacturer_reference_rule": "An active manufacturer reference requires an item-identifying manufacturer design-control reference (RNCC 3 / RNVC 2) linked to an active CAGE. It is manufacturer evidence, not by itself current procurement authorization.",
                 "component_rule": "Reported descriptions support bounded capability language. Exact component claims require a platform-specific government or first-party source.",
                 "opportunity_rule": "Opportunity matches are research leads based on the platform or program name in the loaded notice text.",
             },
@@ -531,6 +540,61 @@ class PlatformContextStore:
         }
         self._cache[resolved] = context
         return context
+
+    def _refresh_precomputed_source_depth(self, context: Dict[str, Any]) -> None:
+        """Overlay release-current source status onto a precomputed platform dossier."""
+        if not hasattr(self, "connection") or not hasattr(self, "niin_source_depth_columns"):
+            return
+        item_evidence = context.get("item_and_component_evidence") or {}
+        members = list(context.get("scope", {}).get("included_platform_records") or [])
+        if not members:
+            members = [str(context.get("scope", {}).get("platform_id") or "").strip()]
+        members = [member for member in members if member]
+        if members:
+            item_evidence["authorized_source_depth"] = self._source_depth_summary(members)
+        context.setdefault("methodology", {})["manufacturer_reference_rule"] = (
+            "An active manufacturer reference requires an item-identifying manufacturer "
+            "design-control reference (RNCC 3 / RNVC 2) linked to an active CAGE. It is "
+            "manufacturer evidence, not by itself current procurement authorization."
+        )
+
+        if "active_manufacturer_reference_count" not in self.niin_source_depth_columns:
+            context["item_and_component_evidence"] = item_evidence
+            return
+        items = item_evidence.get("top_items") or []
+        niins = sorted(
+            {
+                str(item.get("niin") or "").strip().zfill(9)
+                for item in items
+                if str(item.get("niin") or "").strip()
+            }
+        )
+        if niins:
+            rows = _rows(
+                self.connection.execute(
+                    """
+                    SELECT niin, active_manufacturer_reference_count,
+                           active_manufacturer_reference_cages,
+                           active_manufacturer_reference_names,
+                           manufacturer_reference_depth
+                    FROM read_parquet(?)
+                    WHERE niin IN (SELECT UNNEST(?))
+                    """,
+                    [str(self.paths["niin_source_depth"]), niins],
+                )
+            )
+            by_niin = {str(row["niin"]).zfill(9): row for row in rows}
+            for item in items:
+                source_status = by_niin.get(str(item.get("niin") or "").zfill(9))
+                if source_status:
+                    item.update(
+                        {
+                            key: value
+                            for key, value in source_status.items()
+                            if key != "niin"
+                        }
+                    )
+        context["item_and_component_evidence"] = item_evidence
 
     def comparison_projection(self, platform_id: str) -> Dict[str, Any]:
         """Return the supplier evidence needed for a multi-platform comparison."""
@@ -1094,13 +1158,29 @@ class PlatformContextStore:
 
     def _item_evidence(self, platform: str, limit: int = 100) -> Dict[str, Any]:
         members = self._platform_members(platform)
+        manufacturer_reference_fields = (
+            """
+                       COALESCE(s.active_manufacturer_reference_count, 0)
+                           AS active_manufacturer_reference_count,
+                       s.active_manufacturer_reference_cages,
+                       s.active_manufacturer_reference_names,
+                       s.manufacturer_reference_depth
+            """
+            if "active_manufacturer_reference_count" in self.niin_source_depth_columns
+            else """
+                       0 AS active_manufacturer_reference_count,
+                       NULL AS active_manufacturer_reference_cages,
+                       NULL AS active_manufacturer_reference_names,
+                       'Not available in this data release' AS manufacturer_reference_depth
+            """
+        )
         associated_count = self.connection.execute(
             "SELECT COUNT(DISTINCT LPAD(TRIM(niin),9,'0')) FROM read_parquet(?) WHERE platform_family IN (SELECT UNNEST(?))",
             [str(self.paths["platform_bom"]), members],
         ).fetchone()[0]
         top_items = _rows(
             self.connection.execute(
-                """
+                f"""
                 WITH bridge AS (
                     SELECT LPAD(TRIM(niin),9,'0') AS niin,
                            LIST_SORT(LIST_DISTINCT(LIST(wsdc_code))) AS wsdc_codes,
@@ -1127,7 +1207,8 @@ class PlatformContextStore:
                            AS active_authorized_source_count,
                        s.active_authorized_source_cages,
                        s.active_authorized_source_names,
-                       s.source_depth
+                       s.source_depth,
+                       {manufacturer_reference_fields}
                 FROM bridge b
                 LEFT JOIN read_parquet(?) p ON LPAD(TRIM(p.niin),9,'0') = b.niin
                 LEFT JOIN platform_value v ON b.niin=v.niin
@@ -1206,21 +1287,43 @@ class PlatformContextStore:
             rows = _rows(
                 self.connection.execute(
                     """
-                    SELECT associated_niin_count,
-                           niin_count_without_active_authorized_source,
-                           niin_count_with_one_active_authorized_source,
-                           niin_count_with_multiple_active_authorized_sources,
-                           active_authorized_source_relationship_count
+                    SELECT *
                     FROM read_parquet(?)
                     WHERE platform_family = ?
                     """,
                     [str(self.paths["platform_source_depth"]), members[0]],
                 )
             )
+            if rows:
+                rows[0].pop("platform_family", None)
         else:
+            manufacturer_summary_fields = (
+                """
+                        COUNT(*) FILTER (WHERE s.active_manufacturer_reference_count = 0)
+                            AS niin_count_without_active_manufacturer_reference,
+                        COUNT(*) FILTER (WHERE s.active_manufacturer_reference_count = 1)
+                            AS niin_count_with_one_active_manufacturer_reference,
+                        COUNT(*) FILTER (WHERE s.active_manufacturer_reference_count > 1)
+                            AS niin_count_with_multiple_active_manufacturer_references,
+                        SUM(s.active_manufacturer_reference_count)
+                            AS active_manufacturer_reference_relationship_count,
+                        COUNT(*) FILTER (
+                            WHERE s.active_authorized_source_count = 0
+                              AND s.active_manufacturer_reference_count > 0
+                        ) AS niin_count_without_active_authorized_but_with_active_manufacturer_reference
+                """
+                if "active_manufacturer_reference_count" in self.niin_source_depth_columns
+                else """
+                        0 AS niin_count_without_active_manufacturer_reference,
+                        0 AS niin_count_with_one_active_manufacturer_reference,
+                        0 AS niin_count_with_multiple_active_manufacturer_references,
+                        0 AS active_manufacturer_reference_relationship_count,
+                        0 AS niin_count_without_active_authorized_but_with_active_manufacturer_reference
+                """
+            )
             rows = _rows(
                 self.connection.execute(
-                    """
+                    f"""
                     WITH member_items AS (
                         SELECT DISTINCT LPAD(TRIM(niin), 9, '0') AS niin
                         FROM read_parquet(?)
@@ -1235,7 +1338,8 @@ class PlatformContextStore:
                         COUNT(*) FILTER (WHERE s.active_authorized_source_count > 1)
                             AS niin_count_with_multiple_active_authorized_sources,
                         SUM(s.active_authorized_source_count)
-                            AS active_authorized_source_relationship_count
+                            AS active_authorized_source_relationship_count,
+                        {manufacturer_summary_fields}
                     FROM member_items m
                     JOIN read_parquet(?) s USING (niin)
                     """,
@@ -1252,6 +1356,11 @@ class PlatformContextStore:
             "niin_count_with_one_active_authorized_source": 0,
             "niin_count_with_multiple_active_authorized_sources": 0,
             "active_authorized_source_relationship_count": 0,
+            "niin_count_without_active_manufacturer_reference": 0,
+            "niin_count_with_one_active_manufacturer_reference": 0,
+            "niin_count_with_multiple_active_manufacturer_references": 0,
+            "active_manufacturer_reference_relationship_count": 0,
+            "niin_count_without_active_authorized_but_with_active_manufacturer_reference": 0,
         }
 
     def _top_awards(self, platform: str, limit: int = 100) -> List[Dict[str, Any]]:

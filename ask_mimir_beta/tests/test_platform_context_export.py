@@ -18,7 +18,10 @@ class PlatformContextExportTests(unittest.TestCase):
             "reported_component_categories": [],
             "item_and_component_evidence": {
                 "top_items": [],
-                "authorized_source_depth": {},
+                "authorized_source_depth": {
+                    "niin_count_with_one_active_authorized_source": 1,
+                    "niin_count_with_one_active_manufacturer_reference": 2,
+                },
                 "top_item_supplier_sites": [],
             },
             "top_prime_awards": [],
@@ -55,6 +58,9 @@ class PlatformContextExportTests(unittest.TestCase):
             self.assertIn("10_budget_and_fydp.csv", names)
             self.assertIn("11_official_contract_announcements.csv", names)
             self.assertIn("TEST PROGRAM", archive.read("10_budget_and_fydp.csv").decode())
+            source_depth = archive.read("05a_authorized_source_depth_summary.csv").decode()
+            self.assertIn("niin_count_with_one_active_manufacturer_reference", source_depth)
+            self.assertIn("Active procurement-authorized sources", archive.read("README.txt").decode())
 
     def test_legacy_platform_pack_still_exports_without_forward_evidence(self):
         payload = build_platform_context_zip(self._context())

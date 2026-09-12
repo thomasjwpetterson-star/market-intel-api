@@ -57,6 +57,8 @@ def build_platform_context_zip(
             "shared_use_niin_exposure_usd", "latest_observed_date", "wsdc_codes", "association_sources",
             "active_authorized_source_count", "active_authorized_source_cages",
             "active_authorized_source_names", "source_depth",
+            "active_manufacturer_reference_count", "active_manufacturer_reference_cages",
+            "active_manufacturer_reference_names", "manufacturer_reference_depth",
         ])
         _write(
             archive,
@@ -68,6 +70,11 @@ def build_platform_context_zip(
                 "niin_count_with_one_active_authorized_source",
                 "niin_count_with_multiple_active_authorized_sources",
                 "active_authorized_source_relationship_count",
+                "niin_count_without_active_manufacturer_reference",
+                "niin_count_with_one_active_manufacturer_reference",
+                "niin_count_with_multiple_active_manufacturer_references",
+                "active_manufacturer_reference_relationship_count",
+                "niin_count_without_active_authorized_but_with_active_manufacturer_reference",
             ],
         )
         _write(archive, "06_item_supplier_sites.csv", context["item_and_component_evidence"]["top_item_supplier_sites"], [
@@ -115,6 +122,7 @@ def build_platform_context_zip(
             (
                 f"Mimir platform evidence pack: {context['scope']['display_name']}\n\n"
                 "Prime obligations, reported subcontract value, attributed DLA procurement and shared-use NIIN exposure are separate evidence lanes.\n"
+                "Active procurement-authorized sources and active item-identifying manufacturer references are complementary and overlapping source-status measures.\n"
                 "Budget actuals, enacted funding, requests, projections and official contract-announcement values retain their stated status and are not added to obligations.\n"
                 "Reported descriptions support bounded capability language. Exact component claims require platform-specific source evidence.\n"
             ),

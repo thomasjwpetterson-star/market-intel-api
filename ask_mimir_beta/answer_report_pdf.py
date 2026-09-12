@@ -36,6 +36,13 @@ PAPER = colors.HexColor("#FFFFFF")
 SOFT = colors.HexColor("#F4F7F9")
 
 
+class _BrandedDocTemplate(SimpleDocTemplate):
+    """Paint the brand furniture after content so split flowables cannot cover it."""
+
+    def afterPage(self) -> None:
+        _draw_page(self.canv, self)
+
+
 def _register_fonts() -> tuple[str, str]:
     """Use a clean bundled font when present, otherwise ReportLab's Helvetica."""
     candidates = (
@@ -213,16 +220,54 @@ def _styles(regular_font: str, bold_font: str) -> dict[str, ParagraphStyle]:
     }
 
 
+def _draw_mimir_symbol(canvas, x: float, y: float, size: float) -> None:
+    """Draw the Mimir mountain-and-monogram mark used by the website lockup."""
+    canvas.saveState()
+    canvas.setStrokeColor(colors.white)
+    canvas.setLineWidth(max(size * 0.055, 0.8))
+    canvas.setLineJoin(1)
+    canvas.setLineCap(1)
+
+    outer = canvas.beginPath()
+    outer.moveTo(x, y + size * 0.18)
+    outer.lineTo(x + size * 0.5, y + size)
+    outer.lineTo(x + size, y + size * 0.18)
+    outer.lineTo(x, y + size * 0.18)
+    canvas.drawPath(outer, stroke=1, fill=0)
+
+    upper = canvas.beginPath()
+    upper.moveTo(x + size * 0.37, y + size * 0.46)
+    upper.lineTo(x + size * 0.5, y + size * 0.68)
+    upper.lineTo(x + size * 0.63, y + size * 0.46)
+    canvas.drawPath(upper, stroke=1, fill=0)
+
+    monogram = canvas.beginPath()
+    monogram.moveTo(x + size * 0.13, y + size * 0.18)
+    monogram.lineTo(x + size * 0.3, y - size * 0.08)
+    monogram.lineTo(x + size * 0.43, y + size * 0.27)
+    monogram.lineTo(x + size * 0.58, y - size * 0.02)
+    monogram.lineTo(x + size * 0.72, y + size * 0.27)
+    monogram.lineTo(x + size * 0.88, y - size * 0.08)
+    monogram.lineTo(x + size * 0.3, y - size * 0.08)
+    canvas.drawPath(monogram, stroke=1, fill=0)
+    canvas.restoreState()
+
+
 def _draw_page(canvas, document) -> None:
     canvas.saveState()
     width, height = LETTER
     canvas.setFillColor(NAVY)
-    canvas.rect(0, height - 26, width, 26, stroke=0, fill=1)
+    canvas.rect(0, height - 36, width, 36, stroke=0, fill=1)
     canvas.setFillColor(CYAN)
-    canvas.rect(0, height - 29, width, 3, stroke=0, fill=1)
-    canvas.setFont("Helvetica-Bold", 7.5)
+    canvas.rect(0, height - 39, width, 3, stroke=0, fill=1)
+    _draw_mimir_symbol(canvas, document.leftMargin, height - 30, 20)
+    lockup_x = document.leftMargin + 28
+    canvas.setFont("Helvetica-Bold", 8.5)
     canvas.setFillColor(colors.white)
-    canvas.drawString(document.leftMargin, height - 17, "MIMIR ADVISORS")
+    canvas.drawString(lockup_x, height - 18, "MIMIR")
+    canvas.setFont("Helvetica", 5.2)
+    canvas.setFillColor(colors.HexColor("#C7CBC8"))
+    canvas.drawString(lockup_x, height - 26, "A D V I S O R S")
     canvas.setFont("Helvetica", 7)
     canvas.setFillColor(MUTED)
     canvas.drawString(document.leftMargin, 24, "Ask Mimir research brief")
@@ -254,12 +299,12 @@ def build_branded_answer_pdf(
     regular_font, bold_font = _register_fonts()
     styles = _styles(regular_font, bold_font)
     output = BytesIO()
-    document = SimpleDocTemplate(
+    document = _BrandedDocTemplate(
         output,
         pagesize=LETTER,
         leftMargin=0.58 * inch,
         rightMargin=0.58 * inch,
-        topMargin=0.62 * inch,
+        topMargin=0.76 * inch,
         bottomMargin=0.58 * inch,
         title=_title(scope_name),
         author="Mimir Advisors",
@@ -347,5 +392,5 @@ def build_branded_answer_pdf(
             ]))
             story.extend([Spacer(1, 3), table, Spacer(1, 8)])
 
-    document.build(story, onFirstPage=_draw_page, onLaterPages=_draw_page)
+    document.build(story)
     return output.getvalue()

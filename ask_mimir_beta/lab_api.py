@@ -718,8 +718,11 @@ Answer for the resolved platform or program. Follow requested_answer_mode exactl
   mapped relationships distinct. Do not replace the active supplier set with unrelated recipients from a
   broad portfolio such as Army aviation, and do not treat a generic portfolio label as a platform.
 - supplier_source_depth: distinguish high-value positions with limited evidenced source depth from
-  lower-value items that merely have one observed recipient. Do not call an item sole-source unless
-  authoritative source-status evidence establishes it.
+  lower-value items that merely have one observed recipient. Treat active procurement-authorized
+  sources and active item-identifying manufacturer references as distinct, complementary evidence.
+  A manufacturer design-control reference can identify a recognised manufacturer even when current
+  procurement authorization is not established. Do not call an item sole-source unless authoritative
+  source-status evidence establishes it.
 - platform_conclusions: synthesize the three most material conclusions from the full active platform
   scope. Weight conclusions by financial significance, supplier dependency and evidence strength;
   do not revive a specialist market lens from an earlier question unless the latest question asks for it.
@@ -752,6 +755,13 @@ erase values reported in the other years.
 Keep these evidence lanes distinct: net prime obligations on directly mapped awards; Mimir-modelled reported
 subcontract value; attributed DLA procurement value for single-platform NIINs; and shared-use NIIN
 exposure, which is associated with this platform but not allocated to it.
+
+When authorized_source_depth is supplied, do not use the count without an active authorized source as
+a proxy for the number of items without known manufacturers or viable suppliers. Report active
+procurement-authorized-source coverage together with active item-identifying manufacturer-reference
+coverage when both are available, make clear that the populations overlap, and lead with the broader
+manufacturer-reference picture in a general platform overview. Reserve detailed procurement-source
+status for an explicit source-depth, qualification or competition question.
 
 When a MIMIR STRUCTURED PROGRAM OUTLOOK is supplied, use it as the primary evidence for an outlook,
 future-demand, funding or five-year question. For platform_overview, include a concise Forward view
@@ -3607,7 +3617,7 @@ def require_report_download(request: Request) -> AccessContext:
     if not access.policy.can_download_report:
         raise HTTPException(
             status_code=403,
-            detail="Sign in to download a branded Ask Mimir PDF report.",
+            detail="Sign in to download an Ask Mimir PDF report.",
         )
     return access
 
