@@ -94,7 +94,11 @@
     "question": "What is the outlook for the B-52 modernization program over the next five years?",
     "expected_workflow": "platform_intelligence",
     "minimum_values": {
-      "coverage.prime_awards": 1
+      "coverage.prime_awards": 1,
+      "structured_program_outlook.coverage.published_budget_fact_count": 1
+    },
+    "minimum_list_lengths": {
+      "structured_program_outlook.evidence_lanes.budget_and_fydp": 1
     },
     "required_preview_terms": ["B-52", "FY2021-FY2026"]
   },

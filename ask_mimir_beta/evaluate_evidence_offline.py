@@ -63,6 +63,7 @@ from lab_api import (  # noqa: E402
     workflow_for_request,
 )
 from platform_context import requested_platform_focus  # noqa: E402
+from program_outlook_store import is_program_outlook_language  # noqa: E402
 
 
 def _path_value(value: Any, path: str) -> Any:
@@ -139,7 +140,15 @@ def _build_evidence(request: AskRequest, workflow: str) -> Dict[str, Any]:
         arguments = {"platform_id": resolved, "supplier_limit": 180}
         if focus_id:
             arguments["focus_id"] = focus_id
-        return runtime.call_tool("get_platform_context", arguments)
+        evidence = runtime.call_tool("get_platform_context", arguments)
+        if (
+            is_program_outlook_language(latest)
+            and runtime.program_outlook.supports(resolved)
+        ):
+            evidence["structured_program_outlook"] = runtime.call_tool(
+                "get_program_outlook", {"platform_id": resolved}
+            )
+        return evidence
     if workflow == "company_site_intelligence":
         if request.active_scope and request.active_scope.scope_type in {
             "company_parent",

@@ -50,5 +50,14 @@
     "required_tools": [],
     "required_answer_terms": ["submarine", "supplier"],
     "forbidden_answer_terms": ["model returned no answer"]
+  },
+  {
+    "case_id": "platform_b52_forward_view",
+    "question": "What is the outlook for the B-52 modernization program over the next five years?",
+    "required_tools": ["search_platform_contexts", "get_platform_context", "get_program_outlook"],
+    "required_answer_terms": ["B-52", "budget"],
+    "required_scope_type": "platform",
+    "require_mimir_link": true,
+    "require_financial_period": true
   }
 ]

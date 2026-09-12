@@ -70,6 +70,9 @@ ROUTING_CASES = {
         "What vendors support P8A?",
         "Who makes F35?",
         "Who manufactures Patriot?",
+        "What is the five-year outlook for the F-35?",
+        "Show the FYDP and future funding for Virginia class.",
+        "What is the production trajectory for AMRAAM?",
     ],
     "company_site_intelligence": [
         "Tell me everything about this defense supplier: Honeywell",

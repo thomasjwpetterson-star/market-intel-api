@@ -199,6 +199,23 @@ broader family evidence separate. Broad CH-53 family DLA references are labelled
 CH-53K, T64 records are excluded from strict totals, and DLA activity is valued once at NIIN grain.
 The evidence drawer offers a customer-safe ZIP of separate CSVs without internal report keys.
 
+Named platform and program outlook questions use `ProgramOutlookStore` to assemble a reusable
+forward view from the current atomic runtime release. The explicit linkage catalogue currently
+covers 54 programs. Each outlook keeps these evidence lanes separate:
+
+- completed-year and partial-year USAspending prime obligations;
+- official DoD contract announcements, stated values and periods of performance;
+- published P-1 procurement and R-1 development budget facts;
+- enacted, requested and FYDP-projected values and explicit quantities; and
+- currently open SAM.gov solicitations.
+
+The daily AWS announcement refresh therefore becomes available to the outlook after the normal
+runtime activation without rebuilding a frozen momentum pack. Official announcements enrich linked
+awards and do not replace or duplicate USAspending obligations. Program budgets are never allocated
+to a supplier without separate relationship evidence. The missile-program momentum pack remains a
+bounded cross-program ranking; the structured outlook is the source for a named program's five-year
+or future-demand answer.
+
 Build the deterministic missile-program momentum pack with:
 
 ```bash

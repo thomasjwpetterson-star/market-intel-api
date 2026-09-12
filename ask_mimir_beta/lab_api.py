@@ -96,6 +96,7 @@ from beta_controls import (
 )
 from platform_supply_chain_store import PlatformSupplyChainStore
 from program_momentum_store import ProgramMomentumStore, is_program_momentum_language
+from program_outlook_store import ProgramOutlookStore, is_program_outlook_language
 from platform_intent import (
     is_open_capability_discovery_request,
     is_platform_centered_request,
@@ -747,6 +748,18 @@ Keep these evidence lanes distinct: net prime obligations on directly mapped awa
 subcontract value; attributed DLA procurement value for single-platform NIINs; and shared-use NIIN
 exposure, which is associated with this platform but not allocated to it.
 
+When a MIMIR STRUCTURED PROGRAM OUTLOOK is supplied, use it as the primary evidence for an outlook,
+future-demand, funding or five-year question. Present a compact year-by-year view and keep the following
+lanes visibly separate: completed-year and partial-year prime obligations; official DoD contract
+announcements and their stated periods of performance; actual, enacted, requested and projected budget
+facts; explicit procurement quantities; and open SAM.gov solicitations. Never add values across those
+lanes. An announced ceiling or award value is not an obligation, a budget request is not enacted funding,
+and an FYDP projection is not an award. Where an official announcement is linked to a USAspending award,
+use it as qualitative and schedule enrichment rather than a second financial transaction. Prefer the
+structured source locators and public URLs supplied in the outlook; use live web research only for material
+developments that post-date those records. State gaps briefly instead of asking the model to reconstruct a
+missing forecast from generic web material.
+
 For platform_overview, lead with the time-bounded totals supplied in financial_totals. For supplier
 roles or overview, include financial values only when they help rank or size the reported positions.
 Every financial value in prose or a table must carry its fiscal-year period. For direct-award recipient tables,
@@ -1234,6 +1247,18 @@ TOOLS = [
             "type": "object",
             "properties": {"program_id": {"type": "string"}},
             "required": ["program_id"],
+            "additionalProperties": False
+        }
+    },
+    {
+        "type": "function",
+        "name": "get_program_outlook",
+        "description": "Return the reusable forward view for one named platform or program, keeping historical obligations, official announcements, budgets, FYDP projections, explicit quantities and open solicitations separate.",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {"platform_id": {"type": "string"}},
+            "required": ["platform_id"],
             "additionalProperties": False
         }
     },
@@ -2314,13 +2339,16 @@ class LabRuntime:
                 )
             )
         )
-        self.platform_contexts = PlatformContextStore(
-            Path(
-                os.getenv(
-                    "ASK_MIMIR_DATA_ROOT",
-                    "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data",
-                )
+        platform_data_root = Path(
+            os.getenv(
+                "ASK_MIMIR_DATA_ROOT",
+                "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data",
             )
+        )
+        self.platform_contexts = PlatformContextStore(platform_data_root)
+        self.program_outlook = ProgramOutlookStore(
+            platform_data_root,
+            self.platform_contexts,
         )
         opportunity_dir = Path(
             os.getenv(
@@ -2401,6 +2429,7 @@ class LabRuntime:
             self.company_opportunities.opportunity_dir / "manifest.json",
             self.platform_supply_chains.pack_dir / "manifest.json",
             self.program_momentum.pack_path,
+            *self.program_outlook.source_paths,
             self.competitive_position.definitions_path,
             *self.competitive_position.paths.values(),
             self.competitor_discovery.definitions_path,
@@ -2419,11 +2448,6 @@ class LabRuntime:
             )
             if platform_context_manifest.exists():
                 release_sources.add(platform_context_manifest)
-        fydp_budget_value = os.getenv("ASK_MIMIR_FYDP_BUDGET_FILE", "").strip()
-        if fydp_budget_value:
-            fydp_budget_file = Path(fydp_budget_value)
-            if fydp_budget_file.is_file():
-                release_sources.add(fydp_budget_file)
         if self.market_segments.precomputed_dir is not None:
             market_segment_manifest = self.market_segments.precomputed_dir / "manifest.json"
             if market_segment_manifest.exists():
@@ -2539,6 +2563,7 @@ class LabRuntime:
         cacheable = {
             "get_program_momentum",
             "explain_program_momentum",
+            "get_program_outlook",
             "get_platform_supply_chain",
             "get_platform_context",
             "compare_platform_contexts",
@@ -2572,6 +2597,8 @@ class LabRuntime:
                 cache_arguments = {**arguments, "_context_schema": "award-context-v2"}
             elif name == "get_item_context":
                 cache_arguments = {**arguments, "_context_schema": "item-context-v2"}
+            elif name == "get_program_outlook":
+                cache_arguments = {**arguments, "_context_schema": "program-outlook-v1"}
             cache_key = self.evidence_cache.cache_key(
                 self.release_guard.release_binding_id, name, cache_arguments
             )
@@ -2585,6 +2612,8 @@ class LabRuntime:
             result = self.program_momentum.get(**arguments)
         elif name == "explain_program_momentum":
             result = self.program_momentum.explain(**arguments)
+        elif name == "get_program_outlook":
+            result = self.program_outlook.answer_projection(**arguments)
         elif name == "get_platform_supply_chain":
             result = self.platform_supply_chains.get(**arguments)
         elif name == "search_platform_contexts":
@@ -6099,6 +6128,20 @@ def generate_answer(
                 search_trace,
                 {"tool": "get_platform_context", "arguments": arguments, "result": pack},
             ]
+            if (
+                is_program_outlook_language(latest_platform_question)
+                and runtime.program_outlook.supports(resolved_platform)
+            ):
+                outlook_arguments = {"platform_id": resolved_platform}
+                outlook = runtime.call_tool("get_program_outlook", outlook_arguments)
+                pack["structured_program_outlook"] = outlook
+                trace.append(
+                    {
+                        "tool": "get_program_outlook",
+                        "arguments": outlook_arguments,
+                        "result": outlook,
+                    }
+                )
             if resolved_platform.upper() == "CH-53K":
                 curated_arguments = {
                     "platform_id": "CH-53K",
@@ -6151,6 +6194,11 @@ def generate_answer(
                 "release_id": runtime.store.manifest["release_id"],
                 "answer_artifacts": {
                     "platform_dossier": pack,
+                    **(
+                        {"program_outlook": pack["structured_program_outlook"]}
+                        if "structured_program_outlook" in pack
+                        else {}
+                    ),
                     "evidence_pack": {
                         "format": "zip",
                         "download_url": f"/api/evidence/platform.zip?platform_id={resolved_platform}",
