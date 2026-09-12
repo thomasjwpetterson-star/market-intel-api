@@ -24,15 +24,16 @@ class TierPolicy:
     queries_per_utc_day: int
     queries_per_utc_month: int
     can_download_evidence: bool
+    can_download_report: bool
 
 
 TIER_POLICIES: Dict[str, TierPolicy] = {
-    "public": TierPolicy("public", "Guest access", 1, 10, False),
-    "free": TierPolicy("free", "Free", 2, 30, False),
-    "trial": TierPolicy("trial", "Trial", 5, 35, False),
-    "lite": TierPolicy("lite", "Lite", 5, 100, False),
-    "professional": TierPolicy("professional", "Professional", 15, 300, True),
-    "enterprise": TierPolicy("enterprise", "Enterprise", 50, 1000, True),
+    "public": TierPolicy("public", "Guest access", 1, 10, False, False),
+    "free": TierPolicy("free", "Free", 2, 30, False, True),
+    "trial": TierPolicy("trial", "Trial", 5, 35, False, True),
+    "lite": TierPolicy("lite", "Lite", 5, 100, False, True),
+    "professional": TierPolicy("professional", "Professional", 15, 300, True, True),
+    "enterprise": TierPolicy("enterprise", "Enterprise", 50, 1000, True, True),
 }
 
 

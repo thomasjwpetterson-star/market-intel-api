@@ -76,6 +76,7 @@ from platform_context_export import (
     platform_context_filename,
 )
 from answer_artifacts import platform_answer_artifacts
+from answer_report_pdf import answer_report_filename, build_branded_answer_pdf
 from beta_controls import (
     AccessContext,
     BetaStateStore,
@@ -726,6 +727,10 @@ Answer for the resolved platform or program. Follow requested_answer_mode exactl
   direct award recipients, reported supplier sites, components or capabilities, major awards,
   current opportunities and a concise forward view when forward evidence is present.
 
+Do not add an "Assessment date" line or other dated preamble unless the user explicitly asks for
+an as-of date or a date materially changes the answer. Put relevant source recency in Evidence used
+instead of making the answer read like a formal assessment.
+
 When scope.requested_focus is present, use the resolved platform as the industrial and financial
 baseline but answer specifically for that named variant or related program. Use the explicit named
 record summary, awards and supplier records to distinguish the focus from the wider base. For LRASM,
@@ -768,7 +773,11 @@ tool coverage to the customer. If forward evidence is absent, answer naturally f
 platform evidence and authoritative current sources. Discuss methodology or data coverage only when the
 user explicitly asks about it.
 
-For platform_overview, lead with the time-bounded totals supplied in financial_totals. For supplier
+For platform_overview, use completed_year_net_prime_obligations_usd as the main comparable historical
+baseline and show partial_year_net_prime_obligations_usd separately as FY2026 partial. Do not place the
+cumulative FY2021-FY2026 net_prime_obligations_usd beside the completed-year total as a peer headline;
+that obscures that the two figures differ only because one includes a partial fiscal year. Use the
+all-observed-window total only when the user explicitly asks for it. For supplier
 roles or overview, include financial values only when they help rank or size the reported positions.
 Every financial value in prose or a table must carry its fiscal-year period. For direct-award recipient tables,
 normally omit rows below 0.5% of the platform's observed prime obligations unless a small row provides
@@ -2304,6 +2313,12 @@ class FeedbackRequest(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=2000)
 
 
+class AnswerReportRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=12000)
+    answer: str = Field(min_length=1, max_length=60000)
+    scope_name: Optional[str] = Field(default=None, max_length=300)
+
+
 class LabRuntime:
     def __init__(self) -> None:
         release_root = os.getenv("ASK_MIMIR_RELEASE_ROOT")
@@ -3587,6 +3602,16 @@ def require_evidence_download(request: Request) -> AccessContext:
     return access
 
 
+def require_report_download(request: Request) -> AccessContext:
+    access = access_from_request(request)
+    if not access.policy.can_download_report:
+        raise HTTPException(
+            status_code=403,
+            detail="Sign in to download a branded Ask Mimir PDF report.",
+        )
+    return access
+
+
 def sanitize_answer_text(answer: str) -> str:
     """Last-line guard against customer-facing runtime and identity plumbing."""
     blocked_line_patterns = (
@@ -4379,6 +4404,7 @@ def beta_policy(request: Request) -> Dict[str, Any]:
                 "queries_per_utc_day": policy.queries_per_utc_day,
                 "queries_per_utc_month": policy.queries_per_utc_month,
                 "can_download_evidence": policy.can_download_evidence,
+                "can_download_report": policy.can_download_report,
             }
             for tier, policy in TIER_POLICIES.items()
         },
@@ -4494,6 +4520,28 @@ def add_answer_feedback(payload: FeedbackRequest, request: Request) -> Dict[str,
     if payload.rating == "wrong_entity":
         runtime.beta_state.mark_routing_correction(payload.request_id)
     return {"feedback_id": feedback_id, "status": "recorded"}
+
+
+@app.post("/api/evidence/answer.pdf")
+def answer_report_export(
+    payload: AnswerReportRequest,
+    request: Request,
+) -> StreamingResponse:
+    require_report_download(request)
+    report = build_branded_answer_pdf(
+        question=payload.question,
+        answer=payload.answer,
+        scope_name=payload.scope_name,
+    )
+    return StreamingResponse(
+        BytesIO(report),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{answer_report_filename(payload.scope_name, payload.question)}"'
+            )
+        },
+    )
 
 
 @app.get("/api/evidence/platform-supply-chain/{platform_id}.zip")

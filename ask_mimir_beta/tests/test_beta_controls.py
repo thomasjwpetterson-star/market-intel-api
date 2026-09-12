@@ -21,6 +21,11 @@ from beta_controls import (
 
 
 class BetaStateStoreTests(unittest.TestCase):
+    def test_branded_pdf_is_available_to_signed_in_tiers_not_guests(self):
+        self.assertFalse(TIER_POLICIES["public"].can_download_report)
+        for tier in ("free", "trial", "lite", "professional", "enterprise"):
+            self.assertTrue(TIER_POLICIES[tier].can_download_report)
+
     def test_duplicate_request_id_cannot_consume_a_second_allowance(self):
         with tempfile.TemporaryDirectory() as directory:
             store = BetaStateStore(Path(directory) / "beta-state.sqlite3")

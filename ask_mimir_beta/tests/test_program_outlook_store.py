@@ -61,6 +61,19 @@ class FakePlatformContexts:
 
 
 class ProgramOutlookStoreTests(unittest.TestCase):
+    def test_default_linkages_include_amraam(self):
+        definitions = json.loads(
+            (Path(__file__).resolve().parents[1] / "fydp_platform_linkages.json").read_text()
+        )
+        amraam = next(
+            row for row in definitions["linkages"] if row["program_id"] == "AMRAAM"
+        )
+        self.assertIn("AMRAAM", amraam["platform_aliases"])
+        self.assertIn(
+            "ADVANCED MEDIUM RANGE AIR-TO-AIR MISSILE (AMRAAM)",
+            amraam["budget_title_aliases"],
+        )
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

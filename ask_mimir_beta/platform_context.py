@@ -1286,13 +1286,22 @@ class PlatformContextStore:
         totals = {
             "observation_window": OBSERVATION_WINDOW,
             "net_prime_obligations_usd": 0.0,
+            "completed_year_net_prime_obligations_usd": 0.0,
+            "partial_year_net_prime_obligations_usd": 0.0,
+            "completed_fiscal_years": list(COMPLETED_FISCAL_YEARS),
+            "partial_fiscal_year": 2026,
             "positive_prime_obligations_usd": 0.0,
             "prime_deobligations_usd": 0.0,
             "attributed_dla_procurement_value_usd": 0.0,
             "shared_use_niin_exposure_usd": 0.0,
         }
         for row in annual.get("records", []):
-            totals["net_prime_obligations_usd"] += float(row.get("net_prime_obligations_usd") or 0)
+            net_prime_obligations = float(row.get("net_prime_obligations_usd") or 0)
+            totals["net_prime_obligations_usd"] += net_prime_obligations
+            if int(row.get("fiscal_year") or 0) in COMPLETED_FISCAL_YEARS:
+                totals["completed_year_net_prime_obligations_usd"] += net_prime_obligations
+            elif int(row.get("fiscal_year") or 0) == 2026:
+                totals["partial_year_net_prime_obligations_usd"] += net_prime_obligations
             totals["positive_prime_obligations_usd"] += float(row.get("positive_prime_obligations_usd") or 0)
             totals["prime_deobligations_usd"] += float(row.get("prime_deobligations_usd") or 0)
             totals["attributed_dla_procurement_value_usd"] += float(row.get("attributed_dla_procurement_value_usd") or 0)

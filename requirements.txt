@@ -28,3 +28,4 @@ fastparquet>=2024.11.0
 duckdb>=1.1.0
 openai>=1.0.0
 python-dotenv>=1.0.0
+reportlab>=4.2.0
