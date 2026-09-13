@@ -177,6 +177,8 @@ class ProgramOutlookStore:
                         CAST(line_number AS VARCHAR) AS budget_line_number,
                         budget_line_item,
                         budget_line_item_title,
+                        cost_type,
+                        cost_type_title,
                         fiscal_year,
                         CASE fiscal_year
                             WHEN 2025 THEN 'actual'
@@ -203,9 +205,15 @@ class ProgramOutlookStore:
                     budget_line_number,
                     budget_line_item,
                     budget_line_item_title,
+                    cost_type AS budget_line_cost_type,
+                    cost_type_title AS budget_line_cost_type_title,
                     fiscal_year,
                     funding_status,
                     CASE
+                        WHEN exhibit_type = 'P-1'
+                            AND measure_type = 'amount'
+                            AND UPPER(COALESCE(cost_type_title, '')) LIKE '%ADVANCE PROCUREMENT%'
+                            THEN 'advance_procurement'
                         WHEN exhibit_type = 'P-1' AND measure_type = 'amount'
                             THEN 'net_procurement_p1'
                         WHEN exhibit_type = 'P-1' AND measure_type = 'quantity'
@@ -230,7 +238,7 @@ class ProgramOutlookStore:
                 FROM selected_rows
                 WHERE measure_type IN ('amount', 'quantity')
                   AND NOT (exhibit_type = 'R-1' AND measure_type = 'quantity')
-                GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+                GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
                 ORDER BY fiscal_year, exhibit_type, component, budget_line_number, measure_type
             """
             rows.extend(
@@ -287,6 +295,58 @@ class ProgramOutlookStore:
                 )
             )
 
+        supplement = definition.get("published_budget_supplement") or {}
+        supplemental_rows = []
+        for fact in supplement.get("facts", []):
+            supplemental_rows.append(
+                {
+                    "exhibit_type": supplement.get("exhibit_type") or "P-1",
+                    "component": supplement.get("component"),
+                    "budget_line_number": str(
+                        supplement.get("budget_line_number") or ""
+                    ),
+                    "budget_line_item": supplement.get("budget_line_item"),
+                    "budget_line_item_title": supplement.get(
+                        "budget_line_item_title"
+                    ),
+                    "fiscal_year": fact.get("fiscal_year"),
+                    "funding_status": fact.get("funding_status") or "projected",
+                    "measure_type": fact.get("measure_type"),
+                    "amount_usd": fact.get("amount_usd"),
+                    "quantity": fact.get("quantity"),
+                    "availability_status": "PUBLISHED",
+                    "source_id": supplement.get("source_id"),
+                    "source_document_title": supplement.get(
+                        "source_document_title"
+                    ),
+                    "source_page_number": supplement.get("source_page_number"),
+                    "source_landing_page": supplement.get("source_landing_page"),
+                    "source_download_url": supplement.get("source_download_url"),
+                    "source_locator": supplement.get("source_locator"),
+                }
+            )
+        existing = {
+            (
+                row.get("component"),
+                str(row.get("budget_line_number") or ""),
+                row.get("budget_line_item"),
+                int(row["fiscal_year"]) if row.get("fiscal_year") is not None else None,
+                row.get("measure_type"),
+            )
+            for row in rows
+        }
+        for row in supplemental_rows:
+            key = (
+                row.get("component"),
+                str(row.get("budget_line_number") or ""),
+                row.get("budget_line_item"),
+                int(row["fiscal_year"]) if row.get("fiscal_year") is not None else None,
+                row.get("measure_type"),
+            )
+            if key not in existing:
+                rows.append(row)
+                existing.add(key)
+
         for row in rows:
             year = int(row["fiscal_year"])
             row["planning_phase"] = (
@@ -298,7 +358,16 @@ class ProgramOutlookStore:
                 if year == 2027
                 else "projection"
             )
-        return rows
+        return sorted(
+            rows,
+            key=lambda row: (
+                int(row.get("fiscal_year") or 0),
+                str(row.get("exhibit_type") or ""),
+                str(row.get("component") or ""),
+                str(row.get("budget_line_number") or ""),
+                str(row.get("measure_type") or ""),
+            ),
+        )
 
     @staticmethod
     def _announcement_pattern(definition: Dict[str, Any]) -> str:

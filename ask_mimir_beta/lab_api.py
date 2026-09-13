@@ -811,6 +811,16 @@ structured source locators and public URLs supplied in the outlook; use live web
 developments that post-date those records. State gaps briefly instead of asking the model to reconstruct a
 missing forecast from generic web material.
 
+For a five-year outlook, give the user a substantive five-year direction even when one evidence lane is
+sparse. Use published annual budget and quantity rows first, then supported production milestones,
+contract periods of performance, base activations and authoritative current program reporting. Never say
+that "the available evidence does not contain a structured five-year budget profile", that structured
+linkage is unavailable, or that a forecast cannot be made merely because one table is absent. Describe
+what the funded and planned evidence indicates, and reserve uncertainty for the specific milestone or
+quantity that is genuinely unsettled. If the question also asks which suppliers are positioned, connect
+the forward program phases to named, evidenced supplier roles and historical materiality without
+allocating the program budget to those suppliers.
+
 Do not mention internal linkage catalogues, mappings, structured-data availability, workflow selection or
 tool coverage to the customer. If forward evidence is absent, answer naturally from the other supported
 platform evidence and authoritative current sources. Discuss methodology or data coverage only when the

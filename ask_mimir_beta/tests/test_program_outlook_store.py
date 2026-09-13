@@ -74,6 +74,29 @@ class ProgramOutlookStoreTests(unittest.TestCase):
             amraam["budget_title_aliases"],
         )
 
+    def test_default_linkages_include_t7a_fydp(self):
+        definitions = json.loads(
+            (Path(__file__).resolve().parents[1] / "fydp_platform_linkages.json").read_text()
+        )
+        t7a = next(
+            row for row in definitions["linkages"] if row["program_id"] == "T7A"
+        )
+        self.assertIn("T-7", t7a["platform_aliases"])
+        self.assertIn("ADVANCED PILOT TRAINING T-7A", t7a["budget_title_aliases"])
+        facts = t7a["published_budget_supplement"]["facts"]
+        self.assertEqual(
+            [row["quantity"] for row in facts if row["measure_type"] == "procurement_quantity"],
+            [36.0, 42.0, 60.0, 60.0],
+        )
+        self.assertEqual(
+            sum(
+                row["amount_usd"]
+                for row in facts
+                if row["measure_type"] == "net_procurement_p1"
+            ),
+            3917137000.0,
+        )
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -154,15 +177,16 @@ class ProgramOutlookStoreTests(unittest.TestCase):
             """
             COPY (
                 SELECT * FROM (VALUES
-                    ('P-1', 'Total', 2025, true, 'F35', 'F-35', 'Air Force', '1',
+                    ('P-1', 'Total', 2025, true, 'F35', 'F-35', 'A', 'Weapon System Cost', 'Air Force', '1',
                      'amount', 100.0, NULL, 'p1.xlsx', 10),
-                    ('P-1', 'Total', 2026, true, 'F35', 'F-35', 'Air Force', '1',
+                    ('P-1', 'Total', 2026, true, 'F35', 'F-35', 'A', 'Weapon System Cost', 'Air Force', '1',
                      'quantity', NULL, 2.0, 'p1.xlsx', 10),
-                    ('R-1', 'Total', 2027, true, 'F35', 'F-35', 'Air Force', '7',
+                    ('R-1', 'Total', 2027, true, 'F35', 'F-35', NULL, NULL, 'Air Force', '7',
                      'amount', 50.0, NULL, 'r1.xlsx', 20)
                 ) AS t(
                     exhibit_type, funding_status, fiscal_year, is_additive,
-                    budget_line_item, budget_line_item_title, organization,
+                    budget_line_item, budget_line_item_title, cost_type,
+                    cost_type_title, organization,
                     line_number, measure_type, amount_usd, quantity, source_file,
                     source_row_number
                 )
@@ -235,6 +259,40 @@ class ProgramOutlookStoreTests(unittest.TestCase):
             ["OPEN-1"],
         )
         self.assertIn("must not be added", result["interpretation_rules"]["non_additive_measures"])
+        store.connection.close()
+
+    def test_published_budget_supplement_extends_missing_outyears(self):
+        definitions = json.loads(self.definitions.read_text())
+        definitions["linkages"][0]["published_budget_supplement"] = {
+            "component": "Air Force",
+            "budget_line_number": "1",
+            "budget_line_item": "F35",
+            "budget_line_item_title": "F-35",
+            "source_id": "official-p40-supplement",
+            "source_document_title": "F-35 P-40",
+            "source_landing_page": "https://example.gov/budget",
+            "source_download_url": "https://example.gov/p40.pdf",
+            "source_locator": "P-1 line 1",
+            "facts": [
+                {
+                    "fiscal_year": 2029,
+                    "measure_type": "net_procurement_p1",
+                    "amount_usd": 140.0,
+                },
+                {
+                    "fiscal_year": 2029,
+                    "measure_type": "procurement_quantity",
+                    "quantity": 4.0,
+                },
+            ],
+        }
+        self.definitions.write_text(json.dumps(definitions))
+        store = self._store()
+        rows = store.get(platform_id="F-35")["evidence_lanes"]["budget_and_fydp"]
+        supplements = [row for row in rows if row.get("source_id") == "official-p40-supplement"]
+        self.assertEqual(len(supplements), 2)
+        self.assertEqual({row["fiscal_year"] for row in supplements}, {2029})
+        self.assertEqual({row["planning_phase"] for row in supplements}, {"projection"})
         store.connection.close()
 
     def test_missing_optional_sources_yields_a_bounded_partial_view(self):

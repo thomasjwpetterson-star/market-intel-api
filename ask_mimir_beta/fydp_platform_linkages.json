@@ -1,5 +1,5 @@
 {
-  "definition_version": "mimir-fydp-platform-linkages-2026-09-v2",
+  "definition_version": "mimir-fydp-platform-linkages-2026-09-v3",
   "scope_note": "Explicit links between Mimir platform or system names and public FY2027 procurement budget-line titles. The broad P-1 source supplies FY2025 actual, FY2026 enacted and FY2027 request context. Published FY2028-FY2031 projections are included where structured P-40 source books are available. A link supplies program-level demand context; it does not allocate program funding to a company.",
   "linkages": [
     {
@@ -368,6 +368,34 @@
       "display_name": "Tomahawk",
       "platform_aliases": ["TACTOM (TACTICAL TOMAHAWK)", "TOMAHAWK"],
       "budget_title_aliases": ["TOMAHAWK", "TOMAHAWK MODS", "TOMAHAWK SUPPORT EQUIPMENT", "TOMAHAWK AND TOMAHAWK MISSION PLANNING CENTER (TMPC)"]
+    },
+    {
+      "program_id": "T7A",
+      "display_name": "T-7A Red Hawk",
+      "platform_aliases": ["T-7", "T-7A", "T-7A RED HAWK", "RED HAWK"],
+      "budget_title_aliases": ["ADVANCED PILOT TRAINING", "ADVANCED PILOT TRAINING T-7A", "ADVANCED PILOT TRAINING T-7A AP"],
+      "published_budget_supplement": {
+        "component": "Air Force",
+        "exhibit_type": "P-1",
+        "budget_line_number": "12",
+        "budget_line_item": "APT000",
+        "budget_line_item_title": "Advanced Pilot Training T-7A AP",
+        "source_id": "air_force_aircraft_procurement_volume_1_fy2027",
+        "source_document_title": "Aircraft Procurement, Air Force Volume I FY2027 Justification Book",
+        "source_landing_page": "https://www.saffm.hq.af.mil/FM-Resources/Budget/Air-Force-Presidents-Budget-FY27/",
+        "source_download_url": "https://www.af.mil/Portals/1/documents/Secretariat%20of%20the%20AF/SAF-FM/Budget%20-%202027/Budget%20docs/FY27%20Air%20Force%20Aircraft%20Procurement%20Volume%20I.pdf?ver=4kiKWbFkcqsD4dDrO7-P4g%3D%3D",
+        "source_locator": "P-1 line 12, Volume 1 page 73",
+        "facts": [
+          {"fiscal_year": 2028, "measure_type": "net_procurement_p1", "amount_usd": 915479000.0},
+          {"fiscal_year": 2028, "measure_type": "procurement_quantity", "quantity": 36.0},
+          {"fiscal_year": 2029, "measure_type": "net_procurement_p1", "amount_usd": 875143000.0},
+          {"fiscal_year": 2029, "measure_type": "procurement_quantity", "quantity": 42.0},
+          {"fiscal_year": 2030, "measure_type": "net_procurement_p1", "amount_usd": 1121762000.0},
+          {"fiscal_year": 2030, "measure_type": "procurement_quantity", "quantity": 60.0},
+          {"fiscal_year": 2031, "measure_type": "net_procurement_p1", "amount_usd": 1004753000.0},
+          {"fiscal_year": 2031, "measure_type": "procurement_quantity", "quantity": 60.0}
+        ]
+      }
     },
     {
       "program_id": "TOW",
