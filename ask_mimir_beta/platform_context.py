@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+from copy import deepcopy
 from difflib import get_close_matches
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,10 @@ OBSERVATION_WINDOW = "FY2021-FY2026 observed records"
 EVIDENCE_EXPORT_ROW_LIMIT = 5000
 
 PLATFORM_GROUPS = {
+    "AMERICA CLASS LHA": (
+        "AMERICA CLASS LHA",
+        "LHA 6",
+    ),
     "TOMAHAWK": (
         "TOMAHAWK",
         "TACTOM (TACTICAL TOMAHAWK)",
@@ -36,11 +41,19 @@ PLATFORM_GROUPS = {
 }
 
 PLATFORM_DISPLAY_NAMES = {
+    "AMERICA CLASS LHA": "America-class amphibious assault ships",
     "TOMAHAWK": "Tomahawk missile family",
     "PATRIOT AIR DEFENSE SYSTEM": "Patriot air defense system",
 }
 
 PLATFORM_ALIASES = {
+    "AMERICA CLASS": "AMERICA CLASS LHA",
+    "AMERICA CLASS LHA": "AMERICA CLASS LHA",
+    "LHA 6": "AMERICA CLASS LHA",
+    "LHA 7": "AMERICA CLASS LHA",
+    "LHA 8": "AMERICA CLASS LHA",
+    "LHA 9": "AMERICA CLASS LHA",
+    "LHA 10": "AMERICA CLASS LHA",
     "HIGH MOBILITY ARTILLERY ROCKET SYSTEM": "HIMARS",
     "GMLRS": "GMLRS/GMLRS AW",
     "MLRS": "GMLRS/GMLRS AW",
@@ -130,9 +143,10 @@ PLATFORM_FOCUSES = {
     },
 }
 
-# Tomahawk aliases are intentionally collapsed into one family. Patriot retains
-# its component program labels so a PAC-3-specific query can stay PAC-3-specific.
-COLLAPSED_PLATFORM_GROUPS = {"TOMAHAWK"}
+# America-class and Tomahawk aliases are collapsed into their common families.
+# Patriot retains its component program labels so a PAC-3-specific query can
+# stay PAC-3-specific.
+COLLAPSED_PLATFORM_GROUPS = {"AMERICA CLASS LHA", "TOMAHAWK"}
 
 
 def _rows(cursor: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
@@ -424,6 +438,19 @@ class PlatformContextStore:
         top_awards = self._top_awards(resolved)
         component_categories = self._component_categories(resolved)
         financial_totals = self._financial_totals(resolved, annual)
+        attributed_dla_value = abs(
+            float(financial_totals.get("attributed_dla_procurement_value_usd") or 0)
+        )
+        shared_use_value = abs(
+            float(financial_totals.get("shared_use_niin_exposure_usd") or 0)
+        )
+        broad_shared_use_exposure = bool(
+            shared_use_value >= 100_000_000
+            and (
+                attributed_dla_value == 0
+                or shared_use_value / attributed_dla_value >= 10
+            )
+        )
         prime_total = float(financial_totals["positive_prime_obligations_usd"] or 0)
         positive_supplier_values = [
             max(float(row.get("mimir_modelled_reported_subcontract_value_usd") or 0), 0)
@@ -506,6 +533,13 @@ class PlatformContextStore:
                 "reported_supplier_sites_loaded": len(reported_suppliers),
                 "observed_dla_recipient_sites": observed_dla_recipient_sites,
                 "associated_niins": items["associated_niin_count"],
+                "shared_use_niin_exposure_is_broad": broad_shared_use_exposure,
+                "shared_use_niin_exposure_note": (
+                    "Shared-use item value is retained as relationship evidence but is too broad "
+                    "to present as a financial measure for this platform."
+                    if broad_shared_use_exposure
+                    else "Shared-use item value remains separate from platform-attributed procurement."
+                ),
                 "item_relationships_loaded": len(items["top_items"]),
                 "prime_awards": self._available_count(top_awards),
                 "prime_awards_loaded": len(top_awards),
@@ -711,11 +745,11 @@ class PlatformContextStore:
                 "reported_descriptions": (row.get("reported_descriptions") or [])[:4],
             })
         self._attach_supplier_annual_activity(resolved, suppliers)
-        customer_context = {
+        customer_context = deepcopy({
             key: value
             for key, value in context.items()
             if key not in {"calculation_version", "generated_at", "evidence_fingerprint"}
-        }
+        })
         customer_context["coverage"] = {
             key: value
             for key, value in context["coverage"].items()
@@ -734,6 +768,35 @@ class PlatformContextStore:
                 "top_item_supplier_sites": context["item_and_component_evidence"]["top_item_supplier_sites"][:12],
             },
         }
+        if projected["coverage"].get("shared_use_niin_exposure_is_broad"):
+            projected["financial_totals"].pop("shared_use_niin_exposure_usd", None)
+            for row in projected.get("annual_activity", {}).get("records", []):
+                row.pop("shared_use_niin_exposure_usd", None)
+            projected["coverage"].pop("associated_niins", None)
+            item_evidence = projected["item_and_component_evidence"]
+            item_evidence.pop("associated_niin_count", None)
+            item_evidence["top_items"] = [
+                row
+                for row in item_evidence.get("top_items", [])
+                if abs(float(row.get("attributed_dla_procurement_value_usd") or 0)) > 0
+            ][:10]
+            item_evidence["top_item_supplier_sites"] = [
+                row
+                for row in item_evidence.get("top_item_supplier_sites", [])
+                if abs(float(row.get("attributed_dla_procurement_value_usd") or 0)) > 0
+            ][:12]
+            for row in item_evidence["top_items"]:
+                row.pop("shared_use_niin_exposure_usd", None)
+            for row in item_evidence["top_item_supplier_sites"]:
+                row.pop("shared_use_niin_exposure_usd", None)
+            item_evidence["shared_use_context"] = {
+                "treatment": "relationship_context_only",
+                "note": (
+                    "Shared-use NIIN relationships are retained in the downloadable evidence, "
+                    "but their procurement value is not shown in the overview because it cannot "
+                    "be allocated reliably to this platform."
+                ),
+            }
         return projected
 
     def _focused_program_projection(
@@ -1213,8 +1276,12 @@ class PlatformContextStore:
                 LEFT JOIN read_parquet(?) p ON LPAD(TRIM(p.niin),9,'0') = b.niin
                 LEFT JOIN platform_value v ON b.niin=v.niin
                 LEFT JOIN read_parquet(?) s ON b.niin=s.niin
-                ORDER BY ABS(COALESCE(v.attributed_dla_procurement_value_usd,0))
-                       + ABS(COALESCE(v.shared_use_niin_exposure_usd,0)) DESC,
+                ORDER BY CASE
+                           WHEN ABS(COALESCE(v.attributed_dla_procurement_value_usd,0)) > 0
+                           THEN 0 ELSE 1
+                         END,
+                         ABS(COALESCE(v.attributed_dla_procurement_value_usd,0)) DESC,
+                         ABS(COALESCE(v.shared_use_niin_exposure_usd,0)) DESC,
                          b.niin
                 LIMIT ?
                 """,
@@ -1258,8 +1325,12 @@ class PlatformContextStore:
                        COUNT(DISTINCT s.cage) OVER () AS total_supplier_sites
                 FROM supplier_values s
                 LEFT JOIN locations l ON UPPER(TRIM(s.cage))=l.cage
-                ORDER BY ABS(attributed_dla_procurement_value_usd)
-                       + ABS(shared_use_niin_exposure_usd) DESC,
+                ORDER BY CASE
+                           WHEN ABS(attributed_dla_procurement_value_usd) > 0
+                           THEN 0 ELSE 1
+                         END,
+                         ABS(attributed_dla_procurement_value_usd) DESC,
+                         ABS(shared_use_niin_exposure_usd) DESC,
                          s.niin,
                          s.cage
                 LIMIT ?

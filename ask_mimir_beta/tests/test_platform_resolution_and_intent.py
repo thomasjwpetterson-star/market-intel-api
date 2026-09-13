@@ -55,6 +55,7 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             "SDB I",
             "SDB II",
             "AN/SLQ-25 TORPEDO COUNTERMEASURE",
+            "AMERICA CLASS LHA",
         ]
 
     def test_patriot_resolves_to_the_umbrella_system(self):
@@ -70,6 +71,20 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             self.store._platform_members("PATRIOT AIR DEFENSE SYSTEM"),
             ["PATRIOT", "PAC-3", "PAC-3 MSE", "LTAMDS"],
         )
+
+    def test_america_class_scope_includes_the_lha6_spending_record(self):
+        self.assertEqual(
+            self.store._platform_members("AMERICA CLASS LHA"),
+            ["AMERICA CLASS LHA", "LHA 6"],
+        )
+
+    def test_america_class_hull_aliases_resolve_to_the_class_scope(self):
+        for name in ("America class", "LHA 6", "LHA 9", "LHA 10"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    self.store.search(name)["resolved_platform_id"],
+                    "AMERICA CLASS LHA",
+                )
 
     def test_pac3_mse_mention_does_not_also_return_pac3(self):
         result = self.store.mentions("Who supplies PAC-3 MSE?")
@@ -227,6 +242,56 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
         store._attach_supplier_annual_activity.assert_called_once_with(
             "NEXT GEN OPIR",
             result["reported_supplier_sites"],
+        )
+
+    def test_broad_shared_use_value_is_withheld_from_customer_overview(self):
+        store = object.__new__(PlatformContextStore)
+        store.get = Mock(
+            return_value={
+                "scope": {"platform_id": "AMERICA CLASS LHA"},
+                "calculation_version": "test",
+                "generated_at": "test",
+                "evidence_fingerprint": "test",
+                "annual_activity": {
+                    "records": [{
+                        "fiscal_year": 2025,
+                        "attributed_dla_procurement_value_usd": 4_000_000,
+                        "shared_use_niin_exposure_usd": 300_000_000,
+                    }]
+                },
+                "financial_totals": {
+                    "attributed_dla_procurement_value_usd": 8_000_000,
+                    "shared_use_niin_exposure_usd": 800_000_000,
+                },
+                "direct_award_recipients": [],
+                "reported_supplier_sites": [],
+                "reported_component_categories": [],
+                "top_prime_awards": [],
+                "current_opportunities": [],
+                "coverage": {
+                    "associated_niins": 149_985,
+                    "shared_use_niin_exposure_is_broad": True,
+                },
+                "item_and_component_evidence": {
+                    "associated_niin_count": 149_985,
+                    "top_items": [
+                        {"niin": "direct", "attributed_dla_procurement_value_usd": 2_000},
+                        {"niin": "shared", "shared_use_niin_exposure_usd": 3_000},
+                    ],
+                    "top_item_supplier_sites": [],
+                },
+            }
+        )
+        store._attach_supplier_annual_activity = Mock()
+
+        result = PlatformContextStore.answer_projection(store, "AMERICA CLASS LHA")
+
+        self.assertNotIn("shared_use_niin_exposure_usd", result["financial_totals"])
+        self.assertNotIn("shared_use_niin_exposure_usd", result["annual_activity"]["records"][0])
+        self.assertNotIn("associated_niins", result["coverage"])
+        self.assertEqual(
+            [row["niin"] for row in result["item_and_component_evidence"]["top_items"]],
+            ["direct"],
         )
 
     def test_comparison_follow_up_retains_both_platforms(self):

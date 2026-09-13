@@ -782,6 +782,12 @@ Keep these evidence lanes distinct: net prime obligations on directly mapped awa
 subcontract value; attributed DLA procurement value for single-platform NIINs; and shared-use NIIN
 exposure, which is associated with this platform but not allocated to it.
 
+When coverage.shared_use_niin_exposure_is_broad is true, do not quote the shared-use dollar value or
+the broad associated-NIIN count in a general platform answer. They describe a many-platform relationship
+universe rather than spend attributable to the named platform. Use the directly attributed DLA lane and
+its specific item examples instead; mention shared-use relationships only if the user explicitly asks for
+the wider item universe.
+
 When authorized_source_depth is supplied, do not use the count without an active authorized source as
 a proxy for the number of items without known manufacturers or viable suppliers. Report active
 procurement-authorized-source coverage together with active item-identifying manufacturer-reference
@@ -5195,6 +5201,7 @@ def generate_answer(
                 "response_id": "company-site-disambiguation",
                 "model": "deterministic-resolution",
                 "release_id": runtime.store.manifest["release_id"],
+                "requires_clarification": True,
                 "tool_trace": [search_trace],
                 "answer_artifacts": {"company_resolution": resolution},
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -5882,6 +5889,7 @@ def generate_answer(
                 "response_id": "award-opportunity-disambiguation",
                 "model": "deterministic-resolution",
                 "release_id": runtime.store.manifest["release_id"],
+                "requires_clarification": True,
                 "tool_trace": [search_trace],
                 "answer_artifacts": {"record_resolution": resolution},
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -6001,6 +6009,7 @@ def generate_answer(
                 "response_id": "item-identifier-mismatch",
                 "model": "deterministic-resolution",
                 "release_id": runtime.store.manifest["release_id"],
+                "requires_clarification": True,
                 "tool_trace": [search_trace],
                 "answer_artifacts": {"item_resolution": resolution},
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -6022,6 +6031,7 @@ def generate_answer(
                 "response_id": "item-disambiguation",
                 "model": "deterministic-resolution",
                 "release_id": runtime.store.manifest["release_id"],
+                "requires_clarification": True,
                 "tool_trace": [search_trace],
                 "answer_artifacts": {"item_resolution": resolution},
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -6232,6 +6242,7 @@ def generate_answer(
                 "response_id": "platform-disambiguation",
                 "model": "deterministic-resolution",
                 "release_id": runtime.store.manifest["release_id"],
+                "requires_clarification": True,
                 "tool_trace": [search_trace],
                 "answer_artifacts": {"platform_resolution": resolution},
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
