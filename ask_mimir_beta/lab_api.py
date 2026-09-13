@@ -35,6 +35,7 @@ from capability_discovery import (
 )
 from geographic_market import (
     StateIndustrialBaseStore,
+    is_state_forward_demand_request,
     is_geographic_market_request,
     resolve_state,
     state_market_follow_up_intent,
@@ -1036,14 +1037,23 @@ When using web research, apply this source hierarchy:
 
 STATE_INDUSTRIAL_BASE_PROMPT = f"""
 You are Ask Mimir, an evidence-led US defense-market research assistant. The final user message is
-followed by a state-level defense-industrial-base evidence set.
+followed by an answer mode, follow-up status and a state-level defense-industrial-base evidence set.
 
-Give a commercially useful overview of the named state. Lead with the scale of observed activity
-for FY2021-FY2026, then identify the most important company facilities and explain why they matter.
+Follow the supplied ANSWER MODE. For overview, give a commercially useful overview of the named
+state. Lead with the scale of observed activity for FY2021-FY2026, then identify the most important
+company facilities and explain why they matter.
 Use separate columns for prime obligations, DLA procurement and Mimir-modelled reported subcontract
 value; do not add those lanes together. Include CAGE, city and material mapped platforms or customer
 routes. Importance should reflect financial scale, contract or item breadth, program relevance and
 facility role, rather than company name alone.
+
+For forward_demand, answer the forward question immediately. Identify the most material funded
+program, production, sustainment, capacity and customer-demand signals that plausibly affect the
+state's existing industrial footprint. Connect each signal to an evidenced in-state facility,
+platform or capability where possible. Use the historical figures only to establish which existing
+exposures are material; do not repeat the full state overview or facility ranking. When FOLLOW-UP is
+yes, assume the earlier answer already established the principal companies and locations. Do not
+claim that a program-level funding increase guarantees revenue for a particular company.
 
 Registered facilities and places of performance answer different questions. Use the registered-site
 ranking for companies and facilities located in the state. Use the place-of-performance section to
@@ -1091,19 +1101,21 @@ classification evidence. Do not imply win probability. Distinguish Sources Sough
 solicitations.
 
 For awards, show the recipient and site, award identifier, date, supported program where identified,
-and what was purchased. USAspending net prime obligations, an official DoD announcement's stated
-award value or ceiling, and the amount explicitly obligated when that announcement was issued are
-three different measures. Label each by its exact meaning, include its date or observation window,
-and never add or substitute them. If a DoD announcement has no corresponding USAspending value in
-the evidence, present the announcement as current award context without inventing cumulative
-obligations. When a USAspending record contains official_announcements, present one award row and use
+and what was purchased. Lead with the award results, not an as-of date, ranking explanation or
+methodology preamble. Use short, natural customer-facing labels such as Contract value, Obligated
+when announced, or Observed obligations. Explain the difference only where the same award carries
+more than one figure and a reader could otherwise confuse them. If one of those measures is absent,
+omit it silently rather than describing a missing data lane. Never add or substitute the measures.
+When a USAspending record contains official_announcements, present one award row and use
 those announcements only as qualitative enrichment for scope, work location, completion, competition
 and other current context; do not repeat them as separate awards. Link the official source_url and
 describe the source as an official DoD contract
 announcement; never expose source_type codes or retrieval machinery. When asked for a numbered item
 such as 'the third one', use the ordering in the immediately preceding answer. Hyperlink public
-notices and Mimir company, award and platform records. Do not expose release identifiers or
-implementation terminology. Keep the answer below 1,100 words.
+notices and Mimir company, award and platform records. For a recent-awards search, do not introduce
+budget requests, FYDP projections or future funding plans unless the user explicitly asks for an
+outlook. Do not expose release identifiers, source reconciliation commentary or implementation
+terminology. Keep the answer below 1,100 words.
 
 When web research materially improves program or requirement context, apply this source hierarchy:
 {WEB_SOURCE_POLICY_PROMPT}
@@ -3681,6 +3693,34 @@ def sanitize_answer_text(answer: str) -> str:
     cleaned = "\n".join(lines)
     cleaned = cleaned.replace(r"\*", "*")
     cleaned = re.sub(
+        r"^\s*(?:\*\*)?As of [A-Z][A-Za-z]+ \d{1,2}, \d{4}[.:]?(?:\*\*)?\s*",
+        "",
+        cleaned,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"^\s*Ranked by [^.]+\.\s*",
+        "",
+        cleaned,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"^\s*Dollar measures are kept separate:[^.]+\.\s*",
+        "",
+        cleaned,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*No corresponding USAspending obligation values were supplied[^.]*\."
+        r"(?:\s*[^.]*not been presented as cumulative obligations\.)?",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
         r"\bDIRECT_PROGRAM_HISTORY\b",
         "direct program history",
         cleaned,
@@ -5577,17 +5617,35 @@ def generate_answer(
         trace = [
             {"tool": "get_state_industrial_base", "arguments": arguments, "result": pack}
         ]
+        state_answer_mode = (
+            "forward_demand"
+            if is_state_forward_demand_request(latest_question)
+            else "overview"
+        )
+        is_state_follow_up = bool(
+            request.active_scope
+            and request.active_scope.scope_type == "state_market"
+        )
         state_input = [
             {"role": "user", "content": latest_question},
             {
                 "role": "user",
-                "content": "MIMIR STATE INDUSTRIAL-BASE EVIDENCE\n" + json.dumps(pack, default=str),
+                "content": (
+                    f"ANSWER MODE: {state_answer_mode}\n"
+                    f"FOLLOW-UP: {'yes' if is_state_follow_up else 'no'}\n"
+                    "MIMIR STATE INDUSTRIAL-BASE EVIDENCE\n"
+                    + json.dumps(pack, default=str)
+                ),
             },
         ]
         emit_progress(
             progress,
-            "Preparing the state overview",
-            "Comparing facility scale, programs and customer routes",
+            "Preparing the state forward view"
+            if state_answer_mode == "forward_demand"
+            else "Preparing the state overview",
+            "Connecting future demand signals to the state's existing industrial footprint"
+            if state_answer_mode == "forward_demand"
+            else "Comparing facility scale, programs and customer routes",
             68,
         )
         response = client.responses.create(

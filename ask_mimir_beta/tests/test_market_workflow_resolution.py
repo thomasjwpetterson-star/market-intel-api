@@ -17,6 +17,7 @@ from geographic_market import (
     is_geographic_market_request,
     resolve_state,
     state_market_follow_up_intent,
+    is_state_forward_demand_request,
 )
 from platform_intent import platform_follow_up_intent
 from market_segment import market_segment_follow_up_intent, resolve_market_segment
@@ -214,6 +215,11 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
                 "Which platforms and capability areas account for the most visible activity?"
             )
         )
+
+    def test_state_forward_demand_follow_up_is_retained_and_identified(self):
+        question = "What does the forward demand picture look like?"
+        self.assertTrue(state_market_follow_up_intent(question))
+        self.assertTrue(is_state_forward_demand_request(question))
 
     def test_platform_evidence_follow_up_is_retained(self):
         self.assertTrue(

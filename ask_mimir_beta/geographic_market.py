@@ -105,6 +105,20 @@ def state_market_follow_up_intent(text: str) -> bool:
             "which platforms and capability areas",
             "which programmes and capability areas",
             "most visible activity",
+            "forward demand", "future demand", "demand picture",
+            "funding outlook", "market outlook", "what lies ahead",
+        )
+    )
+
+
+def is_state_forward_demand_request(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "forward demand", "future demand", "demand picture",
+            "funding outlook", "market outlook", "what lies ahead",
+            "future growth", "growth outlook", "next five years",
         )
     )
 
