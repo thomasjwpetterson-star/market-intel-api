@@ -5,6 +5,29 @@ from __future__ import annotations
 import re
 
 
+def is_cross_market_company_request(text: str) -> bool:
+    """Recognize company discovery spanning two explicitly named defense markets."""
+    lowered = str(text or "").lower()
+    has_company_discovery = bool(
+        re.search(r"\b(?:which|find|identify|show|name)\b.*\bcompanies\b", lowered)
+    )
+    has_cross_market_language = any(
+        phrase in lowered
+        for phrase in ("both", "across", "exposure to", "operate in", "participate in")
+    )
+    named_markets = sum(
+        bool(re.search(pattern, lowered))
+        for pattern in (
+            r"\bmissiles?\b|\bmunitions?\b|\bguided weapons?\b",
+            r"\bspace systems?\b|\bmilitary space\b|\bnational security space\b",
+            r"\bmilitary aircraft\b|\bcombat aircraft\b|\baviation\b",
+            r"\bground vehicles?\b|\bcombat vehicles?\b",
+            r"\bnaval\b|\bshipbuilding\b|\bsubmarines?\b",
+        )
+    )
+    return has_company_discovery and has_cross_market_language and named_markets >= 2
+
+
 def is_platform_centered_request(text: str, *, has_platform_mention: bool) -> bool:
     """Keep named-platform questions out of the company-name resolver."""
     if not has_platform_mention:

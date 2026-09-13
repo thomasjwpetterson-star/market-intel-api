@@ -25,7 +25,7 @@ FYDP_PLATFORM_LINKAGE_VERSION = json.loads(
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
-DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v11"
+DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v12"
 
 CANONICAL_CONSOLIDATED_PARENT_NAMES = {
     "CURTISS WRIGHT": "CURTISS-WRIGHT CORPORATION",
@@ -550,6 +550,10 @@ def _company_platform_exposure_summary(
             {
                 "measure": measure,
                 "label": label,
+                "share_denominator_label": (
+                    f"company-wide {label.lower()} in "
+                    f"{context.get('scope', {}).get('observation_window')}"
+                ),
                 "observed_value_usd": 0.0,
                 "distinct_awards": 0,
                 "contributing_sites": 0,
@@ -728,6 +732,20 @@ def _company_forward_context(context: Dict[str, Any]) -> Dict[str, Any]:
                 for lane, observed_value in list(exposure.items())
             }
         )
+        exposure["share_denominators"] = {
+            "share_of_company_prime_obligations_pct": (
+                "company-wide prime obligations in "
+                f"{context.get('scope', {}).get('observation_window')}"
+            ),
+            "share_of_company_dla_procurement_value_pct": (
+                "company-wide DLA procurement value in "
+                f"{context.get('scope', {}).get('observation_window')}"
+            ),
+            "share_of_company_reported_subcontract_value_pct": (
+                "company-wide reported subcontract value in "
+                f"{context.get('scope', {}).get('observation_window')}"
+            ),
+        }
         program["historical_company_exposure"] = exposure
 
         funding_by_year: Dict[int, float] = {}
@@ -1404,7 +1422,9 @@ class CompanyContextStore:
                             "observed_value": 0.0,
                         },
                     )
-                    row["vendor_name"] = row.get("vendor_name") or vendor_name
+                    # Prefer the current CAGE-directory name to an older name
+                    # retained in historical award/profile records.
+                    row["vendor_name"] = vendor_name or row.get("vendor_name")
                     row["city"] = city
                     row["state"] = state
                     row["cage_status"] = cage_status
@@ -1469,7 +1489,10 @@ class CompanyContextStore:
         for directory_rank, row in enumerate(
             candidates[: min(max(int(limit), 1), 500)]
         ):
-            name = str(row.get("vendor_name") or f"CAGE {row['cage']}").strip()
+            name = str(
+                row.get("vendor_name")
+                or f"Registered site (CAGE {row['cage']})"
+            ).strip()
             location = ", ".join(
                 str(value).strip()
                 for value in (row.get("city"), row.get("state"))

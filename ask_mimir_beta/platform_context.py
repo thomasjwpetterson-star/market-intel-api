@@ -44,6 +44,7 @@ PLATFORM_DISPLAY_NAMES = {
     "AMERICA CLASS LHA": "America-class amphibious assault ships",
     "TOMAHAWK": "Tomahawk missile family",
     "PATRIOT AIR DEFENSE SYSTEM": "Patriot air defense system",
+    "M109A7 HOWITZER": "M109A7 Paladin",
 }
 
 PLATFORM_ALIASES = {
@@ -85,6 +86,11 @@ PLATFORM_ALIASES = {
     "EAGLE II": "F-15",
     "KING STALLION": "CH-53K",
     "CH 53K KING STALLION": "CH-53K",
+    "M109": "M109A7 HOWITZER",
+    "M109A7": "M109A7 HOWITZER",
+    "M109 PALADIN": "M109A7 HOWITZER",
+    "M109A7 PALADIN": "M109A7 HOWITZER",
+    "PALADIN": "M109A7 HOWITZER",
     "E 7A": "E-7",
     "E7A": "E-7",
     "WEDGETAIL": "E-7",

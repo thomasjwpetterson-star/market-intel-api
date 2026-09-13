@@ -9,6 +9,7 @@ import duckdb
 from platform_context import PlatformContextStore, _canonical_fingerprint_value
 from company_intent import company_follow_up_intent
 from platform_intent import (
+    is_cross_market_company_request,
     is_open_capability_discovery_request,
     is_platform_centered_request,
     platform_answer_mode,
@@ -56,6 +57,7 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             "SDB II",
             "AN/SLQ-25 TORPEDO COUNTERMEASURE",
             "AMERICA CLASS LHA",
+            "M109A7 HOWITZER",
         ]
 
     def test_patriot_resolves_to_the_umbrella_system(self):
@@ -85,6 +87,26 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
                     self.store.search(name)["resolved_platform_id"],
                     "AMERICA CLASS LHA",
                 )
+
+    def test_m109a7_paladin_resolves_as_one_platform(self):
+        question = "Who supplies the M109A7 Paladin, and what are the major supplier positions?"
+        self.assertEqual(self.store.mentions(question), ["M109A7 HOWITZER"])
+        self.assertEqual(
+            self.store.search("M109A7 Paladin")["resolved_platform_id"],
+            "M109A7 HOWITZER",
+        )
+
+    def test_cross_market_company_discovery_is_recognized(self):
+        self.assertTrue(
+            is_cross_market_company_request(
+                "Which US defense companies have meaningful exposure to both missiles and space systems?"
+            )
+        )
+        self.assertFalse(
+            is_cross_market_company_request(
+                "What is happening in the US military space market?"
+            )
+        )
 
     def test_pac3_mse_mention_does_not_also_return_pac3(self):
         result = self.store.mentions("Who supplies PAC-3 MSE?")

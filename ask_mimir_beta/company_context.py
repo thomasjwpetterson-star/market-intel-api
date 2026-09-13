@@ -282,6 +282,12 @@ class CompanyContextBuilder:
                         or cage,
                     },
                 )
+                # The CAGE directory is the current identity source. Profiles and
+                # award records can retain predecessor names after an acquisition
+                # or rebrand, so do not let those older labels win in a live group.
+                current_name = source.get("vendor_name") or source.get("scope_name")
+                if current_name:
+                    target["vendor_name"] = current_name
                 for key in ("city", "state"):
                     if not target.get(key) and source.get(key):
                         target[key] = source[key]
@@ -1433,7 +1439,11 @@ class CompanyContextBuilder:
             )
             SELECT
                 r.cage_code AS cage,
-                COALESCE(p.vendor_name, g.vendor_name, r.cage_code) AS vendor_name,
+                COALESCE(
+                    g.vendor_name,
+                    p.vendor_name,
+                    CONCAT('Registered site (CAGE ', r.cage_code, ')')
+                ) AS vendor_name,
                 g.city,
                 g.state,
                 g.location_quality,

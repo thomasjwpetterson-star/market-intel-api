@@ -193,6 +193,12 @@ class CompanyPrecomputedBoundsTests(unittest.TestCase):
             ],
             25.0,
         )
+        self.assertEqual(
+            program["historical_company_exposure"]["share_denominators"][
+                "share_of_company_prime_obligations_pct"
+            ],
+            "company-wide prime obligations in FY2025-FY2026 observed records",
+        )
         self.assertEqual(program["forward_funding_summary"]["direction"], "growing")
         self.assertEqual(program["forward_funding_summary"]["change_pct"], 50.0)
 
@@ -293,6 +299,12 @@ class CompanyPrecomputedBoundsTests(unittest.TestCase):
                 "share_of_company_lane_pct"
             ],
             25.0,
+        )
+        self.assertEqual(
+            summary["platforms"][0]["evidence_lanes"][0][
+                "share_denominator_label"
+            ],
+            "company-wide net prime obligations in FY2021-FY2026 observed records",
         )
         self.assertEqual(
             summary["platforms"][0]["capability_evidence"][0]["description"],

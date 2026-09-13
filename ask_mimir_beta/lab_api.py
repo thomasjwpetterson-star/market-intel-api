@@ -100,6 +100,7 @@ from platform_supply_chain_store import PlatformSupplyChainStore
 from program_momentum_store import ProgramMomentumStore, is_program_momentum_language
 from program_outlook_store import ProgramOutlookStore
 from platform_intent import (
+    is_cross_market_company_request,
     is_open_capability_discovery_request,
     is_platform_centered_request,
     platform_answer_mode,
@@ -192,6 +193,10 @@ group those CAGEs as one facility while retaining each underlying record. If the
 ambiguous, show concise selectable options with company/site name, city/state and CAGE and say when
 more matches are available. Treat historical names as source-reported evidence and do not assume they
 describe the current brand.
+Use the current CAGE-directory name for a site heading. If an older award or profile record uses a
+predecessor name, describe it as a historical name; never turn that name into a current subsidiary.
+Never title a company or site merely "CAGE record". If no legal name is available, use
+"Registered site (CAGE <code>)" and include the location where available.
 For a question asking how an exact CAGE's program exposure changed, use the returned annual and
 program trajectory rather than the all-period profile total. Compare completed fiscal years on a
 like-for-like basis and keep prime obligations, DLA procurement value and Mimir-modelled reported
@@ -203,6 +208,15 @@ site, retain the company or site as the subject. Use its evidenced role and hist
 that program, then connect those positions to the program's funding, quantities and milestones.
 Do not turn the answer into a general supplier-base survey or retrieve a portfolio-wide supplier
 index unless the user separately asks who supplies the program.
+
+For a question asking which companies span two named markets, build an evidenced cross-market
+shortlist rather than a list of familiar primes. Include major primes and system integrators only where
+both lanes are evidenced, and deliberately test specialist, Tier 1, component, propulsion, electronics,
+materials and services suppliers as well. Organize the result by company role or tier so the lower-tier
+industrial base is visible. State each company's evidence in both requested markets. Do not add sections
+called "other names requiring validation" or generic prose saying the result is a minimum set, is not a
+complete market-share ranking, or needs like-for-like validation. Mention a material evidence boundary once,
+in plain language, only if it changes which companies can be included.
 
 Opportunity-discovery candidates based only on NAICS overlap are not recommendations. A defensible
 recommendation requires demonstrated capability evidence, a plausible program or customer need,
@@ -538,7 +552,10 @@ and before product/NIIN coverage. Build it from platform_exposure_summary.platfo
 platform_exposure rows. Use a compact table with platform/program, the source-reported capability or role,
 and FY2021-FY2026 historical materiality. For each non-zero evidence lane, show its value and its
 share_of_company_lane_pct, with prime obligations, DLA procurement and reported subcontract value labelled
-separately. Do not merge these lanes into one total. Do not substitute the forward view for this historical
+separately. Phrase every percentage with its denominator—for example, "12% of the company's FY2021-FY2026
+prime obligations" or "8% of its FY2021-FY2026 reported subcontract value". Never show a bare platform
+percentage or use one lane's percentage to describe another lane. Do not merge these lanes into one total.
+Do not substitute the forward view for this historical
 platform section. If non_specific_groupings contains material missile-related activity, explain it separately
 below the named-platform table rather than ranking it as a named platform. Never present values listed in
 excluded_non_platform_classifications as platforms or programs.
@@ -2721,7 +2738,7 @@ class LabRuntime:
             if name == "get_company_context":
                 cache_arguments = {
                     **arguments,
-                    "_context_schema": "company-context-v9",
+                    "_context_schema": "company-context-v10",
                 }
             elif name == "get_capability_market":
                 cache_arguments = {
@@ -3292,7 +3309,12 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
         if candidate:
             candidates.append(candidate)
 
-    if request.intent_hint:
+    hinted_company_conflicts_with_platform = bool(
+        request.intent_hint == "company_site_intelligence"
+        and runtime.platform_contexts.mentions(latest)
+        and is_platform_centered_request(latest, has_platform_mention=True)
+    )
+    if request.intent_hint and not hinted_company_conflicts_with_platform:
         add(_routing_candidate(
             request.intent_hint,
             "explicit_clarification_selection",
@@ -3467,7 +3489,9 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
     if is_open_capability_discovery_request(latest):
         add(_routing_candidate("capability_discovery", "open_supplier_discovery", 0.90))
 
-    scope_workflow = _scope_follow_up_workflow(request)
+    # A clicked clarification is an explicit new selection. Do not also offer a
+    # stale conversational scope from an earlier, unrelated question.
+    scope_workflow = None if request.intent_hint else _scope_follow_up_workflow(request)
     if request.active_scope and scope_workflow:
         add(_routing_candidate(
             scope_workflow,
@@ -4120,13 +4144,14 @@ def routing_clarification_result(decision: RoutingDecision) -> Dict[str, Any]:
         })
         if len(options) == 3:
             break
-    if options:
+    if len(options) >= 2:
         labels = " or ".join(option["label"] for option in options[:2])
         answer = f"I found more than one plausible meaning. Did you mean {labels}?"
     else:
+        options = []
         answer = (
             "I could not identify the intended company or research scope confidently. "
-            "Please choose a result or add the company name, CAGE code, location, platform, "
+            "Please add the company name, CAGE code, location, platform, "
             "item identifier, or contract number."
         )
     return {
@@ -6764,11 +6789,16 @@ def generate_answer(
         return result
 
     emit_progress(progress, "Selecting evidence", "Choosing the relevant Mimir calculations and records", 34)
+    general_tools = list(TOOLS)
+    if runtime.external_evidence_allowed and is_cross_market_company_request(
+        request.messages[-1].content
+    ):
+        general_tools.append({"type": "web_search", "search_context_size": "low"})
     response = client.responses.create(
         model=runtime.model,
         instructions=SYSTEM_PROMPT,
         input=input_items,
-        tools=TOOLS,
+        tools=general_tools,
         tool_choice="auto",
         parallel_tool_calls=False,
         reasoning={"effort": runtime.reasoning_effort},
@@ -6821,7 +6851,7 @@ def generate_answer(
             model=runtime.model,
             instructions=SYSTEM_PROMPT,
             input=input_items,
-            tools=TOOLS,
+            tools=general_tools,
             tool_choice="auto",
             parallel_tool_calls=False,
             reasoning={"effort": runtime.reasoning_effort},
