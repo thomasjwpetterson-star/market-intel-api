@@ -550,6 +550,10 @@ def _company_platform_exposure_summary(
             {
                 "measure": measure,
                 "label": label,
+                "share_column_label": (
+                    f"Share of company-wide {label.lower()} "
+                    f"({context.get('scope', {}).get('observation_window')})"
+                ),
                 "share_denominator_label": (
                     f"company-wide {label.lower()} in "
                     f"{context.get('scope', {}).get('observation_window')}"

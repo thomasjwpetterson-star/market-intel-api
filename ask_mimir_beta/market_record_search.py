@@ -30,6 +30,13 @@ TERM_EXPANSIONS = {
     "vehicle": ["VEHICLE", "GROUND COMBAT", "TACTICAL VEHICLE"],
     "radar": ["RADAR", "RF SENSOR"],
     "missile": ["MISSILE", "INTERCEPTOR"],
+    "engine": [
+        "AIRCRAFT ENGINE",
+        "GAS TURBINE",
+        "TURBOFAN",
+        "TURBOSHAFT",
+        "PROPULSION",
+    ],
 }
 
 CONTEXT_ONLY_TERMS = {"aircraft", "vehicle", "platform"}
@@ -156,6 +163,7 @@ def _search_terms(phrase: str) -> List[str]:
 
 def _subject(text: str) -> str:
     patterns = (
+        r"awards?\s+to\s+companies\s+supplying\s+(.+?)(?:,\s*(?:and\s+)?tell\s+me|\?|\.|$)",
         r"relevant\s+to\s*:?\s*(?:companies\s+supplying\s+)?(.+?)(?:\?|\.|$)",
         r"related\s+to\s+(.+?)(?:\?|\.|$)",
         r"awards?\s+(?:involving|covering)\s+(.+?)(?:\?|\.|$)",

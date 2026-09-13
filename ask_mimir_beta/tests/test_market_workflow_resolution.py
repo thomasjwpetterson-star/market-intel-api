@@ -315,6 +315,14 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
             "US_BOMBER_AIRCRAFT",
         )
 
+    def test_training_aircraft_market_resolves(self):
+        self.assertEqual(
+            resolve_market_segment(
+                "What has changed in the US military training-aircraft market over the last five years?"
+            ),
+            "US_MILITARY_TRAINING_AIRCRAFT",
+        )
+
     def test_submarine_market_resolves(self):
         self.assertEqual(
             resolve_market_segment("What is happening in the US submarine industrial base?"),
@@ -344,6 +352,16 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["record_type"], "award")
         self.assertEqual(result["subject"], "electronic warfare")
+
+    def test_recent_awards_to_capability_suppliers_resolves_as_award_search(self):
+        result = resolve_market_record_search(
+            "Find recent awards to companies supplying aircraft engines or engine components, "
+            "and tell me which appear most significant."
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["record_type"], "award")
+        self.assertEqual(result["subject"], "aircraft engines or engine components")
+        self.assertIn("AIRCRAFT ENGINE", result["terms"])
 
     def test_market_record_search_accepts_common_natural_phrasings(self):
         cases = (

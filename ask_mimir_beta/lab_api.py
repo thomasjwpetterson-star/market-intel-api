@@ -552,9 +552,10 @@ and before product/NIIN coverage. Build it from platform_exposure_summary.platfo
 platform_exposure rows. Use a compact table with platform/program, the source-reported capability or role,
 and FY2021-FY2026 historical materiality. For each non-zero evidence lane, show its value and its
 share_of_company_lane_pct, with prime obligations, DLA procurement and reported subcontract value labelled
-separately. Phrase every percentage with its denominator—for example, "12% of the company's FY2021-FY2026
-prime obligations" or "8% of its FY2021-FY2026 reported subcontract value". Never show a bare platform
-percentage or use one lane's percentage to describe another lane. Do not merge these lanes into one total.
+separately. Put the denominator and fiscal window once in the relevant percentage column heading, using
+share_column_label; cells in that column should contain only the compact percentage, such as "12%". If prose
+is used instead of a table, state the denominator once before the list rather than repeating it after every
+value. Never use one lane's percentage to describe another lane. Do not merge these lanes into one total.
 Do not substitute the forward view for this historical
 platform section. If non_specific_groupings contains material missile-related activity, explain it separately
 below the named-platform table rather than ranking it as a named platform. Never present values listed in
@@ -593,7 +594,9 @@ whether the linked program's funding is growing, declining or broadly level. Kee
 procurement and reported subcontract evidence distinct, and do not imply that program funding belongs to the
 company. Make that distinction through precise wording rather than adding a generic forecast or revenue
 disclaimer. For every linked program included, show the percentage beside each non-zero historical exposure
-value; do not give the dollar exposure without its share of the corresponding company-wide historical lane.
+value. In a table, put the company-wide denominator and fiscal window in the column heading once and use bare
+percentage cells; in prose, establish the denominator once for each lane. Do not give the dollar exposure
+without its share of the corresponding company-wide historical lane.
 Omit this section cleanly when no explicit company-platform-budget linkage is present.
 When the latest question names one linked program and asks how its outlook affects this company or site,
 answer that relationship immediately and limit the forward analysis to the named program. Use site-level
@@ -1122,6 +1125,16 @@ as a partial observed year. Use capability_activity, including PSC/FSC descripti
 the technologies and services with the strongest visible activity; do not reduce a broad market to
 one familiar platform or one award.
 
+When a program is discussed using both published budget or FYDP funding and observed prime obligations,
+reconcile the measures in one compact bridge rather than leaving two apparently competing figures. Label the
+budget figure as published program funding and the contract figure as observed mapped net prime obligations.
+For comparable completed fiscal years, show the arithmetic difference (program funding minus observed mapped
+obligations). Explain in one sentence that the difference is a timing-and-coverage bridge: program funding can
+be obligated in another year, carried in broader or differently labelled awards, or cover activity outside the
+mapped prime-award records. Never call the difference unspent funding. When FY2026 obligations are partial but
+the funding figure covers the full enacted year, label the difference "current reporting-cut difference" and
+state that it will narrow or change as contract reporting catches up. Do not add a methodology preamble.
+
 For a market-outlook question, distinguish procurement and sustainment activity already visible in
 Mimir from forward production, modernization and budget signals found in authoritative government
 or first-party sources. Do not infer that the largest prime recipient is automatically the most
@@ -1164,7 +1177,10 @@ such as 'the third one', use the ordering in the immediately preceding answer. H
 notices and Mimir company, award and platform records. For a recent-awards search, do not introduce
 budget requests, FYDP projections or future funding plans unless the user explicitly asks for an
 outlook. Do not expose release identifiers, source reconciliation commentary or implementation
-terminology. Keep the answer below 1,100 words.
+terminology. When the user asks which awards appear most significant, rank direct capability relevance first,
+then financial materiality and recency. This is an award search, not a request for a complete market-wide
+supplier universe: return the strongest matching awards rather than refusing because a cross-platform supplier
+index is incomplete. Keep the answer below 1,100 words.
 
 When web research materially improves program or requirement context, apply this source hierarchy:
 {WEB_SOURCE_POLICY_PROMPT}

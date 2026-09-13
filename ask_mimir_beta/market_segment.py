@@ -113,6 +113,16 @@ MARKET_SEGMENTS = {
         "platform_pattern": r"C-5|C-17|C-130|KC-46|C/KC-135|KC-135|KC-10|C-40|C-32",
         "record_pattern": r"C-5|C-17|C-130|KC-46|KC-135|C/KC-135|KC-10|AIRLIFT|AERIAL REFUEL|TANKER AIRCRAFT",
     },
+    "US_MILITARY_TRAINING_AIRCRAFT": {
+        "display_name": "US military training-aircraft market",
+        "request_pattern": (
+            r"\b(?:us|u\.?s\.?)?\s*(?:military\s+)?(?:training|trainer)[-\s]+"
+            r"aircraft(?:\s+(?:market|segment))?\b"
+        ),
+        "mapped_market_segments": ["Air"],
+        "platform_pattern": r"(?:^|\b)(?:T-1|T-6|T-7|T-38)(?:\b|$)|RED HAWK|TEXAN II|TALON",
+        "record_pattern": r"T-1|T-6|T-7|T-38|RED HAWK|TEXAN II|TALON|TRAINER AIRCRAFT|TRAINING AIRCRAFT",
+    },
     "US_NAVAL_SHIPBUILDING": {
         "display_name": "US naval shipbuilding market",
         "request_pattern": (

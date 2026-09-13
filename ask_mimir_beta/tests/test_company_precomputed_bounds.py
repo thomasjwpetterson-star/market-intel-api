@@ -307,6 +307,10 @@ class CompanyPrecomputedBoundsTests(unittest.TestCase):
             "company-wide net prime obligations in FY2021-FY2026 observed records",
         )
         self.assertEqual(
+            summary["platforms"][0]["evidence_lanes"][0]["share_column_label"],
+            "Share of company-wide net prime obligations (FY2021-FY2026 observed records)",
+        )
+        self.assertEqual(
             summary["platforms"][0]["capability_evidence"][0]["description"],
             "Radar-frequency amplifier repair",
         )
