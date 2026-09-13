@@ -44,6 +44,40 @@ def _normalized_contract_id(value: Any) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
 
 
+def _notice_item_identifiers(value: Any) -> Dict[str, List[str]]:
+    """Extract only explicitly labelled or fully formatted item identifiers."""
+    text = str(value or "")
+    nsns = {
+        "".join(match)
+        for match in re.findall(
+            r"\b(\d{4})[-\s](\d{2})[-\s](\d{3})[-\s](\d{4})\b",
+            text,
+        )
+    }
+    niins = {
+        re.sub(r"\D", "", match)
+        for match in re.findall(
+            r"\bNIIN\s*(?:NO\.?|NUMBER|#|:)?\s*(\d{2}[-\s]?\d{3}[-\s]?\d{4}|\d{9})\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    }
+    part_numbers = {
+        match.rstrip(".,;:)").upper()
+        for match in re.findall(
+            r"\b(?:PART\s+(?:NO\.?|NUMBER)|P/N|PN)\s*[:#-]?\s*"
+            r"([A-Z0-9][A-Z0-9./_-]{2,39})",
+            text,
+            flags=re.IGNORECASE,
+        )
+    }
+    return {
+        "nsns": sorted(nsns),
+        "niins": sorted(niins),
+        "part_numbers": sorted(part_numbers),
+    }
+
+
 def merge_official_announcements(
     award_records: List[Dict[str, Any]],
     announcement_records: List[Dict[str, Any]],
@@ -225,11 +259,12 @@ class MarketRecordSearchStore:
             "announcements": self.data_root / "dod_contract_announcements.parquet",
             "classifications": self.data_root / "classification_reference.parquet",
             "locations": self.data_root / "cage_locations.parquet",
+            "item_sources": self.data_root / "nsn_cage_reference.parquet",
         }
         required_paths = {
             key: path
             for key, path in self.paths.items()
-            if key not in {"recent_awards", "announcements"}
+            if key not in {"recent_awards", "announcements", "item_sources"}
         }
         missing = [str(path) for path in required_paths.values() if not path.exists()]
         if missing:
@@ -248,6 +283,130 @@ class MarketRecordSearchStore:
                 ).fetchall()
             }
         self._cache: Dict[str, Dict[str, Any]] = {}
+
+    def _add_notice_source_context(self, records: List[Dict[str, Any]]) -> None:
+        source_path = self.paths["item_sources"]
+        if not records or not source_path.exists():
+            return
+        record_identifiers: Dict[str, Dict[str, List[str]]] = {}
+        all_nsns: set[str] = set()
+        all_niins: set[str] = set()
+        all_part_numbers: set[str] = set()
+        for record in records:
+            identifiers = _notice_item_identifiers(
+                f"{record.get('title') or ''} {record.get('description') or ''}"
+            )
+            record_identifiers[str(record["record_id"])] = identifiers
+            all_nsns.update(identifiers["nsns"])
+            all_niins.update(identifiers["niins"])
+            all_part_numbers.update(identifiers["part_numbers"])
+        if not (all_nsns or all_niins or all_part_numbers):
+            return
+
+        clauses = []
+        parameters: List[Any] = [str(source_path), str(self.paths["locations"])]
+        if all_nsns:
+            clauses.append(
+                f"REGEXP_REPLACE(COALESCE(r.nsn, ''), '[^0-9]', '', 'g') IN "
+                f"({', '.join('?' for _ in all_nsns)})"
+            )
+            parameters.extend(sorted(all_nsns))
+        if all_niins:
+            clauses.append(
+                f"REGEXP_REPLACE(COALESCE(r.niin, ''), '[^0-9]', '', 'g') IN "
+                f"({', '.join('?' for _ in all_niins)})"
+            )
+            parameters.extend(sorted(all_niins))
+        if all_part_numbers:
+            clauses.append(
+                f"UPPER(TRIM(COALESCE(r.part_number, ''))) IN "
+                f"({', '.join('?' for _ in all_part_numbers)})"
+            )
+            parameters.extend(sorted(all_part_numbers))
+        rows = _rows(
+            self.connection.execute(
+                f"""
+                WITH locations AS (
+                    SELECT UPPER(TRIM(cage_code)) AS cage,
+                           MAX(city) AS city, MAX(state) AS state
+                    FROM read_parquet(?)
+                    GROUP BY 1
+                )
+                SELECT REGEXP_REPLACE(COALESCE(r.nsn, ''), '[^0-9]', '', 'g') AS nsn,
+                       REGEXP_REPLACE(COALESCE(r.niin, ''), '[^0-9]', '', 'g') AS niin,
+                       r.description, r.part_number, r.cage, r.vendor_name,
+                       l.city, l.state, r.is_active_authorized_source,
+                       CASE
+                           WHEN TRIM(COALESCE(r.rncc_codes, '')) = '3'
+                            AND TRIM(COALESCE(r.rnvc_codes, '')) = '2'
+                            AND TRIM(COALESCE(r.cage_status_codes, '')) = 'A'
+                           THEN TRUE ELSE FALSE
+                       END AS is_active_manufacturer_reference
+                FROM read_parquet(?) r
+                LEFT JOIN locations l ON UPPER(TRIM(r.cage)) = l.cage
+                WHERE ({' OR '.join(clauses)})
+                  AND (
+                      COALESCE(r.is_active_authorized_source, FALSE)
+                      OR (
+                          TRIM(COALESCE(r.rncc_codes, '')) = '3'
+                          AND TRIM(COALESCE(r.rnvc_codes, '')) = '2'
+                          AND TRIM(COALESCE(r.cage_status_codes, '')) = 'A'
+                      )
+                  )
+                ORDER BY nsn, niin, part_number, is_active_authorized_source DESC,
+                         is_active_manufacturer_reference DESC, r.vendor_name, r.cage
+                """,
+                [parameters[1], parameters[0], *parameters[2:]],
+            )
+        )
+        for record in records:
+            identifiers = record_identifiers[str(record["record_id"])]
+            matching = [
+                row for row in rows
+                if row.get("nsn") in identifiers["nsns"]
+                or row.get("niin") in identifiers["niins"]
+                or str(row.get("part_number") or "").strip().upper()
+                in identifiers["part_numbers"]
+            ]
+            if not matching:
+                continue
+            items: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+            for row in matching:
+                key = (
+                    str(row.get("nsn") or ""),
+                    str(row.get("niin") or ""),
+                    str(row.get("part_number") or ""),
+                )
+                item = items.setdefault(
+                    key,
+                    {
+                        "nsn": row.get("nsn"),
+                        "niin": row.get("niin"),
+                        "description": row.get("description"),
+                        "part_number": row.get("part_number"),
+                        "procurement_authorized_sources": [],
+                        "manufacturer_references": [],
+                    },
+                )
+                supplier = {
+                    "name": row.get("vendor_name"),
+                    "cage": row.get("cage"),
+                    "city": row.get("city"),
+                    "state": row.get("state"),
+                }
+                target = (
+                    item["procurement_authorized_sources"]
+                    if row.get("is_active_authorized_source")
+                    else item["manufacturer_references"]
+                )
+                if supplier not in target:
+                    target.append(supplier)
+                if (
+                    row.get("is_active_manufacturer_reference")
+                    and supplier not in item["manufacturer_references"]
+                ):
+                    item["manufacturer_references"].append(supplier)
+            record["incumbent_source_context"] = list(items.values())[:12]
 
     @staticmethod
     def _pattern(terms: List[str]) -> str:
@@ -303,9 +462,10 @@ class MarketRecordSearchStore:
                     LIMIT 250
                     """,
                     [pattern, pattern, str(self.paths["opportunities"]),
-                     str(self.paths["classifications"]), pattern],
+                    str(self.paths["classifications"]), pattern],
                 )
             )
+            self._add_notice_source_context(records)
             window = "Open notices with response deadlines on or after the search date"
         else:
             award_source = (

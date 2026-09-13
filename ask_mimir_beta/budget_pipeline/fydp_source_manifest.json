@@ -1,0 +1,141 @@
+{
+  "dataset_id": "dod_pb_fy2027_component_justification_books",
+  "submission_fiscal_year": 2027,
+  "manifest_version": "2.0",
+  "retrieval_date": "2026-09-13",
+  "s3_prefix": "s3://a-and-d-intel-lake-newaccount/bronze/dod_budget/pb_fy2027/component_justification_books/downloaded_2026-09-13/",
+  "scope_note": "Public component procurement justification books with program-level FY2028-FY2031 funding or quantity columns. Coverage includes the principal aircraft, missile, weapons, combat-vehicle and shipbuilding books needed by Mimir's explicitly linked programs. These are public budget projections, not enacted outyear appropriations and not the complete classified FYDP database.",
+  "sources": [
+    {
+      "source_id": "army_missile_procurement_fy2027",
+      "component": "Army",
+      "document_title": "Missile Procurement, Army FY2027 Justification Book",
+      "landing_page": "https://www.asafm.army.mil/Budget-Materials/",
+      "download_url": "https://www.asafm.army.mil/Portals/72/Documents/BudgetMaterial/2027/Discretionary%20Budget/Procurement/Missile%20Procurement%20Army.pdf",
+      "local_filename": "army_missile_procurement_fy2027.pdf",
+      "s3_key": "army/procurement/army_missile_procurement_fy2027.pdf",
+      "outyear_coverage": "FY2028-FY2031 funding and quantities where published",
+      "priority": 1
+    },
+    {
+      "source_id": "navy_weapons_procurement_fy2027",
+      "component": "Navy",
+      "document_title": "Weapons Procurement, Navy FY2027 Justification Book",
+      "landing_page": "https://www.secnav.navy.mil/fmc/Pages/fiscal-year-2027.aspx",
+      "download_url": "https://www.secnav.navy.mil/fmc/fmb/Documents/27pres/WPN_Book.pdf",
+      "local_filename": "navy_weapons_procurement_fy2027.pdf",
+      "s3_key": "navy/procurement/navy_weapons_procurement_fy2027.pdf",
+      "outyear_coverage": "FY2028-FY2031 funding and quantities where published",
+      "priority": 1
+    },
+    {
+      "source_id": "air_force_missile_procurement_fy2027",
+      "component": "Air Force",
+      "document_title": "Missile Procurement, Air Force FY2027 Justification Book",
+      "landing_page": "https://www.saffm.hq.af.mil/FM-Resources/Budget/Air-Force-Presidents-Budget-FY27/",
+      "download_url": "https://www.af.mil/Portals/1/documents/Secretariat%20of%20the%20AF/SAF-FM/Budget%20-%202027/Budget%20docs/FY27%20Air%20Force%20Aircraft%20%20Missile%20Procurement.pdf?ver=6zKfXa_IITL18fK0xVVdIA%3D%3D",
+      "local_filename": "air_force_missile_procurement_fy2027.pdf",
+      "s3_key": "air_force/procurement/air_force_missile_procurement_fy2027.pdf",
+      "outyear_coverage": "FY2028-FY2031 funding and quantities where published",
+      "priority": 1
+    },
+    {
+      "source_id": "army_aircraft_procurement_fy2027",
+      "component": "Army",
+      "document_title": "Aircraft Procurement, Army FY2027 Justification Book",
+      "landing_page": "https://www.asafm.army.mil/Budget-Materials/",
+      "download_url": "https://www.asafm.army.mil/Portals/72/Documents/BudgetMaterial/2027/Discretionary%20Budget/Procurement/Aircraft_Procurement_Army.pdf",
+      "local_filename": "army_aircraft_procurement_fy2027.pdf",
+      "s3_key": "army/procurement/army_aircraft_procurement_fy2027.pdf",
+      "outyear_coverage": "FY2028-FY2031 funding and quantities where published",
+      "priority": 1
+    },
+    {
+      "source_id": "army_wtcv_procurement_fy2027",
+      "component": "Army",
+      "document_title": "Procurement of Weapons and Tracked Combat Vehicles, Army FY2027 Justification Book",
+      "landing_page": "https://www.asafm.army.mil/Budget-Materials/",
+      "download_url": "https://www.asafm.army.mil/Portals/72/Documents/BudgetMaterial/2027/Discretionary%20Budget/Procurement/Procurement_of_Weapons_and_Tracked_Combat_Vehicles.pdf",
+      "archive_download_url": "https://web.archive.org/web/20260424210852id_/https://www.asafm.army.mil/Portals/72/Documents/BudgetMaterial/2027/Discretionary%20Budget/Procurement/Procurement_of_Weapons_and_Tracked_Combat_Vehicles.pdf",
+      "local_filename": "army_wtcv_fy2027.pdf",
+      "s3_key": "army/procurement/army_wtcv_fy2027.pdf",
+      "outyear_coverage": "FY2028-FY2031 funding and quantities where published",
+      "priority": 1
+    },
+    {
+      "source_id": "air_force_aircraft_procurement_volume_1_fy2027",
+      "component": "Air Force",
+      "document_title": "Aircraft Procurement, Air Force Volume I FY2027 Justification Book",
+      "landing_page": "https://www.saffm.hq.af.mil/FM-Resources/Budget/Air-Force-Presidents-Budget-FY27/",
+      "download_url": "https://www.af.mil/Portals/1/documents/Secretariat%20of%20the%20AF/SAF-FM/Budget%20-%202027/Budget%20docs/FY27%20Air%20Force%20Aircraft%20Procurement%20Volume%20I.pdf?ver=4kiKWbFkcqsD4dDrO7-P4g%3D%3D",
+      "local_filename": "air_force_aircraft_procurement_volume_1_fy2027.pdf",
+      "s3_key": "air_force/procurement/air_force_aircraft_procurement_volume_1_fy2027.pdf",
+      "outyear_coverage": "FY2028-FY2031 funding and quantities where published",
+      "priority": 1
+    },
+    {
+      "source_id": "air_force_aircraft_procurement_volume_2_fy2027",
+      "component": "Air Force",
+      "document_title": "Aircraft Procurement, Air Force Volume II FY2027 Justification Book",
+      "landing_page": "https://www.saffm.hq.af.mil/FM-Resources/Budget/Air-Force-Presidents-Budget-FY27/",
+      "download_url": "https://www.af.mil/Portals/1/documents/Secretariat%20of%20the%20AF/SAF-FM/Budget%20-%202027/Budget%20docs/FY27%20Air%20Force%20Aircraft%20Procurement%20Volume%20II.pdf",
+      "local_filename": "air_force_aircraft_procurement_volume_2_fy2027.pdf",
+      "s3_key": "air_force/procurement/air_force_aircraft_procurement_volume_2_fy2027.pdf",
+      "outyear_coverage": "FY2028-FY2031 funding and quantities where published",
+      "priority": 1
+    },
+    {
+      "source_id": "navy_aircraft_procurement_ba1_4_fy2027",
+      "component": "Navy",
+      "document_title": "Aircraft Procurement, Navy Budget Activities 1-4 FY2027 Justification Book",
+      "landing_page": "https://www.secnav.navy.mil/fmc/Pages/fiscal-year-2027.aspx",
+      "download_url": "https://www.secnav.navy.mil/fmc/fmb/Documents/27pres/APN_BA1-4_Book.pdf",
+      "archive_download_url": "https://web.archive.org/web/20260520014059id_/https://www.secnav.navy.mil/fmc/fmb/Documents/27pres/APN_BA1-4_Book.pdf",
+      "local_filename": "navy_aircraft_ba1_4_fy2027.pdf",
+      "s3_key": "navy/procurement/navy_aircraft_ba1_4_fy2027.pdf",
+      "outyear_coverage": "FY2028-FY2031 funding and quantities where published",
+      "priority": 1
+    },
+    {
+      "source_id": "navy_aircraft_procurement_ba6_7_fy2027",
+      "component": "Navy",
+      "document_title": "Aircraft Procurement, Navy Budget Activities 6-7 FY2027 Justification Book",
+      "landing_page": "https://www.secnav.navy.mil/fmc/Pages/fiscal-year-2027.aspx",
+      "download_url": "https://www.secnav.navy.mil/fmc/fmb/Documents/27pres/APN_BA6-7_Book.pdf",
+      "archive_download_url": "https://web.archive.org/web/20260520013414id_/https://www.secnav.navy.mil/fmc/fmb/Documents/27pres/APN_BA6-7_Book.pdf",
+      "local_filename": "navy_aircraft_ba6_7_fy2027.pdf",
+      "s3_key": "navy/procurement/navy_aircraft_ba6_7_fy2027.pdf",
+      "outyear_coverage": "FY2028-FY2031 funding and quantities where published",
+      "priority": 1
+    },
+    {
+      "source_id": "navy_shipbuilding_procurement_fy2027",
+      "component": "Navy",
+      "document_title": "Shipbuilding and Conversion, Navy FY2027 Justification Book",
+      "landing_page": "https://www.secnav.navy.mil/fmc/Pages/fiscal-year-2027.aspx",
+      "download_url": "https://www.secnav.navy.mil/fmc/fmb/Documents/27pres/SCN_Book.pdf",
+      "archive_download_url": "https://web.archive.org/web/20260422123257id_/https://www.secnav.navy.mil/fmc/fmb/Documents/27pres/SCN_Book.pdf",
+      "local_filename": "navy_shipbuilding_fy2027.pdf",
+      "s3_key": "navy/procurement/navy_shipbuilding_fy2027.pdf",
+      "outyear_coverage": "FY2028-FY2031 funding and quantities where published",
+      "priority": 1
+    },
+    {
+      "source_id": "mda_procurement_fy2027",
+      "component": "Missile Defense Agency",
+      "document_title": "Missile Defense Agency Procurement FY2027 Justification Book",
+      "landing_page": "https://www.mda.mil/news/budget_information.html",
+      "download_url": "https://comptroller.war.gov/Portals/45/Documents/defbudget/FY2027/budget_justification/pdfs/02_Procurement/PROC_MDA_VOL2B_PB_2027.pdf",
+      "local_filename": "mda_procurement_fy2027.pdf",
+      "s3_key": "mda/procurement/mda_procurement_fy2027.pdf",
+      "outyear_coverage": "FY2028-FY2031 columns; some programs intentionally omit outyear quantities or funding",
+      "priority": 1
+    }
+  ],
+  "later_phase": [
+    "Aircraft Procurement, Navy Budget Activity 5 modification book once the official host permits repeatable retrieval or a verified public archive becomes available",
+    "Component RDT&E justification books for program milestones, test schedules and development outyears",
+    "Procurement of Ammunition books for guided weapons not carried in missile procurement accounts",
+    "Congressional marks and enacted appropriations as separate scenarios rather than overwriting the President's Budget request"
+  ]
+}

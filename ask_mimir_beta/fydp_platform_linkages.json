@@ -1,5 +1,5 @@
 {
-  "definition_version": "mimir-fydp-platform-linkages-2026-09-v3",
+  "definition_version": "mimir-fydp-platform-linkages-2026-09-v4",
   "scope_note": "Explicit links between Mimir platform or system names and public FY2027 procurement budget-line titles. The broad P-1 source supplies FY2025 actual, FY2026 enacted and FY2027 request context. Published FY2028-FY2031 projections are included where structured P-40 source books are available. A link supplies program-level demand context; it does not allocate program funding to a company.",
   "linkages": [
     {
@@ -138,7 +138,7 @@
       "program_id": "E2D",
       "display_name": "E-2D Advanced Hawkeye",
       "platform_aliases": ["E-2", "E-2D", "E-2D ADVANCED HAWKEYE"],
-      "budget_title_aliases": ["E-2 SERIES", "E-2D ADV HAWKEYE"]
+      "budget_title_aliases": ["E-2 SERIES", "E-2D AHE", "E-2D ADV HAWKEYE"]
     },
     {
       "program_id": "E3",
@@ -168,13 +168,13 @@
       "program_id": "F35",
       "display_name": "F-35 Lightning II",
       "platform_aliases": ["F-35", "F-35 LIGHTNING II"],
-      "budget_title_aliases": ["F-35", "F-35 CV SERIES", "F-35 MODIFICATIONS", "F-35 STOVL SERIES"]
+      "budget_title_aliases": ["F-35", "F-35 CV SERIES", "F-35 MODIFICATIONS", "F-35 STOVL SERIES", "JOINT STRIKE FIGHTER CV", "JSF STOVL"]
     },
     {
       "program_id": "FA18",
       "display_name": "F/A-18E/F Super Hornet",
       "platform_aliases": ["F/A-18", "F/A-18E/F", "F/A-18 SUPER HORNET"],
-      "budget_title_aliases": ["F/A-18E/F (FIGHTER) HORNET"]
+      "budget_title_aliases": ["F/A-18E/F (FIGHTER) HORNET", "FA-18E/F"]
     },
     {
       "program_id": "GMLRS",

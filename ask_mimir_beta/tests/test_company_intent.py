@@ -21,6 +21,14 @@ class CompanyIntentTests(unittest.TestCase):
     def test_unrelated_initial_question_does_not_inherit_company_scope(self):
         self.assertFalse(company_follow_up_intent("Who supplies the Black Hawk?"))
 
+    def test_named_program_outlook_retains_active_company_site(self):
+        self.assertTrue(
+            company_follow_up_intent(
+                "How could the forward outlook for CH-53K King Stallion affect "
+                "SIKORSKY - Stratford, CT's existing US defense position?"
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

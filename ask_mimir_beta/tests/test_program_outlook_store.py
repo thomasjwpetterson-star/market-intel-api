@@ -97,6 +97,25 @@ class ProgramOutlookStoreTests(unittest.TestCase):
             3917137000.0,
         )
 
+    def test_default_linkages_cover_current_aircraft_book_titles(self):
+        definitions = json.loads(
+            (Path(__file__).resolve().parents[1] / "fydp_platform_linkages.json").read_text()
+        )
+        by_id = {row["program_id"]: row for row in definitions["linkages"]}
+        expected_titles = {
+            "T7A": "ADVANCED PILOT TRAINING T-7A AP",
+            "CH53K": "CH-53K (HEAVY LIFT)",
+            "C130": "C-130J",
+            "C17A": "C-17A",
+            "E2D": "E-2D AHE",
+            "F35": "JOINT STRIKE FIGHTER CV",
+            "FA18": "FA-18E/F",
+            "P8A": "P-8A POSEIDON",
+        }
+        for program_id, title in expected_titles.items():
+            with self.subTest(program_id=program_id):
+                self.assertIn(title, by_id[program_id]["budget_title_aliases"])
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

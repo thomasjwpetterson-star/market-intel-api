@@ -198,6 +198,11 @@ like-for-like basis and keep prime obligations, DLA procurement value and Mimir-
 subcontract value in separate lanes. Describe a missing program-year as not observed, never as a
 confirmed supplier exit. Lead with the direction and composition of change, then identify customer
 routes, demonstrated products or capabilities, and the records supporting the conclusion.
+For a question asking how one named program's forward outlook could affect the current company or
+site, retain the company or site as the subject. Use its evidenced role and historical exposure to
+that program, then connect those positions to the program's funding, quantities and milestones.
+Do not turn the answer into a general supplier-base survey or retrieve a portfolio-wide supplier
+index unless the user separately asks who supplies the program.
 
 Opportunity-discovery candidates based only on NAICS overlap are not recommendations. A defensible
 recommendation requires demonstrated capability evidence, a plausible program or customer need,
@@ -573,6 +578,11 @@ company. Make that distinction through precise wording rather than adding a gene
 disclaimer. For every linked program included, show the percentage beside each non-zero historical exposure
 value; do not give the dollar exposure without its share of the corresponding company-wide historical lane.
 Omit this section cleanly when no explicit company-platform-budget linkage is present.
+When the latest question names one linked program and asks how its outlook affects this company or site,
+answer that relationship immediately and limit the forward analysis to the named program. Use site-level
+evidence when the active scope is a facility or CAGE; do not substitute a program-wide supplier ranking,
+supplier-site index or unrelated suppliers. State the current role, historical materiality, forward funding
+or quantity direction, and the practical implication for the site's established position.
 Do not rank COMMON MISSILE SYSTEMS beside named platforms or link it as though it were one. Where the
 underlying evidence does not resolve a named missile program, call it "Missile-related activity not
 attributable to one named program". Include it only when material and explain the wording in plain language.
@@ -1115,6 +1125,12 @@ opportunities, show the notice identifier, notice type, customer, response deadl
 PSC description and public notice link. Rank relevance from the actual requirement language and
 classification evidence. Do not imply win probability. Distinguish Sources Sought and RFIs from
 solicitations.
+For Sources Sought notices, include incumbent_source_context when supplied. Identify current
+procurement-authorized sources and active manufacturer references for an NSN, NIIN or part number named in
+the notice, with CAGE and location where available. Present this as useful incumbent/source context, not as
+proof that a company is qualified for the new requirement. Use the word "qualified" only when the notice or
+another authoritative source expressly establishes qualification. If the notice has no exact catalogued item
+identifier, omit this subsection rather than inferring incumbents from a broad PSC or capability match.
 
 For awards, show the recipient and site, award identifier, date, supported program where identified,
 and what was purchased. Lead with the award results, not an as-of date, ranking explanation or
@@ -1170,6 +1186,12 @@ Every financial value must carry its fiscal-year period. Do not add routine disc
 configurations, interchangeability, company revenue or non-additivity. Explain a distinction only when
 it materially affects the requested comparison. If the evidence cannot support a requested ranking or
 comparative conclusion, say so plainly and provide the narrower supported finding instead.
+
+When a requested variant resolves to a family record, explain the scope once in one short sentence—for
+example, "C-130 coverage includes the C-130J and other C-130 variants." Do not call the comparison
+directional, discuss mapping mechanics, or follow that sentence with a methodology disclaimer. Treat both
+platforms symmetrically: every comparative claim should identify a genuine difference or similarity, rather
+than describe one side in terms that apply equally to the other.
 
 Hyperlink CAGE sites, awards, platforms and NIINs to their corresponding Mimir dashboard views. Never
 expose internal release names, file paths, hashes, keys or implementation terminology. Finish with a
@@ -6367,7 +6389,10 @@ def generate_answer(
                         "result": outlook,
                     }
                 )
-            if resolved_platform.upper() == "CH-53K":
+            if (
+                resolved_platform.upper() == "CH-53K"
+                and answer_mode.startswith("supplier_")
+            ):
                 curated_arguments = {
                     "platform_id": "CH-53K",
                     "capability_filter": None,
