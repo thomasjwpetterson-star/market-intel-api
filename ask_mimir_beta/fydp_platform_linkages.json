@@ -1,5 +1,5 @@
 {
-  "definition_version": "mimir-fydp-platform-linkages-2026-09-v4",
+  "definition_version": "mimir-fydp-platform-linkages-2026-09-v5",
   "scope_note": "Explicit links between Mimir platform or system names and public FY2027 procurement budget-line titles. The broad P-1 source supplies FY2025 actual, FY2026 enacted and FY2027 request context. Published FY2028-FY2031 projections are included where structured P-40 source books are available. A link supplies program-level demand context; it does not allocate program funding to a company.",
   "linkages": [
     {
@@ -99,6 +99,12 @@
       "budget_title_aliases": ["C-5"]
     },
     {
+      "program_id": "C135",
+      "display_name": "C/KC-135 family",
+      "platform_aliases": ["C/KC-135", "C-135", "KC-135", "RC-135"],
+      "budget_title_aliases": ["C-135", "RC-135"]
+    },
+    {
       "program_id": "CH47",
       "display_name": "CH-47 Chinook",
       "platform_aliases": ["CH-47", "CH-47 CHINOOK"],
@@ -145,6 +151,18 @@
       "display_name": "E-3 Sentry",
       "platform_aliases": ["E-3", "E-3 SENTRY", "E-3 AWACS"],
       "budget_title_aliases": ["E-3"]
+    },
+    {
+      "program_id": "E4B",
+      "display_name": "E-4B Nightwatch",
+      "platform_aliases": ["E-4", "E-4B", "E-4B NIGHTWATCH"],
+      "budget_title_aliases": ["E-4"]
+    },
+    {
+      "program_id": "E7A",
+      "display_name": "E-7A Wedgetail",
+      "platform_aliases": ["E-7", "E-7A", "E-7A WEDGETAIL", "WEDGETAIL"],
+      "budget_title_aliases": ["E-7"]
     },
     {
       "program_id": "F15",
@@ -267,6 +285,12 @@
       "budget_title_aliases": ["IMPROVED RECOVERY VEHICLE (M88 HERCULES)"]
     },
     {
+      "program_id": "MH139A",
+      "display_name": "MH-139A Grey Wolf",
+      "platform_aliases": ["MH-139A", "MH-139A GREY WOLF"],
+      "budget_title_aliases": ["MH-139A", "MH-139A MOD"]
+    },
+    {
       "program_id": "MQ4C",
       "display_name": "MQ-4C Triton",
       "platform_aliases": ["MQ-4C", "MQ-4C TRITON", "TRITON"],
@@ -277,6 +301,12 @@
       "display_name": "MQ-9 Reaper",
       "platform_aliases": ["MQ-9", "MQ-9 REAPER"],
       "budget_title_aliases": ["MQ-9 MODS", "MQ-9 POST PROD", "MQ-9 UNMANNED AERIAL VEHICLE"]
+    },
+    {
+      "program_id": "MQ25",
+      "display_name": "MQ-25 Stingray",
+      "platform_aliases": ["MQ-25", "MQ-25 STINGRAY"],
+      "budget_title_aliases": ["MQ-25"]
     },
     {
       "program_id": "MK48",
@@ -398,6 +428,24 @@
       }
     },
     {
+      "program_id": "T1A",
+      "display_name": "T-1A Jayhawk",
+      "platform_aliases": ["T-1", "T-1A", "T-1A JAYHAWK"],
+      "budget_title_aliases": ["T-1"]
+    },
+    {
+      "program_id": "T6",
+      "display_name": "T-6 Texan II",
+      "platform_aliases": ["T-6", "T-6 TEXAN II"],
+      "budget_title_aliases": ["T-6"]
+    },
+    {
+      "program_id": "T38",
+      "display_name": "T-38 Talon",
+      "platform_aliases": ["T-38", "T-38 TALON"],
+      "budget_title_aliases": ["T-38"]
+    },
+    {
       "program_id": "TOW",
       "display_name": "TOW",
       "platform_aliases": ["TOW"],
@@ -414,6 +462,18 @@
       "display_name": "UH-60 Black Hawk",
       "platform_aliases": ["UH-60", "UH-60 BLACK HAWK"],
       "budget_title_aliases": ["UH-60 BLACKHAWK M MODEL (MYP)"]
+    },
+    {
+      "program_id": "UH1Y_AH1Z",
+      "display_name": "UH-1Y Venom / AH-1Z Viper family",
+      "platform_aliases": ["H-1", "AH-1", "AH-1Z", "UH-1", "UH-1Y"],
+      "budget_title_aliases": ["UH-1Y/AH-1Z"]
+    },
+    {
+      "program_id": "U2",
+      "display_name": "U-2 Dragon Lady",
+      "platform_aliases": ["U-2", "U-2 DRAGON LADY"],
+      "budget_title_aliases": ["U-2 MODS"]
     },
     {
       "program_id": "V22",

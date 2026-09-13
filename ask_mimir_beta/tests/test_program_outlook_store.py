@@ -107,10 +107,20 @@ class ProgramOutlookStoreTests(unittest.TestCase):
             "CH53K": "CH-53K (HEAVY LIFT)",
             "C130": "C-130J",
             "C17A": "C-17A",
+            "C135": "C-135",
             "E2D": "E-2D AHE",
+            "E4B": "E-4",
+            "E7A": "E-7",
             "F35": "JOINT STRIKE FIGHTER CV",
             "FA18": "FA-18E/F",
+            "MH139A": "MH-139A",
+            "MQ25": "MQ-25",
             "P8A": "P-8A POSEIDON",
+            "T1A": "T-1",
+            "T38": "T-38",
+            "T6": "T-6",
+            "U2": "U-2 MODS",
+            "UH1Y_AH1Z": "UH-1Y/AH-1Z",
         }
         for program_id, title in expected_titles.items():
             with self.subTest(program_id=program_id):
