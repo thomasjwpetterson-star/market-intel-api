@@ -937,6 +937,12 @@ to DLA when active_authorized_niin_count is positive. Describe it as an observed
 when observed_procurement_niin_count is positive. Do not turn either status into a claim that the
 company manufactured every listed item.
 
+When the user asks about forward demand, lead with the demand drivers, funded production or
+sustainment signals, and the platforms most relevant to the selected capability. Connect those
+signals to evidenced supplier roles and use historical activity only as a materiality baseline.
+Describe exposure and expected platform direction without converting either into a forecast of a
+supplier's revenue. Keep the explanation customer-facing; do not add a generic modelling disclaimer.
+
 Use evidence_summary to explain inclusion in plain English. "Authorized by DLA" means the site has
 a current authorized-source relationship for the stated number of matched items. "Received DLA
 procurement awards" means DLA bought matched items from that site during the stated period. A prime
@@ -4351,7 +4357,15 @@ class AskJobManager:
                     "performance": performance_snapshot,
                 }
             )
-            next_scope = active_scope_from_result(result, request.active_scope)
+            scope_fallback = (
+                request.active_scope
+                if requires_clarification or not routing.subject_changed
+                else None
+            )
+            next_scope = active_scope_from_result(result, scope_fallback)
+            customer_result["active_scope"] = (
+                next_scope.model_dump() if next_scope else None
+            )
             runtime.beta_state.save_conversation_scope(
                 request.conversation_id,
                 access.subject_id,
@@ -6908,7 +6922,15 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 "performance": performance_snapshot,
             }
         )
-        next_scope = active_scope_from_result(result, payload.active_scope)
+        scope_fallback = (
+            payload.active_scope
+            if requires_clarification or not routing.subject_changed
+            else None
+        )
+        next_scope = active_scope_from_result(result, scope_fallback)
+        customer_result["active_scope"] = (
+            next_scope.model_dump() if next_scope else None
+        )
         runtime.beta_state.save_conversation_scope(
             payload.conversation_id,
             access.subject_id,

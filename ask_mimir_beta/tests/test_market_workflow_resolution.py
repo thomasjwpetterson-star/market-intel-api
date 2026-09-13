@@ -100,6 +100,22 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
             with self.subTest(question=question):
                 self.assertEqual(resolve_capability(question), expected)
 
+    def test_aerospace_valve_search_and_clarification_resolve_as_capabilities(self):
+        cases = {
+            "I'm looking for US companies that manufacture aerospace valves for military applications. Who should I investigate?": "capability:aerospace valves",
+            "Aircraft fuel, hydraulic, or pneumatic valves - LRU manufacturers": "capability:aircraft fuel%2C hydraulic%2C or pneumatic valves",
+        }
+        for question, expected in cases.items():
+            with self.subTest(question=question):
+                self.assertEqual(resolve_capability(question), expected)
+
+    def test_capability_forward_demand_follow_up_is_retained(self):
+        self.assertTrue(
+            capability_market_follow_up_intent(
+                "What does the forward demand picture look like for aerospace valves?"
+            )
+        )
+
     def test_aerospace_qualifier_scopes_fuel_without_becoming_a_search_term(self):
         self.assertEqual(_capability_terms("aerospace fuel systems"), ["fuel"])
         self.assertEqual(

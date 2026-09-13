@@ -322,6 +322,14 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             )
         )
 
+    def test_aerospace_valve_supplier_discovery_is_detected(self):
+        for question in (
+            "I'm looking for US companies that manufacture aerospace valves for military applications. Who should I investigate?",
+            "Aircraft fuel, hydraulic, or pneumatic valves - LRU manufacturers",
+        ):
+            with self.subTest(question=question):
+                self.assertTrue(is_open_capability_discovery_request(question))
+
     def test_platform_supplier_commands_outrank_company_word_search(self):
         for question in (
             "Show me F-16 suppliers",

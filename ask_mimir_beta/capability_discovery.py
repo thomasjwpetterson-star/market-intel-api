@@ -80,6 +80,8 @@ CAPABILITY_QUERY_PATTERNS = (
     r"who\s+(?:makes|manufactures)\s+(.+?)(?:\?|$)",
     r"(?:who\s+makes|find|identify|show)\s+(?:us\s+)?(?:manufacturers|suppliers|companies|firms)?\s*(?:that\s+)?(?:supply|supplying|provide|providing|make|manufacture|manufacturing|of)\s+(.+?)(?:\?|$)",
     r"(?:find|identify|show)\s+(?:us\s+)?(?:manufacturers|suppliers|companies|firms)\s+(?:with|capable\s+of\s+(?:making|manufacturing|producing))\s+(.+?)(?:\?|$)",
+    r"(?:i(?:'m| am)\s+)?looking\s+for\s+(?:u\.?s\.?\s+)?(?:companies|manufacturers|suppliers)\s+(?:that\s+)?(?:manufacture|make|supply|provide)\s+(.+?)(?:\s+for\s+(?:military|defen[cs]e)|[?.]|$)",
+    r"(.+?)\s*[-–—:]\s*(?:lru\s+)?manufacturers(?:[?.]|$)",
 )
 CAPABILITY_STOPWORDS = {
     "and", "or", "the", "a", "an", "for", "to", "of", "into", "with",
@@ -230,6 +232,15 @@ def capability_market_follow_up_intent(text: str) -> bool:
             "evidence supporting",
             "directly evidenced",
             "which are inferred",
+            "forward demand",
+            "future demand",
+            "demand picture",
+            "funding outlook",
+            "market outlook",
+            "growth outlook",
+            "what lies ahead",
+            "material contracts",
+            "procurement activity",
         )
     )
 

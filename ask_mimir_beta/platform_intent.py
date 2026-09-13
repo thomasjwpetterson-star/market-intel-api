@@ -364,6 +364,18 @@ def is_open_capability_discovery_request(text: str) -> bool:
             "companies supplying",
             "manufacturers with",
             "suppliers with",
+            "lru manufacturers",
+            "who should i investigate",
+        )
+    ) or bool(
+        re.search(
+            r"\b(?:looking\s+for|find|identify|show)\b.*\b(?:companies|manufacturers|suppliers)\b.*\b(?:manufacture|make|supply|provide)",
+            lowered,
+        )
+    ) or bool(
+        re.search(
+            r"\b(?:companies|manufacturers|suppliers)\s+(?:that\s+)?(?:manufacture|make|supply|provide)\b",
+            lowered,
         )
     )
     has_capability = any(
@@ -385,6 +397,13 @@ def is_open_capability_discovery_request(text: str) -> bool:
             "brake",
             "brakes",
             "braking",
+            "valve",
+            "valves",
+            "hydraulic",
+            "pneumatic",
+            "fuel",
+            "aerospace",
+            "aircraft",
         )
     )
     return has_discovery and has_capability
