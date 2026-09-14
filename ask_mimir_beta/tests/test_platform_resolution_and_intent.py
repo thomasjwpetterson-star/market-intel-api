@@ -58,6 +58,7 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             "AN/SLQ-25 TORPEDO COUNTERMEASURE",
             "AMERICA CLASS LHA",
             "M109A7 HOWITZER",
+            "LCAC",
         ]
 
     def test_patriot_resolves_to_the_umbrella_system(self):
@@ -95,6 +96,26 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             self.store.search("M109A7 Paladin")["resolved_platform_id"],
             "M109A7 HOWITZER",
         )
+
+    def test_ship_to_shore_connector_aliases_resolve_to_lcac(self):
+        for name in (
+            "Ship-to-Shore Connector",
+            "Ship-to-Shore Connector (LCAC 100)",
+            "LCAC 100 class",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    self.store.search(name)["resolved_platform_id"],
+                    "LCAC",
+                )
+
+    def test_lcac_uses_reviewed_exact_names_for_unmapped_award_records(self):
+        condition, parameters = self.store._network_record_condition("LCAC", "n")
+
+        self.assertIn("REGEXP_MATCHES", condition)
+        self.assertEqual(parameters[0], ["LCAC"])
+        self.assertIn("SHIP[- ]TO[- ]SHORE CONNECTOR", parameters[1])
+        self.assertIn("10[0-9]", parameters[1])
 
     def test_cross_market_company_discovery_is_recognized(self):
         self.assertTrue(
@@ -456,6 +477,43 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
                     for row in observations
                 ),
                 113509621.0,
+            )
+
+    def test_lcac_supplier_years_include_exact_named_unmapped_awards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            network = Path(directory) / "network.parquet"
+            connection = duckdb.connect()
+            connection.execute(
+                """
+                COPY (
+                    SELECT * FROM (VALUES
+                        ('1BRA6', 'UNMAPPED', 2024, 100.0, 100.0, 'r1', 'a1',
+                         'THREE FUTURE LCAC 100 CLASS CRAFT', 'MATERIAL PURCHASE'),
+                        ('1BRA6', 'UNMAPPED', 2025, 50.0, 50.0, 'r2', 'a2',
+                         'DETAIL DESIGN AND CONSTRUCTION OF SHIP TO SHORE CONNECTOR', 'SYSTEMS'),
+                        ('1BRA6', 'UNMAPPED', 2025, 900.0, 900.0, 'r3', 'a3',
+                         'UNRELATED NAVAL PROGRAM', 'MATERIAL PURCHASE')
+                    ) AS t(sub_cage, platform_family, year, subaward_value,
+                           subaward_value_raw, source_dedup_key, contract_id,
+                           prime_award_description, description)
+                ) TO ? (FORMAT PARQUET)
+                """,
+                [str(network)],
+            )
+            store = object.__new__(PlatformContextStore)
+            store.connection = connection
+            store.paths = {"network": network}
+            suppliers = [{"cage": "1BRA6"}]
+
+            store._attach_supplier_annual_activity("LCAC", suppliers)
+
+            observations = suppliers[0]["annual_reported_subcontract_activity"]
+            self.assertEqual(
+                sum(
+                    row["mimir_modelled_reported_subcontract_value_usd"] or 0
+                    for row in observations
+                ),
+                150.0,
             )
 
     def test_singular_platform_value_question_retains_company_scope(self):

@@ -19,6 +19,12 @@ class CompanyPrecomputedBoundsTests(unittest.TestCase):
             ("KEARFOTT",),
         )
 
+    def test_marotta_controls_does_not_match_unrelated_marotta_entities(self):
+        self.assertEqual(
+            _reviewed_company_aliases("Marotta Controls"),
+            ("MAROTTA CONTROLS",),
+        )
+
     def test_evidence_rows_are_bounded_without_changing_aggregates(self):
         rows = [{"id": index, "contract_ids": [str(index)] * 30} for index in range(6)]
         context = {

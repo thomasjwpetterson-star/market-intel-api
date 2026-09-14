@@ -45,6 +45,7 @@ PLATFORM_DISPLAY_NAMES = {
     "TOMAHAWK": "Tomahawk missile family",
     "PATRIOT AIR DEFENSE SYSTEM": "Patriot air defense system",
     "M109A7 HOWITZER": "M109A7 Paladin",
+    "LCAC": "Ship-to-Shore Connector (LCAC 100 class)",
 }
 
 PLATFORM_ALIASES = {
@@ -123,6 +124,21 @@ PLATFORM_ALIASES = {
     "SURFACE SHIP TORPEDO DEFENSE": "AN/SLQ-25 TORPEDO COUNTERMEASURE",
     "SURFACE SHIP TORPEDO DEFENCE": "AN/SLQ-25 TORPEDO COUNTERMEASURE",
     "SSTD": "AN/SLQ-25 TORPEDO COUNTERMEASURE",
+    "SHIP TO SHORE CONNECTOR": "LCAC",
+    "SHIP TO SHORE CONNECTOR LCAC 100": "LCAC",
+    "LCAC 100": "LCAC",
+    "LCAC 100 CLASS": "LCAC",
+}
+
+# These are deliberately narrow, reviewed program names that can identify the
+# relevant prime award even when the upstream platform-family field is blank.
+# They are not general fuzzy-description matches.
+REVIEWED_EXACT_RECORD_PATTERNS = {
+    "LCAC": (
+        r"SHIP[- ]TO[- ]SHORE CONNECTOR|"
+        r"(^|[^A-Z0-9])LCAC[ /-]*(?:SSC|10[0-9]|11[0-9]|100[ ]+CLASS)"
+        r"([^A-Z0-9]|$)|(^|[^A-Z0-9])SSC[ /-]*LCAC([^A-Z0-9]|$)"
+    ),
 }
 
 PLATFORM_FOCUSES = {
@@ -427,7 +443,11 @@ class PlatformContextStore:
         if resolved in self._cache:
             return self._cache[resolved]
         precomputed_path = self._precomputed_paths.get(resolved.upper())
-        if precomputed_path is not None and precomputed_path.exists():
+        if (
+            resolved.upper() not in REVIEWED_EXACT_RECORD_PATTERNS
+            and precomputed_path is not None
+            and precomputed_path.exists()
+        ):
             context = json.loads(precomputed_path.read_text())
             if context.get("scope", {}).get("platform_id") == resolved:
                 self._refresh_precomputed_source_depth(context)
@@ -551,6 +571,9 @@ class PlatformContextStore:
                 "prime_awards_loaded": len(top_awards),
                 "open_or_loaded_opportunities": len(opportunities),
                 "component_proof_status": "CURATED_WHEN_AVAILABLE_OTHERWISE_REPORTED_DESCRIPTION_OR_ITEM_REFERENCE",
+                "reviewed_exact_named_award_records_included": (
+                    resolved.upper() in REVIEWED_EXACT_RECORD_PATTERNS
+                ),
                 "reported_supplier_lane_is_sparse": reported_supplier_lane_is_sparse,
                 "reported_supplier_coverage_note": (
                     "Reported first-tier coverage is partial for this platform. Use the reported "
@@ -568,6 +591,16 @@ class PlatformContextStore:
                 "manufacturer_reference_rule": "An active manufacturer reference requires an item-identifying manufacturer design-control reference (RNCC 3 / RNVC 2) linked to an active CAGE. It is manufacturer evidence, not by itself current procurement authorization.",
                 "component_rule": "Reported descriptions support bounded capability language. Exact component claims require a platform-specific government or first-party source.",
                 "opportunity_rule": "Opportunity matches are research leads based on the platform or program name in the loaded notice text.",
+                **(
+                    {
+                        "reviewed_named_award_rule": (
+                            "Exact LCAC or Ship-to-Shore Connector names in federal award "
+                            "descriptions are included with the LCAC platform record."
+                        )
+                    }
+                    if resolved.upper() in REVIEWED_EXACT_RECORD_PATTERNS
+                    else {}
+                ),
             },
             "evidence_index": self._source_index(resolved, top_awards, opportunities),
             "evidence_fingerprint": hashlib.sha256(
@@ -705,6 +738,42 @@ class PlatformContextStore:
             f"({alias}.platform_family IN (SELECT UNNEST(?)) OR "
             f"LIST_HAS_ANY(STR_SPLIT(COALESCE({alias}.platform_families, ''), ' | '), ?))"
         )
+
+    def _transaction_record_condition(
+        self, platform: str, alias: str = "t"
+    ) -> tuple[str, List[Any]]:
+        members = self._platform_members(platform)
+        condition = self._multi_platform_condition(alias)
+        parameters: List[Any] = [members, members]
+        pattern = REVIEWED_EXACT_RECORD_PATTERNS.get(str(platform).upper())
+        if pattern:
+            description = (
+                f"UPPER(COALESCE({alias}.base_award_description, '') || ' ' || "
+                f"COALESCE({alias}.action_description, '') || ' ' || "
+                f"COALESCE({alias}.description, ''))"
+            )
+            condition = (
+                f"({condition} OR ({alias}.source_system = 'USA_SPENDING' "
+                f"AND REGEXP_MATCHES({description}, ?)))"
+            )
+            parameters.append(pattern)
+        return condition, parameters
+
+    def _network_record_condition(
+        self, platform: str, alias: str = "n"
+    ) -> tuple[str, List[Any]]:
+        members = self._platform_members(platform)
+        condition = f"{alias}.platform_family IN (SELECT UNNEST(?))"
+        parameters: List[Any] = [members]
+        pattern = REVIEWED_EXACT_RECORD_PATTERNS.get(str(platform).upper())
+        if pattern:
+            description = (
+                f"UPPER(COALESCE({alias}.prime_award_description, '') || ' ' || "
+                f"COALESCE({alias}.description, ''))"
+            )
+            condition = f"({condition} OR REGEXP_MATCHES({description}, ?))"
+            parameters.append(pattern)
+        return condition, parameters
 
     def get_export_context(
         self, platform_id: str, limit: int = EVIDENCE_EXPORT_ROW_LIMIT
@@ -990,8 +1059,9 @@ class PlatformContextStore:
         }
 
     def _annual_activity(self, platform: str) -> Dict[str, Any]:
-        condition = self._multi_platform_condition("t")
-        members = self._platform_members(platform)
+        condition, condition_parameters = self._transaction_record_condition(
+            platform, "t"
+        )
         rows = _rows(
             self.connection.execute(
                 f"""
@@ -1016,7 +1086,7 @@ class PlatformContextStore:
                 GROUP BY 1, 2
                 ORDER BY 1, 2
                 """,
-                [str(self.paths["transactions"]), members, members],
+                [str(self.paths["transactions"]), *condition_parameters],
             )
         )
         return {
@@ -1030,10 +1100,12 @@ class PlatformContextStore:
         }
 
     def _direct_award_recipients(self, platform: str, limit: int = 100) -> List[Dict[str, Any]]:
-        members = self._platform_members(platform)
+        condition, condition_parameters = self._transaction_record_condition(
+            platform, "t"
+        )
         return _rows(
             self.connection.execute(
-                """
+                f"""
                 WITH locations AS (
                     SELECT UPPER(TRIM(cage_code)) AS cage, MAX(vendor_name) AS location_name,
                            MAX(city) AS city, MAX(state) AS state, MAX(location_quality) AS location_quality
@@ -1060,22 +1132,29 @@ class PlatformContextStore:
                 LEFT JOIN locations l ON UPPER(TRIM(t.vendor_cage)) = l.cage
                 WHERE t.source_system = 'USA_SPENDING'
                   AND t.year BETWEEN 2021 AND 2026
-                  AND t.platform_family IN (SELECT UNNEST(?))
+                  AND {condition}
                 GROUP BY t.vendor_cage
                 ORDER BY positive_prime_obligations_usd DESC,
                          net_prime_obligations_usd DESC,
                          t.vendor_cage
                 LIMIT ?
                 """,
-                [str(self.paths["locations"]), str(self.paths["transactions"]), members, limit],
+                [
+                    str(self.paths["locations"]),
+                    str(self.paths["transactions"]),
+                    *condition_parameters,
+                    limit,
+                ],
             )
         )
 
     def _reported_supplier_sites(self, platform: str, limit: int = 250) -> List[Dict[str, Any]]:
-        members = self._platform_members(platform)
+        condition, condition_parameters = self._network_record_condition(
+            platform, "n"
+        )
         return _rows(
             self.connection.execute(
-                """
+                f"""
                 WITH locations AS (
                     SELECT UPPER(TRIM(cage_code)) AS cage, MAX(vendor_name) AS location_name,
                            MAX(city) AS city, MAX(state) AS state, MAX(location_quality) AS location_quality
@@ -1127,7 +1206,7 @@ class PlatformContextStore:
                 FROM read_parquet(?) n
                 LEFT JOIN locations l ON UPPER(TRIM(n.sub_cage)) = l.cage
                 LEFT JOIN supplier_platforms sp ON UPPER(TRIM(n.sub_cage)) = sp.cage
-                WHERE n.platform_family IN (SELECT UNNEST(?))
+                WHERE {condition}
                   AND n.year BETWEEN 2021 AND 2026
                   AND n.sub_cage IS NOT NULL
                   AND UPPER(TRIM(n.sub_cage)) NOT IN ('','UNKNOWN','UNKNO')
@@ -1140,7 +1219,7 @@ class PlatformContextStore:
                     str(self.paths["locations"]),
                     str(self.paths["network"]),
                     str(self.paths["network"]),
-                    members,
+                    *condition_parameters,
                     limit,
                 ],
             )
@@ -1159,10 +1238,12 @@ class PlatformContextStore:
         })
         if not cages:
             return
-        members = self._platform_members(platform)
+        condition, condition_parameters = self._network_record_condition(
+            platform, "n"
+        )
         rows = _rows(
             self.connection.execute(
-                """
+                f"""
                 SELECT
                     UPPER(TRIM(sub_cage)) AS cage,
                     year AS fiscal_year,
@@ -1171,14 +1252,14 @@ class PlatformContextStore:
                     SUM(COALESCE(subaward_value_raw, 0)) AS source_reported_value_usd,
                     COUNT(DISTINCT source_dedup_key) AS selected_report_count,
                     COUNT(DISTINCT contract_id) AS prime_award_count
-                FROM read_parquet(?)
-                WHERE platform_family IN (SELECT UNNEST(?))
-                  AND year BETWEEN 2021 AND 2026
-                  AND UPPER(TRIM(sub_cage)) IN (SELECT UNNEST(?))
+                FROM read_parquet(?) n
+                WHERE {condition}
+                  AND n.year BETWEEN 2021 AND 2026
+                  AND UPPER(TRIM(n.sub_cage)) IN (SELECT UNNEST(?))
                 GROUP BY 1, 2
                 ORDER BY 1, 2
                 """,
-                [str(self.paths["network"]), members, cages],
+                [str(self.paths["network"]), *condition_parameters, cages],
             )
         )
         by_cage: Dict[str, Dict[int, Dict[str, Any]]] = {}
@@ -1200,10 +1281,12 @@ class PlatformContextStore:
             ]
 
     def _component_categories(self, platform: str, limit: int = 100) -> List[Dict[str, Any]]:
-        members = self._platform_members(platform)
+        condition, condition_parameters = self._network_record_condition(
+            platform, "n"
+        )
         return _rows(
             self.connection.execute(
-                """
+                f"""
                 SELECT
                     description AS reported_description,
                     SUM(COALESCE(subaward_value,0)) AS mimir_modelled_reported_subcontract_value_usd,
@@ -1212,16 +1295,16 @@ class PlatformContextStore:
                     LIST_SLICE(LIST_SORT(LIST_DISTINCT(LIST(sub_name) FILTER (WHERE sub_name IS NOT NULL))),1,8) AS suppliers,
                     LIST_SLICE(LIST_SORT(LIST_DISTINCT(LIST(contract_id) FILTER (WHERE contract_id IS NOT NULL))),1,6) AS sample_prime_contract_ids,
                     COUNT(*) OVER () AS total_available
-                FROM read_parquet(?)
-                WHERE platform_family IN (SELECT UNNEST(?)) AND year BETWEEN 2021 AND 2026
-                  AND description IS NOT NULL AND TRIM(description) <> ''
-                GROUP BY description
+                FROM read_parquet(?) n
+                WHERE {condition} AND n.year BETWEEN 2021 AND 2026
+                  AND n.description IS NOT NULL AND TRIM(n.description) <> ''
+                GROUP BY n.description
                 HAVING SUM(COALESCE(subaward_value,0)) <> 0
                 ORDER BY ABS(mimir_modelled_reported_subcontract_value_usd) DESC,
                          description
                 LIMIT ?
                 """,
-                [str(self.paths["network"]), members, limit],
+                [str(self.paths["network"]), *condition_parameters, limit],
             )
         )
 
@@ -1441,10 +1524,12 @@ class PlatformContextStore:
         }
 
     def _top_awards(self, platform: str, limit: int = 100) -> List[Dict[str, Any]]:
-        members = self._platform_members(platform)
+        condition, condition_parameters = self._transaction_record_condition(
+            platform, "t"
+        )
         return _rows(
             self.connection.execute(
-                """
+                f"""
                 SELECT contract_id, vendor_name AS recipient_name, vendor_cage AS recipient_cage,
                        base_award_description, SUM(spend_amount) AS net_prime_obligations_usd,
                        SUM(CASE WHEN spend_amount > 0 THEN spend_amount ELSE 0 END)
@@ -1454,9 +1539,9 @@ class PlatformContextStore:
                        MAX(place_of_performance_city) AS place_of_performance_city,
                        MAX(place_of_performance_state) AS place_of_performance_state,
                        COUNT(*) OVER () AS total_available
-                FROM read_parquet(?)
+                FROM read_parquet(?) t
                 WHERE source_system='USA_SPENDING' AND year BETWEEN 2021 AND 2026
-                  AND platform_family IN (SELECT UNNEST(?))
+                  AND {condition}
                 GROUP BY contract_id,vendor_name,vendor_cage,base_award_description
                 ORDER BY positive_prime_obligations_usd DESC,
                          net_prime_obligations_usd DESC,
@@ -1464,7 +1549,11 @@ class PlatformContextStore:
                          recipient_cage
                 LIMIT ?
                 """,
-                [str(self.paths["transactions"]), members, limit],
+                [
+                    str(self.paths["transactions"]),
+                    *condition_parameters,
+                    limit,
+                ],
             )
         )
 
@@ -1492,15 +1581,17 @@ class PlatformContextStore:
             totals["prime_deobligations_usd"] += float(row.get("prime_deobligations_usd") or 0)
             totals["attributed_dla_procurement_value_usd"] += float(row.get("attributed_dla_procurement_value_usd") or 0)
             totals["shared_use_niin_exposure_usd"] += float(row.get("shared_use_niin_exposure_usd") or 0)
-        members = self._platform_members(platform)
+        condition, condition_parameters = self._network_record_condition(
+            platform, "n"
+        )
         subcontract_total = self.connection.execute(
-            """
+            f"""
             SELECT SUM(COALESCE(n.subaward_value, 0))
             FROM read_parquet(?) n
             WHERE n.year BETWEEN 2021 AND 2026
-              AND n.platform_family IN (SELECT UNNEST(?))
+              AND {condition}
             """,
-            [str(self.paths["network"]), members],
+            [str(self.paths["network"]), *condition_parameters],
         ).fetchone()[0]
         totals["mimir_modelled_reported_subcontract_value_usd"] = float(subcontract_total or 0)
         return totals

@@ -604,6 +604,10 @@ value. In a table, put the company-wide denominator and fiscal window in the col
 percentage cells; in prose, establish the denominator once for each lane. Do not give the dollar exposure
 without its share of the corresponding company-wide historical lane.
 Omit this section cleanly when no explicit company-platform-budget linkage is present.
+Treat an explicit company-profile question as a fresh company-wide subject even when it follows a platform
+answer. Do not add a platform-specific finding, exclusion or non-relationship section unless the latest
+question itself names that platform or asks about the relationship. A prior platform question is context,
+not the scope of the new company profile.
 When the latest question names one linked program and asks how its outlook affects this company or site,
 answer that relationship immediately and limit the forward analysis to the named program. Use site-level
 evidence when the active scope is a facility or CAGE; do not substitute a program-wide supplier ranking,
@@ -5001,6 +5005,21 @@ def finalize_response(
     return final_response, complete_response_text(final_response)
 
 
+def answer_messages_for_request(
+    request: AskRequest,
+    routing: RoutingDecision | None,
+    selected_workflow: str,
+) -> List[ChatMessage]:
+    """Keep an explicit new company subject independent of earlier chat turns."""
+    explicit_company_subject = bool(
+        selected_workflow == "company_site_intelligence"
+        and explicit_company_name_query(request.messages)
+    )
+    if (routing and routing.subject_changed) or explicit_company_subject:
+        return request.messages[-1:]
+    return request.messages
+
+
 def generate_answer(
     request: AskRequest,
     progress: Callable[[str, str, int], None] | None = None,
@@ -5354,10 +5373,10 @@ def generate_answer(
                 "only after approving transmission of selected metric evidence."
             ),
         )
-    answer_messages = (
-        request.messages[-1:]
-        if routing and routing.subject_changed
-        else request.messages
+    answer_messages = answer_messages_for_request(
+        request,
+        routing,
+        selected_workflow,
     )
     input_items: List[Any] = [
         {"role": message.role, "content": message.content} for message in answer_messages

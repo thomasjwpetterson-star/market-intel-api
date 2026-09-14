@@ -25,7 +25,7 @@ FYDP_PLATFORM_LINKAGE_VERSION = json.loads(
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
-DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v13"
+DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v14"
 
 CANONICAL_CONSOLIDATED_PARENT_NAMES = {
     "CURTISS WRIGHT": "CURTISS-WRIGHT CORPORATION",
@@ -93,6 +93,9 @@ REVIEWED_COMPANY_ALIASES = {
     # Navigation operation in Pine Brook and Motion Systems operation in Black
     # Mountain. Both current CAGE-directory legal names normalize to KEARFOTT.
     "KEARFOTT": ("KEARFOTT",),
+    # Keep MAROTTA CONTROLS sites together without sweeping in unrelated
+    # entities that merely share the Marotta surname.
+    "MAROTTA CONTROLS": ("MAROTTA CONTROLS",),
 }
 
 
