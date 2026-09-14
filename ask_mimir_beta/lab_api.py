@@ -4087,6 +4087,24 @@ def finalize_customer_result(
                 "https://www.mimiradvisors.org/dashboard?upgrade=professional",
             ),
         }
+    elif artifacts.get("evidence_pack") and any(
+        key in artifacts
+        for key in (
+            "platform_dossier",
+            "company_site_dossier",
+            "company_site_context",
+        )
+    ):
+        response_id = str(safe_result.get("response_id") or "").strip()
+        if response_id and not response_requires_clarification(safe_result):
+            artifacts["evidence_pack"] = {
+                **artifacts["evidence_pack"],
+                "download_url": (
+                    "/api/evidence/answer.zip"
+                    f"?request_id={quote(request_id, safe='')}"
+                    f"&response_id={quote(response_id, safe='')}"
+                ),
+            }
     safe_result["answer_artifacts"] = artifacts
     safe_result["request_id"] = request_id
     safe_result["release_binding_id"] = runtime.release_guard.release_binding_id
@@ -4695,7 +4713,36 @@ class AskJobManager:
                 runtime.beta_state.used_this_month(access.subject_id),
             )
             if result.get("result"):
-                result["result"] = {**result["result"], "access": result["access"]}
+                delivered = {**result["result"], "access": result["access"]}
+                artifacts = delivered.get("answer_artifacts") or {}
+                evidence_pack = artifacts.get("evidence_pack") or {}
+                if (
+                    access.policy.can_download_evidence
+                    and evidence_pack.get("download_url")
+                    and any(
+                        key in artifacts
+                        for key in (
+                            "platform_dossier",
+                            "company_site_dossier",
+                            "company_site_context",
+                        )
+                    )
+                    and delivered.get("response_id")
+                    and not response_requires_clarification(delivered)
+                ):
+                    artifacts = {
+                        **artifacts,
+                        "evidence_pack": {
+                            **evidence_pack,
+                            "download_url": (
+                                "/api/evidence/answer.zip"
+                                f"?request_id={quote(request_id, safe='')}"
+                                f"&response_id={quote(str(delivered['response_id']), safe='')}"
+                            ),
+                        },
+                    }
+                    delivered["answer_artifacts"] = artifacts
+                result["result"] = delivered
             return result
 
     @staticmethod
@@ -4925,6 +4972,70 @@ def answer_report_export_download(
 ) -> StreamingResponse:
     """Serve a normal browser navigation so downloads are not synthetic clicks."""
     return _answer_report_export(request_id, response_id, request)
+
+
+@app.get("/api/evidence/answer.zip")
+def answer_evidence_export_download(
+    request: Request,
+    request_id: str,
+    response_id: str,
+) -> StreamingResponse:
+    """Download the evidence already assembled for an owned completed answer."""
+    access = require_evidence_download(request)
+    try:
+        job = job_manager.get(request_id, access)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="This saved answer is no longer available for download.",
+        ) from exc
+    result = job.get("result") or {}
+    if (
+        job.get("status") != "completed"
+        or result.get("response_id") != response_id
+        or response_requires_clarification(result)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Evidence downloads are available for completed research answers, "
+                "not clarification questions."
+            ),
+        )
+
+    artifacts = result.get("answer_artifacts") or {}
+    platform = artifacts.get("platform_dossier")
+    company = artifacts.get("company_site_dossier") or artifacts.get(
+        "company_site_context"
+    )
+    if platform:
+        outlook = artifacts.get("program_outlook") or platform.get(
+            "structured_program_outlook"
+        )
+        payload = build_platform_context_zip(platform, outlook=outlook)
+        filename = platform_context_filename(platform)
+    elif company:
+        scope = company.get("scope") or {}
+        scope_type = str(scope.get("scope_type") or "company_site")
+        scope_id = str(scope.get("scope_id") or "company")
+        payload = build_company_evidence_zip(
+            scope_type,
+            scope_id,
+            runtime.company_contexts.context_dir,
+            context=company,
+        )
+        filename = evidence_pack_filename(scope_type, scope_id)
+    else:
+        raise HTTPException(
+            status_code=404,
+            detail="A downloadable evidence pack is not available for this answer.",
+        )
+
+    return StreamingResponse(
+        BytesIO(payload),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/evidence/platform-supply-chain/{platform_id}.zip")

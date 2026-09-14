@@ -27,6 +27,66 @@ class StopAtEvidence(Exception):
 
 
 class ExecutionBoundaryTests(unittest.TestCase):
+    def test_completed_answer_export_uses_saved_platform_evidence(self):
+        import io, zipfile
+
+        app = FastAPI()
+        app.get('/api/evidence/answer.zip')(lab.answer_evidence_export_download)
+        pack = {
+            'scope': {'platform_id': 'M109 PALADIN', 'display_name': 'M109A7 Paladin'},
+            'annual_activity': {'records': []},
+            'direct_award_recipients': [],
+            'reported_supplier_sites': [],
+            'reported_component_categories': [],
+            'item_and_component_evidence': {
+                'top_items': [], 'top_item_supplier_sites': [],
+                'authorized_source_depth': {},
+            },
+            'top_prime_awards': [],
+            'current_opportunities': [],
+            'evidence_index': [],
+        }
+        job = {
+            'status': 'completed',
+            'result': {
+                'response_id': 'resp-owned',
+                'answer': 'Completed research answer.',
+                'answer_artifacts': {'platform_dossier': pack},
+            },
+        }
+        with patch.object(
+            lab, 'require_evidence_download', return_value=AccessContext('alice', 'enterprise', True)
+        ), patch.object(lab, 'job_manager', SimpleNamespace(get=Mock(return_value=job)), create=True):
+            response = TestClient(app).get(
+                '/api/evidence/answer.zip',
+                params={'request_id': 'request-owned', 'response_id': 'resp-owned'},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers['content-type'], 'application/zip')
+        self.assertIn('mimir-platform-m109-paladin-evidence.zip', response.headers['content-disposition'])
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            self.assertIn('README.txt', archive.namelist())
+
+    def test_completed_answer_export_rejects_response_mismatch(self):
+        app = FastAPI()
+        app.get('/api/evidence/answer.zip')(lab.answer_evidence_export_download)
+        job = {
+            'status': 'completed',
+            'result': {
+                'response_id': 'resp-owned',
+                'answer': 'Completed research answer.',
+                'answer_artifacts': {},
+            },
+        }
+        with patch.object(
+            lab, 'require_evidence_download', return_value=AccessContext('alice', 'enterprise', True)
+        ), patch.object(lab, 'job_manager', SimpleNamespace(get=Mock(return_value=job)), create=True):
+            response = TestClient(app).get(
+                '/api/evidence/answer.zip',
+                params={'request_id': 'request-owned', 'response_id': 'resp-other'},
+            )
+        self.assertEqual(response.status_code, 409)
+
     def test_variant_export_preserves_requested_focus(self):
         app = FastAPI()
         app.get('/api/evidence/platform.zip')(lab.universal_platform_evidence_export)
@@ -236,7 +296,19 @@ class DurableJobTests(unittest.TestCase):
 
     def test_full_job_completion_replays_after_restart_without_rebilling(self):
         self.manager.create(self.request, self.access, self.route)
-        answer = {"answer":"AMRAAM report", "response_id":"test-answer", "answer_artifacts":{}, "tool_trace":[], "model":"test"}
+        answer = {
+            "answer": "AMRAAM report",
+            "response_id": "test-answer",
+            "answer_artifacts": {
+                "platform_dossier": {"scope": {"platform_id": "AMRAAM"}},
+                "evidence_pack": {
+                    "format": "zip",
+                    "download_url": "/api/evidence/platform.zip?platform_id=AMRAAM",
+                },
+            },
+            "tool_trace": [],
+            "model": "test",
+        }
         with patch.object(lab, "generate_answer", return_value=answer), patch.object(lab, "finalize_customer_result", side_effect=lambda result,*args:dict(result)):
             self.manager._run("a"*32, self.request, self.access, self.route)
         self.assertEqual(len(self.manager.jobs), 0)
@@ -246,6 +318,10 @@ class DurableJobTests(unittest.TestCase):
             recovered = restarted.get("a"*32, self.access)
             self.assertEqual(recovered["status"], "completed")
             self.assertEqual(recovered["result"]["answer"], "AMRAAM report")
+            self.assertEqual(
+                recovered["result"]["answer_artifacts"]["evidence_pack"]["download_url"],
+                "/api/evidence/answer.zip?request_id=" + "a"*32 + "&response_id=test-answer",
+            )
             duplicate, _ = restarted.create(self.request, self.access, self.route)
             self.assertTrue(duplicate["deduplicated"])
             self.assertEqual(self.ledger.used_today("alice"), 1)
