@@ -1,11 +1,20 @@
 import unittest
 from unittest.mock import patch
-from reportlab.platypus import CondPageBreak, Paragraph, Table
+from reportlab.platypus import CondPageBreak, PageBreak, Paragraph, Table
 
-from answer_report_pdf import answer_report_filename, build_branded_answer_pdf
+from answer_report_pdf import answer_report_filename, build_branded_answer_pdf, _answer_blocks, _ResearchTable
 
 
 class AnswerReportPdfTests(unittest.TestCase):
+    def test_numbered_investigation_steps_remain_separate_items(self):
+        self.assertEqual(list(_answer_blocks('1. First target\n2. Second target\n3. Third target')), [('numbered', ['First target', 'Second target', 'Third target'])])
+
+    def test_split_table_continues_on_a_new_page(self):
+        table = _ResearchTable([['Supplier', 'Role']] + [[str(i), 'Evidence'] for i in range(20)], colWidths=[200,200], repeatRows=1, splitInRow=1)
+        table.wrap(400,150)
+        parts = table.split(400,150)
+        self.assertIsInstance(parts[1], PageBreak)
+
     def test_heading_reserves_space_before_a_bullet_list(self):
         with patch('answer_report_pdf._BrandedDocTemplate.build') as build:
             build_branded_answer_pdf(question='Test', answer='## Evidence used\n\n- Award records\n- Budget documents')

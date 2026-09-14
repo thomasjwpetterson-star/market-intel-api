@@ -19,6 +19,7 @@ from reportlab.platypus import (
     CondPageBreak,
     ListFlowable,
     ListItem,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -47,6 +48,14 @@ class _BrandedDocTemplate(SimpleDocTemplate):
 
     def afterPage(self) -> None:
         _draw_page(self.canv, self)
+
+
+class _ResearchTable(Table):
+    def split(self, available_width, available_height):
+        parts = super().split(available_width, available_height)
+        # Do not reinsert the header and a fragment of the next row into the
+        # same page's leftover space after splitting between complete rows.
+        return [parts[0], PageBreak(), *parts[1:]] if len(parts) > 1 else parts
 
 
 def _register_fonts() -> tuple[str, str]:
@@ -138,17 +147,19 @@ def _answer_blocks(answer: str) -> Iterable[tuple[str, object]]:
             yield ("table", rows)
             continue
 
-        bullet = re.match(r"^[-*+]\s+(.+)$", stripped)
+        numbered = re.match(r"^\d+[.)]\s+(.+)$", stripped)
+        bullet = re.match(r"^[-*+]\s+(.+)$", stripped) or numbered
         if bullet:
             yield from flush_paragraph()
             items: list[str] = []
             while index < len(lines):
-                match = re.match(r"^\s*[-*+]\s+(.+)$", lines[index])
+                pattern = r"^\s*\d+[.)]\s+(.+)$" if numbered else r"^\s*[-*+]\s+(.+)$"
+                match = re.match(pattern, lines[index])
                 if not match:
                     break
                 items.append(match.group(1).strip())
                 index += 1
-            yield ("bullets", items)
+            yield ("numbered" if numbered else "bullets", items)
             continue
 
         paragraph.append(stripped)
@@ -349,13 +360,13 @@ def build_branded_answer_pdf(
             story.append(Paragraph(_inline_markup(str(value)), styles["h1" if level == 1 else "h2"]))
         elif block_type == "paragraph":
             story.append(Paragraph(_inline_markup(str(content)), styles["body"]))
-        elif block_type == "bullets":
+        elif block_type in {"bullets", "numbered"}:
             story.append(ListFlowable(
                 [
                     ListItem(Paragraph(_inline_markup(item), styles["body"]), leftIndent=9)
                     for item in content
                 ],
-                bulletType="bullet",
+                bulletType="1" if block_type == "numbered" else "bullet",
                 leftIndent=17,
                 bulletFontName=regular_font,
                 bulletFontSize=6,
@@ -373,7 +384,7 @@ def build_branded_answer_pdf(
                 ]
                 for row_index, row in enumerate(normalized)
             ]
-            table = Table(
+            table = _ResearchTable(
                 cells,
                 colWidths=[document.width / widest] * widest,
                 repeatRows=1,

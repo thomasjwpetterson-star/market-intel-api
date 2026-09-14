@@ -3,6 +3,7 @@
 ## Deployment contract
 
 - Deploy the API and website as one coordinated release. PDF downloads now send the saved `request_id` and `response_id`; the API renders the owned, completed answer rather than accepting answer text from the browser.
+- The website proxy reserves 300 seconds, with a 270-second upstream timeout for evidence exports and 55 seconds for ordinary API requests. Verify the deployed Vercel function supports this duration (Fluid compute, or a compatible paid plan); a 60-second legacy limit can interrupt valid cold-cache downloads.
 - Keep one API process (`serve.py` already sets `workers=1`) with the existing persistent disk. The SQLite quota/result store and startup recovery are not a distributed job queue. Do not enable multiple processes or instances against the same store.
 - Keep `ASK_MIMIR_ALLOW_TEST_IDENTITIES=0` and configure the trusted proxy secret on both services. Never deploy the local validation identity/secret used in workspace test scripts.
 - Default admission is two research workers and eight queued requests. Rejected requests do not reserve allowance. Queue wait is bounded at 900 seconds; this does not shorten report content or reduce model reasoning effort.
