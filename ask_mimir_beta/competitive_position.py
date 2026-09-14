@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import duckdb
+from research_safety import configure_duckdb_scratch
 
 
 ROOT = Path(__file__).resolve().parent
@@ -83,7 +84,7 @@ class CompetitivePositionStore:
         self.paths = {
             "transactions": self.data_root / "transactions.parquet",
             "network": self.data_root / "network.parquet",
-            "item_suppliers": self.data_root / "nsn_supplier_lookup.parquet",
+            "item_suppliers": self.data_root / "transactions.parquet",
             "item_profiles": self.data_root / "nsn_profile_lookup.parquet",
             "locations": self.data_root / "cage_locations.parquet",
         }
@@ -91,6 +92,7 @@ class CompetitivePositionStore:
         if missing:
             raise FileNotFoundError(f"competitive-position sources are missing: {missing}")
         self.connection = duckdb.connect()
+        configure_duckdb_scratch(self.connection, 'competitive-position')
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")
@@ -216,14 +218,13 @@ class CompetitivePositionStore:
                     SELECT niin, MAX(item_name) description, MAX(nsn) nsn
                     FROM read_parquet(?) GROUP BY 1
                 ), matched AS (
-                    SELECT s.*, p.description, p.nsn,
-                           CASE WHEN COALESCE(s.platform_count,1) > 1
-                                THEN COALESCE(s.total_revenue,0) ELSE 0 END shared_use_value,
-                           CASE WHEN COALESCE(s.platform_count,1) = 1
-                                THEN COALESCE(s.total_revenue,0) ELSE 0 END attributed_value
+                    SELECT s.niin, s.vendor_cage AS cage, s.vendor_name AS vendor,
+                           s.platform_family, s.year, s.contract_id, p.description, p.nsn,
+                           COALESCE(s.shared_use_exposure_amount,0) AS shared_use_value,
+                           COALESCE(s.platform_attributed_spend_amount,0) AS attributed_value
                     FROM read_parquet(?) s
                     JOIN profiles p USING(niin)
-                    WHERE s.year BETWEEN 2021 AND 2025
+                    WHERE s.source_system='DLA' AND s.year BETWEEN 2021 AND 2025
                       AND s.platform_family IN ({placeholders})
                       AND REGEXP_MATCHES(UPPER(COALESCE(p.description,'')), ?)
                 )

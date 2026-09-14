@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import duckdb
+from research_safety import configure_duckdb_scratch
 
 
 ROOT = Path(__file__).resolve().parent
@@ -180,7 +181,7 @@ class ProductIntelligenceStore:
             "contracts": self.data_root / "contracts_rolled.parquet",
             "network": self.data_root / "network.parquet",
             "references": self.data_root / "nsn_cage_reference.parquet",
-            "suppliers": self.data_root / "nsn_supplier_lookup.parquet",
+            "suppliers": self.data_root / "transactions.parquet",
             "locations": self.data_root / "cage_locations.parquet",
         }
         missing = [str(path) for path in self.paths.values() if not path.exists()]
@@ -190,8 +191,7 @@ class ProductIntelligenceStore:
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")
-        duckdb_temp = os.getenv("ASK_MIMIR_DUCKDB_TEMP", "/tmp/ask-mimir-duckdb")
-        self.connection.execute("SET temp_directory = ?", [duckdb_temp])
+        configure_duckdb_scratch(self.connection, 'product')
         self._cache: Dict[str, Dict[str, Any]] = {}
         self.precomputed_dir = (
             (precomputed_dir or DEFAULT_PRECOMPUTED_DIR).resolve()
@@ -276,8 +276,10 @@ class ProductIntelligenceStore:
                 else None
             )
             if precomputed_path is not None and precomputed_path.exists():
-                self._cache[clean_id] = json.loads(precomputed_path.read_text())
-            else:
+                candidate = json.loads(precomputed_path.read_text())
+                if candidate.get("procurement_measure_version") == "transactions-v1":
+                    self._cache[clean_id] = candidate
+            if clean_id not in self._cache:
                 definition = self.definitions.get(clean_id) or self._dynamic_definition(
                     dynamic_subject or ""
                 )
@@ -404,15 +406,15 @@ class ProductIntelligenceStore:
                     GROUP BY 1, 3
                 ), observed_procurement AS (
                     SELECT LPAD(TRIM(niin), 9, '0') AS niin,
-                           UPPER(TRIM(cage)) AS cage,
-                           MAX(vendor) AS observed_supplier_name,
-                           SUM(COALESCE(total_revenue, 0)) AS observed_dla_procurement_value_usd,
+                           UPPER(TRIM(vendor_cage)) AS cage,
+                           MAX(vendor_name) AS observed_supplier_name,
+                           SUM(COALESCE(spend_amount, 0)) AS observed_dla_procurement_value_usd,
                            COUNT(DISTINCT contract_id) AS observed_contract_count,
                            MIN(year) AS first_observed_fiscal_year,
                            MAX(year) AS last_observed_fiscal_year
                     FROM read_parquet(?)
-                    WHERE year BETWEEN 2019 AND 2026
-                      AND cage IS NOT NULL AND TRIM(cage) <> ''
+                    WHERE source_system='DLA' AND year BETWEEN 2019 AND 2026
+                      AND vendor_cage IS NOT NULL AND TRIM(vendor_cage) <> ''
                     GROUP BY 1, 2
                 )
                 SELECT r.niin, r.nsn, r.cage,
@@ -495,6 +497,7 @@ class ProductIntelligenceStore:
         ]
         return {
             "context_type": "product_family_dossier",
+            "procurement_measure_version": "transactions-v1",
             "scope": {
                 "product_id": product_id,
                 "display_name": definition["display_name"],

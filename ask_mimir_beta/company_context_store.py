@@ -10,6 +10,7 @@ import re
 import shutil
 import tempfile
 import threading
+from reviewed_platform_links import LINK_VERSION
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
@@ -302,7 +303,14 @@ def _bounded_precomputed_context(
         capability[key] = list(capability.get(key, []))[:limit]
     bounded["capability_evidence"] = capability
 
-    product = dict(bounded.get("product_and_part_evidence", {}))
+    product = _customer_product_evidence(dict(bounded.get("product_and_part_evidence", {})))
+    summary = dict(product.get("summary", {}))
+    if len(product.get("niin_financial_observations", [])) == int(summary.get("observed_financial_niin_count") or len(product.get("niin_financial_observations", []))):
+        summary.setdefault("observed_dla_absolute_value_usd", sum(
+            abs(float(row.get("dla_procurement_value_usd") or 0))
+            for row in product.get("niin_financial_observations", [])
+        ))
+    product["summary"] = summary
     financial_rows = []
     for row in list(product.get("niin_financial_observations", []))[:limit]:
         financial_rows.append(
@@ -670,10 +678,12 @@ def _customer_product_evidence(value: Any) -> Any:
         int(summary.get("observed_financial_niin_count") or 0),
     )
     financial_rows = list(product.get("niin_financial_observations", []))
-    observed_total = sum(
+    observed_total = summary.get("observed_dla_absolute_value_usd")
+    if observed_total is None and len(financial_rows) == int(summary.get("observed_financial_niin_count") or len(financial_rows)):
+        observed_total = sum(
         abs(float(row.get("dla_procurement_value_usd") or 0))
         for row in financial_rows
-    )
+        )
     product["representative_niin_examples"] = [
         {
             **row,
@@ -774,7 +784,7 @@ def _customer_product_evidence(value: Any) -> Any:
         ),
         reverse=True,
     )
-    if route_rows:
+    if route_rows and not product.get("third_party_dla_route_summary"):
         route_niins = {
             str(row.get("niin") or "").strip()
             for row in route_rows
@@ -2002,6 +2012,22 @@ class CompanyContextStore:
             raise ValueError(f"unsupported company context focus: {focus}")
         clean_id = str(scope_id).strip().upper()
         context = self.get_raw(scope_type, clean_id)
+        if context.get("platform_link_version") != LINK_VERSION and any(
+            section in FOCUS_SECTIONS[focus]
+            for section in ("platform_exposure", "future_demand_context")
+        ):
+            from company_context import CompanyContextBuilder
+
+            with self._dynamic_lock:
+                if self._dynamic_builder is None:
+                    self._dynamic_builder = CompanyContextBuilder(data_root=self.data_root)
+                cages = context.get("identity", {}).get("resolved_cages", [])
+                years = context.get("scope", {}).get("fiscal_years", [])
+                context["platform_exposure"] = self._dynamic_builder._platform_exposure(cages, years)
+                context["future_demand_context"] = self._dynamic_builder._future_demand_context(
+                    context["platform_exposure"], context.get("missile_program_trajectory", {}),
+                )
+                context["platform_link_version"] = LINK_VERSION
         if (
             scope_type == "company_site"
             and "place_of_performance_activity" not in context
@@ -2020,6 +2046,17 @@ class CompanyContextStore:
                     )
                 )
         product = context.get("product_and_part_evidence", {})
+        if "product_and_part_evidence" in FOCUS_SECTIONS[focus] and product.get("third_party_dla_route_summary", {}).get("aggregate_version") != "full-universe-v1":
+            from company_context import CompanyContextBuilder
+
+            with self._dynamic_lock:
+                if self._dynamic_builder is None:
+                    self._dynamic_builder = CompanyContextBuilder(data_root=self.data_root)
+                cages = context.get("identity", {}).get("resolved_cages", [])
+                years = context.get("scope", {}).get("fiscal_years", [])
+                if cages and years:
+                    product["third_party_dla_route_summary"] = self._dynamic_builder._third_party_dla_procurement_routes(cages, years, summary=True)
+                    product.setdefault("summary", {})["observed_dla_absolute_value_usd"] = self._dynamic_builder._observed_dla_absolute_value(cages, years)
         if (
             "product_and_part_evidence" in FOCUS_SECTIONS[focus]
             and "third_party_dla_procurement_routes" not in product

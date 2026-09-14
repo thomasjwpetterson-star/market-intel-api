@@ -7,6 +7,7 @@ import io
 import re
 import zipfile
 from typing import Any, Dict, Iterable, List
+from csv_safety import spreadsheet_cell
 
 
 def _value(value: Any) -> Any:
@@ -20,7 +21,7 @@ def _write(archive: zipfile.ZipFile, name: str, rows: Iterable[Dict[str, Any]], 
     writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
     writer.writeheader()
     for row in rows:
-        writer.writerow({field: _value(row.get(field)) for field in fields})
+        writer.writerow({field: spreadsheet_cell(_value(row.get(field))) for field in fields})
     archive.writestr(name, stream.getvalue().encode("utf-8-sig"))
 
 

@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
 import duckdb
+from research_safety import configure_duckdb_scratch
+from reviewed_platform_links import LINK_VERSION, recovered_platform_sql
 
 
 ROOT = Path(__file__).resolve().parent
@@ -161,9 +163,7 @@ class CompanyContextBuilder:
         if not re.fullmatch(r"\d+(?:MB|GB)", memory_limit):
             raise ValueError("ASK_MIMIR_DUCKDB_MEMORY_LIMIT must use MB or GB")
         self.connection.execute(f"SET memory_limit = '{memory_limit}'")
-        duckdb_temp = os.getenv("ASK_MIMIR_DUCKDB_TEMP", "/tmp/ask-mimir-duckdb")
-        Path(duckdb_temp).mkdir(parents=True, exist_ok=True)
-        self.connection.execute("SET temp_directory = ?", [duckdb_temp])
+        configure_duckdb_scratch(self.connection, 'company')
 
     def parent_definition(self, parent_id: str) -> Dict[str, Any]:
         clean = str(parent_id).strip().upper()
@@ -363,6 +363,7 @@ class CompanyContextBuilder:
             "capability_evidence": capability_evidence,
             "product_and_part_evidence": product_evidence,
             "platform_exposure": platform_exposure,
+            "platform_link_version": LINK_VERSION,
             "missile_program_trajectory": missile_program_trajectory,
             "future_demand_context": self._future_demand_context(
                 platform_exposure,
@@ -989,7 +990,9 @@ class CompanyContextBuilder:
                 ),
             },
             "third_party_dla_procurement_routes": third_party_routes,
+            "third_party_dla_route_summary": self._third_party_dla_procurement_routes(cages, years, summary=True),
             "summary": {
+                "observed_dla_absolute_value_usd": sum(abs(float(row.get("dla_procurement_value_usd") or 0)) for row in financial),
                 "observed_financial_niin_count": len(financial),
                 "supplier_referenced_niin_count": len(competition_rows),
                 "active_authorized_niin_count": sum(
@@ -1027,9 +1030,19 @@ class CompanyContextBuilder:
             ),
         }
 
+    def _observed_dla_absolute_value(self, cages: Sequence[str], years: Sequence[int]) -> float:
+        return float(self.connection.execute(
+            f"""SELECT COALESCE(SUM(ABS(value)), 0) FROM (
+                SELECT LPAD(NULLIF(TRIM(niin), ''), 9, '0'), SUM(spend_amount) AS value
+                FROM read_parquet(?) WHERE source_system = 'DLA'
+                  AND vendor_cage IN ({placeholders(cages)}) AND year IN ({placeholders(years)})
+                  AND niin IS NOT NULL AND TRIM(niin) <> '' GROUP BY 1
+            )""", [str(self.paths["transactions"]), *cages, *years],
+        ).fetchone()[0])
+
     def _third_party_dla_procurement_routes(
-        self, cages: Sequence[str], years: Sequence[int]
-    ) -> List[Dict[str, Any]]:
+        self, cages: Sequence[str], years: Sequence[int], *, summary: bool = False,
+    ) -> Any:
         """Find other CAGEs paid by DLA for NIINs referenced to this company scope."""
         query = f"""
             WITH target_relationships AS (
@@ -1164,12 +1177,39 @@ class CompanyContextBuilder:
               ON activity.niin = depth.niin
             LEFT JOIN recipient_locations locations
               ON activity.recipient_cage = locations.cage
-            ORDER BY ABS(activity.dla_procurement_value_usd) DESC,
-                     activity.niin,
-                     activity.recipient_cage
-            LIMIT 5000
         """
-        return rows_as_dicts(
+        if summary:
+            query = f"""WITH routes AS ({query}), recipients AS (
+                SELECT recipient_cage, MAX(recipient_name) AS recipient_name,
+                    MAX(recipient_city) AS recipient_city, MAX(recipient_state) AS recipient_state,
+                    SUM(dla_procurement_value_usd) AS observed_dla_procurement_value_usd,
+                    COUNT(DISTINCT niin) AS observed_niin_count,
+                    COUNT(DISTINCT niin) FILTER (WHERE target_is_only_active_authorized_source)
+                        AS target_only_active_source_niin_count,
+                    STRING_AGG(DISTINCT relationship_interpretation, ' / ' ORDER BY relationship_interpretation)
+                        AS relationship_summary,
+                    LIST_SLICE(LIST(STRUCT_PACK(niin := niin, nsn := nsn, description := description,
+                        observed_dla_procurement_value_usd := dla_procurement_value_usd,
+                        relationship := relationship_interpretation) ORDER BY ABS(dla_procurement_value_usd) DESC, niin), 1, 3)
+                        AS representative_items,
+                    MAX(route_universe_recipient_count) AS universe_recipients,
+                    MAX(route_universe_niin_count) AS universe_niins,
+                    MAX(route_universe_procurement_value_usd) AS universe_value,
+                    SUM(CASE WHEN relationship_interpretation = 'Potential distributor or procurement intermediary'
+                        THEN dla_procurement_value_usd ELSE 0 END) AS intermediary_value,
+                    SUM(CASE WHEN recipient_has_design_control_reference OR recipient_is_active_authorized_source
+                        THEN dla_procurement_value_usd ELSE 0 END) AS alternate_value,
+                    SUM(CASE WHEN relationship_interpretation <> 'Potential distributor or procurement intermediary'
+                        AND NOT recipient_has_design_control_reference AND NOT recipient_is_active_authorized_source
+                        THEN dla_procurement_value_usd ELSE 0 END) AS other_value
+                FROM routes GROUP BY recipient_cage
+            ) SELECT *, SUM(intermediary_value) OVER () AS all_intermediary_value,
+                        SUM(alternate_value) OVER () AS all_alternate_value,
+                        SUM(other_value) OVER () AS all_other_value
+              FROM recipients ORDER BY ABS(observed_dla_procurement_value_usd) DESC, recipient_cage LIMIT 12"""
+        else:
+            query += " ORDER BY ABS(activity.dla_procurement_value_usd) DESC, activity.niin, activity.recipient_cage LIMIT 5000"
+        rows = rows_as_dicts(
             self.connection.execute(
                 query,
                 [
@@ -1184,6 +1224,19 @@ class CompanyContextBuilder:
                 ],
             )
         )
+        if not summary:
+            return rows
+        first = rows[0] if rows else {}
+        return {
+            "aggregate_version": "full-universe-v1",
+            "recipient_count": int(first.get("universe_recipients") or 0),
+            "niin_count": int(first.get("universe_niins") or 0),
+            "observed_dla_procurement_value_usd": float(first.get("universe_value") or 0),
+            "potential_intermediary_procurement_value_usd": float(first.get("all_intermediary_value") or 0),
+            "alternate_source_procurement_value_usd": float(first.get("all_alternate_value") or 0),
+            "other_same_item_route_procurement_value_usd": float(first.get("all_other_value") or 0),
+            "leading_recipients": [{key:value for key,value in row.items() if not key.startswith(("universe_", "all_")) and key not in {"intermediary_value", "alternate_value", "other_value"}} for row in rows],
+        }
 
     def _annual_activity(
         self, cages: Sequence[str], years: Sequence[int]
@@ -1909,7 +1962,11 @@ class CompanyContextBuilder:
                         ) IS NOT NULL
                     ), 1, 6
                 ) AS reported_capabilities
-            FROM read_parquet(?)
+            FROM (
+                SELECT * EXCLUDE (platform_family),
+                       {recovered_platform_sql('raw', 'transactions')} AS platform_family
+                FROM read_parquet(?) raw
+            )
             WHERE vendor_cage IN ({placeholders(cages)})
               AND year IN ({placeholders(years)})
               AND platform_family IS NOT NULL AND TRIM(platform_family) <> ''
@@ -1929,7 +1986,11 @@ class CompanyContextBuilder:
                         WHERE NULLIF(TRIM(description), '') IS NOT NULL
                     ), 1, 6
                 ) AS reported_capabilities
-            FROM read_parquet(?)
+            FROM (
+                SELECT * EXCLUDE (platform_family),
+                       {recovered_platform_sql('raw', 'network')} AS platform_family
+                FROM read_parquet(?) raw
+            )
             WHERE sub_cage IN ({placeholders(cages)})
               AND year IN ({placeholders(years)})
               AND platform_family IS NOT NULL AND TRIM(platform_family) <> ''

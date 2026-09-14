@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import duckdb
+from research_safety import configure_duckdb_scratch
 
 
 ROOT = Path(__file__).resolve().parent
@@ -49,7 +50,7 @@ class CompetitorDiscoveryStore:
         self.paths = {
             "profiles": self.data_root / "profiles.parquet",
             "references": self.data_root / "nsn_cage_reference.parquet",
-            "suppliers": self.data_root / "nsn_supplier_lookup.parquet",
+            "suppliers": self.data_root / "transactions.parquet",
             "transactions": self.data_root / "transactions.parquet",
             "network": self.data_root / "network.parquet",
             "contracts": self.data_root / "contracts_rolled.parquet",
@@ -62,11 +63,7 @@ class CompetitorDiscoveryStore:
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")
-        temp_directory = Path(
-            os.getenv("ASK_MIMIR_DUCKDB_TEMP_DIR", "/tmp/ask-mimir-duckdb")
-        )
-        temp_directory.mkdir(parents=True, exist_ok=True)
-        self.connection.execute("SET temp_directory=?", [str(temp_directory)])
+        configure_duckdb_scratch(self.connection, 'competitor')
         self._cache: Dict[str, Dict[str, Any]] = {}
 
     def get(self, target_id: str = "eaton_aerospace", limit: int = 15) -> Dict[str, Any]:
@@ -102,11 +99,23 @@ class CompetitorDiscoveryStore:
         )
 
     def _relationship_rows(self, cages: List[str]) -> List[Dict[str, Any]]:
+        if not cages:
+            return []
         placeholders = ",".join("?" for _ in cages)
         return _rows(
             self.connection.execute(
                 f"""
-                WITH reference_relationships AS (
+                WITH target_niins AS (
+                    SELECT DISTINCT LPAD(TRIM(niin), 9, '0') niin
+                    FROM read_parquet(?)
+                    WHERE UPPER(TRIM(cage)) IN ({placeholders})
+                      AND COALESCE(is_active_authorized_source, false)
+                    UNION
+                    SELECT DISTINCT LPAD(TRIM(niin), 9, '0') niin
+                    FROM read_parquet(?)
+                    WHERE UPPER(TRIM(vendor_cage)) IN ({placeholders})
+                      AND source_system='DLA' AND year BETWEEN 2021 AND 2025
+                ), reference_relationships AS (
                     SELECT LPAD(TRIM(niin), 9, '0') niin,
                            UPPER(TRIM(cage)) cage,
                            MAX(vendor_name) vendor_name,
@@ -118,17 +127,19 @@ class CompetitorDiscoveryStore:
                            MAX(supplier_status) supplier_status
                     FROM read_parquet(?)
                     WHERE cage IS NOT NULL AND TRIM(cage) <> ''
+                      AND LPAD(TRIM(niin), 9, '0') IN (SELECT niin FROM target_niins)
                     GROUP BY 1, 2
                 ), observed_procurement AS (
                     SELECT LPAD(TRIM(niin), 9, '0') niin,
-                           UPPER(TRIM(cage)) cage,
-                           MAX(vendor) vendor_name,
+                           UPPER(TRIM(vendor_cage)) cage,
+                           MAX(vendor_name) vendor_name,
                            MAX(platform_families) platform_families,
                            MAX(platform_family) platform_family,
-                           SUM(COALESCE(total_revenue, 0)) observed_value
+                           SUM(COALESCE(spend_amount, 0)) observed_value
                     FROM read_parquet(?)
-                    WHERE year BETWEEN 2021 AND 2025
-                      AND cage IS NOT NULL AND TRIM(cage) <> ''
+                    WHERE source_system='DLA' AND year BETWEEN 2021 AND 2025
+                      AND vendor_cage IS NOT NULL AND TRIM(vendor_cage) <> ''
+                      AND LPAD(TRIM(niin), 9, '0') IN (SELECT niin FROM target_niins)
                     GROUP BY 1, 2
                 ), relationship_universe AS (
                     SELECT COALESCE(r.niin, o.niin) niin,
@@ -169,6 +180,10 @@ class CompetitorDiscoveryStore:
                 WHERE r.cage NOT IN ({placeholders})
                 """,
                 [
+                    str(self.paths["references"]),
+                    *cages,
+                    str(self.paths["suppliers"]),
+                    *cages,
                     str(self.paths["references"]),
                     str(self.paths["suppliers"]),
                     *cages,

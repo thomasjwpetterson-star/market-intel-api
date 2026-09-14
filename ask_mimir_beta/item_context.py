@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 import duckdb
+from research_safety import configure_duckdb_scratch
 
 
 DEFAULT_DATA_ROOT = Path(
@@ -96,6 +97,7 @@ class ItemContextStore:
         if missing:
             raise FileNotFoundError(f"item context sources are missing: {missing}")
         self.connection = duckdb.connect()
+        configure_duckdb_scratch(self.connection, 'item')
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")

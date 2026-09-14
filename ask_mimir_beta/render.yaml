@@ -32,6 +32,14 @@ services:
         value: high
       - key: ASK_MIMIR_MAX_EVIDENCE_RECORDS
         value: "20"
+      - key: ASK_MIMIR_JOB_WORKERS
+        value: "2"
+      - key: ASK_MIMIR_JOB_QUEUE
+        value: "8"
+      - key: ASK_MIMIR_MAX_QUEUE_SECONDS
+        value: "900"
+      - key: ASK_MIMIR_RESULT_RETENTION_DAYS
+        value: "7"
       - key: OPENAI_MAX_OUTPUT_TOKENS
         value: "10000"
       - key: ASK_MIMIR_UPGRADE_URL

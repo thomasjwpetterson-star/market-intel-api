@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
+import copy
+import zlib
+from collections import OrderedDict
 import json
+import shutil
 import os
 import re
 import sqlite3
@@ -97,6 +102,7 @@ class AccessContext:
         policy = self.policy
         return {
             **asdict(policy),
+            "workspace_key": hashlib.sha256(self.subject_id.encode()).hexdigest()[:24],
             "authenticated": self.authenticated,
             "queries_used_today": used_today,
             "queries_remaining_today": max(policy.queries_per_utc_day - used_today, 0),
@@ -313,6 +319,12 @@ class BetaStateStore:
             );
             CREATE INDEX IF NOT EXISTS routing_events_conversation
                 ON routing_events(conversation_id, created_at);
+            CREATE TABLE IF NOT EXISTS research_results (
+                request_id TEXT PRIMARY KEY,
+                subject_id TEXT NOT NULL,
+                saved_at REAL NOT NULL,
+                job_json TEXT NOT NULL
+            );
             """
         )
         query_columns = {
@@ -597,6 +609,7 @@ class BetaStateStore:
         estimated_cost_usd: float | None,
         billable: bool = True,
         performance: Dict[str, Any] | None = None,
+        job: Dict[str, Any] | None = None,
     ) -> None:
         with self.lock:
             self.connection.execute(
@@ -615,7 +628,51 @@ class BetaStateStore:
                     request_id,
                 ],
             )
-            self.connection.commit()
+            try:
+                if job is not None:
+                    self._save_job_unlocked(job)
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def has_write_capacity(self) -> bool:
+        # Leave headroom for active results, SQLite journaling and cache writes.
+        return shutil.disk_usage(self.path.parent).free >= 128 * 1024 * 1024
+
+    def _save_job_unlocked(self, job: Dict[str, Any]) -> None:
+        """Called in the same transaction as billing for completed research."""
+        self.connection.execute(
+            "INSERT OR REPLACE INTO research_results VALUES (?, ?, ?, ?)",
+            [job["request_id"], job["subject_id"], time.time(), zlib.compress(json.dumps(job, default=str).encode())],
+        )
+        retention = max(int(os.getenv("ASK_MIMIR_RESULT_RETENTION_DAYS", "7")), 1)
+        self.connection.execute(
+            "DELETE FROM research_results WHERE saved_at < ?",
+            [time.time() - retention * 86400],
+        )
+
+    def save_job(self, job: Dict[str, Any]) -> None:
+        with self.lock:
+            try:
+                self._save_job_unlocked(job)
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def load_job(self, request_id: str) -> Dict[str, Any] | None:
+        # Callers must authorize the stored subject before exposing a result.
+        retention = max(int(os.getenv("ASK_MIMIR_RESULT_RETENTION_DAYS", "7")), 1)
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT job_json FROM research_results WHERE request_id = ? AND saved_at >= ?",
+                [request_id, time.time() - retention * 86400],
+            ).fetchone()
+        if not row:
+            return None
+        encoded = zlib.decompress(row[0]) if isinstance(row[0], bytes) else row[0]
+        return json.loads(encoded)
 
     def fail(
         self,
@@ -693,7 +750,31 @@ class EvidencePackCache:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.ttl_seconds = max(int(ttl_seconds), 60)
         self.lock = threading.Lock()
-        self.memory: Dict[str, Dict[str, Any]] = {}
+        self.memory: Dict[str, Dict[str, Any]] = OrderedDict()
+        self.max_memory_bytes = 32 * 1024 * 1024
+        self._last_disk_cleanup = 0.0
+
+    def _remember(self, key: str, value: Dict[str, Any], size: int) -> None:
+        self.memory.pop(key, None)
+        self.memory[key] = {"cached_at_epoch": time.time(), "value": copy.deepcopy(value), "size": size}
+        while self.memory and sum(entry["size"] for entry in self.memory.values()) > self.max_memory_bytes:
+            self.memory.pop(next(iter(self.memory)))
+
+    def _prune_disk(self) -> None:
+        now = time.time()
+        if now - self._last_disk_cleanup < 60:
+            return
+        self._last_disk_cleanup = now
+        files = []
+        for path in self.directory.iterdir():
+            if path.is_file() and re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
+                stat = path.stat()
+                files.append((stat.st_mtime, stat.st_size, path))
+        size = sum(row[1] for row in files)
+        for modified, file_size, path in sorted(files):
+            if now - modified > self.ttl_seconds or size > 256 * 1024 * 1024:
+                path.unlink(missing_ok=True)
+                size -= file_size
 
     @staticmethod
     def cache_key(release_binding_id: str, name: str, arguments: Dict[str, Any]) -> str:
@@ -707,7 +788,8 @@ class EvidencePackCache:
         with self.lock:
             entry = self.memory.get(key)
             if entry and now - float(entry["cached_at_epoch"]) <= self.ttl_seconds:
-                return entry["value"]
+                self.memory.move_to_end(key)
+                return copy.deepcopy(entry["value"])
             path = self.directory / f"{key}.json"
             if not path.exists() or now - path.stat().st_mtime > self.ttl_seconds:
                 return None
@@ -715,7 +797,7 @@ class EvidencePackCache:
                 value = json.loads(path.read_text())
             except (OSError, json.JSONDecodeError):
                 return None
-            self.memory[key] = {"cached_at_epoch": now, "value": value}
+            self._remember(key, value, path.stat().st_size)
             return value
 
     def set(self, key: str, value: Dict[str, Any]) -> None:
@@ -725,7 +807,8 @@ class EvidencePackCache:
         with self.lock:
             temp.write_text(encoded)
             os.replace(temp, target)
-            self.memory[key] = {"cached_at_epoch": time.time(), "value": value}
+            self._remember(key, value, len(encoded.encode()))
+            self._prune_disk()
 
 
 class DataReleaseGuard:
@@ -817,6 +900,22 @@ CUSTOMER_HIDDEN_KEYS = {
 }
 
 
+def is_public_http_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+            return False
+        if host == "localhost" or host.endswith((".local", ".localhost", ".internal")):
+            return False
+        try:
+            return ipaddress.ip_address(host).is_global
+        except ValueError:
+            return "." in host
+    except ValueError:
+        return False
+
+
 def sanitize_customer_payload(value: Any) -> Any:
     """Remove internal lineage identifiers from the browser-facing response."""
     if isinstance(value, dict):
@@ -829,9 +928,14 @@ def sanitize_customer_payload(value: Any) -> Any:
     if isinstance(value, list):
         return [sanitize_customer_payload(child) for child in value]
     if isinstance(value, str):
+        scheme_text = re.sub(r"[\x00-\x20]", "", value).lower()
+        if scheme_text.startswith(("javascript:", "vbscript:", "data:", "file:", "blob:")):
+            return None
         if value.startswith("/Users/") or value.startswith("s3://"):
             return None
-        if value.startswith(("http://", "https://")):
+        if value.lower().startswith(("http://", "https://")):
+            if not is_public_http_url(value):
+                return None
             host = (urlparse(value).hostname or "").lower()
             if host in CUSTOMER_BLOCKED_LINK_HOSTS or any(
                 host.endswith(f".{blocked}") for blocked in CUSTOMER_BLOCKED_LINK_HOSTS
@@ -850,6 +954,8 @@ def _trace_urls(value: Any) -> set[str]:
                 "public_record_url",
                 "public_notice_url",
                 "source_url",
+                "source_download_url",
+                "source_landing_page",
             }:
                 if isinstance(child, str) and child.startswith("https://"):
                     urls.add(child.rstrip("/"))
@@ -911,6 +1017,38 @@ def _trace_identifiers(value: Any, found: Dict[str, set[str]] | None = None) -> 
     return result
 
 
+def link_evidenced_award_identifiers(answer: str, tool_trace: list[Dict[str, Any]]) -> str:
+    """Make exact public award identifiers clickable without inventing evidence."""
+    identifiers: set[str] = set()
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in {"contract_id", "award_id", "award_id_piid", "sample_contract_ids"}:
+                    _add_identifier(identifiers, child)
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+    collect(tool_trace)
+    awards = sorted(
+        (value for value in identifiers
+         if re.fullmatch(r"[A-Z0-9][A-Z0-9-]{5,34}", value)),
+        key=len, reverse=True,
+    )
+    if not awards:
+        return answer
+    pattern = re.compile(r"(?<![A-Z0-9_/=])(?:" + "|".join(map(re.escape, awards)) + r")(?![A-Z0-9])")
+    # Existing links, literal code and bare URLs must remain untouched.
+    protected = re.compile(r"(\[[^\]\n]*\]\([^\n]*?\)|`[^`]*`|https?://\S+)")
+    parts = protected.split(answer)
+    for index in range(0, len(parts), 2):
+        parts[index] = pattern.sub(
+            lambda match: f"[{match.group(0)}](https://www.mimiradvisors.org/dashboard?view=AWARDS&award={match.group(0)})",
+            parts[index],
+        )
+    return "".join(parts)
+
+
 def validate_answer_citations(answer: str, tool_trace: list[Dict[str, Any]]) -> Dict[str, Any]:
     answer_lower = answer.lower()
     forbidden = [marker for marker in FORBIDDEN_ANSWER_MARKERS if marker in answer_lower]
@@ -924,10 +1062,10 @@ def validate_answer_citations(answer: str, tool_trace: list[Dict[str, Any]]) -> 
     external_links = 0
     for raw_url in links:
         url = raw_url.strip().rstrip("/")
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"}:
+        if not is_public_http_url(url):
             unsafe_links.append(raw_url)
             continue
+        parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
         if (
             host in {"localhost", "127.0.0.1"}
@@ -936,7 +1074,7 @@ def validate_answer_citations(answer: str, tool_trace: list[Dict[str, Any]]) -> 
             or any(host.endswith(f".{blocked}") for blocked in CUSTOMER_BLOCKED_LINK_HOSTS)
         ):
             unsafe_links.append(raw_url)
-        elif host.endswith("mimiradvisors.org"):
+        elif host == "mimiradvisors.org" or host.endswith(".mimiradvisors.org"):
             mimir_links += 1
             query = parse_qs(parsed.query)
             for parameter, kind in (

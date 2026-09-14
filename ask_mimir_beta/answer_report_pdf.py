@@ -16,6 +16,7 @@ from reportlab.lib.units import inch
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase import pdfmetrics
 from reportlab.platypus import (
+    CondPageBreak,
     ListFlowable,
     ListItem,
     Paragraph,
@@ -195,6 +196,7 @@ def _styles(regular_font: str, bold_font: str) -> dict[str, ParagraphStyle]:
             textColor=NAVY,
             spaceBefore=13,
             spaceAfter=6,
+            keepWithNext=True,
         ),
         "h2": ParagraphStyle(
             "MimirHeading2",
@@ -205,6 +207,7 @@ def _styles(regular_font: str, bold_font: str) -> dict[str, ParagraphStyle]:
             textColor=NAVY,
             spaceBefore=11,
             spaceAfter=5,
+            keepWithNext=True,
         ),
         "table_header": ParagraphStyle(
             "MimirTableHeader",
@@ -323,6 +326,7 @@ def build_branded_answer_pdf(
                 textColor=CYAN,
             )), Paragraph(_inline_markup(question), styles["question"])]],
             colWidths=[0.92 * inch, document.width - 0.92 * inch],
+            splitInRow=1,
             style=TableStyle([
                 ("BACKGROUND", (0, 0), (-1, -1), LIGHT_CYAN),
                 ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#BBDDEA")),
@@ -370,6 +374,7 @@ def build_branded_answer_pdf(
                 cells,
                 colWidths=[document.width / widest] * widest,
                 repeatRows=1,
+                splitInRow=1,
                 hAlign="LEFT",
             )
             table.setStyle(TableStyle([
@@ -382,7 +387,23 @@ def build_branded_answer_pdf(
                 ("TOPPADDING", (0, 0), (-1, -1), 5),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ]))
-            story.extend([Spacer(1, 3), table, Spacer(1, 8)])
+            table.spaceBefore = 3
+            table.spaceAfter = 8
+            if story and isinstance(story[-1], Paragraph) and story[-1].getKeepWithNext():
+                # Keep only the heading, header and start of the first row
+                # together. keepWithNext groups the entire table and can move
+                # a page-sized table away from a half-empty preceding page.
+                heading = story[-1]
+                table.wrap(document.width, document.height)
+                _, heading_height = heading.wrap(document.width, document.height)
+                header_height = table._rowHeights[0]
+                first_row_height = min(table._rowHeights[1], 120) if len(rows) > 1 else 0
+                minimum_height = (heading_height + heading.getSpaceBefore()
+                                  + heading.getSpaceAfter() + table.spaceBefore
+                                  + header_height + first_row_height + 12)
+                heading.keepWithNext = False
+                story.insert(len(story) - 1, CondPageBreak(minimum_height))
+            story.append(table)
 
     document.build(story)
     return output.getvalue()

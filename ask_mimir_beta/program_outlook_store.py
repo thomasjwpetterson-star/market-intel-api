@@ -1,6 +1,7 @@
 """Reusable, release-bound platform and program forward views for Ask Mimir."""
 
 from __future__ import annotations
+from reviewed_platform_links import REVIEWED_EXACT_RECORD_PATTERNS, recovered_platform_sql
 
 import json
 import os
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import duckdb
+from research_safety import configure_duckdb_scratch
 
 
 ROOT = Path(__file__).resolve().parent
@@ -117,8 +119,7 @@ class ProgramOutlookStore:
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='768MB'")
-        duckdb_temp = os.getenv("ASK_MIMIR_DUCKDB_TEMP", "/tmp/ask-mimir-duckdb")
-        self.connection.execute("SET temp_directory = ?", [duckdb_temp])
+        configure_duckdb_scratch(self.connection, 'outlook')
 
     @property
     def source_paths(self) -> List[Path]:
@@ -395,15 +396,20 @@ class ProgramOutlookStore:
         if not self.announcement_path.exists() or not self.transactions_path.exists():
             return []
         pattern = self._announcement_pattern(definition)
+        platform_column = (
+            recovered_platform_sql('t', 'transactions')
+            if any(member in REVIEWED_EXACT_RECORD_PATTERNS for member in platform_members)
+            else "t.platform_family"
+        )
         cursor = self.connection.execute(
-            """
+            f"""
             WITH scope_contracts AS (
                 SELECT DISTINCT REGEXP_REPLACE(
                     UPPER(COALESCE(CAST(contract_id AS VARCHAR), '')),
                     '[^A-Z0-9]', '', 'g'
                 ) AS normalized_contract_id
-                FROM read_parquet(?)
-                WHERE platform_family IN (SELECT UNNEST(?))
+                FROM read_parquet(?) t
+                WHERE ({platform_column}) IN (SELECT UNNEST(?))
                   AND COALESCE(CAST(contract_id AS VARCHAR), '') <> ''
             ), candidates AS (
                 SELECT

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import duckdb
+from research_safety import configure_duckdb_scratch
 
 from derived_metrics import calculate_concentration, calculate_series_metrics, make_observation_contract
 from materialize import combined_rows, peer_rank_for_scope, universe_rows_for_scope
@@ -34,6 +35,7 @@ class MetricStore:
         self.components_file = self.release_dir / "derived_metric_components.parquet"
         self.manifest = json.loads((self.release_dir / "manifest.json").read_text())
         self.connection = duckdb.connect()
+        configure_duckdb_scratch(self.connection, 'metric')
         self.connection.execute("SET preserve_insertion_order = false")
         self.connection.execute("SET threads = 2")
         self.connection.execute("SET memory_limit = '1GB'")

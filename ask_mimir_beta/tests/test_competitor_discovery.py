@@ -27,10 +27,11 @@ class CompetitorDiscoveryFinancialTests(unittest.TestCase):
             writer.execute(
                 """
                 CREATE TABLE suppliers AS SELECT * FROM (VALUES
-                    ('000000001', 'TARG1', 'Target', 'F-16', 'F-16', 50.0, 2025),
-                    ('000000001', 'PEE01', 'Peer', 'F-16', 'F-16', 100.0, 2025)
-                ) AS t(niin, cage, vendor, platform_families, platform_family,
-                       total_revenue, year)
+                    ('000000001', 'TARG1', 'Target', 'F-16', 'F-16', 50.0, 2025, 'DLA'),
+                    ('000000001', 'PEE01', 'Peer', 'F-16', 'F-16', 100.0, 2025, 'DLA'),
+                    ('000000001', 'PEE01', 'Peer', 'F-16', 'F-16', 9000.0, 2025, 'USA_SPENDING')
+                ) AS t(niin, vendor_cage, vendor_name, platform_families, platform_family,
+                       spend_amount, year, source_system)
                 """
             )
             writer.execute(f"COPY refs TO '{references}' (FORMAT PARQUET)")

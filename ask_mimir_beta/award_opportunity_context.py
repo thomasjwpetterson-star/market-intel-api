@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import duckdb
+from research_safety import configure_duckdb_scratch
 
 from platform_description_mapping import map_platform_candidates
 
@@ -97,6 +98,7 @@ class AwardOpportunityContextStore:
         if missing:
             raise FileNotFoundError(f"award and opportunity sources are missing: {missing}")
         self.connection = duckdb.connect()
+        configure_duckdb_scratch(self.connection, 'award-opportunity')
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")

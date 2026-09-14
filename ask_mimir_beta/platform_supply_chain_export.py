@@ -8,6 +8,7 @@ import json
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
+from csv_safety import spreadsheet_cell
 
 
 ROOT = Path(__file__).resolve().parent
@@ -25,7 +26,7 @@ def _csv_bytes(rows: Iterable[Dict[str, Any]], fieldnames: List[str]) -> bytes:
     writer = csv.DictWriter(stream, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     for row in rows:
-        writer.writerow({key: _text(row.get(key)) for key in fieldnames})
+        writer.writerow({key: spreadsheet_cell(_text(row.get(key))) for key in fieldnames})
     return stream.getvalue().encode("utf-8-sig")
 
 

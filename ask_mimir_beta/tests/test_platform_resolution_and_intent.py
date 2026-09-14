@@ -57,7 +57,7 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
             "SDB II",
             "AN/SLQ-25 TORPEDO COUNTERMEASURE",
             "AMERICA CLASS LHA",
-            "M109A7 HOWITZER",
+            "M109 PALADIN",
             "LCAC",
         ]
 
@@ -91,10 +91,10 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
 
     def test_m109a7_paladin_resolves_as_one_platform(self):
         question = "Who supplies the M109A7 Paladin, and what are the major supplier positions?"
-        self.assertEqual(self.store.mentions(question), ["M109A7 HOWITZER"])
+        self.assertEqual(self.store.mentions(question), ["M109 PALADIN"])
         self.assertEqual(
             self.store.search("M109A7 Paladin")["resolved_platform_id"],
-            "M109A7 HOWITZER",
+            "M109 PALADIN",
         )
 
     def test_ship_to_shore_connector_aliases_resolve_to_lcac(self):
@@ -114,8 +114,8 @@ class PlatformResolutionAndIntentTests(unittest.TestCase):
 
         self.assertIn("REGEXP_MATCHES", condition)
         self.assertEqual(parameters[0], ["LCAC"])
-        self.assertIn("SHIP[- ]TO[- ]SHORE CONNECTOR", parameters[1])
-        self.assertIn("10[0-9]", parameters[1])
+        self.assertIn("SHIP[- ]TO[- ]SHORE CONNECTOR", condition)
+        self.assertIn("1[0-9][0-9]", condition)
 
     def test_cross_market_company_discovery_is_recognized(self):
         self.assertTrue(

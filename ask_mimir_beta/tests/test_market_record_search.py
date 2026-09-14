@@ -165,6 +165,8 @@ class MarketRecordSearchTests(unittest.TestCase):
 
             self.assertEqual(result["coverage"]["matching_records"], 1)
             self.assertEqual(result["records"][0]["record_id"], "RECENT-1")
+            self.assertEqual(result["records"][0]["contract_id"], "RECENT-1")
+            self.assertEqual(result["records"][0]["public_record_url"], "https://www.mimiradvisors.org/dashboard?view=AWARDS&award=RECENT-1")
             self.assertEqual(result["records"][0]["city"], "DALLAS")
 
 

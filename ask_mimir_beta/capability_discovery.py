@@ -13,6 +13,7 @@ from typing import Any, Dict, List
 from urllib.parse import quote, unquote
 
 import duckdb
+from research_safety import configure_duckdb_scratch
 
 
 DEFAULT_DATA_ROOT = Path(
@@ -259,7 +260,7 @@ class CapabilityDiscoveryStore:
         self.ontology_path = DEFAULT_ONTOLOGY_PATH.resolve()
         self.paths = {
             "references": self.data_root / "nsn_cage_reference.parquet",
-            "suppliers": self.data_root / "nsn_supplier_lookup.parquet",
+            "suppliers": self.data_root / "transactions.parquet",
             "locations": self.data_root / "cage_locations.parquet",
             "contracts": self.data_root / "contracts_rolled.parquet",
             "classifications": self.data_root / "classification_reference.parquet",
@@ -271,8 +272,7 @@ class CapabilityDiscoveryStore:
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")
-        duckdb_temp = os.getenv("ASK_MIMIR_DUCKDB_TEMP", "/tmp/ask-mimir-duckdb")
-        self.connection.execute("SET temp_directory = ?", [duckdb_temp])
+        configure_duckdb_scratch(self.connection, 'capability')
         self._cache: Dict[str, Dict[str, Any]] = {}
         configured_dir = precomputed_dir or Path(
             os.getenv("ASK_MIMIR_CAPABILITY_DIR", str(DEFAULT_PRECOMPUTED_DIR))
@@ -312,8 +312,10 @@ class CapabilityDiscoveryStore:
                 else None
             )
             if precomputed_path is not None and precomputed_path.exists():
-                self._cache[clean_id] = json.loads(precomputed_path.read_text())
-            else:
+                candidate = json.loads(precomputed_path.read_text())
+                if candidate.get("procurement_measure_version") == "transactions-v1":
+                    self._cache[clean_id] = candidate
+            if clean_id not in self._cache:
                 self._cache[clean_id] = self._build(clean_id, definition)
         pack = self._cache[clean_id]
         bounded = min(max(int(limit), 1), 50)
@@ -408,15 +410,15 @@ class CapabilityDiscoveryStore:
                 WITH observed_procurement AS (
                     SELECT
                         LPAD(TRIM(niin), 9, '0') AS niin,
-                        UPPER(TRIM(cage)) AS cage,
-                        MAX(vendor) AS vendor_name,
-                        SUM(COALESCE(total_revenue, 0)) AS observed_value,
+                        UPPER(TRIM(vendor_cage)) AS cage,
+                        MAX(vendor_name) AS vendor_name,
+                        SUM(COALESCE(spend_amount, 0)) AS observed_value,
                         COUNT(DISTINCT contract_id) AS observed_contract_count,
                         MIN(year) AS first_observed_fiscal_year,
                         MAX(year) AS last_observed_fiscal_year
                     FROM read_parquet(?)
-                    WHERE year BETWEEN 2021 AND 2026
-                      AND cage IS NOT NULL AND TRIM(cage) <> ''
+                    WHERE source_system='DLA' AND year BETWEEN 2021 AND 2026
+                      AND vendor_cage IS NOT NULL AND TRIM(vendor_cage) <> ''
                     GROUP BY 1, 2
                 ), item_relationships AS (
                     SELECT
@@ -777,12 +779,12 @@ class CapabilityDiscoveryStore:
                     """
                     WITH observed_procurement AS (
                         SELECT LPAD(TRIM(niin), 9, '0') AS niin,
-                               UPPER(TRIM(cage)) AS cage,
-                               MAX(vendor) AS supplier_name,
-                               SUM(COALESCE(total_revenue, 0)) AS observed_value
+                               UPPER(TRIM(vendor_cage)) AS cage,
+                               MAX(vendor_name) AS supplier_name,
+                               SUM(COALESCE(spend_amount, 0)) AS observed_value
                         FROM read_parquet(?)
-                        WHERE year BETWEEN 2021 AND 2026
-                          AND cage IS NOT NULL AND TRIM(cage) <> ''
+                        WHERE source_system='DLA' AND year BETWEEN 2021 AND 2026
+                          AND vendor_cage IS NOT NULL AND TRIM(vendor_cage) <> ''
                         GROUP BY 1, 2
                     ), relationships AS (
                         SELECT LPAD(TRIM(r.niin), 9, '0') AS niin,
@@ -870,6 +872,7 @@ class CapabilityDiscoveryStore:
             }
         return {
             "context_type": "capability_supplier_market",
+            "procurement_measure_version": "transactions-v1",
             "scope": {
                 "capability_id": capability_id,
                 "display_name": definition["display_name"],

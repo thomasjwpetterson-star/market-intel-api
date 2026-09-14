@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import duckdb
+from research_safety import configure_duckdb_scratch
 
 
 DEFAULT_DATA_ROOT = Path(
@@ -143,6 +144,7 @@ class StateIndustrialBaseStore:
         if missing:
             raise FileNotFoundError(f"state-market sources are missing: {missing}")
         self.connection = duckdb.connect()
+        configure_duckdb_scratch(self.connection, 'geographic')
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")

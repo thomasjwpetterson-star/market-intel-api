@@ -109,9 +109,9 @@ class ProductIntelligenceResolutionTests(unittest.TestCase):
                        false is_active_authorized_source,
                        CAST(NULL AS VARCHAR) platform_families WHERE false
             """,
-            "nsn_supplier_lookup.parquet": """
-                SELECT CAST(NULL AS VARCHAR) niin, CAST(NULL AS VARCHAR) cage,
-                       CAST(NULL AS VARCHAR) vendor, 0.0 total_revenue,
+            "transactions.parquet": """
+                SELECT CAST(NULL AS VARCHAR) niin, CAST(NULL AS VARCHAR) vendor_cage,
+                       CAST(NULL AS VARCHAR) vendor_name, 0.0 spend_amount, 'DLA' source_system,
                        CAST(NULL AS VARCHAR) contract_id,
                        CAST(NULL AS INTEGER) AS year WHERE false
             """,

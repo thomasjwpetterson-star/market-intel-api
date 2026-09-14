@@ -10,6 +10,7 @@ import re
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
+from csv_safety import spreadsheet_cell
 
 
 ROOT = Path(__file__).resolve().parent
@@ -33,7 +34,7 @@ def _write_csv(
     writer = csv.DictWriter(stream, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     for row in itertools.islice(rows, EVIDENCE_EXPORT_ROW_LIMIT):
-        writer.writerow({key: _text(row.get(key)) for key in fieldnames})
+        writer.writerow({key: spreadsheet_cell(_text(row.get(key))) for key in fieldnames})
     archive.writestr(name, stream.getvalue().encode("utf-8-sig"))
 
 

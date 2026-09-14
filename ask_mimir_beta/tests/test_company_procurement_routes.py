@@ -92,6 +92,42 @@ class CompanyProcurementRouteTests(unittest.TestCase):
                 alternate["relationship_interpretation"],
                 "Observed DLA recipient with its own design-control reference",
             )
+            summary = builder._third_party_dla_procurement_routes(["TARGET"], [2024, 2025], summary=True)
+            self.assertEqual(summary["observed_dla_procurement_value_usd"], 250.0)
+            self.assertEqual(summary["potential_intermediary_procurement_value_usd"], 200.0)
+            self.assertEqual(summary["alternate_source_procurement_value_usd"], 50.0)
+            self.assertEqual(summary["leading_recipients"][0]["observed_dla_procurement_value_usd"], 200.0)
+            connection.close()
+
+    def test_full_recipient_summary_includes_routes_below_5000_row_cap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            con = duckdb.connect()
+            con.execute("""COPY (SELECT lpad(i::varchar,9,'0') AS niin, 'NSN' AS nsn,
+                'TARGET' AS cage, 'P' AS part_number, 'CONTROL' AS description,
+                'Active authorized source' AS supplier_status, true AS is_procurement_authorized,
+                true AS is_active_authorized_source, '3' AS rncc_codes FROM range(5002) t(i)
+            ) TO ? (FORMAT PARQUET)""",[str(root/'reference.parquet')])
+            con.execute("""COPY (SELECT 'DLA' AS source_system,
+                CASE WHEN i<5000 THEN 'AAAAA' ELSE 'BBBBB' END AS vendor_cage,
+                'Supplier' AS vendor_name, lpad(i::varchar,9,'0') AS niin, 2025 AS year,
+                CASE WHEN i<5000 THEN 2.0 ELSE 1.5 END AS spend_amount,
+                i::varchar AS award_key, i::varchar AS transaction_key, DATE '2025-01-01' AS action_date
+                FROM range(5002) t(i)) TO ? (FORMAT PARQUET)""",[str(root/'transactions.parquet')])
+            con.execute("""COPY (SELECT 'AAAAA' AS cage_code, 'Dayton' AS city, 'OH' AS state)
+                TO ? (FORMAT PARQUET)""",[str(root/'geo.parquet')])
+            builder = object.__new__(CompanyContextBuilder)
+            builder.connection = con
+            builder.paths = {'nsn_reference':root/'reference.parquet','transactions':root/'transactions.parquet','geo':root/'geo.parquet'}
+            rows = builder._third_party_dla_procurement_routes(['TARGET'],[2025])
+            summary = builder._third_party_dla_procurement_routes(['TARGET'],[2025],summary=True)
+            self.assertEqual(len(rows),5000)
+            self.assertEqual(summary['observed_dla_procurement_value_usd'],10003)
+            self.assertEqual(summary['potential_intermediary_procurement_value_usd'],10003)
+            self.assertEqual(summary['recipient_count'],2)
+            self.assertEqual(summary['leading_recipients'][1]['recipient_cage'],'BBBBB')
+            self.assertEqual(summary['leading_recipients'][1]['observed_dla_procurement_value_usd'],3)
+            con.close()
 
 
 if __name__ == "__main__":

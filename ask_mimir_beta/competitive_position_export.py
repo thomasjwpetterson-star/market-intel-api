@@ -7,6 +7,7 @@ import io
 import json
 import zipfile
 from typing import Any, Dict, Iterable
+from csv_safety import spreadsheet_cell
 
 
 def _csv(rows: Iterable[Dict[str, Any]]) -> bytes:
@@ -20,9 +21,9 @@ def _csv(rows: Iterable[Dict[str, Any]]) -> bytes:
     for row in materialized:
         writer.writerow(
             {
-                key: " | ".join(map(str, value)) if isinstance(value, list)
+                key: spreadsheet_cell(" | ".join(map(str, value)) if isinstance(value, list)
                 else json.dumps(value, sort_keys=True) if isinstance(value, dict)
-                else value
+                else value)
                 for key, value in row.items()
             }
         )

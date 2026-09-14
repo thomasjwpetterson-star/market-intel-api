@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 import duckdb
+from research_safety import configure_duckdb_scratch
 
 
 DEFAULT_DATA_ROOT = Path(
@@ -23,6 +24,9 @@ OBSERVATION_WINDOW = "FY2021-FY2026 observed records"
 EVIDENCE_EXPORT_ROW_LIMIT = 5000
 
 PLATFORM_GROUPS = {
+    "M109 PALADIN": ("M109 PALADIN", "M109A7 HOWITZER"),
+    "COLUMBIA CLASS SSBN": ("COLUMBIA CLASS SSBN", "COLUMBIA CLASS SSN"),
+    "M88": ("M88", "M88 RECOVERY VEHICLE", "M88A2 HERCULES"),
     "AMERICA CLASS LHA": (
         "AMERICA CLASS LHA",
         "LHA 6",
@@ -41,14 +45,19 @@ PLATFORM_GROUPS = {
 }
 
 PLATFORM_DISPLAY_NAMES = {
+    "M88": "M88 recovery-vehicle family",
     "AMERICA CLASS LHA": "America-class amphibious assault ships",
     "TOMAHAWK": "Tomahawk missile family",
     "PATRIOT AIR DEFENSE SYSTEM": "Patriot air defense system",
-    "M109A7 HOWITZER": "M109A7 Paladin",
-    "LCAC": "Ship-to-Shore Connector (LCAC 100 class)",
+    "M109 PALADIN": "M109 Paladin family (including M109A7)",
+    "LCAC": "LCAC family / Ship-to-Shore Connector",
 }
 
 PLATFORM_ALIASES = {
+    "C 17": "C-17A",
+    "E 3": "E-3 AWACS",
+    "E 4": "E-4 (AABNCP)",
+    "E 4B": "E-4 (AABNCP)",
     "AMERICA CLASS": "AMERICA CLASS LHA",
     "AMERICA CLASS LHA": "AMERICA CLASS LHA",
     "LHA 6": "AMERICA CLASS LHA",
@@ -87,11 +96,12 @@ PLATFORM_ALIASES = {
     "EAGLE II": "F-15",
     "KING STALLION": "CH-53K",
     "CH 53K KING STALLION": "CH-53K",
-    "M109": "M109A7 HOWITZER",
-    "M109A7": "M109A7 HOWITZER",
-    "M109 PALADIN": "M109A7 HOWITZER",
-    "M109A7 PALADIN": "M109A7 HOWITZER",
-    "PALADIN": "M109A7 HOWITZER",
+    "M109": "M109 PALADIN",
+    "M109A7": "M109 PALADIN",
+    "M109A7 HOWITZER": "M109 PALADIN",
+    "M109 PALADIN": "M109 PALADIN",
+    "M109A7 PALADIN": "M109 PALADIN",
+    "PALADIN": "M109 PALADIN",
     "E 7A": "E-7",
     "E7A": "E-7",
     "WEDGETAIL": "E-7",
@@ -133,15 +143,16 @@ PLATFORM_ALIASES = {
 # These are deliberately narrow, reviewed program names that can identify the
 # relevant prime award even when the upstream platform-family field is blank.
 # They are not general fuzzy-description matches.
-REVIEWED_EXACT_RECORD_PATTERNS = {
-    "LCAC": (
-        r"SHIP[- ]TO[- ]SHORE CONNECTOR|"
-        r"(^|[^A-Z0-9])LCAC[ /-]*(?:SSC|10[0-9]|11[0-9]|100[ ]+CLASS)"
-        r"([^A-Z0-9]|$)|(^|[^A-Z0-9])SSC[ /-]*LCAC([^A-Z0-9]|$)"
-    ),
-}
+from reviewed_platform_links import REVIEWED_EXACT_RECORD_PATTERNS, recovered_platform_sql
 
 PLATFORM_FOCUSES = {
+    "M109A7": {
+        "display_name": "M109A7 Paladin",
+        "base_platform": "M109 PALADIN",
+        "match_pattern": r"M109A7|PALADIN INTEGRATED MANAGEMENT",
+        "related_mapped_platforms": ["M109 PALADIN", "M109A7 HOWITZER"],
+        "relationship": "M109A7 variant within the M109 Paladin family",
+    },
     "F-15EX": {
         "display_name": "F-15EX",
         "base_platform": "F-15",
@@ -168,7 +179,7 @@ PLATFORM_FOCUSES = {
 # America-class and Tomahawk aliases are collapsed into their common families.
 # Patriot retains its component program labels so a PAC-3-specific query can
 # stay PAC-3-specific.
-COLLAPSED_PLATFORM_GROUPS = {"AMERICA CLASS LHA", "TOMAHAWK"}
+COLLAPSED_PLATFORM_GROUPS = {"AMERICA CLASS LHA", "TOMAHAWK", "M88", "COLUMBIA CLASS SSBN", "M109 PALADIN"}
 
 
 def _rows(cursor: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
@@ -204,6 +215,8 @@ def _date(value: Any) -> str | None:
 
 def requested_platform_focus(text: str) -> str | None:
     normalized = f" {_normalize(text)} "
+    if " M109A7 " in normalized or " PALADIN INTEGRATED MANAGEMENT " in normalized:
+        return "M109A7"
     if (
         " F 15EX " in normalized
         or " F15EX " in normalized
@@ -249,8 +262,7 @@ class PlatformContextStore:
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")
-        duckdb_temp = os.getenv("ASK_MIMIR_DUCKDB_TEMP", "/tmp/ask-mimir-duckdb")
-        self.connection.execute("SET temp_directory = ?", [duckdb_temp])
+        configure_duckdb_scratch(self.connection, 'platform')
         self.niin_source_depth_columns = {
             str(row[0]).lower()
             for row in self.connection.execute(
@@ -323,6 +335,25 @@ class PlatformContextStore:
             if normalized not in grouped_members
         ]
         platforms.extend(PLATFORM_GROUPS)
+        # Reviewed budget aliases can bridge spelling/name gaps. Do not replace
+        # an existing historical variant with its broader budget family.
+        self._budget_aliases: Dict[str, str] = {}
+        definitions = json.loads(Path(__file__).with_name("fydp_platform_linkages.json").read_text())["linkages"]
+        known = {_normalize(platform): platform for platform in platforms}
+        for definition in definitions:
+            aliases = definition.get("platform_aliases", [])
+            primary = aliases[0] if aliases else None
+            primary_target = PLATFORM_ALIASES.get(_normalize(primary), primary)
+            canonical = known.get(_normalize(primary_target))
+            if not canonical and aliases:
+                canonical = aliases[0]
+                platforms.append(canonical)
+                known[_normalize(canonical)] = canonical
+            if canonical:
+                for alias in [*aliases, definition.get("display_name", "")]:
+                    normalized_alias = _normalize(alias)
+                    if normalized_alias and normalized_alias not in known:
+                        self._budget_aliases[normalized_alias] = canonical
         return sorted(set(platforms), key=_normalize)
 
     def search(self, query: str, limit: int = 15) -> Dict[str, Any]:
@@ -330,7 +361,7 @@ class PlatformContextStore:
         normalized = _normalize(clean)
         if not normalized:
             return {"query": clean, "matches": [], "requires_disambiguation": False}
-        alias_target = PLATFORM_ALIASES.get(normalized)
+        alias_target = PLATFORM_ALIASES.get(normalized) or getattr(self, "_budget_aliases", {}).get(normalized)
         exact = [alias_target] if alias_target in self.platforms else []
         if not exact:
             exact = [platform for platform in self.platforms if _normalize(platform) == normalized]
@@ -361,10 +392,11 @@ class PlatformContextStore:
 
     def mentions(self, text: str) -> List[str]:
         normalized = f" {_normalize(text)} "
+        aliases = {**getattr(self, "_budget_aliases", {}), **PLATFORM_ALIASES}
         alias_hits = [
             (alias, target)
             for alias, target in sorted(
-                PLATFORM_ALIASES.items(), key=lambda item: len(item[0]), reverse=True
+                aliases.items(), key=lambda item: len(item[0]), reverse=True
             )
             if f" {alias} " in normalized and target in self.platforms
         ]
@@ -404,7 +436,7 @@ class PlatformContextStore:
         matches.extend(alias_matches)
         if not matches:
             single_token_targets: Dict[str, str] = {}
-            for alias, target in PLATFORM_ALIASES.items():
+            for alias, target in aliases.items():
                 if " " not in alias and len(alias) >= 6 and target in self.platforms:
                     single_token_targets[alias] = target
             for platform in self.platforms:
@@ -449,8 +481,11 @@ class PlatformContextStore:
             and precomputed_path.exists()
         ):
             context = json.loads(precomputed_path.read_text())
-            if context.get("scope", {}).get("platform_id") == resolved:
+            scope = context.get("scope", {})
+            if scope.get("platform_id") == resolved and set(scope.get("included_platform_records") or [resolved]) == set(self._platform_members(resolved)):
                 self._refresh_precomputed_source_depth(context)
+                self._refresh_precomputed_item_financials(context, resolved)
+                self._refresh_supplier_metrics(context, resolved)
                 self._cache[resolved] = context
                 return context
 
@@ -478,11 +513,8 @@ class PlatformContextStore:
             )
         )
         prime_total = float(financial_totals["positive_prime_obligations_usd"] or 0)
-        positive_supplier_values = [
-            max(float(row.get("mimir_modelled_reported_subcontract_value_usd") or 0), 0)
-            for row in reported_suppliers
-        ]
-        subcontract_total = sum(positive_supplier_values)
+        supplier_concentration = self._supplier_concentration(resolved)
+        subcontract_total = supplier_concentration["positive_reported_subcontract_value_usd"]
         for row in direct_recipients:
             row["share_of_platform_prime_obligations_pct"] = (
                 float(row.get("positive_prime_obligations_usd") or 0) / prime_total * 100
@@ -493,8 +525,6 @@ class PlatformContextStore:
                 max(float(row.get("mimir_modelled_reported_subcontract_value_usd") or 0), 0)
                 / subcontract_total * 100 if subcontract_total else 0
             )
-        positive_supplier_values = sorted(positive_supplier_values, reverse=True)
-        positive_supplier_total = sum(positive_supplier_values)
         observed_dla_recipient_sites = int(items.get("observed_dla_recipient_site_count") or 0)
         reported_supplier_lane_is_sparse = (
             len(reported_suppliers) < 10
@@ -503,27 +533,14 @@ class PlatformContextStore:
                 or observed_dla_recipient_sites >= 25
             )
         )
-        supplier_concentration = {
-            "supplier_site_count": len(reported_suppliers),
-            "positive_reported_subcontract_value_usd": positive_supplier_total,
-            "top_supplier_share_pct": (
-                positive_supplier_values[0] / positive_supplier_total * 100
-                if positive_supplier_total and positive_supplier_values else 0
-            ),
-            "top_five_supplier_share_pct": (
-                sum(positive_supplier_values[:5]) / positive_supplier_total * 100
-                if positive_supplier_total else 0
-            ),
-            "top_ten_supplier_share_pct": (
-                sum(positive_supplier_values[:10]) / positive_supplier_total * 100
-                if positive_supplier_total else 0
-            ),
+        supplier_concentration.update({
+            "supplier_sites_displayed": len(reported_suppliers),
             "interpretation_note": (
                 "Value concentration describes the distribution of observed reported subcontract "
                 "value across supplier sites. Component source depth is a separate question and "
                 "depends on item-level source evidence."
             ),
-        }
+        })
         fingerprint_input = {
             "platform": resolved,
             "annual": annual,
@@ -535,7 +552,7 @@ class PlatformContextStore:
         }
         context = {
             "context_type": "universal_platform_dossier",
-            "calculation_version": "mimir-platform-context-2026-09-v1",
+            "calculation_version": "mimir-platform-context-2026-09-v2",
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "scope": {
                 "platform_id": resolved,
@@ -544,6 +561,7 @@ class PlatformContextStore:
                 "completed_fiscal_years": list(COMPLETED_FISCAL_YEARS),
                 "partial_fiscal_year": 2026,
                 "observation_window": OBSERVATION_WINDOW,
+                **({"parts_scope_note": "Parts coverage includes the wider LCAC family; SSC-specific awards are identified separately."} if resolved == "LCAC" else {}),
             },
             "annual_activity": annual,
             "direct_award_recipients": direct_recipients,
@@ -594,8 +612,8 @@ class PlatformContextStore:
                 **(
                     {
                         "reviewed_named_award_rule": (
-                            "Exact LCAC or Ship-to-Shore Connector names in federal award "
-                            "descriptions are included with the LCAC platform record."
+                            f"Reviewed exact program names in federal award descriptions "
+                            f"are included with the {resolved} platform record."
                         )
                     }
                     if resolved.upper() in REVIEWED_EXACT_RECORD_PATTERNS
@@ -669,6 +687,22 @@ class PlatformContextStore:
                     )
         context["item_and_component_evidence"] = item_evidence
 
+    def _refresh_precomputed_item_financials(self, context: Dict[str, Any], platform: str) -> None:
+        """Replace legacy supplier-lookup dollar values with transaction-based values."""
+        if not hasattr(self, "connection") or not hasattr(self, "niin_source_depth_columns"):
+            return
+        items = self._item_evidence(platform)
+        context["item_and_component_evidence"] = items
+        coverage = context.setdefault("coverage", {})
+        coverage["observed_dla_recipient_sites"] = items["observed_dla_recipient_site_count"]
+        coverage["associated_niins"] = items["associated_niin_count"]
+        coverage["item_relationships_loaded"] = len(items["top_items"])
+        context["calculation_version"] = "mimir-platform-context-2026-09-v2"
+        context["evidence_fingerprint"] = hashlib.sha256(json.dumps(
+            _canonical_fingerprint_value({key: value for key, value in context.items() if key not in {"evidence_fingerprint", "generated_at"}}),
+            sort_keys=True, default=str,
+        ).encode()).hexdigest()[:24]
+
     def comparison_projection(self, platform_id: str) -> Dict[str, Any]:
         """Return the supplier evidence needed for a multi-platform comparison."""
         resolution = self.search(platform_id)
@@ -678,16 +712,6 @@ class PlatformContextStore:
         suppliers = self._reported_supplier_sites(resolved, limit=500)
         self._attach_supplier_annual_activity(resolved, suppliers)
         categories = self._component_categories(resolved, limit=150)
-        positive_values = [
-            max(
-                float(
-                    row.get("mimir_modelled_reported_subcontract_value_usd") or 0
-                ),
-                0,
-            )
-            for row in suppliers
-        ]
-        positive_total = sum(positive_values)
         return {
             "scope": {
                 "platform_id": resolved,
@@ -700,21 +724,9 @@ class PlatformContextStore:
             "reported_supplier_sites": suppliers,
             "reported_component_categories": categories,
             "reported_supplier_summary": {
-                "supplier_site_count": len(suppliers),
+                **self._supplier_concentration(resolved),
+                "supplier_sites_displayed": len(suppliers),
                 "available_supplier_site_count": self._available_count(suppliers),
-                "positive_reported_subcontract_value_usd": positive_total,
-                "top_supplier_share_pct": (
-                    max(positive_values) / positive_total * 100
-                    if positive_total and positive_values
-                    else 0
-                ),
-                "top_five_supplier_share_pct": (
-                    sum(sorted(positive_values, reverse=True)[:5])
-                    / positive_total
-                    * 100
-                    if positive_total
-                    else 0
-                ),
             },
         }
 
@@ -747,16 +759,8 @@ class PlatformContextStore:
         parameters: List[Any] = [members, members]
         pattern = REVIEWED_EXACT_RECORD_PATTERNS.get(str(platform).upper())
         if pattern:
-            description = (
-                f"UPPER(COALESCE({alias}.base_award_description, '') || ' ' || "
-                f"COALESCE({alias}.action_description, '') || ' ' || "
-                f"COALESCE({alias}.description, ''))"
-            )
-            condition = (
-                f"({condition} OR ({alias}.source_system = 'USA_SPENDING' "
-                f"AND REGEXP_MATCHES({description}, ?)))"
-            )
-            parameters.append(pattern)
+            condition = f"({condition} OR ({recovered_platform_sql(alias, 'transactions')}) IN (SELECT UNNEST(?)))"
+            parameters.append(members)
         return condition, parameters
 
     def _network_record_condition(
@@ -767,18 +771,16 @@ class PlatformContextStore:
         parameters: List[Any] = [members]
         pattern = REVIEWED_EXACT_RECORD_PATTERNS.get(str(platform).upper())
         if pattern:
-            description = (
-                f"UPPER(COALESCE({alias}.prime_award_description, '') || ' ' || "
-                f"COALESCE({alias}.description, ''))"
-            )
-            condition = f"({condition} OR REGEXP_MATCHES({description}, ?))"
-            parameters.append(pattern)
+            condition = f"({recovered_platform_sql(alias, 'network')}) IN (SELECT UNNEST(?))"
         return condition, parameters
 
     def get_export_context(
-        self, platform_id: str, limit: int = EVIDENCE_EXPORT_ROW_LIMIT
+        self, platform_id: str, limit: int = EVIDENCE_EXPORT_ROW_LIMIT,
+        focus_id: str | None = None,
     ) -> Dict[str, Any]:
         """Build expanded evidence only when a customer requests the download."""
+        if focus_id:
+            return self._focused_program_projection(platform_id, focus_id, limit, export=True)
         base = self.get(platform_id)
         resolved = base["scope"]["platform_id"]
         row_limit = min(max(int(limit), 1), EVIDENCE_EXPORT_ROW_LIMIT)
@@ -875,7 +877,7 @@ class PlatformContextStore:
         return projected
 
     def _focused_program_projection(
-        self, platform_id: str, focus_id: str, supplier_limit: int
+        self, platform_id: str, focus_id: str, supplier_limit: int, *, export: bool = False
     ) -> Dict[str, Any]:
         resolution = self.search(platform_id)
         resolved = resolution.get("resolved_platform_id")
@@ -886,7 +888,7 @@ class PlatformContextStore:
             raise ValueError(
                 f"{focus_id} is configured against {focus['base_platform']}, not {resolved}"
             )
-        base_activity = _rows(
+        focused_activity = _rows(
             self.connection.execute(
                 """
                 SELECT year AS fiscal_year, source_system,
@@ -900,11 +902,13 @@ class PlatformContextStore:
                            AS shared_use_niin_exposure_usd,
                        COUNT(DISTINCT award_key) AS award_count
                 FROM read_parquet(?)
-                WHERE year BETWEEN 2021 AND 2026 AND platform_family = ?
+                WHERE year BETWEEN 2021 AND 2026 AND source_system = 'USA_SPENDING'
+                  AND REGEXP_MATCHES(UPPER(COALESCE(base_award_description, '') || ' ' ||
+                      COALESCE(action_description, '') || ' ' || COALESCE(description, '')), ?)
                 GROUP BY 1, 2
                 ORDER BY 1, 2
                 """,
-                [str(self.paths["transactions"]), resolved],
+                [str(self.paths["transactions"]), PLATFORM_FOCUSES[focus["focus_id"]]["match_pattern"]],
             )
         )
         focus_prime = sum(
@@ -916,7 +920,16 @@ class PlatformContextStore:
             float(row.get("mimir_modelled_reported_subcontract_value_usd") or 0)
             for row in focus["reported_supplier_sites_on_explicit_records"]
         )
-        supplier_limit = min(max(int(supplier_limit), 1), 250)
+        supplier_count = len(focus["reported_supplier_sites_on_explicit_records"])
+        award_count = len(focus["top_explicit_prime_awards"])
+        supplier_limit = min(max(int(supplier_limit), 1), EVIDENCE_EXPORT_ROW_LIMIT if export else 250)
+        focus = {**focus,
+            "total_reported_supplier_sites": supplier_count,
+            "total_reported_subcontract_value_usd": focus_supplier_value,
+            "total_prime_awards": award_count,
+            "reported_supplier_sites_on_explicit_records": focus["reported_supplier_sites_on_explicit_records"][:supplier_limit],
+            "top_explicit_prime_awards": focus["top_explicit_prime_awards"][:EVIDENCE_EXPORT_ROW_LIMIT if export else 20],
+        }
         return {
             "context_type": "focused_platform_or_program_dossier",
             "scope": {
@@ -929,7 +942,7 @@ class PlatformContextStore:
                 "requested_focus": focus,
             },
             "annual_activity": {
-                "records": base_activity,
+                "records": focused_activity,
                 "completed_fiscal_years": list(COMPLETED_FISCAL_YEARS),
                 "partial_fiscal_year": 2026,
             },
@@ -942,18 +955,17 @@ class PlatformContextStore:
                 "associated_niin_count": 0,
                 "top_items": [],
                 "top_item_supplier_sites": [],
+                "authorized_source_depth": {},
             },
             "top_prime_awards": focus["top_explicit_prime_awards"],
             "current_opportunities": [],
             "coverage": {
-                "reported_supplier_sites": len(
-                    focus["reported_supplier_sites_on_explicit_records"]
-                ),
+                "reported_supplier_sites": supplier_count,
                 "reported_supplier_sites_loaded": min(
                     len(focus["reported_supplier_sites_on_explicit_records"]),
                     supplier_limit,
                 ),
-                "prime_awards": len(focus["top_explicit_prime_awards"]),
+                "prime_awards": award_count,
                 "prime_awards_loaded": len(focus["top_explicit_prime_awards"]),
                 "focus_uses_explicit_named_records": True,
                 "reported_supplier_lane_is_sparse": len(
@@ -1016,7 +1028,6 @@ class PlatformContextStore:
                   AND REGEXP_MATCHES({transaction_expression}, ?)
                 GROUP BY contract_id
                 ORDER BY ABS(net_prime_obligations_usd) DESC
-                LIMIT 20
                 """,
                 [str(self.paths["transactions"]), pattern],
             )
@@ -1041,7 +1052,6 @@ class PlatformContextStore:
                 GROUP BY sub_cage
                 HAVING SUM(COALESCE(subaward_value, 0)) <> 0
                 ORDER BY ABS(mimir_modelled_reported_subcontract_value_usd) DESC
-                LIMIT 40
                 """,
                 [str(self.paths["network"]), pattern],
             )
@@ -1148,6 +1158,50 @@ class PlatformContextStore:
             )
         )
 
+    def _supplier_concentration(self, platform: str) -> Dict[str, Any]:
+        condition, parameters = self._network_record_condition(platform, "n")
+        row = self.connection.execute(
+            f"""WITH sites AS (
+                SELECT n.sub_cage, SUM(COALESCE(n.subaward_value, 0)) AS value
+                FROM read_parquet(?) n
+                WHERE {condition} AND n.year BETWEEN 2021 AND 2026
+                  AND n.sub_cage IS NOT NULL
+                  AND UPPER(TRIM(n.sub_cage)) NOT IN ('', 'UNKNOWN', 'UNKNO')
+                GROUP BY n.sub_cage HAVING value <> 0
+            ), ranked AS (
+                SELECT GREATEST(value, 0) AS value,
+                       ROW_NUMBER() OVER (ORDER BY value DESC, sub_cage) AS rank
+                FROM sites
+            ) SELECT COUNT(*), COALESCE(SUM(value), 0),
+                     COALESCE(MAX(value), 0),
+                     COALESCE(SUM(CASE WHEN rank <= 5 THEN value ELSE 0 END), 0),
+                     COALESCE(SUM(CASE WHEN rank <= 10 THEN value ELSE 0 END), 0)
+              FROM ranked""",
+            [str(self.paths["network"]), *parameters],
+        ).fetchone()
+        total = float(row[1])
+        return {
+            "supplier_site_count": int(row[0]),
+            "positive_reported_subcontract_value_usd": total,
+            "top_supplier_share_pct": float(row[2]) / total * 100 if total else 0,
+            "top_five_supplier_share_pct": float(row[3]) / total * 100 if total else 0,
+            "top_ten_supplier_share_pct": float(row[4]) / total * 100 if total else 0,
+            "denominator": "All observed supplier sites with positive net reported subcontract value, FY2021–FY2026",
+        }
+
+    def _refresh_supplier_metrics(self, context: Dict[str, Any], platform: str) -> None:
+        if not hasattr(self, "connection"):
+            return
+        summary = self._supplier_concentration(platform)
+        suppliers = context.get("reported_supplier_sites", [])
+        total = summary["positive_reported_subcontract_value_usd"]
+        for row in suppliers:
+            row["share_of_reported_subcontract_value_pct"] = (
+                max(float(row.get("mimir_modelled_reported_subcontract_value_usd") or 0), 0)
+                / total * 100 if total else 0
+            )
+        context["reported_supplier_concentration"] = {**summary, "supplier_sites_displayed": len(suppliers)}
+
     def _reported_supplier_sites(self, platform: str, limit: int = 250) -> List[Dict[str, Any]]:
         condition, condition_parameters = self._network_record_condition(
             platform, "n"
@@ -1171,7 +1225,11 @@ class PlatformContextStore:
                             1,
                             30
                         ) AS mapped_platforms
-                    FROM read_parquet(?)
+                    FROM (
+                        SELECT * EXCLUDE (platform_family),
+                               {recovered_platform_sql('raw', 'network')} AS platform_family
+                        FROM read_parquet(?) raw
+                    )
                     WHERE year BETWEEN 2021 AND 2026
                       AND UPPER(TRIM(COALESCE(platform_family, ''))) NOT IN (
                           '', 'UNMAPPED', 'REVIEW NEEDED'
@@ -1383,27 +1441,41 @@ class PlatformContextStore:
                 ],
             )
         )
-        suppliers = _rows(
+        suppliers = self._item_supplier_sites(platform, limit=limit)
+        source_depth = self._source_depth_summary(members)
+        return {
+            "associated_niin_count": associated_count,
+            "authorized_source_depth": source_depth,
+            "observed_dla_recipient_site_count": int(
+                suppliers[0].get("total_supplier_sites") or 0
+            ) if suppliers else 0,
+            "top_items": top_items,
+            "top_item_supplier_sites": suppliers,
+            "financial_treatment": "Single-platform attributed value and shared-use NIIN exposure remain separate.",
+        }
+
+    def _item_supplier_sites(self, platform: str, limit: int = 100) -> List[Dict[str, Any]]:
+        members = self._platform_members(platform)
+        return _rows(
             self.connection.execute(
                 """
                 WITH supplier_values AS (
-                SELECT niin, cage, MAX(vendor) AS supplier_name,
-                       SUM(CASE WHEN COALESCE(has_multiple_platforms,FALSE)=FALSE THEN total_revenue ELSE 0 END)
-                           AS attributed_dla_procurement_value_usd,
-                       SUM(CASE WHEN COALESCE(has_multiple_platforms,FALSE)=TRUE THEN total_revenue ELSE 0 END)
-                           AS shared_use_niin_exposure_usd,
-                       SUM(total_units_sold) AS observed_units,
-                       MAX(last_sold) AS latest_observed_date,
-                       MAX(has_multiple_platforms) AS has_multiple_platforms,
+                SELECT LPAD(TRIM(niin),9,'0') AS niin, vendor_cage AS cage,
+                       MAX(vendor_name) AS supplier_name,
+                       SUM(COALESCE(platform_attributed_spend_amount,0)) AS attributed_dla_procurement_value_usd,
+                       SUM(COALESCE(shared_use_exposure_amount,0)) AS shared_use_niin_exposure_usd,
+                       CAST(NULL AS DOUBLE) AS observed_units,
+                       MAX(SUBSTR(action_date,1,10)) AS latest_observed_date,
+                       BOOL_OR(COALESCE(platform_count,0) > 1) AS has_multiple_platforms,
                        MAX(platform_families) AS platform_families,
                        COUNT(DISTINCT contract_id) AS contract_count
                 FROM read_parquet(?)
-                WHERE year BETWEEN 2021 AND 2026
+                WHERE source_system='DLA' AND year BETWEEN 2021 AND 2026
                   AND (platform_family IN (SELECT UNNEST(?)) OR EXISTS (
                       SELECT 1 FROM UNNEST(STR_SPLIT(COALESCE(platform_families,''),' | ')) member(value)
                       WHERE value IN (SELECT UNNEST(?))))
-                GROUP BY niin,cage
-                HAVING SUM(total_revenue) <> 0
+                GROUP BY 1,2
+                HAVING SUM(spend_amount) <> 0
                 ), locations AS (
                     SELECT UPPER(TRIM(cage_code)) AS cage, MAX(city) AS city, MAX(state) AS state,
                            MAX(location_quality) AS location_quality
@@ -1425,23 +1497,11 @@ class PlatformContextStore:
                 LIMIT ?
                 """,
                 [
-                    str(self.paths["item_suppliers"]), members, members,
+                    str(self.paths["transactions"]), members, members,
                     str(self.paths["locations"]), limit,
                 ],
             )
         )
-        source_depth = self._source_depth_summary(members)
-        return {
-            "associated_niin_count": associated_count,
-            "authorized_source_depth": source_depth,
-            "observed_dla_recipient_site_count": int(
-                suppliers[0].get("total_supplier_sites") or 0
-            ) if suppliers else 0,
-            "top_items": top_items,
-            "top_item_supplier_sites": suppliers,
-            "financial_treatment": "Single-platform attributed value and shared-use NIIN exposure remain separate.",
-        }
-
     def _source_depth_summary(self, members: List[str]) -> Dict[str, Any]:
         if len(members) == 1:
             rows = _rows(

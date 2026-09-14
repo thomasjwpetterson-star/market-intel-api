@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 from urllib.parse import quote, unquote
 
 import duckdb
+from research_safety import configure_duckdb_scratch
 
 
 DEFAULT_DATA_ROOT = Path(
@@ -278,6 +279,7 @@ class MarketRecordSearchStore:
         if missing:
             raise FileNotFoundError(f"market-record search sources are missing: {missing}")
         self.connection = duckdb.connect()
+        configure_duckdb_scratch(self.connection, 'record-search')
         self.connection.execute("SET preserve_insertion_order=false")
         self.connection.execute("SET threads=2")
         self.connection.execute("SET memory_limit='1GB'")
@@ -660,6 +662,15 @@ class MarketRecordSearchStore:
                 if has_current_announcements or "source_type" in optional
                 else "FY2025-FY2026 observed contract awards"
             )
+            for row in records:
+                # Preserve a typed identifier so citation validation recognises
+                # award links; record_id also represents notices elsewhere.
+                if row.get("record_id") and row.get("source_type") != "DOD_CONTRACT_ANNOUNCEMENT":
+                    row["contract_id"] = row["record_id"]
+                    row["public_record_url"] = (
+                        "https://www.mimiradvisors.org/dashboard?view=AWARDS&award="
+                        + quote(str(row["record_id"]), safe="")
+                    )
         return {
             "context_type": "market_record_search",
             "scope": {
