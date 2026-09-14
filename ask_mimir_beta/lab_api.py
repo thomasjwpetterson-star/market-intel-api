@@ -4876,20 +4876,20 @@ def add_answer_feedback(payload: FeedbackRequest, request: Request) -> Dict[str,
     return {"feedback_id": feedback_id, "status": "recorded"}
 
 
-@app.post("/api/evidence/answer.pdf")
-def answer_report_export(
-    payload: AnswerReportRequest,
+def _answer_report_export(
+    request_id: str,
+    response_id: str,
     request: Request,
 ) -> StreamingResponse:
     access = require_report_download(request)
     try:
-        job = job_manager.get(payload.request_id, access)
+        job = job_manager.get(request_id, access)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="This saved answer is no longer available for download.") from exc
     result = job.get("result") or {}
-    if job.get("status") != "completed" or result.get("response_id") != payload.response_id or response_requires_clarification(result):
+    if job.get("status") != "completed" or result.get("response_id") != response_id or response_requires_clarification(result):
         raise HTTPException(status_code=409, detail="PDF downloads are available for completed research answers, not clarification questions.")
-    saved = runtime.beta_state.load_job(payload.request_id) or {}
+    saved = runtime.beta_state.load_job(request_id) or {}
     question = str(saved.get("_question") or "Ask Mimir research")
     scope_name = (result.get("active_scope") or {}).get("scope_name")
     report = build_branded_answer_pdf(
@@ -4906,6 +4906,25 @@ def answer_report_export(
             )
         },
     )
+
+
+@app.post("/api/evidence/answer.pdf")
+def answer_report_export(
+    payload: AnswerReportRequest,
+    request: Request,
+) -> StreamingResponse:
+    """Retain the existing POST contract for older clients."""
+    return _answer_report_export(payload.request_id, payload.response_id, request)
+
+
+@app.get("/api/evidence/answer.pdf")
+def answer_report_export_download(
+    request: Request,
+    request_id: str,
+    response_id: str,
+) -> StreamingResponse:
+    """Serve a normal browser navigation so downloads are not synthetic clicks."""
+    return _answer_report_export(request_id, response_id, request)
 
 
 @app.get("/api/evidence/platform-supply-chain/{platform_id}.zip")

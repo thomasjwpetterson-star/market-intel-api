@@ -296,6 +296,7 @@ class DurableJobTests(unittest.TestCase):
     def test_pdf_uses_owned_saved_answer_and_rejects_clarification(self):
         app = FastAPI()
         app.post('/api/evidence/answer.pdf')(lab.answer_report_export)
+        app.get('/api/evidence/answer.pdf')(lab.answer_report_export_download)
         job = {'request_id':'pdf-request','subject_id':'alice','status':'completed',
             '_question':'Original question', 'result':{'response_id':'pdf-response',
             'answer':'Saved research', 'active_scope':{'scope_name':'AMRAAM'}}}
@@ -306,6 +307,9 @@ class DurableJobTests(unittest.TestCase):
             response = client.post('/api/evidence/answer.pdf',json=payload)
             self.assertEqual(response.status_code,200,response.text)
             render.assert_called_once_with(question='Original question',answer='Saved research',scope_name='AMRAAM')
+            get_response = client.get('/api/evidence/answer.pdf',params={'request_id':'pdf-request','response_id':'pdf-response'})
+            self.assertEqual(get_response.status_code,200,get_response.text)
+            self.assertEqual(get_response.headers['content-type'],'application/pdf')
             with patch.object(lab,'require_report_download',return_value=AccessContext('bob','enterprise',True)):
                 self.assertEqual(client.post('/api/evidence/answer.pdf',json=payload).status_code,404)
             job['result']['requires_clarification'] = True
