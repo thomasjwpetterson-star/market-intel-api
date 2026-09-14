@@ -2109,6 +2109,7 @@ def company_site_dossier_cage(messages: List[ChatMessage]) -> str | None:
         for term in (
             "everything",
             "tell me about",
+            "tell me more about",
             "company profile",
             "site profile",
             "full picture",
@@ -3950,6 +3951,24 @@ def sanitize_answer_text(answer: str) -> str:
     cleaned = re.sub(
         r"\s*No (?:DIRECT_PROGRAM_HISTORY|direct program history)[^.]*\.",
         "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"(?m)^\s*(?:[-*]\s*)?No explicit public FYDP linkage[^.]*\.\s*\n?",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*Obligations are contract-action values, not [^.]+\.",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\bThis is a separate, non-additive lane totaling\b",
+        "This totals",
         cleaned,
         flags=re.IGNORECASE,
     )

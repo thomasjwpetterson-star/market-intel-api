@@ -62,13 +62,18 @@ class ExecutionBoundaryTests(unittest.TestCase):
             self.assertEqual(small['financial_totals'], large['financial_totals'])
             self.assertEqual(small['coverage']['reported_supplier_sites'], 60)
             self.assertEqual(small['coverage']['prime_awards'], 45)
+            self.assertEqual(small['coverage']['direct_award_recipient_sites'], 1)
+            self.assertEqual(len(small['direct_award_recipients']), 1)
+            self.assertEqual(small['direct_award_recipients'][0]['award_count'], 45)
+            self.assertNotIn('associated_niins', small['coverage'])
+            self.assertNotIn('associated_niin_count', small['item_and_component_evidence'])
             self.assertEqual(len(small['reported_supplier_sites']), 1)
             self.assertEqual(len(large['reported_supplier_sites']), 50)
             self.assertEqual(small['financial_totals']['mimir_modelled_reported_subcontract_value_usd'], 600)
             self.assertEqual(sum(row['net_prime_obligations_usd'] for row in small['annual_activity']['records']), 4500)
             export = store.get_export_context('M109 PALADIN', focus_id='M109A7')
             bundle = zipfile.ZipFile(io.BytesIO(build_platform_context_zip(export)))
-            for filename, expected in [('03_reported_supplier_sites.csv',60), ('07_prime_awards.csv',45)]:
+            for filename, expected in [('02_direct_award_recipients.csv',1), ('03_reported_supplier_sites.csv',60), ('07_prime_awards.csv',45)]:
                 rows = list(csv.DictReader(io.StringIO(bundle.read(filename).decode('utf-8-sig'))))
                 self.assertEqual(len(rows), expected)
             con.close()
@@ -130,6 +135,18 @@ class ExecutionBoundaryTests(unittest.TestCase):
                 with self.assertRaises(StopAtEvidence):
                     lab.generate_answer(request, routing=routing)
                 self.assertEqual(calls, ["search_company_contexts", "get_company_context"])
+
+    def test_generated_cage_site_follow_up_uses_dedicated_dossier_route(self):
+        question = "Tell me more about the US defense activity at TELEDYNE BROWN ENGINEERING, INC., CAGE 14925."
+        request = lab.AskRequest(messages=[{"role":"user", "content":question}])
+        runtime = SimpleNamespace(
+            platform_contexts=Mock(mentions=Mock(return_value=[])),
+            company_contexts=Mock(search=Mock(return_value={"matches":[]})),
+        )
+        with patch.object(lab, "runtime", runtime, create=True):
+            routing = lab.routing_decision_for_request(request)
+        self.assertEqual(lab.company_site_dossier_cage(request.messages), "14925")
+        self.assertEqual(routing.workflow, "company_site_intelligence")
 
     def test_genuine_follow_up_keeps_compatible_scope(self):
         request = lab.AskRequest(messages=[{"role":"user","content":"What is its forward outlook?"}], active_scope={"scope_type":"platform","scope_id":"AMRAAM"})
@@ -314,6 +331,19 @@ class EvidenceCacheTests(unittest.TestCase):
         self.assertIn('view=COMPANY&cage=8MQW5', clean)
         self.assertIn('/ask-mimir?q=Sentinel', clean)
         self.assertEqual(lab.sanitize_answer_text('modelled reported subcontract value'), 'reported subcontract value')
+
+    def test_internal_fydp_and_generic_financial_qualifications_are_removed(self):
+        answer = (
+            "Useful finding.\n\n"
+            "- No explicit public FYDP linkage was found for the site's mapped platform positions in the structured evidence.\n"
+            "Obligations are contract-action values, not site revenue or production output.\n"
+            "This is a separate, non-additive lane totaling $12 million."
+        )
+        clean = lab.sanitize_answer_text(answer)
+        self.assertNotIn("structured evidence", clean)
+        self.assertNotIn("not site revenue", clean)
+        self.assertIn("This totals $12 million", clean)
+        self.assertNotIn("\n-\n", clean)
 
     def test_lookup_teaser_links_are_normalized_for_both_query_spellings(self):
         for parameter in ['q', 'query']:

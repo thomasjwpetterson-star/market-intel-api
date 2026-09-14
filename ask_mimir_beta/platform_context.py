@@ -916,6 +916,10 @@ class PlatformContextStore:
             for row in focus["explicit_named_record_summary"]
             if row.get("source_system") == "USA_SPENDING"
         )
+        direct_award_recipients = self._focused_direct_award_recipients(
+            focus["top_explicit_prime_awards"]
+        )
+        direct_award_recipient_count = len(direct_award_recipients)
         focus_supplier_value = sum(
             float(row.get("mimir_modelled_reported_subcontract_value_usd") or 0)
             for row in focus["reported_supplier_sites_on_explicit_records"]
@@ -946,13 +950,12 @@ class PlatformContextStore:
                 "completed_fiscal_years": list(COMPLETED_FISCAL_YEARS),
                 "partial_fiscal_year": 2026,
             },
-            "direct_award_recipients": [],
+            "direct_award_recipients": direct_award_recipients[:supplier_limit],
             "reported_supplier_sites": focus[
                 "reported_supplier_sites_on_explicit_records"
             ][:supplier_limit],
             "reported_component_categories": [],
             "item_and_component_evidence": {
-                "associated_niin_count": 0,
                 "top_items": [],
                 "top_item_supplier_sites": [],
                 "authorized_source_depth": {},
@@ -960,6 +963,10 @@ class PlatformContextStore:
             "top_prime_awards": focus["top_explicit_prime_awards"],
             "current_opportunities": [],
             "coverage": {
+                "direct_award_recipient_sites": direct_award_recipient_count,
+                "direct_award_recipient_sites_loaded": min(
+                    direct_award_recipient_count, supplier_limit
+                ),
                 "reported_supplier_sites": supplier_count,
                 "reported_supplier_sites_loaded": min(
                     len(focus["reported_supplier_sites_on_explicit_records"]),
@@ -984,6 +991,63 @@ class PlatformContextStore:
             },
             "evidence_index": [],
         }
+
+    @staticmethod
+    def _focused_direct_award_recipients(
+        awards: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Aggregate focused award rows by recipient without treating missing item evidence as zero."""
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for award in awards:
+            cage = str(award.get("recipient_cage") or "").strip().upper()
+            if not cage:
+                continue
+            value = float(award.get("net_prime_obligations_usd") or 0)
+            row = grouped.setdefault(
+                cage,
+                {
+                    "cage": cage,
+                    "recipient_name": award.get("recipient_name"),
+                    "net_prime_obligations_usd": 0.0,
+                    "positive_prime_obligations_usd": 0.0,
+                    "deobligations_usd": 0.0,
+                    "award_count": 0,
+                    "first_action_date": None,
+                    "latest_action_date": None,
+                    "sample_contract_ids": [],
+                    "sample_award_descriptions": [],
+                },
+            )
+            row["recipient_name"] = row["recipient_name"] or award.get("recipient_name")
+            row["net_prime_obligations_usd"] += value
+            row["positive_prime_obligations_usd"] += max(value, 0)
+            row["deobligations_usd"] += min(value, 0)
+            row["award_count"] += 1
+            first_date = award.get("first_action_date")
+            latest_date = award.get("latest_action_date")
+            if first_date and (not row["first_action_date"] or first_date < row["first_action_date"]):
+                row["first_action_date"] = first_date
+            if latest_date and (not row["latest_action_date"] or latest_date > row["latest_action_date"]):
+                row["latest_action_date"] = latest_date
+            contract_id = award.get("contract_id")
+            if contract_id and contract_id not in row["sample_contract_ids"]:
+                row["sample_contract_ids"].append(contract_id)
+            description = award.get("base_award_description")
+            if description and description not in row["sample_award_descriptions"]:
+                row["sample_award_descriptions"].append(description)
+        rows = sorted(
+            grouped.values(),
+            key=lambda row: (
+                -float(row["positive_prime_obligations_usd"]),
+                -float(row["net_prime_obligations_usd"]),
+                row["cage"],
+            ),
+        )
+        for row in rows:
+            row["sample_contract_ids"] = row["sample_contract_ids"][:8]
+            row["sample_award_descriptions"] = row["sample_award_descriptions"][:6]
+            row["total_available"] = len(rows)
+        return rows
 
     def _focus_evidence(self, focus_id: str) -> Dict[str, Any]:
         clean_focus = str(focus_id or "").strip().upper()
