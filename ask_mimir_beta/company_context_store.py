@@ -25,7 +25,7 @@ FYDP_PLATFORM_LINKAGE_VERSION = json.loads(
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
-DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v12"
+DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v13"
 
 CANONICAL_CONSOLIDATED_PARENT_NAMES = {
     "CURTISS WRIGHT": "CURTISS-WRIGHT CORPORATION",
@@ -89,6 +89,10 @@ REVIEWED_COMPANY_ALIASES = {
         "EATON INDUSTRIES",
         "EATON LIMITED",
     ),
+    # Kearfott's current public facility directory lists its Guidance &
+    # Navigation operation in Pine Brook and Motion Systems operation in Black
+    # Mountain. Both current CAGE-directory legal names normalize to KEARFOTT.
+    "KEARFOTT": ("KEARFOTT",),
 }
 
 
@@ -687,6 +691,111 @@ def _customer_product_evidence(value: Any) -> Any:
         }
         for row in financial_rows[:5]
     ]
+    route_rows = list(product.get("third_party_dla_procurement_routes", []))
+    recipients: Dict[str, Dict[str, Any]] = {}
+    potential_intermediary_value = 0.0
+    alternate_source_value = 0.0
+    other_same_item_route_value = 0.0
+    for row in route_rows:
+        cage = str(row.get("recipient_cage") or "").strip().upper()
+        if not cage:
+            continue
+        observed_value = float(row.get("dla_procurement_value_usd") or 0)
+        interpretation = str(row.get("relationship_interpretation") or "")
+        if interpretation == "Potential distributor or procurement intermediary":
+            route_class = "Potential distributor or procurement intermediary"
+            potential_intermediary_value += observed_value
+        elif (
+            row.get("recipient_has_design_control_reference")
+            or row.get("recipient_is_active_authorized_source")
+        ):
+            route_class = "Alternate observed source"
+            alternate_source_value += observed_value
+        else:
+            route_class = "Other observed same-item procurement route"
+            other_same_item_route_value += observed_value
+        recipient = recipients.setdefault(
+            cage,
+            {
+                "recipient_cage": cage,
+                "recipient_name": row.get("recipient_name"),
+                "recipient_city": row.get("recipient_city"),
+                "recipient_state": row.get("recipient_state"),
+                "observed_dla_procurement_value_usd": 0.0,
+                "niins": set(),
+                "target_only_source_niins": set(),
+                "route_classes": set(),
+                "items": [],
+            },
+        )
+        recipient["observed_dla_procurement_value_usd"] += observed_value
+        niin = str(row.get("niin") or "").strip()
+        if niin:
+            recipient["niins"].add(niin)
+            if row.get("target_is_only_active_authorized_source"):
+                recipient["target_only_source_niins"].add(niin)
+        recipient["route_classes"].add(route_class)
+        recipient["items"].append(
+            {
+                "niin": row.get("niin"),
+                "nsn": row.get("nsn"),
+                "description": row.get("description"),
+                "observed_dla_procurement_value_usd": observed_value,
+                "relationship": route_class,
+            }
+        )
+    leading_recipients = []
+    for recipient in recipients.values():
+        items = sorted(
+            recipient.pop("items"),
+            key=lambda row: abs(
+                float(row.get("observed_dla_procurement_value_usd") or 0)
+            ),
+            reverse=True,
+        )
+        niins = recipient.pop("niins")
+        only_source_niins = recipient.pop("target_only_source_niins")
+        route_classes = recipient.pop("route_classes")
+        leading_recipients.append(
+            {
+                **recipient,
+                "observed_niin_count": len(niins),
+                "target_only_active_source_niin_count": len(only_source_niins),
+                "relationship_summary": " / ".join(sorted(route_classes)),
+                "representative_items": items[:3],
+            }
+        )
+    leading_recipients.sort(
+        key=lambda row: abs(
+            float(row.get("observed_dla_procurement_value_usd") or 0)
+        ),
+        reverse=True,
+    )
+    if route_rows:
+        route_niins = {
+            str(row.get("niin") or "").strip()
+            for row in route_rows
+            if str(row.get("niin") or "").strip()
+        }
+        product["third_party_dla_route_summary"] = {
+            "recipient_count": int(
+                summary.get("third_party_dla_recipient_count") or len(recipients)
+            ),
+            "niin_count": int(
+                summary.get("third_party_dla_route_niin_count") or len(route_niins)
+            ),
+            "observed_dla_procurement_value_usd": float(
+                summary.get("third_party_dla_procurement_value_usd")
+                or sum(
+                    float(row.get("dla_procurement_value_usd") or 0)
+                    for row in route_rows
+                )
+            ),
+            "potential_intermediary_procurement_value_usd": potential_intermediary_value,
+            "alternate_source_procurement_value_usd": alternate_source_value,
+            "other_same_item_route_procurement_value_usd": other_same_item_route_value,
+            "leading_recipients": leading_recipients[:12],
+        }
     product["summary"] = summary
     return product
 

@@ -8,10 +8,17 @@ from company_context_store import (
     _company_platform_exposure_summary,
     _customer_product_evidence,
     _matching_parent_scope_ids,
+    _reviewed_company_aliases,
 )
 
 
 class CompanyPrecomputedBoundsTests(unittest.TestCase):
+    def test_kearfott_company_name_uses_reviewed_multi_site_alias(self):
+        self.assertEqual(
+            _reviewed_company_aliases("Kearfott Corporation"),
+            ("KEARFOTT",),
+        )
+
     def test_evidence_rows_are_bounded_without_changing_aggregates(self):
         rows = [{"id": index, "contract_ids": [str(index)] * 30} for index in range(6)]
         context = {
@@ -227,6 +234,57 @@ class CompanyPrecomputedBoundsTests(unittest.TestCase):
                 "share_of_observed_dla_procurement_pct"
             ],
             75.0,
+        )
+
+    def test_product_summary_aggregates_third_party_procurement_routes(self):
+        product = _customer_product_evidence(
+            {
+                "summary": {
+                    "third_party_dla_recipient_count": 2,
+                    "third_party_dla_route_niin_count": 2,
+                    "third_party_dla_procurement_value_usd": 350.0,
+                },
+                "third_party_dla_procurement_routes": [
+                    {
+                        "recipient_cage": "OTHER",
+                        "recipient_name": "Observed Supply Co",
+                        "niin": "000000042",
+                        "nsn": "1234-00-000-0042",
+                        "description": "CONTROL",
+                        "dla_procurement_value_usd": 200.0,
+                        "target_is_only_active_authorized_source": True,
+                        "relationship_interpretation": "Potential distributor or procurement intermediary",
+                    },
+                    {
+                        "recipient_cage": "OTHER",
+                        "recipient_name": "Observed Supply Co",
+                        "niin": "000000043",
+                        "nsn": "1234-00-000-0043",
+                        "description": "ACTUATOR",
+                        "dla_procurement_value_usd": 100.0,
+                        "relationship_interpretation": "Potential distributor or procurement intermediary",
+                    },
+                    {
+                        "recipient_cage": "ALT01",
+                        "recipient_name": "Alternate Manufacturer",
+                        "niin": "000000043",
+                        "nsn": "1234-00-000-0043",
+                        "description": "ACTUATOR",
+                        "dla_procurement_value_usd": 50.0,
+                        "recipient_has_design_control_reference": True,
+                        "relationship_interpretation": "Observed DLA recipient with its own design-control reference",
+                    },
+                ],
+            }
+        )
+
+        summary = product["third_party_dla_route_summary"]
+        self.assertEqual(summary["recipient_count"], 2)
+        self.assertEqual(summary["observed_dla_procurement_value_usd"], 350.0)
+        self.assertEqual(summary["potential_intermediary_procurement_value_usd"], 300.0)
+        self.assertEqual(summary["alternate_source_procurement_value_usd"], 50.0)
+        self.assertEqual(
+            summary["leading_recipients"][0]["observed_niin_count"], 2
         )
 
     def test_platform_summary_keeps_lanes_separate_and_excludes_non_platforms(self):

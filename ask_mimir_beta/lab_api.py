@@ -582,7 +582,13 @@ years for recency and describe the latest year as the latest FY2026 records rath
 The third_party_dla_procurement_routes section identifies other CAGE sites that received DLA procurement
 for NIINs referenced to the resolved company. Use it to identify possible distributor, reseller or procurement-
 intermediary routes when the resolved company has design-control or authorized-source evidence. State the
-recipient, location, NIIN examples, time-bounded DLA value and the resolved company's source position. Never
+recipient, location, NIIN examples, time-bounded DLA value and the resolved company's source position. When
+third_party_dla_route_summary is populated, include a compact "Third-party procurement routes" subsection.
+Lead with its aggregate recipient count, NIIN count and observed DLA procurement value for the stated fiscal-
+year window, then show the leading recipients and their aggregated values rather than relying on one anecdotal
+NIIN. Keep potential intermediary routes separate from recipients that have their own active source or design-
+control relationship. Describe possible reseller activity as a procurement route, not confirmed reseller
+revenue. Never
 call the recipient an authorized distributor unless an authoritative source establishes that relationship.
 If the recipient has its own design-control or active authorized-source relationship, describe it as an
 alternate observed source rather than a distributor. "Only active authorized source" describes the current
@@ -1125,15 +1131,13 @@ as a partial observed year. Use capability_activity, including PSC/FSC descripti
 the technologies and services with the strongest visible activity; do not reduce a broad market to
 one familiar platform or one award.
 
-When a program is discussed using both published budget or FYDP funding and observed prime obligations,
-reconcile the measures in one compact bridge rather than leaving two apparently competing figures. Label the
-budget figure as published program funding and the contract figure as observed mapped net prime obligations.
-For comparable completed fiscal years, show the arithmetic difference (program funding minus observed mapped
-obligations). Explain in one sentence that the difference is a timing-and-coverage bridge: program funding can
-be obligated in another year, carried in broader or differently labelled awards, or cover activity outside the
-mapped prime-award records. Never call the difference unspent funding. When FY2026 obligations are partial but
-the funding figure covers the full enacted year, label the difference "current reporting-cut difference" and
-state that it will narrow or change as contract reporting catches up. Do not add a methodology preamble.
+When a program is discussed using both published budget or FYDP funding and observed prime obligations, label
+the measures clearly and add one short note only if the figures could appear contradictory: published program
+funding is not expected to equal same-year mapped prime obligations because funding can be obligated across
+different periods and through broader award or program-cost categories. Do not calculate or emphasize the
+difference unless the user specifically asks for that arithmetic, and never call it an unspent balance. If one
+figure covers a full enacted fiscal year while obligations are partial, say so in the table heading or note.
+Do not add a methodology preamble.
 
 For a market-outlook question, distinguish procurement and sustainment activity already visible in
 Mimir from forward production, modernization and budget signals found in authoritative government

@@ -1,6 +1,37 @@
 {
-  "version": "mimir-company-identity-2026-09-v2",
+  "version": "mimir-company-identity-2026-09-v3",
   "parents": [
+    {
+      "parent_id": "KEARFOTT_CORPORATION",
+      "parent_name": "KEARFOTT CORPORATION",
+      "aliases": [
+        "KEARFOTT",
+        "KEARFOTT CORPORATION"
+      ],
+      "review_status": "analyst_seed_for_site_evaluation",
+      "as_of_date": "2026-09-14",
+      "sources": [
+        {
+          "source_type": "company_facility_directory",
+          "url": "https://www.kearfott.com/about-us/locations/",
+          "retrieved_at": "2026-09-14"
+        }
+      ],
+      "sites": [
+        {
+          "cage": "88818",
+          "official_site_label": "Kearfott Guidance & Navigation - Pine Brook",
+          "city": "PINE BROOK",
+          "state": "NJ"
+        },
+        {
+          "cage": "05088",
+          "official_site_label": "Kearfott Motion Systems - Black Mountain",
+          "city": "BLACK MOUNTAIN",
+          "state": "NC"
+        }
+      ]
+    },
     {
       "parent_id": "CURTISS_WRIGHT_CORPORATION",
       "parent_name": "CURTISS-WRIGHT CORPORATION",
