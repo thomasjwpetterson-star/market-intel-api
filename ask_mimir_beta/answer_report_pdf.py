@@ -343,6 +343,9 @@ def build_branded_answer_pdf(
     for block_type, content in _answer_blocks(answer):
         if block_type == "heading":
             level, value = content
+            # ListFlowable can split before its first item despite keepWithNext.
+            # Reserve enough room for the heading and at least two body lines.
+            story.append(CondPageBreak(72))
             story.append(Paragraph(_inline_markup(str(value)), styles["h1" if level == 1 else "h2"]))
         elif block_type == "paragraph":
             story.append(Paragraph(_inline_markup(str(content)), styles["body"]))

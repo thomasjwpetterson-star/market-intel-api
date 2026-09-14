@@ -6,6 +6,13 @@ from answer_report_pdf import answer_report_filename, build_branded_answer_pdf
 
 
 class AnswerReportPdfTests(unittest.TestCase):
+    def test_heading_reserves_space_before_a_bullet_list(self):
+        with patch('answer_report_pdf._BrandedDocTemplate.build') as build:
+            build_branded_answer_pdf(question='Test', answer='## Evidence used\n\n- Award records\n- Budget documents')
+        story = build.call_args.args[0]
+        heading = next(index for index, item in enumerate(story) if isinstance(item, Paragraph) and item.getPlainText() == 'Evidence used')
+        self.assertIsInstance(story[heading - 1], CondPageBreak)
+
     def test_heading_keeps_direct_connection_to_following_table(self):
         with patch('answer_report_pdf._BrandedDocTemplate.build') as build:
             build_branded_answer_pdf(question='Test', answer='## Platform exposure\n\n| Platform | Value |\n| --- | --- |\n| T-7 | 12% |')
