@@ -4974,6 +4974,78 @@ def answer_report_export_download(
     return _answer_report_export(request_id, response_id, request)
 
 
+def _evidence_export_release_key() -> str:
+    """Use the stable runtime release ID so ZIP caches survive app-only restarts."""
+    return (
+        os.getenv("ASK_MIMIR_RELEASE_ID", "").strip()
+        or runtime.release_guard.release_binding_id
+    )
+
+
+def _cached_platform_evidence_zip(
+    platform_id: str,
+    *,
+    focus_id: str | None = None,
+    fallback_outlook: Dict[str, Any] | None = None,
+) -> tuple[bytes, str]:
+    cache_arguments = {
+        "platform_id": platform_id,
+        "focus_id": focus_id,
+        "row_limit_per_table": 5000,
+    }
+    cache_key = runtime.evidence_cache.cache_key(
+        _evidence_export_release_key(),
+        "platform_evidence_zip_v3",
+        cache_arguments,
+    )
+    cached = runtime.evidence_cache.get_bytes(cache_key)
+    if cached is not None:
+        filename = platform_context_filename(
+            {"scope": {"platform_id": platform_id}}
+        )
+        return cached, filename
+
+    expanded = runtime.platform_contexts.get_export_context(
+        platform_id,
+        limit=5000,
+        focus_id=focus_id,
+    )
+    outlook = runtime.optional_program_outlook(platform_id, export=True) or fallback_outlook
+    payload = build_platform_context_zip(expanded, outlook=outlook)
+    runtime.evidence_cache.set_bytes(cache_key, payload)
+    return payload, platform_context_filename(expanded)
+
+
+def _cached_company_evidence_zip(scope_type: str, scope_id: str) -> bytes:
+    cache_arguments = {
+        "scope_type": scope_type,
+        "scope_id": scope_id,
+        "row_limit_per_table": 5000,
+    }
+    cache_key = runtime.evidence_cache.cache_key(
+        _evidence_export_release_key(),
+        "company_evidence_zip_v3",
+        cache_arguments,
+    )
+    cached = runtime.evidence_cache.get_bytes(cache_key)
+    if cached is not None:
+        return cached
+
+    expanded = runtime.company_contexts.get_export_context(
+        scope_type,
+        scope_id,
+        limit=5000,
+    )
+    payload = build_company_evidence_zip(
+        scope_type,
+        scope_id,
+        runtime.company_contexts.context_dir,
+        context=expanded,
+    )
+    runtime.evidence_cache.set_bytes(cache_key, payload)
+    return payload
+
+
 @app.get("/api/evidence/answer.zip")
 def answer_evidence_export_download(
     request: Request,
@@ -5018,30 +5090,14 @@ def answer_evidence_export_download(
                 status_code=404,
                 detail="A downloadable evidence pack is not available for this answer.",
             )
-        cache_arguments = {
-            "platform_id": platform_id,
-            "focus_id": focus_id,
-            "row_limit_per_table": 5000,
-        }
-        cache_key = runtime.evidence_cache.cache_key(
-            runtime.release_guard.release_binding_id,
-            "answer_platform_evidence_export_v2",
-            cache_arguments,
+        payload, filename = _cached_platform_evidence_zip(
+            platform_id,
+            focus_id=focus_id,
+            fallback_outlook=(
+                artifacts.get("program_outlook")
+                or platform.get("structured_program_outlook")
+            ),
         )
-        expanded = runtime.evidence_cache.get(cache_key)
-        if expanded is None:
-            expanded = runtime.platform_contexts.get_export_context(
-                platform_id,
-                limit=5000,
-                focus_id=focus_id,
-            )
-            runtime.evidence_cache.set(cache_key, expanded)
-        outlook = runtime.optional_program_outlook(platform_id, export=True) or (
-            artifacts.get("program_outlook")
-            or platform.get("structured_program_outlook")
-        )
-        payload = build_platform_context_zip(expanded, outlook=outlook)
-        filename = platform_context_filename(expanded)
     elif company:
         scope = company.get("scope") or {}
         scope_type = str(scope.get("scope_type") or "company_site")
@@ -5051,30 +5107,7 @@ def answer_evidence_export_download(
                 status_code=404,
                 detail="A downloadable evidence pack is not available for this answer.",
             )
-        cache_arguments = {
-            "scope_type": scope_type,
-            "scope_id": scope_id,
-            "row_limit_per_table": 5000,
-        }
-        cache_key = runtime.evidence_cache.cache_key(
-            runtime.release_guard.release_binding_id,
-            "answer_company_evidence_export_v2",
-            cache_arguments,
-        )
-        expanded = runtime.evidence_cache.get(cache_key)
-        if expanded is None:
-            expanded = runtime.company_contexts.get_export_context(
-                scope_type,
-                scope_id,
-                limit=5000,
-            )
-            runtime.evidence_cache.set(cache_key, expanded)
-        payload = build_company_evidence_zip(
-            scope_type,
-            scope_id,
-            runtime.company_contexts.context_dir,
-            context=expanded,
-        )
+        payload = _cached_company_evidence_zip(scope_type, scope_id)
         filename = evidence_pack_filename(scope_type, scope_id)
     else:
         raise HTTPException(
@@ -5111,9 +5144,7 @@ def platform_supply_chain_evidence_export(platform_id: str, request: Request) ->
 def universal_platform_evidence_export(platform_id: str, request: Request, focus_id: Optional[str] = None) -> StreamingResponse:
     require_evidence_download(request)
     try:
-        context = runtime.platform_contexts.get_export_context(platform_id, limit=5000, focus_id=focus_id)
-        outlook = runtime.optional_program_outlook(platform_id, export=True)
-        payload = build_platform_context_zip(context, outlook=outlook)
+        payload, filename = _cached_platform_evidence_zip(platform_id, focus_id=focus_id)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return StreamingResponse(
@@ -5121,7 +5152,7 @@ def universal_platform_evidence_export(platform_id: str, request: Request, focus
         media_type="application/zip",
         headers={
             "Content-Disposition": (
-                f'attachment; filename="{platform_context_filename(context)}"'
+                f'attachment; filename="{filename}"'
             )
         },
     )
@@ -5133,15 +5164,7 @@ def company_evidence_export(scope_type: str, scope_id: str, request: Request) ->
     if scope_type not in {"company_site", "company_parent"}:
         raise HTTPException(status_code=400, detail="Unsupported company scope type")
     try:
-        context = runtime.company_contexts.get_export_context(
-            scope_type, scope_id, limit=5000
-        )
-        payload = build_company_evidence_zip(
-            scope_type,
-            scope_id,
-            runtime.company_contexts.context_dir,
-            context=context,
-        )
+        payload = _cached_company_evidence_zip(scope_type, scope_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return StreamingResponse(

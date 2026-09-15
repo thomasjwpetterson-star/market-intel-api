@@ -767,7 +767,7 @@ class EvidencePackCache:
         self._last_disk_cleanup = now
         files = []
         for path in self.directory.iterdir():
-            if path.is_file() and re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
+            if path.is_file() and re.fullmatch(r"[0-9a-f]{64}\.(?:json|zip)", path.name):
                 stat = path.stat()
                 files.append((stat.st_mtime, stat.st_size, path))
         size = sum(row[1] for row in files)
@@ -808,6 +808,27 @@ class EvidencePackCache:
             temp.write_text(encoded)
             os.replace(temp, target)
             self._remember(key, value, len(encoded.encode()))
+            self._prune_disk()
+
+    def get_bytes(self, key: str) -> bytes | None:
+        """Return a cached binary artifact without JSON rehydration or deep copies."""
+        now = time.time()
+        with self.lock:
+            path = self.directory / f"{key}.zip"
+            if not path.exists() or now - path.stat().st_mtime > self.ttl_seconds:
+                return None
+            try:
+                return path.read_bytes()
+            except OSError:
+                return None
+
+    def set_bytes(self, key: str, value: bytes) -> None:
+        """Atomically cache a completed binary artifact for fast repeat delivery."""
+        temp = self.directory / f".{key}.{os.getpid()}.tmp"
+        target = self.directory / f"{key}.zip"
+        with self.lock:
+            temp.write_bytes(value)
+            os.replace(temp, target)
             self._prune_disk()
 
 

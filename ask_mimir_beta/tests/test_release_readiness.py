@@ -67,8 +67,8 @@ class ExecutionBoundaryTests(unittest.TestCase):
         }
         evidence_cache = Mock(
             cache_key=Mock(return_value='platform-export-key'),
-            get=Mock(return_value=None),
-            set=Mock(),
+            get_bytes=Mock(return_value=None),
+            set_bytes=Mock(),
         )
         platform_contexts = Mock(
             get_export_context=Mock(return_value=expanded_pack),
@@ -100,7 +100,9 @@ class ExecutionBoundaryTests(unittest.TestCase):
         platform_contexts.get_export_context.assert_called_once_with(
             'M109 PALADIN', limit=5000, focus_id='M109A7'
         )
-        evidence_cache.set.assert_called_once_with('platform-export-key', expanded_pack)
+        evidence_cache.set_bytes.assert_called_once_with(
+            'platform-export-key', response.content
+        )
 
     def test_completed_answer_export_rejects_response_mismatch(self):
         app = FastAPI()
@@ -161,8 +163,8 @@ class ExecutionBoundaryTests(unittest.TestCase):
         }
         evidence_cache = Mock(
             cache_key=Mock(return_value='company-export-key'),
-            get=Mock(return_value=None),
-            set=Mock(),
+            get_bytes=Mock(return_value=None),
+            set_bytes=Mock(),
         )
         company_contexts = SimpleNamespace(
             context_dir=Path('.'),
@@ -195,13 +197,36 @@ class ExecutionBoundaryTests(unittest.TestCase):
         company_contexts.get_export_context.assert_called_once_with(
             'company_site', '14925', limit=5000
         )
-        evidence_cache.set.assert_called_once_with('company-export-key', expanded_pack)
+        evidence_cache.set_bytes.assert_called_once_with(
+            'company-export-key', response.content
+        )
+        evidence_cache.get_bytes.return_value = response.content
+        with patch.object(
+            lab, 'require_evidence_download', return_value=AccessContext('alice', 'professional', True)
+        ), patch.object(
+            lab, 'job_manager', SimpleNamespace(get=Mock(return_value=job)), create=True
+        ), patch.object(lab, 'runtime', runtime, create=True):
+            cached_response = TestClient(app).get(
+                '/api/evidence/answer.zip',
+                params={'request_id': 'request-company', 'response_id': 'resp-company'},
+            )
+        self.assertEqual(cached_response.content, response.content)
+        company_contexts.get_export_context.assert_called_once()
 
     def test_variant_export_preserves_requested_focus(self):
         app = FastAPI()
         app.get('/api/evidence/platform.zip')(lab.universal_platform_evidence_export)
         store = Mock(get_export_context=Mock(return_value={'scope': {'display_name': 'M109A7'}}))
-        runtime = SimpleNamespace(platform_contexts=store, optional_program_outlook=Mock(return_value=None))
+        runtime = SimpleNamespace(
+            platform_contexts=store,
+            optional_program_outlook=Mock(return_value=None),
+            evidence_cache=Mock(
+                cache_key=Mock(return_value='platform-export-key'),
+                get_bytes=Mock(return_value=None),
+                set_bytes=Mock(),
+            ),
+            release_guard=SimpleNamespace(release_binding_id='release-binding'),
+        )
         with patch.object(lab, 'runtime', runtime, create=True), patch.object(lab, 'require_evidence_download'), patch.object(lab, 'build_platform_context_zip', return_value=b'zip'), patch.object(lab, 'platform_context_filename', return_value='m109a7.zip'):
             response = TestClient(app).get('/api/evidence/platform.zip', params={'platform_id':'M109 PALADIN','focus_id':'M109A7'})
             self.assertEqual(response.status_code, 200)
@@ -578,6 +603,15 @@ class EvidenceCacheTests(unittest.TestCase):
             cache.set(cache.cache_key('release','other',{}),{'data':'x'*100})
             self.assertEqual(len(cache.memory),0)
             self.assertEqual(cache.get(key)['scope']['id'],'AMRAAM')
+
+    def test_cache_stores_completed_zip_without_json_rehydration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = EvidencePackCache(Path(tmp))
+            key = cache.cache_key('release', 'company-evidence-zip', {'id': '14925'})
+            payload = b'PK\x03\x04completed evidence pack'
+            cache.set_bytes(key, payload)
+            self.assertEqual(cache.get_bytes(key), payload)
+            self.assertTrue((Path(tmp) / f'{key}.zip').is_file())
 
 
 class AggregateAndLinkTests(unittest.TestCase):
