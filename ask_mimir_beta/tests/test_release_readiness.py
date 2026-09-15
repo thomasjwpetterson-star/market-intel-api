@@ -80,7 +80,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
             optional_program_outlook=Mock(return_value=None),
         )
         with patch.object(
-            lab, 'require_evidence_download', return_value=AccessContext('alice', 'enterprise', True)
+            lab, 'require_evidence_download', return_value=AccessContext('alice', 'professional', True)
         ), patch.object(
             lab, 'job_manager', SimpleNamespace(get=Mock(return_value=job)), create=True
         ), patch.object(lab, 'runtime', runtime, create=True):
