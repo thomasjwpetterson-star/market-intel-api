@@ -274,7 +274,7 @@ def build_company_evidence_zip(
                 "Mimir company evidence pack\n\n"
                 f"Scope: {scope['scope_name']} ({scope['scope_type']} {scope['scope_id']})\n"
                 f"Observation window: {scope['observation_window']}\n"
-                f"Calculation version: {context['calculation_version']}\n\n"
+                "Evidence basis: the records assembled for the completed Ask Mimir answer.\n\n"
                 f"Each CSV is limited to {EVIDENCE_EXPORT_ROW_LIMIT:,} records.\n"
                 "Prime obligations, DLA procurement value and Mimir-modelled reported "
                 "subcontract value are presented as separate measures. DLA financial value is "

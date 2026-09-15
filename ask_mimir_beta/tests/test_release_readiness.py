@@ -87,6 +87,55 @@ class ExecutionBoundaryTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 409)
 
+    def test_completed_answer_export_uses_customer_safe_company_evidence(self):
+        import io, zipfile
+
+        app = FastAPI()
+        app.get('/api/evidence/answer.zip')(lab.answer_evidence_export_download)
+        pack = {
+            'scope': {
+                'scope_type': 'company_site',
+                'scope_id': '14925',
+                'scope_name': 'Teledyne Brown Engineering, Inc.',
+                'observation_window': 'FY2021-FY2026 observed records',
+            },
+            'identity': {'sites': []},
+            'observed_financials': [],
+            'reported_subcontract_relationships': {},
+            'location_footprint': {},
+            'site_capability_evidence': [],
+            'platform_exposure': [],
+            'product_and_part_evidence': {},
+            'future_demand_context': {},
+            'evidence_index': {'records': []},
+        }
+        job = {
+            'status': 'completed',
+            'result': {
+                'response_id': 'resp-company',
+                'answer': 'Completed company research answer.',
+                'answer_artifacts': {'company_site_dossier': pack},
+            },
+        }
+        runtime = SimpleNamespace(
+            company_contexts=SimpleNamespace(context_dir=Path('.'))
+        )
+        with patch.object(
+            lab, 'require_evidence_download', return_value=AccessContext('alice', 'enterprise', True)
+        ), patch.object(
+            lab, 'job_manager', SimpleNamespace(get=Mock(return_value=job)), create=True
+        ), patch.object(lab, 'runtime', runtime, create=True):
+            response = TestClient(app).get(
+                '/api/evidence/answer.zip',
+                params={'request_id': 'request-company', 'response_id': 'resp-company'},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('mimir-company-site-14925-evidence.zip', response.headers['content-disposition'])
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            readme = archive.read('README.txt').decode()
+        self.assertIn('Evidence basis: the records assembled for the completed Ask Mimir answer.', readme)
+        self.assertNotIn('Calculation version', readme)
+
     def test_variant_export_preserves_requested_focus(self):
         app = FastAPI()
         app.get('/api/evidence/platform.zip')(lab.universal_platform_evidence_export)
