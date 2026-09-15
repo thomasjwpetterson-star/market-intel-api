@@ -5016,7 +5016,12 @@ def _cached_platform_evidence_zip(
     return payload, platform_context_filename(expanded)
 
 
-def _cached_company_evidence_zip(scope_type: str, scope_id: str) -> bytes:
+def _cached_company_evidence_zip(
+    scope_type: str,
+    scope_id: str,
+    *,
+    prepared: bool = False,
+) -> bytes:
     cache_arguments = {
         "scope_type": scope_type,
         "scope_id": scope_id,
@@ -5035,6 +5040,7 @@ def _cached_company_evidence_zip(scope_type: str, scope_id: str) -> bytes:
         scope_type,
         scope_id,
         limit=5000,
+        prepared=prepared,
     )
     payload = build_company_evidence_zip(
         scope_type,
@@ -5107,7 +5113,14 @@ def answer_evidence_export_download(
                 status_code=404,
                 detail="A downloadable evidence pack is not available for this answer.",
             )
-        payload = _cached_company_evidence_zip(scope_type, scope_id)
+        payload = _cached_company_evidence_zip(
+            scope_type,
+            scope_id,
+            prepared=(
+                result.get("release_binding_id")
+                == runtime.release_guard.release_binding_id
+            ),
+        )
         filename = evidence_pack_filename(scope_type, scope_id)
     else:
         raise HTTPException(

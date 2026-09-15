@@ -2223,10 +2223,15 @@ class CompanyContextStore:
             return context
 
     def get_export_context(
-        self, scope_type: str, scope_id: str, limit: int = 5000
+        self,
+        scope_type: str,
+        scope_id: str,
+        limit: int = 5000,
+        prepared: bool = False,
     ) -> Dict[str, Any]:
         """Return expanded download evidence while preserving compact answer contexts."""
-        self.get(scope_type, scope_id, "full_dossier")
+        if not prepared:
+            self.get(scope_type, scope_id, "full_dossier")
         context = self.get_raw(scope_type, scope_id)
         from company_context import CompanyContextBuilder
 

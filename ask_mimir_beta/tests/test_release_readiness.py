@@ -151,6 +151,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
             'result': {
                 'response_id': 'resp-company',
                 'answer': 'Completed company research answer.',
+                'release_binding_id': 'release-binding',
                 'answer_artifacts': {'company_site_dossier': pack},
             },
         }
@@ -195,7 +196,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
         self.assertNotIn('Calculation version', readme)
         self.assertEqual(len(award_rows) - 1, 25)
         company_contexts.get_export_context.assert_called_once_with(
-            'company_site', '14925', limit=5000
+            'company_site', '14925', limit=5000, prepared=True
         )
         evidence_cache.set_bytes.assert_called_once_with(
             'company-export-key', response.content
