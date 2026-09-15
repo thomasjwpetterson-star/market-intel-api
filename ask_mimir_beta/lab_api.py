@@ -4980,7 +4980,7 @@ def answer_evidence_export_download(
     request_id: str,
     response_id: str,
 ) -> StreamingResponse:
-    """Download the evidence already assembled for an owned completed answer."""
+    """Expand and download evidence for the scope of an owned completed answer."""
     access = require_evidence_download(request)
     try:
         job = job_manager.get(request_id, access)
@@ -5009,20 +5009,71 @@ def answer_evidence_export_download(
         "company_site_context"
     )
     if platform:
-        outlook = artifacts.get("program_outlook") or platform.get(
-            "structured_program_outlook"
+        scope = platform.get("scope") or {}
+        platform_id = str(scope.get("platform_id") or "").strip()
+        requested_focus = scope.get("requested_focus") or {}
+        focus_id = str(requested_focus.get("focus_id") or "").strip() or None
+        if not platform_id:
+            raise HTTPException(
+                status_code=404,
+                detail="A downloadable evidence pack is not available for this answer.",
+            )
+        cache_arguments = {
+            "platform_id": platform_id,
+            "focus_id": focus_id,
+            "row_limit_per_table": 5000,
+        }
+        cache_key = runtime.evidence_cache.cache_key(
+            runtime.release_guard.release_binding_id,
+            "answer_platform_evidence_export_v2",
+            cache_arguments,
         )
-        payload = build_platform_context_zip(platform, outlook=outlook)
-        filename = platform_context_filename(platform)
+        expanded = runtime.evidence_cache.get(cache_key)
+        if expanded is None:
+            expanded = runtime.platform_contexts.get_export_context(
+                platform_id,
+                limit=5000,
+                focus_id=focus_id,
+            )
+            runtime.evidence_cache.set(cache_key, expanded)
+        outlook = runtime.optional_program_outlook(platform_id, export=True) or (
+            artifacts.get("program_outlook")
+            or platform.get("structured_program_outlook")
+        )
+        payload = build_platform_context_zip(expanded, outlook=outlook)
+        filename = platform_context_filename(expanded)
     elif company:
         scope = company.get("scope") or {}
         scope_type = str(scope.get("scope_type") or "company_site")
-        scope_id = str(scope.get("scope_id") or "company")
+        scope_id = str(scope.get("scope_id") or "").strip()
+        if scope_type not in {"company_site", "company_parent"} or not scope_id:
+            raise HTTPException(
+                status_code=404,
+                detail="A downloadable evidence pack is not available for this answer.",
+            )
+        cache_arguments = {
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "row_limit_per_table": 5000,
+        }
+        cache_key = runtime.evidence_cache.cache_key(
+            runtime.release_guard.release_binding_id,
+            "answer_company_evidence_export_v2",
+            cache_arguments,
+        )
+        expanded = runtime.evidence_cache.get(cache_key)
+        if expanded is None:
+            expanded = runtime.company_contexts.get_export_context(
+                scope_type,
+                scope_id,
+                limit=5000,
+            )
+            runtime.evidence_cache.set(cache_key, expanded)
         payload = build_company_evidence_zip(
             scope_type,
             scope_id,
             runtime.company_contexts.context_dir,
-            context=company,
+            context=expanded,
         )
         filename = evidence_pack_filename(scope_type, scope_id)
     else:

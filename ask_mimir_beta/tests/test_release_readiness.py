@@ -27,13 +27,17 @@ class StopAtEvidence(Exception):
 
 
 class ExecutionBoundaryTests(unittest.TestCase):
-    def test_completed_answer_export_uses_saved_platform_evidence(self):
-        import io, zipfile
+    def test_completed_answer_export_expands_owned_platform_scope_on_demand(self):
+        import csv, io, zipfile
 
         app = FastAPI()
         app.get('/api/evidence/answer.zip')(lab.answer_evidence_export_download)
         pack = {
-            'scope': {'platform_id': 'M109 PALADIN', 'display_name': 'M109A7 Paladin'},
+            'scope': {
+                'platform_id': 'M109 PALADIN',
+                'display_name': 'M109A7 Paladin',
+                'requested_focus': {'focus_id': 'M109A7'},
+            },
             'annual_activity': {'records': []},
             'direct_award_recipients': [],
             'reported_supplier_sites': [],
@@ -54,9 +58,32 @@ class ExecutionBoundaryTests(unittest.TestCase):
                 'answer_artifacts': {'platform_dossier': pack},
             },
         }
+        expanded_pack = {
+            **pack,
+            'reported_supplier_sites': [
+                {'cage': f'{index:05d}', 'supplier_name': f'Supplier {index}'}
+                for index in range(30)
+            ],
+        }
+        evidence_cache = Mock(
+            cache_key=Mock(return_value='platform-export-key'),
+            get=Mock(return_value=None),
+            set=Mock(),
+        )
+        platform_contexts = Mock(
+            get_export_context=Mock(return_value=expanded_pack),
+        )
+        runtime = SimpleNamespace(
+            evidence_cache=evidence_cache,
+            release_guard=SimpleNamespace(release_binding_id='release-binding'),
+            platform_contexts=platform_contexts,
+            optional_program_outlook=Mock(return_value=None),
+        )
         with patch.object(
             lab, 'require_evidence_download', return_value=AccessContext('alice', 'enterprise', True)
-        ), patch.object(lab, 'job_manager', SimpleNamespace(get=Mock(return_value=job)), create=True):
+        ), patch.object(
+            lab, 'job_manager', SimpleNamespace(get=Mock(return_value=job)), create=True
+        ), patch.object(lab, 'runtime', runtime, create=True):
             response = TestClient(app).get(
                 '/api/evidence/answer.zip',
                 params={'request_id': 'request-owned', 'response_id': 'resp-owned'},
@@ -66,6 +93,14 @@ class ExecutionBoundaryTests(unittest.TestCase):
         self.assertIn('mimir-platform-m109-paladin-evidence.zip', response.headers['content-disposition'])
         with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
             self.assertIn('README.txt', archive.namelist())
+            supplier_rows = list(csv.reader(io.StringIO(
+                archive.read('03_reported_supplier_sites.csv').decode('utf-8-sig')
+            )))
+        self.assertEqual(len(supplier_rows) - 1, 30)
+        platform_contexts.get_export_context.assert_called_once_with(
+            'M109 PALADIN', limit=5000, focus_id='M109A7'
+        )
+        evidence_cache.set.assert_called_once_with('platform-export-key', expanded_pack)
 
     def test_completed_answer_export_rejects_response_mismatch(self):
         app = FastAPI()
@@ -87,8 +122,8 @@ class ExecutionBoundaryTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 409)
 
-    def test_completed_answer_export_uses_customer_safe_company_evidence(self):
-        import io, zipfile
+    def test_completed_answer_export_expands_owned_company_scope_on_demand(self):
+        import csv, io, zipfile
 
         app = FastAPI()
         app.get('/api/evidence/answer.zip')(lab.answer_evidence_export_download)
@@ -117,8 +152,26 @@ class ExecutionBoundaryTests(unittest.TestCase):
                 'answer_artifacts': {'company_site_dossier': pack},
             },
         }
+        expanded_pack = {
+            **pack,
+            'top_awards': [
+                {'contract_id': f'AWARD-{index}', 'recipient_cage': '14925'}
+                for index in range(25)
+            ],
+        }
+        evidence_cache = Mock(
+            cache_key=Mock(return_value='company-export-key'),
+            get=Mock(return_value=None),
+            set=Mock(),
+        )
+        company_contexts = SimpleNamespace(
+            context_dir=Path('.'),
+            get_export_context=Mock(return_value=expanded_pack),
+        )
         runtime = SimpleNamespace(
-            company_contexts=SimpleNamespace(context_dir=Path('.'))
+            company_contexts=company_contexts,
+            evidence_cache=evidence_cache,
+            release_guard=SimpleNamespace(release_binding_id='release-binding'),
         )
         with patch.object(
             lab, 'require_evidence_download', return_value=AccessContext('alice', 'enterprise', True)
@@ -133,8 +186,16 @@ class ExecutionBoundaryTests(unittest.TestCase):
         self.assertIn('mimir-company-site-14925-evidence.zip', response.headers['content-disposition'])
         with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
             readme = archive.read('README.txt').decode()
-        self.assertIn('Evidence basis: the records assembled for the completed Ask Mimir answer.', readme)
+            award_rows = list(csv.reader(io.StringIO(
+                archive.read('02_prime_awards.csv').decode('utf-8-sig')
+            )))
+        self.assertIn('Evidence basis: expanded records for the scope resolved in the completed Ask Mimir answer.', readme)
         self.assertNotIn('Calculation version', readme)
+        self.assertEqual(len(award_rows) - 1, 25)
+        company_contexts.get_export_context.assert_called_once_with(
+            'company_site', '14925', limit=5000
+        )
+        evidence_cache.set.assert_called_once_with('company-export-key', expanded_pack)
 
     def test_variant_export_preserves_requested_focus(self):
         app = FastAPI()
