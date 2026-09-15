@@ -128,6 +128,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
             self.assertNotIn('associated_niins', small['coverage'])
             self.assertNotIn('associated_niin_count', small['item_and_component_evidence'])
             self.assertEqual(len(small['reported_supplier_sites']), 1)
+            self.assertEqual(len(small['top_prime_awards']), 45)
             self.assertEqual(len(large['reported_supplier_sites']), 50)
             self.assertEqual(small['financial_totals']['mimir_modelled_reported_subcontract_value_usd'], 600)
             self.assertEqual(sum(row['net_prime_obligations_usd'] for row in small['annual_activity']['records']), 4500)

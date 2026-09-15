@@ -932,7 +932,10 @@ class PlatformContextStore:
             "total_reported_subcontract_value_usd": focus_supplier_value,
             "total_prime_awards": award_count,
             "reported_supplier_sites_on_explicit_records": focus["reported_supplier_sites_on_explicit_records"][:supplier_limit],
-            "top_explicit_prime_awards": focus["top_explicit_prime_awards"][:EVIDENCE_EXPORT_ROW_LIMIT if export else 20],
+            # Keep enough focused award rows in the completed-answer artifact for
+            # its account-bound evidence download. The model prompt remains bounded,
+            # while ordinary focused programs no longer lose a small tail of records.
+            "top_explicit_prime_awards": focus["top_explicit_prime_awards"][:EVIDENCE_EXPORT_ROW_LIMIT if export else 50],
         }
         return {
             "context_type": "focused_platform_or_program_dossier",
