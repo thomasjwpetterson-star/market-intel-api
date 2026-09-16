@@ -26,6 +26,141 @@ class StopAtEvidence(Exception):
     pass
 
 
+class AnswerTypeTests(unittest.TestCase):
+    def test_short_provider_correction_is_clarification_not_research(self):
+        result = {
+            "answer": "I couldn't resolve that company. Please add a CAGE code or location.",
+            "response_id": "resp_provider_generated",
+            "answer_artifacts": {},
+            "tool_trace": [],
+        }
+        self.assertEqual(lab.answer_type_for_result(result), "clarification")
+
+    def test_short_validation_notice_is_validation_not_research(self):
+        result = {
+            "answer": "That request is missing a valid subject identifier.",
+            "response_id": "resp_provider_generated",
+            "answer_artifacts": {},
+            "tool_trace": [],
+        }
+        self.assertEqual(lab.answer_type_for_result(result), "validation")
+
+    def test_entity_selection_is_clarification(self):
+        self.assertEqual(
+            lab.answer_type_for_result(
+                {
+                    "answer": "Which Acme site did you mean?",
+                    "response_id": "company-site-disambiguation",
+                    "requires_clarification": True,
+                }
+            ),
+            "clarification",
+        )
+
+    def test_evidence_backed_answer_is_substantive_even_when_concise(self):
+        self.assertEqual(
+            lab.answer_type_for_result(
+                {
+                    "answer": "The cited award supports the conclusion.",
+                    "response_id": "resp_research",
+                    "answer_artifacts": {"company_site_dossier": {"scope": {}}},
+                }
+            ),
+            "substantive",
+        )
+
+    def test_concise_tool_evidence_answer_is_substantive(self):
+        self.assertEqual(
+            lab.answer_type_for_result(
+                {
+                    "answer": "The cited award supports the conclusion.",
+                    "response_id": "resp_research",
+                    "tool_trace": [
+                        {"tool": "get_metric_evidence", "result": {"records": [{}]}}
+                    ],
+                }
+            ),
+            "substantive",
+        )
+
+    def test_ambiguous_company_selection_is_returned_as_clarification(self):
+        matches = [
+            {
+                "scope_type": "company_site",
+                "scope_id": "11111",
+                "scope_name": "COLLINS AEROSPACE",
+                "city": "CEDAR RAPIDS",
+                "state": "IA",
+                "option_label": "COLLINS AEROSPACE — Cedar Rapids, IA — CAGE 11111",
+            },
+            {
+                "scope_type": "company_site",
+                "scope_id": "22222",
+                "scope_name": "COLLINS AEROSPACE",
+                "city": "WINDSOR LOCKS",
+                "state": "CT",
+                "option_label": "COLLINS AEROSPACE — Windsor Locks, CT — CAGE 22222",
+            },
+        ]
+        resolution = {
+            "matches": matches,
+            "requires_disambiguation": True,
+            "disambiguation_options": [row["option_label"] for row in matches],
+        }
+        runtime = SimpleNamespace(
+            mock_mode=False,
+            platform_contexts=Mock(mentions=Mock(return_value=[])),
+            company_contexts=Mock(search=Mock(return_value=resolution)),
+            call_tool=Mock(return_value=resolution),
+            store=SimpleNamespace(manifest={"release_id": "test-release"}),
+        )
+        request = lab.AskRequest(messages=[{
+            "role": "user",
+            "content": "Tell me about Collins Aerospace",
+        }])
+        route = lab.RoutingDecision(
+            workflow="company_site_intelligence",
+            reason="explicit_company_name",
+            confidence=0.9,
+        )
+        with patch.object(lab, "runtime", runtime, create=True):
+            result = lab.generate_answer(request, routing=route)
+        self.assertTrue(result["requires_clarification"])
+        self.assertEqual(result["answer_type"], "clarification")
+        self.assertEqual(result["response_id"], "company-site-disambiguation")
+        self.assertFalse(lab.result_counts_toward_quota(result))
+
+    def test_unknown_exact_cage_is_returned_as_clarification(self):
+        runtime = SimpleNamespace(
+            mock_mode=False,
+            external_evidence_allowed=True,
+            model="test-model",
+            reasoning_effort="medium",
+            max_output_tokens=1000,
+            platform_contexts=Mock(mentions=Mock(return_value=[])),
+            company_contexts=Mock(search=Mock(return_value={"matches": []})),
+            call_tool=Mock(side_effect=KeyError("unknown CAGE")),
+            store=SimpleNamespace(manifest={"release_id": "test-release"}),
+        )
+        request = lab.AskRequest(messages=[{
+            "role": "user",
+            "content": "CAGE 9ZZ99",
+        }])
+        route = lab.RoutingDecision(
+            workflow="company_site_intelligence",
+            reason="explicit_cage_identifier",
+            confidence=1,
+        )
+        with patch.object(lab, "runtime", runtime, create=True), patch.object(
+            lab, "OpenAI", return_value=Mock()
+        ), patch.dict("os.environ", {"OPENAI_API_KEY": "test-placeholder"}):
+            result = lab.generate_answer(request, routing=route)
+        self.assertTrue(result["requires_clarification"])
+        self.assertEqual(result["answer_type"], "clarification")
+        self.assertEqual(result["response_id"], "company-site-disambiguation")
+        self.assertFalse(lab.result_counts_toward_quota(result))
+
+
 class ExecutionBoundaryTests(unittest.TestCase):
     def test_completed_answer_export_expands_owned_platform_scope_on_demand(self):
         import csv, io, zipfile
@@ -474,7 +609,7 @@ class DurableJobTests(unittest.TestCase):
         with self.assertRaises(lab.HTTPException) as exc:
             self.manager.create(second, self.access, self.route)
         self.assertEqual(exc.exception.status_code, 503)
-        self.assertEqual(self.ledger.used_today("alice"), 1)
+        self.assertEqual(self.ledger.used_today("alice"), 0)
 
     def test_low_disk_rejection_does_not_reserve_allowance(self):
         with patch.object(self.ledger, 'has_write_capacity', return_value=False):
@@ -483,6 +618,134 @@ class DurableJobTests(unittest.TestCase):
         self.assertEqual(exc.exception.status_code, 503)
         self.assertEqual(self.ledger.used_today('alice'), 0)
         self.assertFalse(self.manager.jobs)
+
+    def test_exhausted_allowance_is_rejected_before_queueing(self):
+        public = AccessContext("guest", "public", False)
+        self.ledger.reserve("already-used", public, "release", "platform")
+        self.ledger.complete(
+            "already-used", latency_ms=1, estimated_cost_usd=0.01
+        )
+        with self.assertRaises(lab.DailyQuotaExceeded):
+            self.manager.create(self.request, public, self.route)
+        self.assertFalse(self.manager.jobs)
+        self.assertEqual(self.ledger.used_today("guest"), 1)
+
+    def test_clarification_is_accepted_after_allowance_is_exhausted(self):
+        public = AccessContext("guest", "public", False)
+        self.ledger.reserve("already-used", public, "release", "platform")
+        self.ledger.complete(
+            "already-used", latency_ms=1, estimated_cost_usd=0.01
+        )
+        clarification_request = self.request.model_copy(
+            update={"conversation_id": "new-over-limit-question"}
+        )
+        clarification_route = self.route.model_copy(
+            update={"clarification_needed": True}
+        )
+        job, _ = self.manager.create(
+            clarification_request, public, clarification_route
+        )
+        self.assertEqual(job["status"], "queued")
+        self.assertFalse(job["continuation_eligible"])
+        self.assertEqual(self.ledger.used_today("guest"), 1)
+
+        clarification = {
+            "answer": "Which platform did you mean?",
+            "response_id": "routing-clarification",
+            "requires_clarification": True,
+            "answer_type": "clarification",
+            "answer_artifacts": {"routing_clarification": {"options": []}},
+            "tool_trace": [],
+        }
+        with patch.object(lab, "routing_clarification_result", return_value=clarification), patch.object(
+            lab,
+            "finalize_customer_result",
+            side_effect=lambda result, *args: dict(result),
+        ):
+            self.manager._run(
+                "a" * 32, clarification_request, public, clarification_route
+            )
+
+        correction = clarification_request.model_copy(
+            update={"client_request_id": "b" * 32}
+        )
+        with self.assertRaises(lab.DailyQuotaExceeded):
+            self.manager.create(correction, public, self.route)
+
+    def test_quota_race_returns_a_recoverable_429_job(self):
+        public = AccessContext("guest", "public", False)
+        self.manager.create(self.request, public, self.route)
+        self.ledger.reserve("racing-answer", public, "release", "platform")
+        self.ledger.complete(
+            "racing-answer", latency_ms=1, estimated_cost_usd=0.01
+        )
+
+        self.manager._run("a" * 32, self.request, public, self.route)
+
+        recovered = self.ledger.load_job("a" * 32)
+        self.assertEqual(recovered["status"], "failed")
+        self.assertEqual(recovered["http_status"], 429)
+        self.assertEqual(recovered["error_code"], "quota_exceeded")
+        self.assertEqual(self.ledger.used_today("guest"), 1)
+
+    def test_eligible_clarification_can_complete_after_allowance_race(self):
+        public = AccessContext("guest", "public", False)
+        clarification_request = self.request.model_copy(
+            update={"conversation_id": "eligible-clarification"}
+        )
+        clarification_route = self.route.model_copy(
+            update={"clarification_needed": True}
+        )
+        job, _ = self.manager.create(
+            clarification_request, public, clarification_route
+        )
+        self.assertTrue(job["continuation_eligible"])
+        clarification = {
+            "answer": "Which platform did you mean?",
+            "response_id": "routing-clarification",
+            "requires_clarification": True,
+            "answer_type": "clarification",
+            "answer_artifacts": {"routing_clarification": {"options": []}},
+            "tool_trace": [],
+        }
+        with patch.object(lab, "routing_clarification_result", return_value=clarification), patch.object(
+            lab,
+            "finalize_customer_result",
+            side_effect=lambda result, *args: dict(result),
+        ):
+            self.manager._run(
+                "a" * 32, clarification_request, public, clarification_route
+            )
+
+        self.ledger.reserve("racing-answer", public, "release", "platform")
+        self.ledger.complete(
+            "racing-answer", latency_ms=1, estimated_cost_usd=0.01
+        )
+        correction = clarification_request.model_copy(
+            update={"client_request_id": "b" * 32}
+        )
+        correction_job, _ = self.manager.create(correction, public, self.route)
+        self.assertTrue(correction_job["clarification_continuation"])
+
+        answer = {
+            "answer": "Substantive platform research " + "with evidence. " * 30,
+            "response_id": "resp_answer",
+            "answer_artifacts": {"platform_dossier": {"scope": {}}},
+            "tool_trace": [],
+        }
+        with patch.object(lab, "generate_answer", return_value=answer), patch.object(
+            lab,
+            "finalize_customer_result",
+            side_effect=lambda result, *args: dict(result),
+        ):
+            self.manager._run("b" * 32, correction, public, self.route)
+
+        self.assertEqual(self.ledger.used_today("guest"), 2)
+        self.assertFalse(
+            self.ledger.clarification_continuation_allowed(
+                "eligible-clarification", "guest", "platform_intelligence"
+            )
+        )
 
     def test_result_and_billing_commit_together(self):
         self.ledger.reserve("test", self.access,"release","workflow")
@@ -504,7 +767,129 @@ class DurableJobTests(unittest.TestCase):
             second=client.post('/api/ask/jobs',json=request.model_dump())
             self.assertEqual(second.status_code,202,second.text)
             self.assertTrue(second.json()['deduplicated'])
-            self.assertEqual(self.ledger.used_today('alice'),1)
+            self.assertEqual(self.ledger.used_today('alice'),0)
+
+    def test_worker_releases_credit_for_entity_clarification(self):
+        self.manager.create(self.request, self.access, self.route)
+        clarification = {
+            "answer": "Which company site did you mean?",
+            "response_id": "company-site-disambiguation",
+            "requires_clarification": True,
+            "answer_artifacts": {"company_resolution": {"matches": []}},
+            "tool_trace": [],
+            "model": "deterministic-resolution",
+        }
+        with patch.object(
+            lab, "generate_answer", return_value=clarification
+        ), patch.object(
+            lab, "finalize_customer_result", side_effect=lambda result, *args: dict(result)
+        ):
+            self.manager._run("a" * 32, self.request, self.access, self.route)
+
+        self.assertEqual(self.ledger.used_today("alice"), 0)
+        status = self.ledger.connection.execute(
+            "SELECT status FROM query_events WHERE request_id = ?", ["a" * 32]
+        ).fetchone()[0]
+        self.assertEqual(status, "completed_unbilled")
+        recovered = self.ledger.load_job("a" * 32)
+        self.assertEqual(recovered["result"]["access"]["queries_used_today"], 0)
+        event_types = [
+            call.args[0]["record_type"]
+            for call in self.runtime.write_audit_record.call_args_list
+            if call.args and call.args[0].get("record_type", "").startswith("ask_credit_")
+        ]
+        self.assertEqual(event_types, ["ask_credit_reserved", "ask_credit_released"])
+        release_event = next(
+            call.args[0]
+            for call in self.runtime.write_audit_record.call_args_list
+            if call.args and call.args[0].get("record_type") == "ask_credit_released"
+        )
+        self.assertEqual(
+            {
+                key: release_event[key]
+                for key in (
+                    "request_id", "conversation_id", "tier", "workflow",
+                    "reason", "answer_type",
+                )
+            },
+            {
+                "request_id": "a" * 32,
+                "conversation_id": None,
+                "tier": "professional",
+                "workflow": "platform_intelligence",
+                "reason": "clarification_answer_delivered",
+                "answer_type": "clarification",
+            },
+        )
+
+    def test_short_provider_correction_releases_credit_and_keeps_turn_open(self):
+        request = self.request.model_copy(
+            update={"conversation_id": "test-conversation"}
+        )
+        self.manager.create(request, self.access, self.route)
+        correction = {
+            "answer": "I couldn't resolve that company. Please add a CAGE code or location.",
+            "response_id": "resp_provider_generated",
+            "answer_artifacts": {},
+            "tool_trace": [{"tool": "search_company_contexts"}],
+            "model": "test",
+        }
+        with patch.object(
+            lab, "generate_answer", return_value=correction
+        ), patch.object(
+            lab, "finalize_customer_result", side_effect=lambda result, *args: dict(result)
+        ):
+            self.manager._run("a" * 32, request, self.access, self.route)
+
+        recovered = self.ledger.load_job("a" * 32)
+        self.assertEqual(self.ledger.used_today("alice"), 0)
+        self.assertEqual(recovered["result"]["answer_type"], "clarification")
+        self.assertTrue(recovered["result"]["requires_clarification"])
+        self.assertTrue(
+            self.ledger.clarification_continuation_allowed(
+                "test-conversation", "alice"
+            )
+        )
+
+    def test_timeout_releases_reserved_credit(self):
+        self.manager.create(self.request, self.access, self.route)
+        with patch.object(
+            lab, "generate_answer", side_effect=TimeoutError("provider timeout")
+        ):
+            self.manager._run("a" * 32, self.request, self.access, self.route)
+
+        self.assertEqual(self.ledger.used_today("alice"), 0)
+        status = self.ledger.connection.execute(
+            "SELECT status FROM query_events WHERE request_id = ?", ["a" * 32]
+        ).fetchone()[0]
+        self.assertEqual(status, "failed_refunded")
+        release_event = next(
+            call.args[0]
+            for call in self.runtime.write_audit_record.call_args_list
+            if call.args and call.args[0].get("record_type") == "ask_credit_released"
+        )
+        self.assertEqual(release_event["reason"], "timeout")
+        self.assertEqual(release_event["answer_type"], "error")
+
+    def test_empty_provider_response_fails_and_releases_credit(self):
+        self.manager.create(self.request, self.access, self.route)
+        empty = {
+            "answer": "",
+            "response_id": "resp_empty",
+            "answer_artifacts": {},
+            "tool_trace": [],
+            "model": "test",
+        }
+        with patch.object(lab, "generate_answer", return_value=empty):
+            self.manager._run("a" * 32, self.request, self.access, self.route)
+
+        self.assertEqual(self.ledger.used_today("alice"), 0)
+        recovered = self.ledger.load_job("a" * 32)
+        self.assertEqual(recovered["status"], "failed")
+        status = self.ledger.connection.execute(
+            "SELECT status FROM query_events WHERE request_id = ?", ["a" * 32]
+        ).fetchone()[0]
+        self.assertEqual(status, "failed_refunded")
 
     def test_pdf_uses_owned_saved_answer_and_rejects_clarification(self):
         app = FastAPI()

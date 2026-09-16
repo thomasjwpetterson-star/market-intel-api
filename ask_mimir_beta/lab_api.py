@@ -3046,6 +3046,7 @@ class LabRuntime:
                 "response_id": "local-mock-no-match",
                 "model": "local-evidence-mock",
                 "release_id": self.store.manifest["release_id"],
+                "answer_type": "validation",
                 "tool_trace": trace,
             }
 
@@ -4116,25 +4117,83 @@ def finalize_customer_result(
     return safe_result
 
 
-NON_BILLABLE_RESPONSE_IDS = frozenset(
+VALID_ANSWER_TYPES = frozenset({"substantive", "clarification", "validation", "error"})
+VALIDATION_RESPONSE_IDS = frozenset(
     {
-        "company-site-disambiguation",
-        "award-opportunity-disambiguation",
-        "item-disambiguation",
-        "item-identifier-mismatch",
-        "platform-disambiguation",
-        "routing-clarification",
         "capability-index-insufficient",
+        "capability-evidence-insufficient",
+        "local-mock-no-match",
         "out-of-domain",
     }
 )
 
 
-def result_counts_toward_quota(result: Dict[str, Any]) -> bool:
-    return (
-        str(result.get("response_id") or "") not in NON_BILLABLE_RESPONSE_IDS
-        and not response_requires_clarification(result)
+def answer_type_for_result(result: Dict[str, Any]) -> str:
+    """Classify delivery semantics before changing a customer's allowance."""
+    explicit = str(result.get("answer_type") or "").strip().lower()
+    if explicit in VALID_ANSWER_TYPES:
+        return explicit
+    if response_requires_clarification(result):
+        return "clarification"
+    response_id = str(result.get("response_id") or "")
+    if response_id in VALIDATION_RESPONSE_IDS:
+        return "validation"
+    answer = re.sub(r"\s+", " ", str(result.get("answer") or "")).strip()
+    if not answer:
+        return "error"
+
+    # A provider-generated correction/missing-subject prompt previously slipped
+    # through because it had a normal resp_* identifier. A short answer with no
+    # evidence is not completed research, regardless of who generated it.
+    artifacts = result.get("answer_artifacts") or {}
+    has_research_evidence = bool(
+        any(
+            key not in {"routing_clarification", "company_resolution"}
+            for key in artifacts
+        )
+        or any(
+            isinstance(entry, dict)
+            and not entry.get("error")
+            and str(entry.get("tool") or "").startswith(("get_", "explain_"))
+            for entry in (result.get("tool_trace") or [])
+        )
     )
+    if not has_research_evidence and len(answer) < 400:
+        return "validation"
+    return "substantive"
+
+
+def result_counts_toward_quota(result: Dict[str, Any]) -> bool:
+    return answer_type_for_result(result) == "substantive"
+
+
+def write_credit_event(
+    event_type: str,
+    *,
+    request_id: str,
+    request: AskRequest,
+    access: AccessContext,
+    workflow: str,
+    reason: str,
+    answer_type: str,
+) -> None:
+    try:
+        runtime.write_audit_record(
+            {
+                "record_type": event_type,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "request_id": request_id,
+                "conversation_id": request.conversation_id,
+                "tier": access.policy.tier,
+                "workflow": workflow,
+                "reason": reason,
+                "answer_type": answer_type,
+            }
+        )
+    except Exception:
+        # Telemetry must never change whether a customer's credit is consumed
+        # or released, nor turn a successful delivery into a failed job.
+        LOGGER.exception("Unable to persist %s telemetry for %s", event_type, request_id)
 
 
 def is_lightweight_scope_follow_up(request: AskRequest) -> bool:
@@ -4305,6 +4364,7 @@ def routing_clarification_result(decision: RoutingDecision) -> Dict[str, Any]:
         "model": "structured-intent-classifier",
         "release_id": runtime.store.manifest["release_id"],
         "requires_clarification": True,
+        "answer_type": "clarification",
         "answer_artifacts": {"routing_clarification": {"options": options}},
         "tool_trace": [],
         "latency_ms": 0.0,
@@ -4435,6 +4495,25 @@ class AskJobManager:
             if not runtime.beta_state.has_write_capacity():
                 raise HTTPException(status_code=503, detail="Ask Mimir is temporarily unable to save new research. No query has been used; please try again shortly.")
 
+            clarification_continuation = bool(
+                runtime.beta_state.clarification_continuation_allowed(
+                    request.conversation_id,
+                    access.subject_id,
+                    routing.workflow,
+                )
+            )
+            continuation_eligible = clarification_continuation or not allowance_exempt
+            if allowance_exempt and not continuation_eligible:
+                try:
+                    runtime.beta_state.assert_allowance_available(access)
+                    continuation_eligible = True
+                except DailyQuotaExceeded:
+                    # Clarification remains free and visible after exhaustion,
+                    # but a new over-limit question must not mint a research grant.
+                    continuation_eligible = False
+            if not allowance_exempt and not clarification_continuation:
+                runtime.beta_state.assert_allowance_available(access)
+
             runtime.beta_state.record_routing_decision(
                 request_id=request_id,
                 conversation_id=request.conversation_id,
@@ -4442,16 +4521,7 @@ class AskJobManager:
                 question=request.messages[-1].content,
                 decision=routing.model_dump(),
             )
-            if allowance_exempt:
-                used = runtime.beta_state.used_today(access.subject_id)
-            else:
-                used = runtime.beta_state.reserve(
-                    request_id,
-                    access,
-                    runtime.release_guard.release_binding_id,
-                    workflow,
-                    request_fingerprint,
-                )
+            used = runtime.beta_state.used_today(access.subject_id)
             job = {
                 "request_id": request_id,
                 "subject_id": access.subject_id,
@@ -4468,6 +4538,8 @@ class AskJobManager:
                     runtime.beta_state.used_this_month(access.subject_id),
                 ),
                 "allowance_exempt": allowance_exempt,
+                "clarification_continuation": clarification_continuation,
+                "continuation_eligible": continuation_eligible,
                 "routing": routing.model_dump(),
                 "_request_fingerprint": request_fingerprint,
                 "_question": request.messages[-1].content,
@@ -4480,8 +4552,6 @@ class AskJobManager:
         except Exception:
             with self.lock:
                 self.jobs.pop(request_id, None)
-            if not allowance_exempt:
-                runtime.beta_state.fail(request_id, refund=True)
             raise
         return self.get(request_id, access), routing
 
@@ -4505,6 +4575,10 @@ class AskJobManager:
         routing: RoutingDecision,
     ) -> None:
         allowance_exempt = bool(self.jobs[request_id].get("allowance_exempt"))
+        clarification_continuation = bool(
+            self.jobs[request_id].get("clarification_continuation")
+        )
+        credit_reserved = False
         request_started_perf = float(
             self.jobs[request_id].get("_request_started_perf") or time.perf_counter()
         )
@@ -4522,6 +4596,28 @@ class AskJobManager:
             if queue_wait_ms > max(int(os.getenv("ASK_MIMIR_MAX_QUEUE_SECONDS", "900")), 30) * 1000:
                 raise HTTPException(status_code=503, detail="The research queue took too long. Your query allowance has been restored; please try again.")
             if not allowance_exempt:
+                runtime.beta_state.reserve(
+                    request_id,
+                    access,
+                    runtime.release_guard.release_binding_id,
+                    routing.workflow,
+                    self.jobs[request_id].get("_request_fingerprint"),
+                    allow_over_limit=clarification_continuation,
+                )
+                credit_reserved = True
+                write_credit_event(
+                    "ask_credit_reserved",
+                    request_id=request_id,
+                    request=request,
+                    access=access,
+                    workflow=routing.workflow,
+                    reason=(
+                        "clarification_continuation_started"
+                        if clarification_continuation
+                        else "substantive_job_started"
+                    ),
+                    answer_type="substantive",
+                )
                 runtime.beta_state.mark_running(request_id)
             with request_performance_scope(performance):
                 runtime.release_guard.assert_unchanged()
@@ -4542,7 +4638,14 @@ class AskJobManager:
                     answer_generation_ms = (
                         time.perf_counter() - answer_started
                     ) * 1000
-                requires_clarification = response_requires_clarification(result)
+                answer_type = answer_type_for_result(result)
+                result["answer_type"] = answer_type
+                if answer_type == "error":
+                    raise ValueError("Answer generation returned no deliverable response.")
+                requires_clarification = bool(
+                    response_requires_clarification(result)
+                    or answer_type == "clarification"
+                )
                 if requires_clarification:
                     result["requires_clarification"] = True
                 self.update(
@@ -4599,6 +4702,10 @@ class AskJobManager:
                     if requires_clarification
                     else "research_completed"
                 ),
+                continuation_eligible=bool(
+                    requires_clarification
+                    and self.jobs[request_id].get("continuation_eligible")
+                ),
             )
             customer_result["access"] = access.public_dict(
                 runtime.beta_state.used_today(access.subject_id),
@@ -4622,9 +4729,32 @@ class AskJobManager:
                 else:
                     runtime.beta_state.complete(
                         request_id, latency_ms=result.get("latency_ms"),
-                        estimated_cost_usd=cost, billable=result_counts_toward_quota(result),
+                        estimated_cost_usd=cost,
+                        billable=answer_type == "substantive",
                         performance=performance_snapshot, job=completed_job,
                     )
+                    write_credit_event(
+                        "ask_credit_consumed"
+                        if answer_type == "substantive"
+                        else "ask_credit_released",
+                        request_id=request_id,
+                        request=request,
+                        access=access,
+                        workflow=routing.workflow,
+                        reason=(
+                            "substantive_answer_delivered"
+                            if answer_type == "substantive"
+                            else f"{answer_type}_answer_delivered"
+                        ),
+                        answer_type=answer_type,
+                    )
+                    refreshed_access = access.public_dict(
+                        runtime.beta_state.used_today(access.subject_id),
+                        runtime.beta_state.used_this_month(access.subject_id),
+                    )
+                    completed_job["access"] = refreshed_access
+                    completed_job["result"]["access"] = refreshed_access
+                    runtime.beta_state.save_job(completed_job)
                 # Completed packs are durable, not retained indefinitely in RAM.
                 self.jobs.pop(request_id, None)
         except Exception as exc:
@@ -4634,11 +4764,24 @@ class AskJobManager:
                 validation_ms=validation_ms,
                 total_request_ms=(time.perf_counter() - request_started_perf) * 1000,
             )
-            if not allowance_exempt:
+            if credit_reserved:
                 runtime.beta_state.fail(
                     request_id,
                     refund=True,
                     performance=performance_snapshot,
+                )
+                write_credit_event(
+                    "ask_credit_released",
+                    request_id=request_id,
+                    request=request,
+                    access=access,
+                    workflow=routing.workflow,
+                    reason=(
+                        "timeout"
+                        if isinstance(exc, TimeoutError)
+                        else "request_failed"
+                    ),
+                    answer_type="error",
                 )
             runtime.write_audit_record(
                 {
@@ -4663,7 +4806,15 @@ class AskJobManager:
             detail = (
                 exc.detail
                 if isinstance(exc, HTTPException) and isinstance(exc.detail, str)
+                else str(exc)
+                if isinstance(exc, DailyQuotaExceeded)
                 else PUBLIC_REQUEST_FAILURE
+            )
+            http_status = 429 if isinstance(exc, DailyQuotaExceeded) else None
+            error_code = (
+                "quota_exceeded"
+                if isinstance(exc, DailyQuotaExceeded)
+                else "request_failed"
             )
             if "credit_balance_exhausted" in str(detail) or "insufficient_quota" in str(detail):
                 detail = (
@@ -4682,6 +4833,8 @@ class AskJobManager:
                         "detail": detail,
                         "percent": 100,
                         "error": detail,
+                        "error_code": error_code,
+                        "http_status": http_status,
                         "access": refreshed_access,
                     }
                 )
@@ -5460,6 +5613,7 @@ def generate_answer(
             "response_id": "out-of-domain",
             "model": "deterministic-scope-guard",
             "release_id": runtime.store.manifest["release_id"],
+            "answer_type": "validation",
             "tool_trace": [],
             "answer_artifacts": {},
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -5581,6 +5735,7 @@ def generate_answer(
             "response_id": "capability-index-insufficient",
             "model": "deterministic-evidence-control",
             "release_id": runtime.store.manifest["release_id"],
+            "answer_type": "validation",
             "tool_trace": [],
             "answer_artifacts": {},
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -5764,8 +5919,44 @@ def generate_answer(
                 "model": "deterministic-resolution",
                 "release_id": runtime.store.manifest["release_id"],
                 "requires_clarification": True,
+                "answer_type": "clarification",
                 "tool_trace": [search_trace],
                 "answer_artifacts": {"company_resolution": resolution},
+                "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                "response_calls": 0,
+                "usage": None,
+                "usage_by_response": [],
+                "estimated_cost": None,
+            }
+        if not resolved_company_scope:
+            offered_matches = matches[:6]
+            offered_labels = [
+                str(row.get("option_label") or row.get("scope_name") or row.get("scope_id"))
+                for row in offered_matches
+            ]
+            normalized_resolution = {
+                **resolution,
+                "matches": offered_matches,
+                "requires_disambiguation": True,
+                "disambiguation_options": offered_labels,
+            }
+            options = "\n".join(f"- {label}" for label in offered_labels)
+            answer = (
+                f"I could not resolve **{company_query}** to one company or CAGE site confidently."
+                + (f"\n\nDid you mean:\n\n{options}" if options else "")
+                + "\n\nChoose an option, or add the CAGE code or location."
+            )
+            return {
+                "answer": answer,
+                "response_id": "company-site-disambiguation",
+                "model": "deterministic-resolution",
+                "release_id": runtime.store.manifest["release_id"],
+                "requires_clarification": True,
+                "answer_type": "clarification",
+                "tool_trace": [search_trace],
+                "answer_artifacts": {
+                    "company_resolution": normalized_resolution
+                },
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "response_calls": 0,
                 "usage": None,
@@ -6246,6 +6437,7 @@ def generate_answer(
                 "response_id": "capability-evidence-insufficient",
                 "model": "deterministic-evidence-control",
                 "release_id": runtime.store.manifest["release_id"],
+                "answer_type": "validation",
                 "tool_trace": trace,
                 "answer_artifacts": {"capability_market": pack},
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -6472,6 +6664,7 @@ def generate_answer(
                 "model": "deterministic-resolution",
                 "release_id": runtime.store.manifest["release_id"],
                 "requires_clarification": True,
+                "answer_type": "clarification",
                 "tool_trace": [search_trace],
                 "answer_artifacts": {"record_resolution": resolution},
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -6592,6 +6785,7 @@ def generate_answer(
                 "model": "deterministic-resolution",
                 "release_id": runtime.store.manifest["release_id"],
                 "requires_clarification": True,
+                "answer_type": "clarification",
                 "tool_trace": [search_trace],
                 "answer_artifacts": {"item_resolution": resolution},
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -6614,6 +6808,7 @@ def generate_answer(
                 "model": "deterministic-resolution",
                 "release_id": runtime.store.manifest["release_id"],
                 "requires_clarification": True,
+                "answer_type": "clarification",
                 "tool_trace": [search_trace],
                 "answer_artifacts": {"item_resolution": resolution},
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -6825,6 +7020,7 @@ def generate_answer(
                 "model": "deterministic-resolution",
                 "release_id": runtime.store.manifest["release_id"],
                 "requires_clarification": True,
+                "answer_type": "clarification",
                 "tool_trace": [search_trace],
                 "answer_artifacts": {"platform_resolution": resolution},
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -7116,6 +7312,32 @@ def generate_answer(
                 }
             )
             return result
+        if selected_workflow == "company_site_intelligence":
+            return {
+                "answer": (
+                    f"I could not match CAGE **{dossier_scope_id}** to a company site in "
+                    "the current Mimir release. Please check the CAGE code or add the "
+                    "company name and location."
+                ),
+                "response_id": "company-site-disambiguation",
+                "model": "deterministic-resolution",
+                "release_id": runtime.store.manifest["release_id"],
+                "requires_clarification": True,
+                "answer_type": "clarification",
+                "tool_trace": [],
+                "answer_artifacts": {
+                    "company_resolution": {
+                        "matches": [],
+                        "requires_disambiguation": True,
+                        "disambiguation_options": [],
+                    }
+                },
+                "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                "response_calls": 0,
+                "usage": None,
+                "usage_by_response": [],
+                "estimated_cost": None,
+            }
 
     trajectory_cage = (
         company_site_trajectory_cage(request.messages)
@@ -7373,6 +7595,20 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
         routing.clarification_needed
         or is_lightweight_scope_follow_up(payload)
     )
+    clarification_continuation = (
+        runtime.beta_state.clarification_continuation_allowed(
+            payload.conversation_id,
+            access.subject_id,
+            routing.workflow,
+        )
+    )
+    continuation_eligible = clarification_continuation or not allowance_exempt
+    if allowance_exempt and not continuation_eligible:
+        try:
+            runtime.beta_state.assert_allowance_available(access)
+            continuation_eligible = True
+        except DailyQuotaExceeded:
+            continuation_eligible = False
     runtime.beta_state.record_routing_decision(
         request_id=request_id,
         conversation_id=payload.conversation_id,
@@ -7387,6 +7623,20 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 access,
                 runtime.release_guard.release_binding_id,
                 routing.workflow,
+                allow_over_limit=clarification_continuation,
+            )
+            write_credit_event(
+                "ask_credit_reserved",
+                request_id=request_id,
+                request=payload,
+                access=access,
+                workflow=routing.workflow,
+                reason=(
+                    "clarification_continuation_started"
+                    if clarification_continuation
+                    else "substantive_job_started"
+                ),
+                answer_type="substantive",
             )
     except DailyQuotaExceeded as exc:
         raise HTTPException(
@@ -7414,7 +7664,14 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 answer_generation_ms = (
                     time.perf_counter() - answer_started
                 ) * 1000
-            requires_clarification = response_requires_clarification(result)
+            answer_type = answer_type_for_result(result)
+            result["answer_type"] = answer_type
+            if answer_type == "error":
+                raise ValueError("Answer generation returned no deliverable response.")
+            requires_clarification = bool(
+                response_requires_clarification(result)
+                or answer_type == "clarification"
+            )
             if requires_clarification:
                 result["requires_clarification"] = True
             validation_started = time.perf_counter()
@@ -7438,8 +7695,23 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 estimated_cost_usd=(result.get("estimated_cost") or {}).get(
                     "estimated_total_usd"
                 ),
-                billable=result_counts_toward_quota(result),
+                billable=answer_type == "substantive",
                 performance=performance_snapshot,
+            )
+            write_credit_event(
+                "ask_credit_consumed"
+                if answer_type == "substantive"
+                else "ask_credit_released",
+                request_id=request_id,
+                request=payload,
+                access=access,
+                workflow=routing.workflow,
+                reason=(
+                    "substantive_answer_delivered"
+                    if answer_type == "substantive"
+                    else f"{answer_type}_answer_delivered"
+                ),
+                answer_type=answer_type,
             )
         runtime.write_audit_record(
             {
@@ -7473,6 +7745,9 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 if requires_clarification
                 else "research_completed"
             ),
+            continuation_eligible=bool(
+                requires_clarification and continuation_eligible
+            ),
         )
         customer_result["access"] = access.public_dict(
             runtime.beta_state.used_today(access.subject_id),
@@ -7490,6 +7765,15 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 request_id,
                 refund=True,
                 performance=performance_snapshot,
+            )
+            write_credit_event(
+                "ask_credit_released",
+                request_id=request_id,
+                request=payload,
+                access=access,
+                workflow=routing.workflow,
+                reason="request_failed",
+                answer_type="error",
             )
         runtime.write_audit_record(
             {

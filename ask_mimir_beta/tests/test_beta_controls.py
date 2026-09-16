@@ -148,6 +148,69 @@ class BetaStateStoreTests(unittest.TestCase):
             self.assertEqual(store.used_today(access.subject_id), 1)
             store.connection.close()
 
+    def test_verified_clarification_continuation_can_finish_after_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = BetaStateStore(Path(directory) / "beta-state.sqlite3")
+            access = AccessContext("guest", "public", False)
+            store.record_routing_decision(
+                request_id="clarification",
+                conversation_id="conversation-1",
+                subject_id=access.subject_id,
+                question="Which Acme?",
+                decision={
+                    "workflow": "company_site_intelligence",
+                    "candidates": [],
+                    "confidence": 0.5,
+                    "resolved_entities": [],
+                    "clarification_needed": True,
+                },
+            )
+            store.complete_routing_event(
+                "clarification",
+                clarification_outcome="clarification_requested",
+                continuation_eligible=True,
+            )
+            store.reserve("other-answer", access, "release-1", "platform")
+            store.complete(
+                "other-answer", latency_ms=1, estimated_cost_usd=0.01
+            )
+
+            self.assertTrue(
+                store.clarification_continuation_allowed(
+                    "conversation-1",
+                    access.subject_id,
+                    "company_site_intelligence",
+                )
+            )
+            self.assertFalse(
+                store.clarification_continuation_allowed(
+                    "conversation-1",
+                    access.subject_id,
+                    "platform_intelligence",
+                )
+            )
+            store.reserve(
+                "selected-company",
+                access,
+                "release-1",
+                "company_site_intelligence",
+                allow_over_limit=True,
+            )
+            self.assertEqual(store.used_today(access.subject_id), 2)
+            store.connection.close()
+
+    def test_allowance_preflight_never_reserves_a_credit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = BetaStateStore(Path(directory) / "beta-state.sqlite3")
+            access = AccessContext("guest", "public", False)
+            store.assert_allowance_available(access)
+            self.assertEqual(store.used_today(access.subject_id), 0)
+            store.reserve("answer", access, "release-1", "platform")
+            with self.assertRaises(DailyQuotaExceeded):
+                store.assert_allowance_available(access)
+            self.assertEqual(store.used_today(access.subject_id), 1)
+            store.connection.close()
+
     def test_restart_refunds_an_interrupted_query(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "beta-state.sqlite3"
@@ -255,6 +318,14 @@ class RequestPerformanceTests(unittest.TestCase):
 
 
 class ClarificationDetectionTests(unittest.TestCase):
+    def test_unresolved_company_correction_is_a_clarification(self):
+        result = {
+            "answer": (
+                "I couldn't resolve that company. Please add a CAGE code or location."
+            )
+        }
+        self.assertTrue(response_requires_clarification(result))
+
     def test_model_generated_scope_question_is_a_clarification(self):
         result = {
             "answer": (

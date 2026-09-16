@@ -50,6 +50,8 @@ CLARIFICATION_OPENING_PATTERNS = (
     r"please (?:clarify|specify|choose|confirm)\b",
     r"before i answer.{0,80}(?:clarify|specify|choose|confirm)\b",
     r"i need (?:a|one) (?:quick |short )?clarification\b",
+    r"i (?:could not|couldn't|cannot|can't|was unable to) "
+    r"(?:identify|resolve|match|determine)\b",
 )
 
 CLARIFICATION_QUESTION_PATTERNS = (
@@ -313,6 +315,7 @@ class BetaStateStore:
                 subject_changed INTEGER NOT NULL DEFAULT 0,
                 clarification_needed INTEGER NOT NULL DEFAULT 0,
                 clarification_outcome TEXT,
+                continuation_eligible INTEGER NOT NULL DEFAULT 0,
                 user_correction INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 completed_at TEXT
@@ -338,6 +341,15 @@ class BetaStateStore:
         if "request_fingerprint" not in query_columns:
             self.connection.execute(
                 "ALTER TABLE query_events ADD COLUMN request_fingerprint TEXT"
+            )
+        routing_columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(routing_events)")
+        }
+        if "continuation_eligible" not in routing_columns:
+            self.connection.execute(
+                "ALTER TABLE routing_events ADD COLUMN continuation_eligible "
+                "INTEGER NOT NULL DEFAULT 0"
             )
         self.connection.execute(
             """
@@ -448,17 +460,20 @@ class BetaStateStore:
         request_id: str,
         *,
         clarification_outcome: str | None = None,
+        continuation_eligible: bool = False,
     ) -> None:
         with self.lock:
             self.connection.execute(
                 """
                 UPDATE routing_events
                 SET clarification_outcome = COALESCE(?, clarification_outcome),
+                    continuation_eligible = ?,
                     completed_at = ?
                 WHERE request_id = ?
                 """,
                 [
                     clarification_outcome,
+                    int(continuation_eligible),
                     datetime.now(timezone.utc).isoformat(),
                     request_id,
                 ],
@@ -503,6 +518,92 @@ class BetaStateStore:
             ).fetchone()
         return int(row[0])
 
+    def clarification_continuation_allowed(
+        self,
+        conversation_id: str | None,
+        subject_id: str,
+        workflow: str | None = None,
+    ) -> bool:
+        """Return whether a conversation has an unresolved clarification turn.
+
+        A completed substantive answer closes the grant. Failed attempts do not:
+        the user must still be able to correct or retry the selection that Mimir
+        requested without an unrelated allowance check stranding the query.
+        """
+        if not conversation_id:
+            return False
+        with self.lock:
+            clarification = self.connection.execute(
+                """
+                SELECT created_at, selected_workflow, intended_workflow,
+                       candidates_json
+                FROM routing_events
+                WHERE conversation_id = ? AND subject_id = ?
+                  AND clarification_outcome = 'clarification_requested'
+                  AND continuation_eligible = 1
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                [conversation_id, subject_id],
+            ).fetchone()
+            completed = self.connection.execute(
+                """
+                SELECT MAX(created_at)
+                FROM routing_events
+                WHERE conversation_id = ? AND subject_id = ?
+                  AND clarification_outcome = 'research_completed'
+                """,
+                [conversation_id, subject_id],
+            ).fetchone()[0]
+        if not clarification or (completed and clarification[0] <= completed):
+            return False
+        if not workflow:
+            return True
+        allowed_workflows = {
+            str(value)
+            for value in (clarification[1], clarification[2])
+            if value
+        }
+        try:
+            candidates = json.loads(clarification[3] or "[]")
+        except (TypeError, ValueError):
+            candidates = []
+        allowed_workflows.update(
+            str(candidate.get("workflow"))
+            for candidate in candidates
+            if isinstance(candidate, dict) and candidate.get("workflow")
+        )
+        return workflow in allowed_workflows
+
+    def assert_allowance_available(self, access: AccessContext) -> None:
+        """Reject exhausted subjects without reserving or consuming a credit."""
+        policy = access.policy
+        with self.lock:
+            used = int(
+                self.connection.execute(
+                    """
+                    SELECT COUNT(*) FROM query_events
+                    WHERE subject_id = ? AND utc_day = ?
+                      AND status IN ('reserved', 'running', 'completed', 'failed')
+                    """,
+                    [access.subject_id, utc_day()],
+                ).fetchone()[0]
+            )
+            if used >= policy.queries_per_utc_day:
+                raise DailyQuotaExceeded(policy)
+            used_this_month = int(
+                self.connection.execute(
+                    """
+                    SELECT COUNT(*) FROM query_events
+                    WHERE subject_id = ? AND SUBSTR(utc_day, 1, 7) = ?
+                      AND status IN ('reserved', 'running', 'completed', 'failed')
+                    """,
+                    [access.subject_id, utc_month()],
+                ).fetchone()[0]
+            )
+            if used_this_month >= policy.queries_per_utc_month:
+                raise DailyQuotaExceeded(policy, period="month")
+
     def reserve(
         self,
         request_id: str,
@@ -510,6 +611,7 @@ class BetaStateStore:
         release_binding_id: str,
         workflow: str,
         request_fingerprint: str | None = None,
+        allow_over_limit: bool = False,
     ) -> int:
         policy = access.policy
         now = datetime.now(timezone.utc).isoformat()
@@ -550,7 +652,7 @@ class BetaStateStore:
                         [access.subject_id, utc_day()],
                     ).fetchone()[0]
                 )
-                if used >= policy.queries_per_utc_day:
+                if not allow_over_limit and used >= policy.queries_per_utc_day:
                     raise DailyQuotaExceeded(policy)
                 used_this_month = int(
                     self.connection.execute(
@@ -562,7 +664,10 @@ class BetaStateStore:
                         [access.subject_id, utc_month()],
                     ).fetchone()[0]
                 )
-                if used_this_month >= policy.queries_per_utc_month:
+                if (
+                    not allow_over_limit
+                    and used_this_month >= policy.queries_per_utc_month
+                ):
                     raise DailyQuotaExceeded(policy, period="month")
                 if existing:
                     self.connection.execute(
