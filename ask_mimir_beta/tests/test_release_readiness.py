@@ -527,6 +527,67 @@ class ExecutionBoundaryTests(unittest.TestCase):
         self.assertEqual(pack['requested_answer_mode'], 'program_outlook')
         self.assertIn('Do not append a general parts/NIIN inventory', client.responses.create.call_args.kwargs['instructions'])
 
+    def test_record_search_subject_matches_do_not_trigger_clarification(self):
+        questions = (
+            "Find current US defense opportunities relevant to electronic-warfare equipment manufacturers.",
+            "Find current US defense opportunities relevant to: aircraft thermal management",
+            "What defense opportunities are open for radar manufacturers?",
+            "Show recent defence awards involving missile propulsion.",
+            "Find recent US defense contract awards related to missile propulsion systems.",
+        )
+        runtime = SimpleNamespace(
+            platform_contexts=Mock(mentions=Mock(side_effect=lambda text: (
+                ["AMRAAM"] if "AMRAAM" in str(text) else []
+            ))),
+            company_contexts=Mock(search=Mock(return_value={"matches": []})),
+        )
+        subject_workflows = {
+            "product_intelligence",
+            "platform_intelligence",
+            "capability_discovery",
+            "market_segment_intelligence",
+            "state_industrial_base",
+            "competitor_discovery",
+            "program_momentum",
+        }
+        with patch.object(lab, "runtime", runtime, create=True):
+            for question in questions:
+                with self.subTest(question=question):
+                    request = lab.AskRequest(messages=[{"role": "user", "content": question}])
+                    routing = lab.routing_decision_for_request(request)
+                    self.assertEqual(routing.workflow, "market_record_search")
+                    self.assertFalse(routing.clarification_needed)
+                    self.assertFalse(
+                        subject_workflows.intersection(
+                            candidate.workflow for candidate in routing.candidates
+                        )
+                    )
+
+            starter = lab.AskRequest(messages=[{
+                "role": "user",
+                "content": (
+                    "Who supplies AMRAAM, what do they provide, and what evidence "
+                    "supports those positions?"
+                ),
+            }])
+            starter_routing = lab.routing_decision_for_request(starter)
+            self.assertEqual(starter_routing.workflow, "platform_intelligence")
+            self.assertFalse(starter_routing.clarification_needed)
+
+    def test_routing_labels_never_expose_capability_ontology_ids(self):
+        entity = lab.RoutingEntity(
+            entity_type="capability_market",
+            entity_id="electronic_warfare",
+            source="capability_ontology",
+            confidence=0.96,
+        )
+        label = lab._routing_entity_label(entity, "capability_discovery")
+        self.assertEqual(
+            label,
+            "Military electronic-warfare and countermeasure equipment",
+        )
+        self.assertNotIn("_", label)
+
     def test_new_company_dispatch_is_independent_of_previous_scope(self):
         company = {"scope_type":"company_parent", "scope_id":"MAROTTA", "scope_name":"MAROTTA CONTROLS", "resolved_cages":["99657"]}
         for scope in [None, {"scope_type":"platform", "scope_id":"LCAC"}, {"scope_type":"product_family", "scope_id":"VALVES"}, {"scope_type":"capability_market", "scope_id":"MISSILES"}]:

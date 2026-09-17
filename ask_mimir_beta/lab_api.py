@@ -31,6 +31,7 @@ from competitive_position import CompetitivePositionStore
 from competitive_position_export import build_competitive_position_zip
 from competitor_discovery import CompetitorDiscoveryStore
 from capability_discovery import (
+    CAPABILITY_DEFINITIONS,
     CapabilityDiscoveryStore,
     capability_market_follow_up_intent,
     resolve_capability,
@@ -3488,36 +3489,42 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
             entities=[_routing_entity("company_site", cage, source="identifier", confidence=1.0)],
         ))
 
+    # A record search is the requested action; product, platform, market,
+    # capability and geography matches inside its subject are filters for that
+    # search, not alternate user intents. Resolve it before the subject
+    # ontologies so one phrase cannot become two clarification choices.
+    record_search = resolve_market_record_search(latest)
     product_id = resolve_product_request(latest)
-    if product_id:
-        add(_routing_candidate(
-            "product_intelligence",
-            "recognized_product_family",
-            0.98,
-            entities=[_routing_entity(
-                "product_family", product_id, source="product_ontology", confidence=0.98
-            )],
-        ))
-    elif product_follow_up_intent(latest):
-        prior_product = next(
-            (
-                resolved
-                for message in reversed(request.messages[:-1])
-                if (resolved := resolve_product_request(message.content))
-            ),
-            None,
-        )
-        if prior_product:
+    if not record_search:
+        if product_id:
             add(_routing_candidate(
                 "product_intelligence",
-                "product_family_conversation",
-                0.94,
+                "recognized_product_family",
+                0.98,
                 entities=[_routing_entity(
-                    "product_family", prior_product,
-                    source="conversation_history", confidence=0.94,
+                    "product_family", product_id,
+                    source="product_ontology", confidence=0.98,
                 )],
             ))
-    record_search = resolve_market_record_search(latest)
+        elif product_follow_up_intent(latest):
+            prior_product = next(
+                (
+                    resolved
+                    for message in reversed(request.messages[:-1])
+                    if (resolved := resolve_product_request(message.content))
+                ),
+                None,
+            )
+            if prior_product:
+                add(_routing_candidate(
+                    "product_intelligence",
+                    "product_family_conversation",
+                    0.94,
+                    entities=[_routing_entity(
+                        "product_family", prior_product,
+                        source="conversation_history", confidence=0.94,
+                    )],
+                ))
     if record_search:
         add(_routing_candidate(
             "market_record_search",
@@ -3531,7 +3538,7 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
             )],
         ))
     compared_platforms = explicit_platform_comparison(request.messages, runtime.platform_contexts)
-    if compared_platforms:
+    if compared_platforms and not record_search:
         add(_routing_candidate(
             "platform_comparison",
             "multiple_named_platforms",
@@ -3542,7 +3549,7 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
             ],
         ))
     platform_id = explicit_platform_query(request.messages, runtime.platform_contexts)
-    if platform_id and not compared_platforms:
+    if platform_id and not compared_platforms and not record_search:
         add(_routing_candidate(
             "platform_intelligence",
             "recognized_platform",
@@ -3551,14 +3558,14 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
                 "platform", platform_id, source="platform_ontology", confidence=0.98
             )],
         ))
-    if is_ground_vehicle_power_position_request(request.messages):
+    if not record_search and is_ground_vehicle_power_position_request(request.messages):
         add(_routing_candidate(
             "defined_market_competitive_position",
             "defined_competitive_market",
             0.98,
         ))
     segment_id = resolve_market_segment(latest)
-    if segment_id:
+    if segment_id and not record_search:
         add(_routing_candidate(
             "market_segment_intelligence",
             "recognized_market_segment",
@@ -3568,7 +3575,7 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
             )],
         ))
     capability_id = resolve_capability(latest)
-    if capability_id and not segment_id:
+    if capability_id and not segment_id and not record_search:
         add(_routing_candidate(
             "capability_discovery",
             "recognized_capability_request",
@@ -3577,7 +3584,11 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
                 "capability_market", capability_id, source="capability_ontology", confidence=0.96
             )],
         ))
-    state_code = resolve_state(latest) if is_geographic_market_request(latest) else None
+    state_code = (
+        resolve_state(latest)
+        if not record_search and is_geographic_market_request(latest)
+        else None
+    )
     company_phrase = explicit_company_name_query(request.messages)
     company_phrase_is_platform = bool(
         company_phrase and runtime.platform_contexts.mentions(company_phrase)
@@ -3607,11 +3618,11 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
                 "state_market", state_code, source="state_parser", confidence=0.98
             )],
         ))
-    if is_eaton_competitor_request(request.messages):
+    if not record_search and is_eaton_competitor_request(request.messages):
         add(_routing_candidate("competitor_discovery", "recognized_competitor_request", 0.96))
-    if is_program_momentum_request(request.messages):
+    if not record_search and is_program_momentum_request(request.messages):
         add(_routing_candidate("program_momentum", "program_momentum_language", 0.985))
-    if is_open_capability_discovery_request(latest):
+    if not record_search and is_open_capability_discovery_request(latest):
         add(_routing_candidate("capability_discovery", "open_supplier_discovery", 0.90))
 
     # A clicked clarification is an explicit new selection. Do not also offer a
@@ -4568,6 +4579,34 @@ def active_scope_from_result(
     return previous_scope
 
 
+def _routing_entity_label(entity: RoutingEntity | None, workflow: str) -> str:
+    if entity is None:
+        return {
+            "company_site_intelligence": "A company or supplier site",
+            "platform_intelligence": "A platform or program",
+            "capability_discovery": "A capability market",
+            "market_segment_intelligence": "A defense market segment",
+            "state_industrial_base": "A state industrial base",
+        }.get(workflow, workflow.replace("_", " ").title())
+
+    label = entity.entity_name or entity.entity_id
+    if entity.entity_type == "capability_market":
+        capability_id = str(entity.entity_id)
+        if capability_id.startswith("capability:"):
+            label = unquote(capability_id.split(":", 1)[1])
+        else:
+            label = CAPABILITY_DEFINITIONS.get(capability_id, {}).get(
+                "display_name",
+                label,
+            )
+    value = str(label).strip()
+    # Internal ontology identifiers are implementation details, never
+    # customer-facing clarification labels.
+    if "_" in value and value == str(entity.entity_id):
+        value = value.replace("_", " ")
+    return value
+
+
 def routing_clarification_result(decision: RoutingDecision) -> Dict[str, Any]:
     options = []
     seen = set()
@@ -4576,15 +4615,7 @@ def routing_clarification_result(decision: RoutingDecision) -> Dict[str, Any]:
             continue
         seen.add(candidate.workflow)
         entity = candidate.resolved_entities[0] if candidate.resolved_entities else None
-        label = entity.entity_name or entity.entity_id if entity else {
-            "company_site_intelligence": "A company or supplier site",
-            "platform_intelligence": "A platform or program",
-            "capability_discovery": "A capability market",
-            "market_segment_intelligence": "A defense market segment",
-            "state_industrial_base": "A state industrial base",
-        }.get(candidate.workflow, candidate.workflow.replace("_", " ").title())
-        if entity and str(label).startswith("capability:"):
-            label = unquote(str(label).split(":", 1)[1]).title()
+        label = _routing_entity_label(entity, candidate.workflow)
         value = str(label)
         prompt = {
             "company_site_intelligence": f"Tell me about this defense supplier: {value}",
