@@ -1121,6 +1121,18 @@ class DurableJobTests(unittest.TestCase):
         self.assertEqual(recovered["status"], "completed")
         self.assertEqual(recovered["result"]["answer_type"], "clarification")
         self.assertEqual(self.ledger.used_today("alice"), 0)
+        self.manager.check_lifecycle()
+        self.assertEqual(self.ledger.load_job("a" * 32)["status"], "completed")
+        self.assertNotIn("a" * 32, self.manager.jobs)
+
+    def test_quota_race_is_logged_as_rejection_not_server_failure(self):
+        self.manager.create(self.request, self.access, self.route)
+        with patch.object(self.ledger, "reserve", side_effect=lab.DailyQuotaExceeded(self.access.policy)), patch.object(lab, "lifecycle") as log:
+            self.manager._run("a" * 32, self.request, self.access, self.route)
+        events = [call.args[0] for call in log.call_args_list]
+        self.assertIn("ask_request_rejected", events)
+        self.assertNotIn("ask_server_failed", events)
+        self.assertEqual(self.ledger.load_job("a" * 32)["failure_stage"], "quota")
 
     def test_admission_rejection_does_not_reserve_allowance(self):
         self.manager.capacity = 1

@@ -4872,6 +4872,63 @@ class AskJobManager:
         self.worker_count = min(max(int(os.getenv("ASK_MIMIR_JOB_WORKERS", "2")), 1), 8)
         self.capacity = self.worker_count + min(max(int(os.getenv("ASK_MIMIR_JOB_QUEUE", "8")), 0), 100)
         self.executor = ThreadPoolExecutor(max_workers=self.worker_count, thread_name_prefix="mimir-research")
+        self.monitor_stop = threading.Event()
+        self.monitor_thread = None
+        self.monitor_issues: set[tuple[str, str]] = set()
+        self.monitor_state: Dict[str, Any] = {"status": "starting"}
+
+    def check_lifecycle(self) -> Dict[str, Any]:
+        # Queue allowance + execution deadline + five-minute restart grace.
+        orphan_after = max(int(os.getenv("ASK_MIMIR_MAX_QUEUE_SECONDS", "900")), 30) + max_job_seconds() + 300
+        with self.lock:
+            # Retry a clarification result whose initial save failed. Never
+            # expire its older queued record while the answer exists in RAM.
+            for request_id, job in list(self.jobs.items()):
+                if job.get("status") == "completed":
+                    runtime.beta_state.save_job(job)
+                    self.jobs.pop(request_id, None)
+            report = runtime.beta_state.reconcile_job_lifecycle(
+                {key for key, job in self.jobs.items() if job.get("status") in {"queued", "running"}},
+                orphan_after_seconds=orphan_after,
+            )
+            current = {(row["request_id"], row["state"]) for row in report["issues"]}
+            previous = self.monitor_issues
+            self.monitor_issues = current
+            self.monitor_state = {"status": "ok", "checked_at": datetime.now(timezone.utc).isoformat(),
+                                  "orphan_after_seconds": orphan_after, "delivery_after_seconds": 900,
+                                  **report["counts"]}
+        for row in report["expired"]:
+            lifecycle("ask_orphaned_request", **row, resolution="expired_and_refunded")
+            lifecycle("ask_server_failed", **row, retryable=True)
+        for row in report["issues"]:
+            if (row["request_id"], row["state"]) not in previous:
+                lifecycle("ask_delivery_unconfirmed" if row["state"] == "delivery_unconfirmed" else "ask_orphaned_request", **row)
+        for request_id, state in previous - current:
+            lifecycle("ask_lifecycle_issue_cleared", request_id=request_id, previous_state=state)
+        return dict(self.monitor_state)
+
+    def start_monitor(self) -> None:
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            return
+        self.monitor_stop.clear()
+
+        def monitor() -> None:
+            while not self.monitor_stop.is_set():
+                try:
+                    self.check_lifecycle()
+                except Exception:
+                    LOGGER.exception("Ask Mimir lifecycle monitor failed")
+                    with self.lock:
+                        self.monitor_state = {**self.monitor_state, "status": "error"}
+                self.monitor_stop.wait(60)
+
+        self.monitor_thread = threading.Thread(target=monitor, name="mimir-lifecycle", daemon=True)
+        self.monitor_thread.start()
+
+    def stop_monitor(self) -> None:
+        self.monitor_stop.set()
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=5)
 
     def _schedule_credit_release(
         self,
@@ -5356,7 +5413,10 @@ class AskJobManager:
                 total_request_ms=(time.perf_counter() - request_started_perf) * 1000,
             )
             failure = request_failure_details(exc)
-            lifecycle("ask_server_failed", error_class=type(exc).__name__, **failure)
+            quota_rejected = failure.get("failure_stage") == "quota"
+            lifecycle("ask_request_rejected" if quota_rejected else "ask_server_failed",
+                      error_class=type(exc).__name__, **failure,
+                      **({"reason": "quota", "technical_failure": False} if quota_rejected else {}))
             if credit_reserved:
                 try:
                     runtime.beta_state.fail(
@@ -5393,11 +5453,10 @@ class AskJobManager:
                     "error_detail": str(exc),
                 }),
             )
-            LOGGER.exception(
-                "Ask Mimir request failed request_id=%s workflow=%s",
-                request_id,
-                routing.workflow,
-            )
+            if quota_rejected:
+                LOGGER.info("Ask Mimir quota rejected request_id=%s workflow=%s", request_id, routing.workflow)
+            else:
+                LOGGER.exception("Ask Mimir request failed request_id=%s workflow=%s", request_id, routing.workflow)
             best_effort(
                 "failed routing telemetry",
                 lambda: runtime.beta_state.complete_routing_event(
@@ -5580,10 +5639,21 @@ class AskJobManager:
                 "oldest_active_seconds": round(max(ages), 1) if ages else 0,
                 "accepting_new_jobs": len(active) < self.capacity,
                 "pending_credit_releases": len(self.pending_credit_releases),
+                "lifecycle_monitor": dict(self.monitor_state),
             }
 
 
 job_manager = AskJobManager()
+
+
+@app.on_event("startup")
+def start_lifecycle_monitor() -> None:
+    job_manager.start_monitor()
+
+
+@app.on_event("shutdown")
+def stop_lifecycle_monitor() -> None:
+    job_manager.stop_monitor()
 
 
 @app.get("/")
@@ -5678,7 +5748,9 @@ def create_ask_job(
     try:
         return accept_ask_job(payload, request, response)
     except Exception as exc:
-        lifecycle("ask_request_rejected", error_class=type(exc).__name__, **request_failure_details(exc))
+        failure = request_failure_details(exc)
+        lifecycle("ask_request_rejected", error_class=type(exc).__name__, **failure,
+                  **({"reason": "quota", "technical_failure": False} if failure.get("failure_stage") == "quota" else {}))
         raise
     finally:
         REQUEST_CONTEXT.reset(token)

@@ -921,6 +921,91 @@ class BetaStateStore:
                     raise
             return {key: job[key], "conversation_id": job.get("conversation_id"), "workflow": job.get("workflow")}
 
+    def reconcile_job_lifecycle(
+        self, active_request_ids: set[str], *, orphan_after_seconds: float,
+        delivery_after_seconds: float = 900, now: float | None = None,
+    ) -> Dict[str, Any]:
+        """Inspect canonical results without relying on browser polling.
+
+        Caller holds the job-manager lock so an interrupted job cannot resume
+        while it is being expired. Live workers are only flagged, never failed:
+        they may still return a result. Expiry and refund commit together.
+        """
+        now = time.time() if now is None else now
+        counts = {key: 0 for key in (
+            "server_completed", "server_failed", "quota_rejected", "browser_rendered",
+            "delivery_unconfirmed", "overdue_active", "interrupted_expired", "invalid_saved_jobs",
+        )}
+        issues, expired = [], []
+        retention = max(int(os.getenv("ASK_MIMIR_RESULT_RETENTION_DAYS", "7")), 1)
+        with self.lock:
+            cursor = self.connection.execute(
+                "SELECT request_id, saved_at, job_json FROM research_results WHERE saved_at >= ?",
+                [now - retention * 86400],
+            )
+            try:
+                while True:
+                    rows = cursor.fetchmany(32)
+                    if not rows:
+                        break
+                    for request_id, saved_at, encoded in rows:
+                        try:
+                            job = json.loads(zlib.decompress(encoded) if isinstance(encoded, bytes) else encoded)
+                            anchor = job.get("completed_at") if job.get("status") == "completed" else job.get("created_at")
+                            timestamp = datetime.fromisoformat(anchor).timestamp() if anchor else saved_at
+                            age = max(now - timestamp, 0)
+                        except (ValueError, TypeError, AttributeError, zlib.error):
+                            counts["invalid_saved_jobs"] += 1
+                            issues.append({"request_id": request_id, "state": "invalid_saved_job"})
+                            continue
+                        identity = {"request_id": request_id, "client_request_id": job.get("client_request_id"),
+                                    "workflow": job.get("workflow")}
+                        status = job.get("status")
+                        if status in {"queued", "running"} and age > orphan_after_seconds:
+                            if request_id in active_request_ids:
+                                counts["overdue_active"] += 1
+                                issues.append({**identity, "state": "overdue_active", "age_seconds": round(age)})
+                            else:
+                                # A completed ledger must never be overwritten by expiry.
+                                ledger = self.connection.execute("SELECT status FROM query_events WHERE request_id=?", [request_id]).fetchone()
+                                if ledger and ledger[0] in {"completed", "completed_unbilled"}:
+                                    counts["invalid_saved_jobs"] += 1
+                                    issues.append({**identity, "state": "inconsistent_saved_job"})
+                                    continue
+                                completed_at = datetime.fromtimestamp(now, timezone.utc).isoformat()
+                                job.update(status="failed", stage="Research interrupted", percent=100,
+                                           completed_at=completed_at, failure_stage="worker",
+                                           error_code="interrupted_job_expired", http_status=503, retryable=True,
+                                           error="This research was interrupted and its recovery window expired. Your query allowance is available; please submit it again.")
+                                self.connection.execute(
+                                    "UPDATE query_events SET status='failed_refunded', completed_at=? WHERE request_id=? AND status IN ('reserved', 'running')",
+                                    [completed_at, request_id],
+                                )
+                                self.connection.execute("UPDATE research_results SET job_json=? WHERE request_id=?",
+                                                        [zlib.compress(json.dumps(job, default=str).encode()), request_id])
+                                expired.append({**identity, "failure_stage": "worker", "error_code": "interrupted_job_expired"})
+                                status = "failed"
+                        if status == "completed":
+                            counts["server_completed"] += 1
+                            if job.get("browser_rendered_at"):
+                                counts["browser_rendered"] += 1
+                            elif job.get("_request_body") and age > delivery_after_seconds:
+                                # Pre-receipt releases cannot confirm browser delivery.
+                                counts["delivery_unconfirmed"] += 1
+                                issues.append({**identity, "state": "delivery_unconfirmed", "age_seconds": round(age),
+                                               "browser_received": bool(job.get("browser_received_at"))})
+                        elif status == "failed":
+                            counts["quota_rejected" if job.get("failure_stage") == "quota" else "server_failed"] += 1
+                            if job.get("error_code") == "interrupted_job_expired":
+                                counts["interrupted_expired"] += 1
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            finally:
+                cursor.close()
+        return {"counts": counts, "issues": issues, "expired": expired}
+
     def fail(
         self,
         request_id: str,
