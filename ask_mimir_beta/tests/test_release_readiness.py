@@ -954,6 +954,8 @@ class DurableJobTests(unittest.TestCase):
             recovered = restarted.get("a"*32, self.access)
             self.assertEqual(recovered["status"], "completed")
             self.assertEqual(recovered["result"]["answer"], "AMRAAM report")
+            self.assertGreaterEqual(recovered["timings"]["total_request_ms"], 0)
+            self.assertNotIn("operations", recovered["timings"])
             self.assertEqual(
                 recovered["result"]["answer_artifacts"]["evidence_pack"]["download_url"],
                 "/api/evidence/answer.zip?request_id=" + "a"*32 + "&response_id=test-answer",
@@ -965,6 +967,40 @@ class DurableJobTests(unittest.TestCase):
                 restarted.get("a"*32, AccessContext("bob","professional",True))
         finally:
             restarted.executor.shutdown()
+
+    def test_legacy_result_timings_are_owner_bound_and_do_not_include_tool_payloads(self):
+        self.ledger.reserve("legacy", self.access, "test", "platform_intelligence")
+        job = {"request_id": "legacy", "subject_id": "alice", "status": "completed", "result": {"answer": "Report"}}
+        self.ledger.complete("legacy", latency_ms=1000, estimated_cost_usd=None,
+                             performance={"model_ms": 900, "routing_ms": 10, "operations": [{"question": "PRIVATE"}]}, job=job)
+        self.assertEqual(self.manager.get("legacy", self.access)["timings"], {"model_ms": 900, "routing_ms": 10})
+        self.assertEqual(self.ledger.load_job_timings("legacy", "another-owner"), {})
+        with self.assertRaises(KeyError):
+            self.manager.get("legacy", AccessContext("another-owner", "public", False))
+
+    def test_timing_read_failure_does_not_block_completed_answer(self):
+        self.ledger.save_job({"request_id": "legacy", "subject_id": "alice", "status": "completed", "result": {"answer": "Report"}})
+        with patch.object(self.ledger, "load_job_timings", side_effect=ValueError("malformed timing")):
+            self.assertEqual(self.manager.get("legacy", self.access)["result"]["answer"], "Report")
+
+    def test_timing_summary_rejects_non_numeric_private_or_invalid_values(self):
+        summary = lab.request_timing_summary({"model_ms": 20, "queue_wait_ms": float("inf"), "routing_ms": -1,
+                                              "total_request_ms": "30", "model_call_count": True,
+                                              "operations": ["private"], "estimated_cost_usd": 0.1})
+        self.assertEqual(summary, {"model_ms": 20})
+
+    def test_passive_policy_gets_do_not_reserve_credit_or_create_research(self):
+        app = FastAPI()
+        app.get("/api/beta/policy")(lab.beta_policy)
+        client = TestClient(app)
+        with patch.dict(os.environ, {"ASK_MIMIR_TRUSTED_PROXY_SECRET": "test-secret"}):
+            for identity in ["guest:scanner", "guest:scanner", "guest:human"]:
+                response = client.get("/api/beta/policy", headers={"X-Ask-Mimir-Proxy-Secret": "test-secret", "X-Ask-Mimir-Subject": identity, "X-Ask-Mimir-Tier": "public"})
+                self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.ledger.connection.execute("SELECT count(*) FROM query_events").fetchone()[0], 0)
+        self.assertEqual(self.ledger.connection.execute("SELECT count(*) FROM research_results").fetchone()[0], 0)
+        self.assertEqual(self.ledger.connection.execute("SELECT count(*) FROM ask_conversations").fetchone()[0], 0)
+        self.manager.executor.submit.assert_not_called()
 
     def test_routing_analytics_failure_does_not_block_job_admission(self):
         with patch.object(

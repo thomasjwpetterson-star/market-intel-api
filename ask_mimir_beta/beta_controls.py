@@ -8,6 +8,7 @@ import copy
 import zlib
 from collections import OrderedDict
 import json
+import math
 import shutil
 import os
 import re
@@ -153,6 +154,16 @@ def next_utc_month_iso() -> str:
         datetime_time.min,
         tzinfo=timezone.utc,
     ).isoformat()
+
+
+def request_timing_summary(performance: Dict[str, Any] | None) -> Dict[str, float]:
+    """Only bounded numeric timings may leave the internal performance record."""
+    keys = ("routing_ms", "queue_wait_ms", "answer_generation_ms", "evidence_retrieval_ms",
+            "model_ms", "validation_and_formatting_ms", "total_request_ms",
+            "evidence_call_count", "model_call_count", "evidence_cache_hit_count")
+    return {key: value for key in keys
+            if isinstance((value := (performance or {}).get(key)), (int, float))
+            and not isinstance(value, bool) and math.isfinite(value) and value >= 0}
 
 
 class RequestPerformance:
@@ -920,6 +931,16 @@ class BetaStateStore:
                     self.connection.rollback()
                     raise
             return {key: job[key], "conversation_id": job.get("conversation_id"), "workflow": job.get("workflow")}
+
+    def load_job_timings(self, request_id: str, subject_id: str) -> Dict[str, float]:
+        # Owner-bound, read-only compatibility for results saved before timing
+        # summaries were included in the job. No prompt/tool payloads or costs.
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT performance_json FROM query_events WHERE request_id=? AND subject_id=?",
+                [request_id, subject_id],
+            ).fetchone()
+        return request_timing_summary(json.loads(row[0])) if row and row[0] else {}
 
     def reconcile_job_lifecycle(
         self, active_request_ids: set[str], *, orphan_after_seconds: float,

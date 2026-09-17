@@ -97,6 +97,7 @@ from beta_controls import (
     normalize_tier,
     record_request_timing,
     request_performance_scope,
+    request_timing_summary,
     response_requires_clarification,
     sanitize_customer_payload,
     link_evidenced_award_identifiers,
@@ -5344,6 +5345,7 @@ class AskJobManager:
                         "result": customer_result,
                         "access": customer_result["access"],
                         "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "timings": request_timing_summary(performance_snapshot),
                     }
                 )
                 completed_job = self.jobs[request_id]
@@ -5488,6 +5490,7 @@ class AskJobManager:
                         "error": detail,
                         "error_code": failure["error_code"],
                         "failure_stage": failure["failure_stage"],
+                        "timings": request_timing_summary(performance_snapshot),
                         "http_status": failure["http_status"],
                         "retryable": failure["retryable"],
                         "latency_ms": round(
@@ -5566,6 +5569,11 @@ class AskJobManager:
                 raise KeyError(request_id)
             self._resume_persisted_job(job, access)
             result = self.public_job(job)
+            if result.get("status") in {"completed", "failed"} and "timings" not in result:
+                try:
+                    result["timings"] = runtime.beta_state.load_job_timings(request_id, access.subject_id)
+                except Exception:
+                    LOGGER.warning("Ask Mimir timing lookup unavailable request_id=%s", request_id)
             result["access"] = access_snapshot(
                 access, result.get("access")
             )
