@@ -895,6 +895,32 @@ class BetaStateStore:
         encoded = zlib.decompress(row[0]) if isinstance(row[0], bytes) else row[0]
         return json.loads(encoded)
 
+    def record_delivery_receipt(self, request_id: str, subject_id: str, response_id: str, stage: str) -> Dict[str, Any]:
+        """Idempotent, owner-bound confirmation; never changes the credit ledger."""
+        if stage not in {"received", "rendered"}:
+            raise ValueError("Invalid delivery stage")
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT job_json FROM research_results WHERE request_id=? AND subject_id=? AND saved_at>=?",
+                [request_id, subject_id, time.time() - max(int(os.getenv("ASK_MIMIR_RESULT_RETENTION_DAYS", "7")), 1) * 86400],
+            ).fetchone()
+            if not row:
+                raise KeyError(request_id)
+            job = json.loads(zlib.decompress(row[0]) if isinstance(row[0], bytes) else row[0])
+            if job.get("status") != "completed" or str((job.get("result") or {}).get("response_id") or "") != response_id:
+                raise ValueError("Receipt does not match a completed answer")
+            key = "browser_received_at" if stage == "received" else "browser_rendered_at"
+            if not job.get(key):
+                job[key] = datetime.now(timezone.utc).isoformat()
+                try:
+                    # Preserve original saved_at so receipts do not extend retention.
+                    self.connection.execute("UPDATE research_results SET job_json=? WHERE request_id=?", [zlib.compress(json.dumps(job, default=str).encode()), request_id])
+                    self.connection.commit()
+                except Exception:
+                    self.connection.rollback()
+                    raise
+            return {key: job[key], "conversation_id": job.get("conversation_id"), "workflow": job.get("workflow")}
+
     def fail(
         self,
         request_id: str,

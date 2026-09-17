@@ -7,6 +7,8 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -100,11 +102,40 @@ class DirectAccessTests(unittest.TestCase):
         cors_definition = source.index("app.add_middleware(\n    CORSMiddleware", app_definition)
         self.assertLess(cors_definition, route_definition)
         self.assertIn('"https://www.mimiradvisors.org"', source[app_definition:route_definition])
-        self.assertIn('allow_headers=["Authorization", "Content-Type"]', source[app_definition:route_definition])
+        self.assertIn('allow_headers=["Authorization", "Content-Type", "X-Ask-Mimir-Client-Request-Id"]', source[app_definition:route_definition])
 
 
 class StopAtEvidence(Exception):
     pass
+
+
+class HttpBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        app = FastAPI()
+        app.middleware("http")(lab.audit_ask_http)
+        app.post("/api/ask/jobs")(lab.create_ask_job)
+        self.client = TestClient(app)
+        self.request_id = str(uuid.uuid4())
+
+    def test_malformed_and_incomplete_requests_are_correlated_before_validation(self):
+        with patch.object(lab, "lifecycle") as events:
+            for payload in [{}, {"messages": []}, {"messages": [{"role": "user", "content": "   "}]},
+                            {"messages": [{"role": "assistant", "content": "Wrong final role"}]}]:
+                with self.subTest(payload=payload):
+                    response = self.client.post("/api/ask/jobs", json=payload,
+                        headers={"X-Ask-Mimir-Client-Request-Id": self.request_id})
+                    self.assertEqual(response.status_code, 422)
+            events.assert_any_call("ask_api_arrived", client_request_id=self.request_id)
+            self.assertEqual(sum(c.args[0] == "ask_api_responded" and c.kwargs["http_status"] == 422
+                                 for c in events.call_args_list), 4)
+
+    def test_production_direct_requests_cannot_bypass_the_signed_quota_identity(self):
+        with patch.dict(os.environ, {"ASK_MIMIR_TRUSTED_PROXY_SECRET": "test-secret", "ASK_MIMIR_ALLOW_TEST_IDENTITIES": "0"}), patch.object(lab, "lifecycle") as events:
+            response = self.client.post("/api/ask/jobs", json={"messages": [{"role": "user", "content": "Tell me about AMRAAM"}], "client_request_id": self.request_id},
+                headers={"X-Ask-Mimir-Client-Request-Id": self.request_id})
+            self.assertEqual(response.status_code, 401)
+            self.assertTrue(any(c.args[0] == "ask_api_responded" and c.kwargs["http_status"] == 401
+                                for c in events.call_args_list))
 
 
 class AnswerTypeTests(unittest.TestCase):
@@ -324,6 +355,19 @@ class AnswerTypeTests(unittest.TestCase):
 
 
 class ExecutionBoundaryTests(unittest.TestCase):
+    def test_supplier_question_about_named_platform_does_not_offer_sentence_fragment_as_capability(self):
+        runtime = SimpleNamespace(platform_contexts=Mock(mentions=Mock(return_value=["AMRAAM"])))
+        with patch.object(lab, "runtime", runtime, create=True):
+            for question in (
+                "Which companies supply AMRAAM and what do they provide?",
+                "Which companies supply AMRAAM?",
+                "Find suppliers that manufacture AMRAAM components.",
+            ):
+                with self.subTest(question=question):
+                    route = lab.routing_decision_for_request(lab.AskRequest(messages=[{"role":"user", "content":question}]))
+                    self.assertEqual(route.workflow, "platform_intelligence")
+                    self.assertFalse(route.clarification_needed)
+
     def test_completed_answer_export_expands_owned_platform_scope_on_demand(self):
         import csv, io, zipfile
 
@@ -784,6 +828,87 @@ class ConcurrentEvidenceTests(unittest.TestCase):
 
 
 class DurableJobTests(unittest.TestCase):
+    def test_concurrent_duplicate_admission_schedules_one_job(self):
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            results = list(pool.map(lambda _: self.manager.create(self.request, self.access, self.route)[0], range(20)))
+        self.assertEqual(sum(not r.get("deduplicated", False) for r in results), 1)
+        self.manager.executor.submit.assert_called_once()
+        self.assertEqual(self.ledger.used_today("alice"), 0)
+
+    def test_concurrency_1_5_10_20_has_bounded_queue_and_rejections_never_charge(self):
+        for count in (1, 5, 10, 20):
+            with self.subTest(concurrent=count):
+                self.manager.jobs.clear()
+                def submit(index):
+                    request = lab.AskRequest(messages=[{"role":"user","content":"Tell me about AMRAAM"}], client_request_id=str(uuid.uuid4()))
+                    access = AccessContext(f"load-{count}-{index}", "public", False)
+                    try:
+                        self.manager.create(request, access, self.route)
+                        return 202
+                    except lab.HTTPException as exc:
+                        return exc.status_code
+                with ThreadPoolExecutor(max_workers=count) as pool:
+                    results = list(pool.map(submit, range(count)))
+                self.assertEqual(results.count(202), min(count, self.manager.capacity))
+                self.assertEqual(results.count(503), max(count - self.manager.capacity, 0))
+                for index in range(count):
+                    self.assertEqual(self.ledger.used_today(f"load-{count}-{index}"), 0)
+
+    def test_provider_transient_failures_release_credit_and_preserve_classification(self):
+        for status in (429, 500, 502, 503):
+            with self.subTest(provider_status=status):
+                request = self.request.model_copy(update={"client_request_id":str(uuid.uuid4())})
+                job, _ = self.manager.create(request, self.access, self.route)
+                error = RuntimeError("Provider temporarily unavailable")
+                error.status_code = status
+                with patch.object(lab, "generate_answer", side_effect=error):
+                    self.manager._run(job["request_id"], request, self.access, self.route)
+                result = self.manager.get(job["request_id"], self.access)
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["failure_stage"], "model")
+                self.assertTrue(result["retryable"])
+                self.assertEqual(self.ledger.used_today("alice"), 0)
+
+    def test_accepted_job_can_resume_from_only_its_id_after_restart(self):
+        self.manager.create(self.request, self.access, self.route)
+        self.assertEqual(self.ledger.used_today("alice"), 0)
+        saved = self.ledger.load_job("a" * 32)
+        self.assertEqual(saved["status"], "queued")
+        self.manager.jobs.clear()  # Simulate process memory loss before reservation.
+        with self.assertRaises(KeyError):
+            self.manager.get("a" * 32, AccessContext("other", "professional", True))
+        self.manager.executor.reset_mock()
+        first = self.manager.get("a" * 32, self.access)
+        second = self.manager.get("a" * 32, self.access)
+        self.assertEqual(first["status"], "queued")
+        self.assertEqual(second["request_id"], first["request_id"])
+        self.manager.executor.submit.assert_called_once()
+        self.assertNotIn("_request_body", first)
+        self.assertEqual(self.ledger.used_today("alice"), 0)
+
+    def test_acceptance_is_refused_without_durable_recovery_and_without_credit(self):
+        with patch.object(self.ledger, "save_job", side_effect=OSError("disk unavailable")):
+            with self.assertRaises(OSError):
+                self.manager.create(self.request, self.access, self.route)
+        self.assertEqual(self.manager.jobs, {})
+        self.manager.executor.submit.assert_not_called()
+        self.assertEqual(self.ledger.used_today("alice"), 0)
+
+    def test_delivery_receipts_are_authorized_idempotent_and_do_not_rebill(self):
+        job = {"request_id":"a" * 32, "subject_id":"alice", "status":"completed", "result":{"response_id":"answer-1", "answer":"Report"}}
+        self.ledger.save_job(job)
+        before = self.ledger.used_today("alice")
+        with self.assertRaises(KeyError):
+            self.ledger.record_delivery_receipt("a" * 32, "other", "answer-1", "rendered")
+        with self.assertRaises(ValueError):
+            self.ledger.record_delivery_receipt("a" * 32, "alice", "wrong-answer", "rendered")
+        received = self.ledger.record_delivery_receipt("a" * 32, "alice", "answer-1", "received")
+        rendered = self.ledger.record_delivery_receipt("a" * 32, "alice", "answer-1", "rendered")
+        duplicate = self.ledger.record_delivery_receipt("a" * 32, "alice", "answer-1", "rendered")
+        self.assertIn("browser_received_at", received)
+        self.assertEqual(rendered, duplicate)
+        self.assertEqual(self.ledger.used_today("alice"), before)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.ledger = BetaStateStore(Path(self.tmp.name)/"state.sqlite")

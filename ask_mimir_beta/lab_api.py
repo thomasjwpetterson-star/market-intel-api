@@ -139,6 +139,19 @@ PUBLIC_REQUEST_FAILURE = (
 JOB_DEADLINE = contextvars.ContextVar(
     "ask_mimir_job_deadline", default=None
 )
+REQUEST_CONTEXT = contextvars.ContextVar("ask_mimir_request_context", default=None)
+
+
+def lifecycle(event: str, **fields: Any) -> None:
+    """Content-free lifecycle, available in both service logs and bounded audit."""
+    record = {
+        "record_type": "ask_lifecycle", "event": event,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "application_revision": os.getenv("RENDER_GIT_COMMIT", "development"),
+        **(REQUEST_CONTEXT.get() or {}), **fields,
+    }
+    LOGGER.info("%s", json.dumps(record, default=str))
+    best_effort("lifecycle audit", lambda: runtime.write_audit_record(record))
 
 
 def max_job_seconds() -> int:
@@ -2411,6 +2424,8 @@ class ChatMessage(BaseModel):
 
     @model_validator(mode="after")
     def user_input_is_bounded(self) -> "ChatMessage":
+        if self.role == "user" and not self.content.strip():
+            raise ValueError("Enter a question first.")
         if self.role == "user" and len(self.content) > 12000:
             raise ValueError("Please keep each question or pasted article under 12,000 characters.")
         return self
@@ -2479,6 +2494,8 @@ class AskRequest(BaseModel):
     )
     @model_validator(mode="after")
     def required_template_value_is_present(self) -> "AskRequest":
+        if self.messages[-1].role != "user":
+            raise ValueError("The last message must contain the user's question.")
         message = incomplete_template_message(self.messages[-1].content)
         if message:
             raise ValueError(message)
@@ -2799,8 +2816,16 @@ class LabRuntime:
 
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         started = time.perf_counter()
+        lifecycle("ask_retrieval_started", tool=name)
         try:
-            return self._call_tool(name, arguments)
+            result = self._call_tool(name, arguments)
+            lifecycle("ask_retrieval_completed", tool=name, latency_ms=round((time.perf_counter() - started) * 1000))
+            return result
+        except Exception as exc:
+            exc.failure_stage = "retrieval"
+            exc.error_code = "retrieval_timeout" if isinstance(exc, TimeoutError) else "retrieval_failed"
+            lifecycle("ask_retrieval_failed", tool=name, error_class=type(exc).__name__, error_code=exc.error_code)
+            raise
         finally:
             record_request_timing(
                 "evidence_retrieval",
@@ -3187,7 +3212,7 @@ app.add_middleware(
     allow_origins=_browser_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST", "HEAD", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", "X-Ask-Mimir-Client-Request-Id"],
     expose_headers=[
         "Retry-After",
         "X-Ask-Mimir-Workflow",
@@ -3197,6 +3222,26 @@ app.add_middleware(
         "X-Ask-Mimir-Clarification",
     ],
 )
+
+
+@app.middleware("http")
+async def audit_ask_http(request: Request, call_next: Callable) -> Response:
+    if request.method != "POST" or request.url.path != "/api/ask/jobs":
+        return await call_next(request)
+    started = time.perf_counter()
+    supplied = request.headers.get("x-ask-mimir-client-request-id", "")
+    correlation_id = supplied if re.fullmatch(r"[A-Fa-f0-9-]{20,100}", supplied) else None
+    lifecycle("ask_api_arrived", client_request_id=correlation_id)
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        lifecycle("ask_api_response_failed", client_request_id=correlation_id,
+                  error_class=type(exc).__name__, http_status=500,
+                  latency_ms=round((time.perf_counter() - started) * 1000))
+        raise
+    lifecycle("ask_api_responded", client_request_id=correlation_id,
+              http_status=response.status_code, latency_ms=round((time.perf_counter() - started) * 1000))
+    return response
 app.mount("/assets", StaticFiles(directory=LAB_DIR / "assets"), name="assets")
 
 
@@ -3611,7 +3656,9 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
             )],
         ))
     capability_id = resolve_capability(latest)
-    if capability_id and not segment_id and not record_search:
+    if capability_id and not segment_id and not record_search and not (
+        platform_id and is_platform_centered_request(latest, has_platform_mention=True)
+    ):
         add(_routing_candidate(
             "capability_discovery",
             "recognized_capability_request",
@@ -3868,12 +3915,12 @@ def access_from_request(request: Request) -> AccessContext:
             tier=requested_tier,
             authenticated=requested_tier != "public",
         )
-    if requested_subject and requested_tier != "public":
+    if (proxy_secret and not test_identities) or (requested_subject and requested_tier != "public"):
         raise HTTPException(
             status_code=401,
             detail=(
-                "Signed-in Ask Mimir access could not be verified. The website and "
-                "Ask Mimir proxy configuration do not match."
+                "Ask Mimir access could not be verified. Reload Ask Mimir on the "
+                "website to renew your research access."
             ),
         )
 
@@ -4446,6 +4493,12 @@ def result_counts_toward_quota(result: Dict[str, Any]) -> bool:
 
 def request_failure_details(exc: Exception) -> Dict[str, Any]:
     """Return stable, content-free diagnostics for customer-visible failures."""
+    if getattr(exc, "failure_stage", None) in {"retrieval", "routing", "database", "persistence"}:
+        return {
+            "failure_stage": exc.failure_stage,
+            "error_code": exc.error_code,
+            "http_status": 503, "retryable": True, "credit_reason": exc.error_code,
+        }
     if isinstance(exc, DailyQuotaExceeded):
         return {
             "failure_stage": "quota",
@@ -4499,6 +4552,8 @@ def request_failure_details(exc: Exception) -> Dict[str, Any]:
             code, stage = "queue_timeout", "queue"
         elif "save" in detail or "write" in detail:
             code, stage = "persistence_failed", "persistence"
+        elif status in {401, 403}:
+            code, stage = "authentication_failed", "auth"
         elif status in {400, 409, 422}:
             code, stage = "validation_failed", "validation"
         elif status in {502, 503, 504}:
@@ -4920,6 +4975,7 @@ class AskJobManager:
                         status_code=409,
                         detail="That request identifier is already attached to another question.",
                     )
+                self._resume_persisted_job(existing, access)
                 duplicate = self.public_job(existing)
                 duplicate["access"] = access_snapshot(
                     access, duplicate.get("access")
@@ -5005,10 +5061,17 @@ class AskJobManager:
                 "routing": routing.model_dump(),
                 "_request_fingerprint": request_fingerprint,
                 "_question": request.messages[-1].content,
+                "_request_body": request.model_dump(),
                 "_routing_ms": max(float(routing_ms), 0.0),
                 "_request_started_perf": request_started_perf or time.perf_counter(),
             }
+            # Acceptance must survive a process restart even if the visitor
+            # returns in a new tab with only the saved opaque request ID.
+            runtime.beta_state.save_job(job)
             self.jobs[request_id] = job
+            lifecycle("ask_request_accepted", request_id=request_id,
+                      client_request_id=request.client_request_id, conversation_id=request.conversation_id,
+                      workflow=workflow, tier=access.tier, actor_type="authenticated" if access.authenticated else "guest")
         try:
             self.executor.submit(self._run, request_id, request, access, routing)
         except Exception:
@@ -5043,6 +5106,11 @@ class AskJobManager:
         credit_reserved = False
         credit_finalized = False
         deadline_token = JOB_DEADLINE.set(time.monotonic() + max_job_seconds())
+        context_token = REQUEST_CONTEXT.set({
+            "request_id": request_id, "client_request_id": request.client_request_id,
+            "conversation_id": request.conversation_id, "workflow": routing.workflow,
+            "tier": access.tier, "actor_type": "authenticated" if access.authenticated else "guest",
+        })
         request_started_perf = float(
             self.jobs[request_id].get("_request_started_perf") or time.perf_counter()
         )
@@ -5057,6 +5125,7 @@ class AskJobManager:
         answer_generation_ms = 0.0
         validation_ms = 0.0
         try:
+            lifecycle("ask_research_started", queue_wait_ms=round(queue_wait_ms))
             if queue_wait_ms > max(int(os.getenv("ASK_MIMIR_MAX_QUEUE_SECONDS", "900")), 30) * 1000:
                 raise HTTPException(status_code=503, detail="The research queue took too long. Your query allowance has been restored; please try again.")
             if not allowance_exempt:
@@ -5277,6 +5346,8 @@ class AskJobManager:
                 # customer-visible failure.
                 if persisted:
                     self.jobs.pop(request_id, None)
+                lifecycle("ask_server_completed", response_id=customer_result.get("response_id"),
+                          answer_type=answer_type, latency_ms=performance_snapshot.get("total_request_ms"))
         except Exception as exc:
             performance_snapshot = performance.snapshot(
                 queue_wait_ms=queue_wait_ms,
@@ -5285,6 +5356,7 @@ class AskJobManager:
                 total_request_ms=(time.perf_counter() - request_started_perf) * 1000,
             )
             failure = request_failure_details(exc)
+            lifecycle("ask_server_failed", error_class=type(exc).__name__, **failure)
             if credit_reserved:
                 try:
                     runtime.beta_state.fail(
@@ -5390,6 +5462,7 @@ class AskJobManager:
                         request_id, request, access, routing
                     )
             JOB_DEADLINE.reset(deadline_token)
+            REQUEST_CONTEXT.reset(context_token)
             # A secondary logging/storage failure must not leave an immortal
             # running slot. Keep a small failed-result fallback in memory.
             with self.lock:
@@ -5408,11 +5481,31 @@ class AskJobManager:
                 for key in terminal[:-32]:
                     self.jobs.pop(key, None)
 
+    def _resume_persisted_job(self, job: Dict[str, Any], access: AccessContext) -> None:
+        """Called under the manager lock, after ownership/fingerprint checks."""
+        request_id = job["request_id"]
+        if request_id in self.jobs or job.get("status") not in {"queued", "running"}:
+            return
+        if sum(row.get("status") in {"queued", "running"} for row in self.jobs.values()) >= self.capacity:
+            raise HTTPException(status_code=503, detail="Research recovery is waiting for a worker.", headers={"Retry-After": "5"})
+        request = AskRequest(**job["_request_body"])
+        routing = RoutingDecision(**job["routing"])
+        job.update(status="queued", stage="Restoring research", percent=2, _request_started_perf=time.perf_counter())
+        self.jobs[request_id] = job
+        try:
+            self.executor.submit(self._run, request_id, request, access, routing)
+        except Exception:
+            self.jobs.pop(request_id, None)
+            raise
+        lifecycle("ask_request_resumed", request_id=request_id, client_request_id=request.client_request_id,
+                  conversation_id=request.conversation_id, workflow=routing.workflow)
+
     def get(self, request_id: str, access: AccessContext) -> Dict[str, Any]:
         with self.lock:
             job = self.jobs.get(request_id) or runtime.beta_state.load_job(request_id)
             if not job or job["subject_id"] != access.subject_id:
                 raise KeyError(request_id)
+            self._resume_persisted_job(job, access)
             result = self.public_job(job)
             result["access"] = access_snapshot(
                 access, result.get("access")
@@ -5578,11 +5671,34 @@ def request_with_server_conversation_scope(
 def create_ask_job(
     payload: AskRequest, request: Request, response: Response
 ) -> Dict[str, Any]:
+    token = REQUEST_CONTEXT.set({"client_request_id": payload.client_request_id,
+                                 "request_id": payload.client_request_id,
+                                 "conversation_id": payload.conversation_id})
+    lifecycle("ask_request_received")
+    try:
+        return accept_ask_job(payload, request, response)
+    except Exception as exc:
+        lifecycle("ask_request_rejected", error_class=type(exc).__name__, **request_failure_details(exc))
+        raise
+    finally:
+        REQUEST_CONTEXT.reset(token)
+
+
+def accept_ask_job(payload: AskRequest, request: Request, response: Response) -> Dict[str, Any]:
     request_started_perf = time.perf_counter()
     access = access_from_request(request)
     fingerprint = hashlib.sha256(payload.model_dump_json().encode()).hexdigest()
-    payload = request_with_server_conversation_scope(payload, access)
-    routing = validate_routing_decision(payload, routing_decision_for_request(payload))
+    try:
+        payload = request_with_server_conversation_scope(payload, access)
+    except Exception:
+        LOGGER.exception("Conversation scope unavailable; using submitted context")
+    try:
+        routing = validate_routing_decision(payload, routing_decision_for_request(payload))
+    except Exception as exc:
+        exc.failure_stage, exc.error_code = "routing", "router_exception"
+        raise
+    lifecycle("ask_routing_completed", workflow=routing.workflow, reason=routing.reason,
+              tier=access.tier, clarification_needed=routing.clarification_needed)
     routing_ms = (time.perf_counter() - request_started_perf) * 1000
     routing_headers = {
         "X-Ask-Mimir-Workflow": routing.workflow,
@@ -5631,6 +5747,26 @@ def get_ask_job(request_id: str, request: Request) -> Dict[str, Any]:
         return job_manager.get(request_id, access_from_request(request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Ask Mimir job was not found.") from exc
+
+
+class DeliveryReceipt(BaseModel):
+    stage: str = Field(pattern="^(received|rendered)$")
+    response_id: str = Field(max_length=500)
+
+
+@app.post("/api/ask/jobs/{request_id}/receipt", status_code=202)
+def record_delivery_receipt(request_id: str, payload: DeliveryReceipt, request: Request) -> Dict[str, Any]:
+    access = access_from_request(request)
+    try:
+        receipt = runtime.beta_state.record_delivery_receipt(request_id, access.subject_id, payload.response_id, payload.stage)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Research answer was not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Receipt does not match this answer.") from exc
+    lifecycle("ask_browser_received" if payload.stage == "received" else "ask_answer_delivered",
+              request_id=request_id, client_request_id=request_id, response_id=payload.response_id,
+              tier=access.tier, actor_type="authenticated" if access.authenticated else "guest", **receipt)
+    return {"accepted": True}
 
 
 @app.post("/api/feedback", status_code=201)
@@ -6036,8 +6172,15 @@ class TimedResponses:
             # worker beyond the overall research deadline.
             kwargs["timeout"] = max(min(configured, remaining / 2), 1.0)
         started = time.perf_counter()
+        lifecycle("ask_model_started", model=str(kwargs.get("model") or "unknown"))
         try:
-            return self._responses.create(**kwargs)
+            response = self._responses.create(**kwargs)
+            lifecycle("ask_model_completed", response_id=getattr(response, "id", None),
+                      latency_ms=round((time.perf_counter() - started) * 1000))
+            return response
+        except Exception as exc:
+            lifecycle("ask_model_failed", error_class=type(exc).__name__, **request_failure_details(exc))
+            raise
         finally:
             record_request_timing(
                 "model",
