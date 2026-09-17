@@ -2746,14 +2746,12 @@ class LabRuntime:
     def write_audit_record(self, record: Dict[str, Any]) -> None:
         if self.audit_log is None:
             return
-        if os.getenv("ASK_MIMIR_AUDIT_CONTENT", "0") != "1":
-            record = {
-                key: value
-                for key, value in record.items()
-                if key not in {"request_messages", "answer", "tool_trace"}
-            }
-        with self.audit_lock:
-            write_bounded_audit_record(self.audit_log, record)
+        try:
+            with self.audit_lock:
+                write_bounded_audit_record(self.audit_log, record)
+        except Exception:
+            # Audit retention is observability, never part of answer delivery.
+            LOGGER.exception("Ask Mimir audit write failed without affecting delivery")
 
     def search_scopes(self, query: str, scope_type: str | None, limit: int) -> Dict[str, Any]:
         clean_query = str(query).strip()
@@ -4686,6 +4684,7 @@ class AskJobManager:
         self.lock = threading.Lock()
         self.jobs: Dict[str, Dict[str, Any]] = {}
         self.pending_credit_releases: set[str] = set()
+        self.continuation_grants: Dict[tuple[str, str], set[str]] = {}
         self.worker_count = min(max(int(os.getenv("ASK_MIMIR_JOB_WORKERS", "2")), 1), 8)
         self.capacity = self.worker_count + min(max(int(os.getenv("ASK_MIMIR_JOB_QUEUE", "8")), 0), 100)
         self.executor = ThreadPoolExecutor(max_workers=self.worker_count, thread_name_prefix="mimir-research")
@@ -4738,6 +4737,18 @@ class AskJobManager:
         timer = threading.Timer(delay, release)
         timer.daemon = True
         timer.start()
+
+    @staticmethod
+    def _continuation_workflows(routing: RoutingDecision) -> set[str]:
+        return {
+            str(workflow)
+            for workflow in (
+                routing.workflow,
+                routing.intended_workflow,
+                *(candidate.workflow for candidate in routing.candidates),
+            )
+            if workflow
+        }
 
     def create(
         self,
@@ -4799,13 +4810,26 @@ class AskJobManager:
             if not runtime.beta_state.has_write_capacity():
                 raise HTTPException(status_code=503, detail="Ask Mimir is temporarily unable to save new research. No query has been used; please try again shortly.")
 
-            clarification_continuation = bool(
-                runtime.beta_state.clarification_continuation_allowed(
-                    request.conversation_id,
-                    access.subject_id,
-                    routing.workflow,
-                )
+            grant_key = (str(request.conversation_id or ""), access.subject_id)
+            memory_workflows = (
+                self.continuation_grants.get(grant_key, set())
+                if request.conversation_id
+                else set()
             )
+            clarification_continuation = routing.workflow in memory_workflows
+            if not clarification_continuation:
+                try:
+                    clarification_continuation = bool(
+                        runtime.beta_state.clarification_continuation_allowed(
+                            request.conversation_id,
+                            access.subject_id,
+                            routing.workflow,
+                        )
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "Ask Mimir continuation lookup failed without blocking submission"
+                    )
             continuation_eligible = clarification_continuation or not allowance_exempt
             if allowance_exempt and not continuation_eligible:
                 try:
@@ -4818,12 +4842,15 @@ class AskJobManager:
             if not allowance_exempt and not clarification_continuation:
                 runtime.beta_state.assert_allowance_available(access)
 
-            runtime.beta_state.record_routing_decision(
-                request_id=request_id,
-                conversation_id=request.conversation_id,
-                subject_id=access.subject_id,
-                question=request.messages[-1].content,
-                decision=routing.model_dump(),
+            best_effort(
+                "routing decision telemetry",
+                lambda: runtime.beta_state.record_routing_decision(
+                    request_id=request_id,
+                    conversation_id=request.conversation_id,
+                    subject_id=access.subject_id,
+                    question=request.messages[-1].content,
+                    decision=routing.model_dump(),
+                ),
             )
             used = runtime.beta_state.used_today(access.subject_id)
             job = {
@@ -5016,6 +5043,24 @@ class AskJobManager:
                     routing.workflow,
                 ),
             )
+            grant_key = (str(request.conversation_id or ""), access.subject_id)
+            if (
+                requires_user_correction
+                and request.conversation_id
+                and self.jobs[request_id].get("continuation_eligible")
+            ):
+                allowed_workflows = self._continuation_workflows(routing)
+                with self.lock:
+                    self.continuation_grants[grant_key] = allowed_workflows
+                best_effort(
+                    "clarification continuation persistence",
+                    lambda: runtime.beta_state.open_clarification_grant(
+                        request.conversation_id,
+                        access.subject_id,
+                        request_id,
+                        allowed_workflows,
+                    ),
+                )
             best_effort(
                 "routing completion telemetry",
                 lambda: runtime.beta_state.complete_routing_event(
@@ -5089,6 +5134,14 @@ class AskJobManager:
                         lambda: runtime.beta_state.save_job(completed_job),
                     )
                     persisted = True
+                if not requires_user_correction:
+                    self.continuation_grants.pop(grant_key, None)
+                    best_effort(
+                        "clarification continuation closure",
+                        lambda: runtime.beta_state.close_clarification_grant(
+                            request.conversation_id, access.subject_id
+                        ),
+                    )
                 # Completed packs are durable, not retained indefinitely in RAM.
                 # A clarification whose persistence failed remains available in
                 # the bounded in-memory terminal cache instead of becoming a
@@ -8033,12 +8086,15 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
             continuation_eligible = True
         except DailyQuotaExceeded:
             continuation_eligible = False
-    runtime.beta_state.record_routing_decision(
-        request_id=request_id,
-        conversation_id=payload.conversation_id,
-        subject_id=access.subject_id,
-        question=payload.messages[-1].content,
-        decision=routing.model_dump(),
+    best_effort(
+        "synchronous routing decision telemetry",
+        lambda: runtime.beta_state.record_routing_decision(
+            request_id=request_id,
+            conversation_id=payload.conversation_id,
+            subject_id=access.subject_id,
+            question=payload.messages[-1].content,
+            decision=routing.model_dump(),
+        ),
     )
     try:
         if not allowance_exempt:
@@ -8171,15 +8227,18 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
             next_scope.model_dump() if next_scope else None,
             routing.workflow,
         )
-        runtime.beta_state.complete_routing_event(
-            request_id,
-            clarification_outcome=(
-                "clarification_requested"
-                if requires_user_correction
-                else "research_completed"
-            ),
-            continuation_eligible=bool(
-                requires_user_correction and continuation_eligible
+        best_effort(
+            "synchronous routing completion telemetry",
+            lambda: runtime.beta_state.complete_routing_event(
+                request_id,
+                clarification_outcome=(
+                    "clarification_requested"
+                    if requires_user_correction
+                    else "research_completed"
+                ),
+                continuation_eligible=bool(
+                    requires_user_correction and continuation_eligible
+                ),
             ),
         )
         customer_result["access"] = access.public_dict(
@@ -8218,7 +8277,10 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 "performance": performance_snapshot,
             }
         )
-        runtime.beta_state.complete_routing_event(
-            request_id, clarification_outcome="request_failed"
+        best_effort(
+            "synchronous failed routing telemetry",
+            lambda: runtime.beta_state.complete_routing_event(
+                request_id, clarification_outcome="request_failed"
+            ),
         )
         raise

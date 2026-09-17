@@ -120,15 +120,62 @@ class BetaStateStoreTests(unittest.TestCase):
 
             row = store.connection.execute(
                 """
-                SELECT selected_workflow, clarification_outcome, user_correction
+                SELECT question, selected_workflow, clarification_outcome, user_correction
                 FROM routing_events WHERE request_id = ?
                 """,
                 ["request-1"],
             ).fetchone()
             self.assertEqual(
                 row,
-                ("platform_intelligence", "clarification_requested", 1),
+                ("Which one?", "platform_intelligence", "clarification_requested", 1),
             )
+            store.connection.close()
+
+    def test_clarification_grant_is_operational_state_not_routing_analytics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = BetaStateStore(Path(directory) / "beta-state.sqlite3")
+            store.open_clarification_grant(
+                "conversation-123",
+                "guest-a",
+                "request-1",
+                {"company_site_intelligence", "company_parent_intelligence"},
+            )
+            self.assertTrue(store.clarification_continuation_allowed(
+                "conversation-123", "guest-a", "company_site_intelligence"
+            ))
+            self.assertFalse(store.clarification_continuation_allowed(
+                "conversation-123", "guest-a", "platform_intelligence"
+            ))
+            store.close_clarification_grant("conversation-123", "guest-a")
+            self.assertFalse(store.clarification_continuation_allowed(
+                "conversation-123", "guest-a", "company_site_intelligence"
+            ))
+            store.connection.close()
+
+    def test_failed_routing_analytics_transaction_cannot_poison_credit_ledger(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = BetaStateStore(Path(directory) / "beta-state.sqlite3")
+            store.connection.execute(
+                """
+                CREATE TRIGGER reject_routing_analytics
+                BEFORE INSERT ON routing_events
+                BEGIN
+                    SELECT RAISE(ABORT, 'analytics unavailable');
+                END
+                """
+            )
+            store.connection.commit()
+            with self.assertRaises(Exception):
+                store.record_routing_decision(
+                    request_id="request-1",
+                    conversation_id="conversation-1",
+                    subject_id="guest-a",
+                    question="Which one?",
+                    decision={"workflow": "platform_intelligence", "confidence": 1},
+                )
+            access = AccessContext("guest-a", "public", False)
+            store.reserve("request-2", access, "release-1", "platform")
+            self.assertEqual(store.used_today("guest-a"), 1)
             store.connection.close()
 
     def test_unbilled_clarification_restores_public_query_allowance(self):

@@ -597,6 +597,17 @@ class ConcurrentEvidenceTests(unittest.TestCase):
             self.assertLessEqual(len(list(Path(tmp).iterdir())), 3)
             self.assertIn('"number": 19', path.read_text())
 
+    def test_audit_write_failure_is_never_an_answer_failure(self):
+        runtime = lab.LabRuntime.__new__(lab.LabRuntime)
+        runtime.audit_log = Path("/tmp/ask-mimir-test-audit.jsonl")
+        runtime.audit_lock = threading.Lock()
+        with patch.object(
+            lab, "write_bounded_audit_record", side_effect=OSError("audit unavailable")
+        ) as writer:
+            record = {"answer": "Raw answer", "request_messages": []}
+            runtime.write_audit_record(record)
+        self.assertEqual(writer.call_args.args[1], record)
+
     def test_immutable_catalog_lookup_is_not_blocked_by_evidence_work(self):
         lock=threading.RLock()
         store=SynchronizedStore(SimpleNamespace(search=lambda value:{'platform':value}),lock,frozenset({'search'}))
@@ -687,6 +698,49 @@ class DurableJobTests(unittest.TestCase):
                 restarted.get("a"*32, AccessContext("bob","professional",True))
         finally:
             restarted.executor.shutdown()
+
+    def test_routing_analytics_failure_does_not_block_job_admission(self):
+        with patch.object(
+            self.ledger,
+            "record_routing_decision",
+            side_effect=OSError("routing analytics unavailable"),
+        ):
+            job, _ = self.manager.create(self.request, self.access, self.route)
+        self.assertEqual(job["status"], "queued")
+
+    def test_clarification_continuation_does_not_depend_on_routing_analytics(self):
+        public = AccessContext("guest", "public", False)
+        request = self.request.model_copy(update={"conversation_id": "conversation-1"})
+        route = self.route.model_copy(update={"clarification_needed": True})
+        clarification = {
+            "answer": "Which company site did you mean?",
+            "response_id": "company-site-disambiguation",
+            "requires_clarification": True,
+            "answer_type": "clarification",
+            "answer_artifacts": {"company_resolution": {"matches": []}},
+            "tool_trace": [],
+        }
+        with patch.object(
+            self.ledger, "record_routing_decision", side_effect=OSError("analytics down")
+        ):
+            self.manager.create(request, public, route)
+        with patch.object(
+            self.ledger, "complete_routing_event", side_effect=OSError("analytics down")
+        ), patch.object(
+            lab, "routing_clarification_result", return_value=clarification
+        ), patch.object(
+            lab, "finalize_customer_result", side_effect=lambda result, *args: dict(result)
+        ):
+            self.manager._run("a" * 32, request, public, route)
+
+        # Prove the durable operational grant works independently of the
+        # in-process fallback and the routing-events analytics table.
+        self.manager.continuation_grants.clear()
+        self.ledger.reserve("other-answer", public, "release", "platform")
+        self.ledger.complete("other-answer", latency_ms=1, estimated_cost_usd=0)
+        correction = request.model_copy(update={"client_request_id": "b" * 32})
+        correction_job, _ = self.manager.create(correction, public, self.route)
+        self.assertTrue(correction_job["clarification_continuation"])
 
     def test_auxiliary_failures_cannot_turn_a_delivered_answer_into_a_charged_failure(self):
         self.manager.create(self.request, self.access, self.route)

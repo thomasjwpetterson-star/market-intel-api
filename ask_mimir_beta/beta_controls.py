@@ -326,6 +326,15 @@ class BetaStateStore:
             );
             CREATE INDEX IF NOT EXISTS routing_events_conversation
                 ON routing_events(conversation_id, created_at);
+            CREATE TABLE IF NOT EXISTS clarification_grants (
+                conversation_id TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                source_request_id TEXT NOT NULL,
+                allowed_workflows_json TEXT NOT NULL,
+                opened_at TEXT NOT NULL,
+                closed_at TEXT,
+                PRIMARY KEY (conversation_id, subject_id)
+            );
             CREATE TABLE IF NOT EXISTS research_results (
                 request_id TEXT PRIMARY KEY,
                 subject_id TEXT NOT NULL,
@@ -401,21 +410,25 @@ class BetaStateStore:
         now = datetime.now(timezone.utc).isoformat()
         scope_json = json.dumps(active_scope, default=str) if active_scope else None
         with self.lock:
-            self.connection.execute(
-                """
-                INSERT INTO ask_conversations (
-                    conversation_id, subject_id, active_scope_json, last_workflow,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(conversation_id) DO UPDATE SET
-                    active_scope_json = excluded.active_scope_json,
-                    last_workflow = excluded.last_workflow,
-                    updated_at = excluded.updated_at
-                WHERE ask_conversations.subject_id = excluded.subject_id
-                """,
-                [conversation_id, subject_id, scope_json, workflow, now, now],
-            )
-            self.connection.commit()
+            try:
+                self.connection.execute(
+                    """
+                    INSERT INTO ask_conversations (
+                        conversation_id, subject_id, active_scope_json, last_workflow,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(conversation_id) DO UPDATE SET
+                        active_scope_json = excluded.active_scope_json,
+                        last_workflow = excluded.last_workflow,
+                        updated_at = excluded.updated_at
+                    WHERE ask_conversations.subject_id = excluded.subject_id
+                    """,
+                    [conversation_id, subject_id, scope_json, workflow, now, now],
+                )
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def record_routing_decision(
         self,
@@ -428,8 +441,9 @@ class BetaStateStore:
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.lock:
-            self.connection.execute(
-                """
+            try:
+                self.connection.execute(
+                    """
                 INSERT OR REPLACE INTO routing_events (
                     request_id, conversation_id, subject_id, question,
                     intended_workflow, selected_workflow, candidates_json,
@@ -437,27 +451,30 @@ class BetaStateStore:
                     subject_changed, clarification_needed, clarification_outcome,
                     user_correction, created_at, completed_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
-                """,
-                [
-                    request_id,
-                    conversation_id,
-                    subject_id,
-                    question if os.getenv("ASK_MIMIR_AUDIT_CONTENT", "0") == "1" else "",
-                    decision.get("intended_workflow"),
-                    decision.get("workflow"),
-                    json.dumps(decision.get("candidates") or [], default=str),
-                    float(decision.get("confidence") or 0),
-                    json.dumps(decision.get("current_scope"), default=str)
-                    if decision.get("current_scope")
-                    else None,
-                    json.dumps(decision.get("resolved_entities") or [], default=str),
-                    int(bool(decision.get("subject_changed"))),
-                    int(bool(decision.get("clarification_needed"))),
-                    int(bool(decision.get("user_correction"))),
-                    now,
-                ],
-            )
-            self.connection.commit()
+                    """,
+                    [
+                        request_id,
+                        conversation_id,
+                        subject_id,
+                        question,
+                        decision.get("intended_workflow"),
+                        decision.get("workflow"),
+                        json.dumps(decision.get("candidates") or [], default=str),
+                        float(decision.get("confidence") or 0),
+                        json.dumps(decision.get("current_scope"), default=str)
+                        if decision.get("current_scope")
+                        else None,
+                        json.dumps(decision.get("resolved_entities") or [], default=str),
+                        int(bool(decision.get("subject_changed"))),
+                        int(bool(decision.get("clarification_needed"))),
+                        int(bool(decision.get("user_correction"))),
+                        now,
+                    ],
+                )
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def complete_routing_event(
         self,
@@ -467,36 +484,44 @@ class BetaStateStore:
         continuation_eligible: bool = False,
     ) -> None:
         with self.lock:
-            self.connection.execute(
-                """
+            try:
+                self.connection.execute(
+                    """
                 UPDATE routing_events
                 SET clarification_outcome = COALESCE(?, clarification_outcome),
                     continuation_eligible = ?,
                     completed_at = ?
                 WHERE request_id = ?
-                """,
-                [
-                    clarification_outcome,
-                    int(continuation_eligible),
-                    datetime.now(timezone.utc).isoformat(),
-                    request_id,
-                ],
-            )
-            self.connection.commit()
+                    """,
+                    [
+                        clarification_outcome,
+                        int(continuation_eligible),
+                        datetime.now(timezone.utc).isoformat(),
+                        request_id,
+                    ],
+                )
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def mark_routing_correction(self, request_id: str | None) -> None:
         if not request_id:
             return
         with self.lock:
-            self.connection.execute(
-                """
-                UPDATE routing_events
-                SET user_correction = 1
-                WHERE request_id = ?
-                """,
-                [request_id],
-            )
-            self.connection.commit()
+            try:
+                self.connection.execute(
+                    """
+                    UPDATE routing_events
+                    SET user_correction = 1
+                    WHERE request_id = ?
+                    """,
+                    [request_id],
+                )
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def used_today(self, subject_id: str) -> int:
         with self.lock:
@@ -537,6 +562,31 @@ class BetaStateStore:
         if not conversation_id:
             return False
         with self.lock:
+            grant = self.connection.execute(
+                """
+                SELECT allowed_workflows_json, closed_at, opened_at
+                FROM clarification_grants
+                WHERE conversation_id = ? AND subject_id = ?
+                """,
+                [conversation_id, subject_id],
+            ).fetchone()
+            if grant:
+                if grant[1]:
+                    return False
+                try:
+                    opened_at = datetime.fromisoformat(str(grant[2]))
+                except (TypeError, ValueError):
+                    return False
+                if opened_at < datetime.now(timezone.utc) - timedelta(days=7):
+                    return False
+                try:
+                    allowed_workflows = set(json.loads(grant[0] or "[]"))
+                except (TypeError, ValueError):
+                    allowed_workflows = set()
+                return not workflow or workflow in allowed_workflows
+
+            # Compatibility for clarification turns opened before the dedicated
+            # operational grant table was deployed.
             clarification = self.connection.execute(
                 """
                 SELECT created_at, selected_workflow, intended_workflow,
@@ -561,6 +611,12 @@ class BetaStateStore:
             ).fetchone()[0]
         if not clarification or (completed and clarification[0] <= completed):
             return False
+        try:
+            clarification_opened = datetime.fromisoformat(str(clarification[0]))
+        except (TypeError, ValueError):
+            return False
+        if clarification_opened < datetime.now(timezone.utc) - timedelta(days=7):
+            return False
         if not workflow:
             return True
         allowed_workflows = {
@@ -578,6 +634,62 @@ class BetaStateStore:
             if isinstance(candidate, dict) and candidate.get("workflow")
         )
         return workflow in allowed_workflows
+
+    def open_clarification_grant(
+        self,
+        conversation_id: str | None,
+        subject_id: str,
+        request_id: str,
+        allowed_workflows: Iterable[str],
+    ) -> None:
+        if not conversation_id:
+            return
+        workflows = sorted({str(value) for value in allowed_workflows if value})
+        now = datetime.now(timezone.utc).isoformat()
+        with self.lock:
+            try:
+                self.connection.execute(
+                    """
+                INSERT INTO clarification_grants (
+                    conversation_id, subject_id, source_request_id,
+                    allowed_workflows_json, opened_at, closed_at
+                ) VALUES (?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(conversation_id, subject_id) DO UPDATE SET
+                    source_request_id = excluded.source_request_id,
+                    allowed_workflows_json = excluded.allowed_workflows_json,
+                    opened_at = excluded.opened_at,
+                    closed_at = NULL
+                    """,
+                    [conversation_id, subject_id, request_id, json.dumps(workflows), now],
+                )
+                self.connection.execute(
+                    "DELETE FROM clarification_grants WHERE opened_at < ?",
+                    [(datetime.now(timezone.utc) - timedelta(days=30)).isoformat()],
+                )
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def close_clarification_grant(
+        self, conversation_id: str | None, subject_id: str
+    ) -> None:
+        if not conversation_id:
+            return
+        with self.lock:
+            try:
+                self.connection.execute(
+                    """
+                    UPDATE clarification_grants
+                    SET closed_at = ?
+                    WHERE conversation_id = ? AND subject_id = ? AND closed_at IS NULL
+                    """,
+                    [datetime.now(timezone.utc).isoformat(), conversation_id, subject_id],
+                )
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def assert_allowance_available(self, access: AccessContext) -> None:
         """Reject exhausted subjects without reserving or consuming a credit."""
