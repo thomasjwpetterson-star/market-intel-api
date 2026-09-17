@@ -44,6 +44,31 @@ class AnswerTypeTests(unittest.TestCase):
             "tool_trace": [],
         }
         self.assertEqual(lab.answer_type_for_result(result), "validation")
+        self.assertTrue(lab.validation_requires_user_correction(result))
+
+    def test_long_provider_failure_is_not_substantive(self):
+        result = {
+            "answer": (
+                "I could not complete this research request because the provider failed. "
+                + "Please retry shortly. " * 40
+            ),
+            "response_id": "resp_provider_failure",
+            "answer_artifacts": {},
+            "tool_trace": [],
+        }
+        self.assertEqual(lab.answer_type_for_result(result), "error")
+
+    def test_failure_text_is_not_substantive_even_with_partial_evidence(self):
+        result = {
+            "answer": (
+                "I’m sorry, but I couldn’t complete this research request because the provider failed. "
+                + "Please retry shortly. " * 10
+            ),
+            "response_id": "resp_provider_failure",
+            "answer_artifacts": {"platform_dossier": {"scope": {}}},
+            "tool_trace": [{"tool": "get_platform_context", "result": {}}],
+        }
+        self.assertEqual(lab.answer_type_for_result(result), "error")
 
     def test_entity_selection_is_clarification(self):
         self.assertEqual(
@@ -747,6 +772,43 @@ class DurableJobTests(unittest.TestCase):
             )
         )
 
+    def test_actionable_validation_releases_credit_and_keeps_correction_open(self):
+        public = AccessContext("guest", "public", False)
+        request = self.request.model_copy(
+            update={"conversation_id": "validation-correction"}
+        )
+        self.manager.create(request, public, self.route)
+        validation = {
+            "answer": "That request is missing a valid subject identifier. Please add the company or CAGE code.",
+            "response_id": "resp_validation",
+            "answer_artifacts": {},
+            "tool_trace": [],
+        }
+        with patch.object(lab, "generate_answer", return_value=validation), patch.object(
+            lab,
+            "finalize_customer_result",
+            side_effect=lambda result, *args: dict(result),
+        ):
+            self.manager._run("a" * 32, request, public, self.route)
+
+        recovered = self.ledger.load_job("a" * 32)
+        self.assertEqual(recovered["result"]["answer_type"], "validation")
+        self.assertTrue(recovered["result"]["requires_user_correction"])
+        self.assertEqual(self.ledger.used_today("guest"), 0)
+        self.assertTrue(
+            self.ledger.clarification_continuation_allowed(
+                "validation-correction", "guest", "platform_intelligence"
+            )
+        )
+
+        self.ledger.reserve("racing-answer", public, "release", "platform")
+        self.ledger.complete(
+            "racing-answer", latency_ms=1, estimated_cost_usd=0.01
+        )
+        correction = request.model_copy(update={"client_request_id": "b" * 32})
+        correction_job, _ = self.manager.create(correction, public, self.route)
+        self.assertTrue(correction_job["clarification_continuation"])
+
     def test_result_and_billing_commit_together(self):
         self.ledger.reserve("test", self.access,"release","workflow")
         with patch.object(self.ledger, "_save_job_unlocked", side_effect=OSError("disk full")):
@@ -886,6 +948,29 @@ class DurableJobTests(unittest.TestCase):
         self.assertEqual(self.ledger.used_today("alice"), 0)
         recovered = self.ledger.load_job("a" * 32)
         self.assertEqual(recovered["status"], "failed")
+        status = self.ledger.connection.execute(
+            "SELECT status FROM query_events WHERE request_id = ?", ["a" * 32]
+        ).fetchone()[0]
+        self.assertEqual(status, "failed_refunded")
+
+    def test_provider_failure_message_fails_and_releases_credit(self):
+        self.manager.create(self.request, self.access, self.route)
+        failure = {
+            "answer": (
+                "I could not complete this research request because the provider failed. "
+                + "Please retry shortly. " * 40
+            ),
+            "response_id": "resp_provider_failure",
+            "answer_artifacts": {"platform_dossier": {"scope": {}}},
+            "tool_trace": [{"tool": "get_platform_context", "result": {}}],
+            "model": "test",
+        }
+        with patch.object(lab, "generate_answer", return_value=failure):
+            self.manager._run("a" * 32, self.request, self.access, self.route)
+
+        recovered = self.ledger.load_job("a" * 32)
+        self.assertEqual(recovered["status"], "failed")
+        self.assertEqual(self.ledger.used_today("alice"), 0)
         status = self.ledger.connection.execute(
             "SELECT status FROM query_events WHERE request_id = ?", ["a" * 32]
         ).fetchone()[0]

@@ -4126,15 +4126,77 @@ VALIDATION_RESPONSE_IDS = frozenset(
         "out-of-domain",
     }
 )
+NON_DELIVERABLE_OPENING_PATTERNS = (
+    r"(?:i|we|ask mimir) (?:could not|couldn't|cannot|can't|was unable to) "
+    r"(?:complete|finish|process|answer|generate|perform)\b",
+    r"(?:i'm|i am|we are|ask mimir is) (?:temporarily )?unable to "
+    r"(?:complete|finish|process|answer|generate|perform)\b",
+    r"(?:temporarily )?unable to (?:complete|finish|process|answer|generate|perform)\b",
+    r"(?:this|the) (?:request|answer|research) (?:could not|couldn't|cannot|can't) "
+    r"be (?:completed|generated|processed)\b",
+    r"(?:i'm sorry[, ]+)?(?:but )?i (?:can't|cannot|won't|am unable to) "
+    r"(?:help|assist|comply|provide)\b",
+    r"(?:an error occurred|something went wrong|the request failed)\b",
+    r"the (?:service|provider|model) (?:encountered|returned|reported) "
+    r"(?:an )?(?:error|failure)\b",
+    r"ask mimir is temporarily unavailable\b",
+)
+ACTIONABLE_VALIDATION_RESPONSE_IDS = frozenset(
+    {
+        "capability-index-insufficient",
+        "capability-evidence-insufficient",
+        "local-mock-no-match",
+    }
+)
+
+
+def response_is_non_deliverable(result: Dict[str, Any]) -> bool:
+    """Detect provider text that describes a failure instead of an answer."""
+    answer = re.sub(r"\s+", " ", str(result.get("answer") or "")).strip()
+    if not answer:
+        return True
+    normalized = re.sub(r"^[#>*_`\-\s]+", "", answer).strip().lower()
+    normalized = normalized.replace("’", "'")
+    normalized = re.sub(
+        r"^(?:sorry|i'm sorry)[,:;\s-]+(?:but\s+)?",
+        "",
+        normalized,
+    )
+    return any(
+        re.match(pattern, normalized)
+        for pattern in NON_DELIVERABLE_OPENING_PATTERNS
+    )
+
+
+def validation_requires_user_correction(result: Dict[str, Any]) -> bool:
+    """Keep an actionable validation turn open without changing its answer type."""
+    if result.get("requires_user_correction") is True:
+        return True
+    if str(result.get("response_id") or "") in ACTIONABLE_VALIDATION_RESPONSE_IDS:
+        return True
+    answer = re.sub(r"\s+", " ", str(result.get("answer") or "")).strip().lower()
+    return bool(
+        len(answer) <= 1_500
+        and re.search(
+            r"(?:missing (?:a |the )?(?:valid )?(?:subject|identifier|company|cage|platform|program)|"
+            r"please (?:add|provide|choose|specify|check|correct)|"
+            r"try narrowing (?:the |your )?(?:question|request))",
+            answer,
+        )
+    )
 
 
 def answer_type_for_result(result: Dict[str, Any]) -> str:
     """Classify delivery semantics before changing a customer's allowance."""
     explicit = str(result.get("answer_type") or "").strip().lower()
-    if explicit in VALID_ANSWER_TYPES:
+    if explicit in {"clarification", "validation", "error"}:
         return explicit
     if response_requires_clarification(result):
         return "clarification"
+    if response_is_non_deliverable(result):
+        return "error"
+    if explicit == "substantive":
+        return explicit
     response_id = str(result.get("response_id") or "")
     if response_id in VALIDATION_RESPONSE_IDS:
         return "validation"
@@ -4646,8 +4708,17 @@ class AskJobManager:
                     response_requires_clarification(result)
                     or answer_type == "clarification"
                 )
+                requires_user_correction = bool(
+                    requires_clarification
+                    or (
+                        answer_type == "validation"
+                        and validation_requires_user_correction(result)
+                    )
+                )
                 if requires_clarification:
                     result["requires_clarification"] = True
+                if requires_user_correction:
+                    result["requires_user_correction"] = True
                 self.update(
                     request_id,
                     "Validating the answer",
@@ -4682,7 +4753,7 @@ class AskJobManager:
             )
             scope_fallback = (
                 request.active_scope
-                if requires_clarification or not routing.subject_changed
+                if requires_user_correction or not routing.subject_changed
                 else None
             )
             next_scope = active_scope_from_result(result, scope_fallback)
@@ -4699,11 +4770,11 @@ class AskJobManager:
                 request_id,
                 clarification_outcome=(
                     "clarification_requested"
-                    if requires_clarification
+                    if requires_user_correction
                     else "research_completed"
                 ),
                 continuation_eligible=bool(
-                    requires_clarification
+                    requires_user_correction
                     and self.jobs[request_id].get("continuation_eligible")
                 ),
             )
@@ -7672,8 +7743,17 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 response_requires_clarification(result)
                 or answer_type == "clarification"
             )
+            requires_user_correction = bool(
+                requires_clarification
+                or (
+                    answer_type == "validation"
+                    and validation_requires_user_correction(result)
+                )
+            )
             if requires_clarification:
                 result["requires_clarification"] = True
+            if requires_user_correction:
+                result["requires_user_correction"] = True
             validation_started = time.perf_counter()
             try:
                 customer_result = finalize_customer_result(
@@ -7725,7 +7805,7 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
         )
         scope_fallback = (
             payload.active_scope
-            if requires_clarification or not routing.subject_changed
+            if requires_user_correction or not routing.subject_changed
             else None
         )
         next_scope = active_scope_from_result(result, scope_fallback)
@@ -7742,11 +7822,11 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
             request_id,
             clarification_outcome=(
                 "clarification_requested"
-                if requires_clarification
+                if requires_user_correction
                 else "research_completed"
             ),
             continuation_eligible=bool(
-                requires_clarification and continuation_eligible
+                requires_user_correction and continuation_eligible
             ),
         )
         customer_result["access"] = access.public_dict(
