@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import re
+import contextvars
 import threading
 import time
 import uuid
@@ -130,6 +131,50 @@ PUBLIC_REQUEST_FAILURE = (
     "Ask Mimir could not complete this request. Your query allowance has been "
     "restored; please try again."
 )
+JOB_DEADLINE = contextvars.ContextVar(
+    "ask_mimir_job_deadline", default=None
+)
+
+
+def max_job_seconds() -> int:
+    """Generous wall-clock guard for research, independent of browser polling."""
+    return min(max(int(os.getenv("ASK_MIMIR_MAX_JOB_SECONDS", "2700")), 300), 7200)
+
+
+def remaining_job_seconds() -> float | None:
+    deadline = JOB_DEADLINE.get()
+    return None if deadline is None else deadline - time.monotonic()
+
+
+def best_effort(label: str, operation: Callable[[], Any]) -> bool:
+    """Keep telemetry and conversational bookkeeping outside product delivery."""
+    try:
+        operation()
+        return True
+    except Exception:
+        LOGGER.exception("Ask Mimir %s failed without affecting delivery", label)
+        return False
+
+
+def access_snapshot(
+    access: AccessContext, fallback: Dict[str, Any] | None = None
+) -> Dict[str, Any]:
+    """Return quota display data without making answer delivery depend on it."""
+    try:
+        return access.public_dict(
+            runtime.beta_state.used_today(access.subject_id),
+            runtime.beta_state.used_this_month(access.subject_id),
+        )
+    except Exception:
+        LOGGER.exception(
+            "Ask Mimir could not refresh allowance display for %s",
+            access.subject_id,
+        )
+        fallback = fallback or {}
+        return access.public_dict(
+            int(fallback.get("queries_used_today") or 0),
+            int(fallback.get("queries_used_this_month") or 0),
+        )
 BROAD_PLATFORM_MARKET_IDENTIFIERS = {
     "AIR",
     "AIRCRAFT",
@@ -2701,6 +2746,12 @@ class LabRuntime:
     def write_audit_record(self, record: Dict[str, Any]) -> None:
         if self.audit_log is None:
             return
+        if os.getenv("ASK_MIMIR_AUDIT_CONTENT", "0") != "1":
+            record = {
+                key: value
+                for key, value in record.items()
+                if key not in {"request_messages", "answer", "tool_trace"}
+            }
         with self.audit_lock:
             write_bounded_audit_record(self.audit_log, record)
 
@@ -4197,14 +4248,28 @@ def validation_requires_user_correction(result: Dict[str, Any]) -> bool:
     )
 
 
-def _has_meaningful_tool_result(value: Any) -> bool:
+NON_EVIDENCE_ENVELOPE_KEYS = frozenset({
+    "scope", "identity", "query", "filters", "limit", "offset", "metadata",
+    "retrieval_status", "status", "message", "error", "count", "total",
+    "available", "format", "locked", "required_tier", "upgrade_url",
+    "download_url",
+})
+
+
+def _has_meaningful_tool_result(value: Any, key: str | None = None) -> bool:
     """Reject empty lookup envelopes as research evidence."""
+    normalized_key = str(key or "").strip().lower()
+    if normalized_key in NON_EVIDENCE_ENVELOPE_KEYS or normalized_key.endswith("_count"):
+        return False
     if value is None or value is False or value == "":
         return False
     if isinstance(value, (list, tuple, set)):
-        return bool(value)
+        return any(_has_meaningful_tool_result(item) for item in value)
     if isinstance(value, dict):
-        return any(_has_meaningful_tool_result(item) for item in value.values())
+        return any(
+            _has_meaningful_tool_result(item, item_key)
+            for item_key, item in value.items()
+        )
     return True
 
 
@@ -4215,7 +4280,10 @@ def result_has_research_evidence(result: Dict[str, Any]) -> bool:
         for key, value in artifacts.items()
         if key not in {"routing_clarification", "company_resolution"}
     }
-    if any(bool(value) for value in trusted_artifacts.values()):
+    if any(
+        _has_meaningful_tool_result(value, key)
+        for key, value in trusted_artifacts.items()
+    ):
         return True
     return any(
         isinstance(entry, dict)
@@ -4240,6 +4308,8 @@ def answer_type_for_result(result: Dict[str, Any]) -> str:
         return "validation"
     if validation_requires_user_correction(result):
         return "validation"
+    # Explicit substantive types only come from previously classified, owned
+    # results. Live generated responses do not set this flag before this gate.
     if explicit == "substantive":
         return explicit
     answer = re.sub(r"\s+", " ", str(result.get("answer") or "")).strip()
@@ -4615,9 +4685,59 @@ class AskJobManager:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.jobs: Dict[str, Dict[str, Any]] = {}
+        self.pending_credit_releases: set[str] = set()
         self.worker_count = min(max(int(os.getenv("ASK_MIMIR_JOB_WORKERS", "2")), 1), 8)
         self.capacity = self.worker_count + min(max(int(os.getenv("ASK_MIMIR_JOB_QUEUE", "8")), 0), 100)
         self.executor = ThreadPoolExecutor(max_workers=self.worker_count, thread_name_prefix="mimir-research")
+
+    def _schedule_credit_release(
+        self,
+        request_id: str,
+        request: AskRequest,
+        access: AccessContext,
+        routing: RoutingDecision,
+        attempt: int = 0,
+    ) -> None:
+        """Retry a failed refund until it succeeds or this process restarts.
+
+        Startup reconciliation also refunds interrupted reservations, so a
+        process replacement safely takes over if an instance disappears while
+        one of these retries is pending.
+        """
+        with self.lock:
+            self.pending_credit_releases.add(request_id)
+        delays = (5, 30, 120, 300)
+        delay = delays[min(attempt, len(delays) - 1)]
+
+        def release() -> None:
+            try:
+                runtime.beta_state.fail(request_id, refund=True)
+            except Exception:
+                LOGGER.exception(
+                    "Ask Mimir deferred credit reconciliation failed "
+                    "request_id=%s attempt=%s",
+                    request_id,
+                    attempt + 1,
+                )
+                self._schedule_credit_release(
+                    request_id, request, access, routing, attempt + 1
+                )
+                return
+            with self.lock:
+                self.pending_credit_releases.discard(request_id)
+            write_credit_event(
+                "ask_credit_released",
+                request_id=request_id,
+                request=request,
+                access=access,
+                workflow=routing.workflow,
+                reason="deferred_reconciliation",
+                answer_type="error",
+            )
+
+        timer = threading.Timer(delay, release)
+        timer.daemon = True
+        timer.start()
 
     def create(
         self,
@@ -4661,9 +4781,8 @@ class AskJobManager:
                         detail="That request identifier is already attached to another question.",
                     )
                 duplicate = self.public_job(existing)
-                duplicate["access"] = access.public_dict(
-                    runtime.beta_state.used_today(access.subject_id),
-                    runtime.beta_state.used_this_month(access.subject_id),
+                duplicate["access"] = access_snapshot(
+                    access, duplicate.get("access")
                 )
                 if duplicate.get("result"):
                     duplicate["result"] = {**duplicate["result"], "access": duplicate["access"]}
@@ -4766,6 +4885,8 @@ class AskJobManager:
             self.jobs[request_id].get("clarification_continuation")
         )
         credit_reserved = False
+        credit_finalized = False
+        deadline_token = JOB_DEADLINE.set(time.monotonic() + max_job_seconds())
         request_started_perf = float(
             self.jobs[request_id].get("_request_started_perf") or time.perf_counter()
         )
@@ -4866,15 +4987,16 @@ class AskJobManager:
                 total_request_ms=(time.perf_counter() - request_started_perf) * 1000,
             )
             cost = (result.get("estimated_cost") or {}).get("estimated_total_usd")
-            runtime.write_audit_record(
-                {
+            best_effort(
+                "completed performance telemetry",
+                lambda: runtime.write_audit_record({
                     "record_type": "request_performance",
                     "recorded_at": datetime.now(timezone.utc).isoformat(),
                     "request_id": request_id,
                     "workflow": routing.workflow,
                     "status": "completed",
                     "performance": performance_snapshot,
-                }
+                }),
             )
             scope_fallback = (
                 request.active_scope
@@ -4885,27 +5007,32 @@ class AskJobManager:
             customer_result["active_scope"] = (
                 next_scope.model_dump() if next_scope else None
             )
-            runtime.beta_state.save_conversation_scope(
-                request.conversation_id,
-                access.subject_id,
-                next_scope.model_dump() if next_scope else None,
-                routing.workflow,
-            )
-            runtime.beta_state.complete_routing_event(
-                request_id,
-                clarification_outcome=(
-                    "clarification_requested"
-                    if requires_user_correction
-                    else "research_completed"
-                ),
-                continuation_eligible=bool(
-                    requires_user_correction
-                    and self.jobs[request_id].get("continuation_eligible")
+            best_effort(
+                "conversation scope update",
+                lambda: runtime.beta_state.save_conversation_scope(
+                    request.conversation_id,
+                    access.subject_id,
+                    next_scope.model_dump() if next_scope else None,
+                    routing.workflow,
                 ),
             )
-            customer_result["access"] = access.public_dict(
-                runtime.beta_state.used_today(access.subject_id),
-                runtime.beta_state.used_this_month(access.subject_id),
+            best_effort(
+                "routing completion telemetry",
+                lambda: runtime.beta_state.complete_routing_event(
+                    request_id,
+                    clarification_outcome=(
+                        "clarification_requested"
+                        if requires_user_correction
+                        else "research_completed"
+                    ),
+                    continuation_eligible=bool(
+                        requires_user_correction
+                        and self.jobs[request_id].get("continuation_eligible")
+                    ),
+                ),
+            )
+            customer_result["access"] = access_snapshot(
+                access, self.jobs[request_id].get("access")
             )
             with self.lock:
                 self.jobs[request_id].update(
@@ -4921,17 +5048,25 @@ class AskJobManager:
                 )
                 completed_job = self.jobs[request_id]
                 if allowance_exempt:
-                    runtime.beta_state.save_job(completed_job)
+                    # Clarifications are useful even if durable result storage is
+                    # briefly unavailable. Retain the completed job in memory so
+                    # the current browser can still collect it.
+                    persisted = best_effort(
+                        "completed clarification persistence",
+                        lambda: runtime.beta_state.save_job(completed_job),
+                    )
                 else:
+                    billable = is_substantive_deliverable(result)
                     runtime.beta_state.complete(
                         request_id, latency_ms=result.get("latency_ms"),
                         estimated_cost_usd=cost,
-                        billable=is_substantive_deliverable(result),
+                        billable=billable,
                         performance=performance_snapshot, job=completed_job,
                     )
+                    credit_finalized = True
                     write_credit_event(
                         "ask_credit_consumed"
-                        if is_substantive_deliverable(result)
+                        if billable
                         else "ask_credit_released",
                         request_id=request_id,
                         request=request,
@@ -4939,20 +5074,27 @@ class AskJobManager:
                         workflow=routing.workflow,
                         reason=(
                             "substantive_answer_delivered"
-                            if is_substantive_deliverable(result)
+                            if billable
                             else f"{answer_type}_answer_delivered"
                         ),
                         answer_type=answer_type,
                     )
-                    refreshed_access = access.public_dict(
-                        runtime.beta_state.used_today(access.subject_id),
-                        runtime.beta_state.used_this_month(access.subject_id),
+                    refreshed_access = access_snapshot(
+                        access, completed_job.get("access")
                     )
                     completed_job["access"] = refreshed_access
                     completed_job["result"]["access"] = refreshed_access
-                    runtime.beta_state.save_job(completed_job)
+                    best_effort(
+                        "completed access refresh",
+                        lambda: runtime.beta_state.save_job(completed_job),
+                    )
+                    persisted = True
                 # Completed packs are durable, not retained indefinitely in RAM.
-                self.jobs.pop(request_id, None)
+                # A clarification whose persistence failed remains available in
+                # the bounded in-memory terminal cache instead of becoming a
+                # customer-visible failure.
+                if persisted:
+                    self.jobs.pop(request_id, None)
         except Exception as exc:
             performance_snapshot = performance.snapshot(
                 queue_wait_ms=queue_wait_ms,
@@ -4962,22 +5104,31 @@ class AskJobManager:
             )
             failure = request_failure_details(exc)
             if credit_reserved:
-                runtime.beta_state.fail(
-                    request_id,
-                    refund=True,
-                    performance=performance_snapshot,
-                )
-                write_credit_event(
-                    "ask_credit_released",
-                    request_id=request_id,
-                    request=request,
-                    access=access,
-                    workflow=routing.workflow,
-                    reason=str(failure["credit_reason"]),
-                    answer_type="error",
-                )
-            runtime.write_audit_record(
-                {
+                try:
+                    runtime.beta_state.fail(
+                        request_id,
+                        refund=True,
+                        performance=performance_snapshot,
+                    )
+                    credit_finalized = True
+                except Exception:
+                    LOGGER.exception(
+                        "Ask Mimir could not release credit for %s; will retry in cleanup",
+                        request_id,
+                    )
+                if credit_finalized:
+                    write_credit_event(
+                        "ask_credit_released",
+                        request_id=request_id,
+                        request=request,
+                        access=access,
+                        workflow=routing.workflow,
+                        reason=str(failure["credit_reason"]),
+                        answer_type="error",
+                    )
+            best_effort(
+                "failed performance telemetry",
+                lambda: runtime.write_audit_record({
                     "record_type": "request_performance",
                     "recorded_at": datetime.now(timezone.utc).isoformat(),
                     "request_id": request_id,
@@ -4986,15 +5137,18 @@ class AskJobManager:
                     "performance": performance_snapshot,
                     "error_type": type(exc).__name__,
                     "error_detail": str(exc),
-                }
+                }),
             )
             LOGGER.exception(
                 "Ask Mimir request failed request_id=%s workflow=%s",
                 request_id,
                 routing.workflow,
             )
-            runtime.beta_state.complete_routing_event(
-                request_id, clarification_outcome="request_failed"
+            best_effort(
+                "failed routing telemetry",
+                lambda: runtime.beta_state.complete_routing_event(
+                    request_id, clarification_outcome="request_failed"
+                ),
             )
             detail = (
                 exc.detail
@@ -5008,9 +5162,8 @@ class AskJobManager:
                     "Ask Mimir is temporarily unavailable. Your query allowance has been "
                     "restored; please try again shortly."
                 )
-            refreshed_access = access.public_dict(
-                runtime.beta_state.used_today(access.subject_id),
-                runtime.beta_state.used_this_month(access.subject_id),
+            refreshed_access = access_snapshot(
+                access, self.jobs[request_id].get("access")
             )
             with self.lock:
                 self.jobs[request_id].update(
@@ -5033,11 +5186,33 @@ class AskJobManager:
                 runtime.beta_state.save_job(self.jobs[request_id])
                 self.jobs.pop(request_id, None)
         finally:
+            if credit_reserved and not credit_finalized:
+                try:
+                    runtime.beta_state.fail(request_id, refund=True)
+                    credit_finalized = True
+                    write_credit_event(
+                        "ask_credit_released",
+                        request_id=request_id,
+                        request=request,
+                        access=access,
+                        workflow=routing.workflow,
+                        reason="cleanup_reconciliation",
+                        answer_type="error",
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "Ask Mimir credit reconciliation failed request_id=%s",
+                        request_id,
+                    )
+                    self._schedule_credit_release(
+                        request_id, request, access, routing
+                    )
+            JOB_DEADLINE.reset(deadline_token)
             # A secondary logging/storage failure must not leave an immortal
             # running slot. Keep a small failed-result fallback in memory.
             with self.lock:
                 remaining = self.jobs.get(request_id)
-                if remaining:
+                if remaining and remaining.get("status") not in {"completed", "failed"}:
                     remaining.update({
                         "status": "failed", "stage": "Research interrupted",
                         "error": "The research service could not save this answer. Please try again shortly.",
@@ -5057,9 +5232,8 @@ class AskJobManager:
             if not job or job["subject_id"] != access.subject_id:
                 raise KeyError(request_id)
             result = self.public_job(job)
-            result["access"] = access.public_dict(
-                runtime.beta_state.used_today(access.subject_id),
-                runtime.beta_state.used_this_month(access.subject_id),
+            result["access"] = access_snapshot(
+                access, result.get("access")
             )
             if result.get("result"):
                 delivered = {**result["result"], "access": result["access"]}
@@ -5096,12 +5270,42 @@ class AskJobManager:
 
     @staticmethod
     def public_job(job: Dict[str, Any]) -> Dict[str, Any]:
-        return {
+        public = {
             key: value
             for key, value in job.items()
             if key not in {"subject_id", "allowance_exempt", "routing"}
             and not key.startswith("_")
         }
+        # Returning the original question to its authorized owner lets a new
+        # tab render an answer using only an opaque locally stored request ID.
+        if job.get("_question"):
+            public["question"] = str(job["_question"])[:12_000]
+        return public
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self.lock:
+            active = [
+                job for job in self.jobs.values()
+                if job.get("status") in {"queued", "running"}
+            ]
+            running = sum(job.get("status") == "running" for job in active)
+            queued = sum(job.get("status") == "queued" for job in active)
+            ages = []
+            now = datetime.now(timezone.utc)
+            for job in active:
+                try:
+                    ages.append((now - datetime.fromisoformat(job["created_at"])).total_seconds())
+                except (KeyError, TypeError, ValueError):
+                    continue
+            return {
+                "running": running,
+                "queued": queued,
+                "capacity": self.capacity,
+                "workers": self.worker_count,
+                "oldest_active_seconds": round(max(ages), 1) if ages else 0,
+                "accepting_new_jobs": len(active) < self.capacity,
+                "pending_credit_releases": len(self.pending_credit_releases),
+            }
 
 
 job_manager = AskJobManager()
@@ -5139,6 +5343,8 @@ def health() -> Dict[str, Any]:
         "release_binding_id": runtime.release_guard.release_binding_id,
         "test_identities_enabled": os.getenv("ASK_MIMIR_ALLOW_TEST_IDENTITIES", "0") == "1",
         "trusted_proxy_configured": bool(os.getenv("ASK_MIMIR_TRUSTED_PROXY_SECRET")),
+        "ask_jobs": job_manager.snapshot(),
+        "max_job_seconds": max_job_seconds(),
     }
 
 
@@ -5635,6 +5841,18 @@ class TimedResponses:
         self._responses = responses
 
     def create(self, **kwargs: Any) -> Any:
+        remaining = remaining_job_seconds()
+        if remaining is not None:
+            if remaining <= 1:
+                raise TimeoutError("Ask Mimir reached its overall research deadline.")
+            configured = min(
+                max(float(os.getenv("ASK_MIMIR_PROVIDER_TIMEOUT_SECONDS", "900")), 30.0),
+                1_200.0,
+            )
+            # The SDK may make one retry. Give each attempt no more than half of
+            # the remaining job budget so one provider call cannot monopolize a
+            # worker beyond the overall research deadline.
+            kwargs["timeout"] = max(min(configured, remaining / 2), 1.0)
         started = time.perf_counter()
         try:
             return self._responses.create(**kwargs)

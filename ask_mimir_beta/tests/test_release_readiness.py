@@ -27,6 +27,16 @@ class StopAtEvidence(Exception):
 
 
 class AnswerTypeTests(unittest.TestCase):
+    def test_expired_overall_deadline_stops_before_another_provider_call(self):
+        responses = Mock()
+        token = lab.JOB_DEADLINE.set(time.monotonic() - 1)
+        try:
+            with self.assertRaisesRegex(TimeoutError, "overall research deadline"):
+                lab.TimedResponses(responses).create(model="test")
+        finally:
+            lab.JOB_DEADLINE.reset(token)
+        responses.create.assert_not_called()
+
     def test_failure_taxonomy_distinguishes_queue_and_provider_limits(self):
         queue = lab.request_failure_details(lab.HTTPException(
             status_code=503,
@@ -100,7 +110,7 @@ class AnswerTypeTests(unittest.TestCase):
             "clarification",
         )
 
-    def test_evidence_backed_answer_is_substantive_even_when_concise(self):
+    def test_metadata_only_artifact_is_not_substantive(self):
         self.assertEqual(
             lab.answer_type_for_result(
                 {
@@ -109,10 +119,10 @@ class AnswerTypeTests(unittest.TestCase):
                     "answer_artifacts": {"company_site_dossier": {"scope": {}}},
                 }
             ),
-            "substantive",
+            "validation",
         )
 
-    def test_concise_tool_evidence_answer_is_substantive(self):
+    def test_empty_tool_records_are_not_substantive(self):
         self.assertEqual(
             lab.answer_type_for_result(
                 {
@@ -123,7 +133,7 @@ class AnswerTypeTests(unittest.TestCase):
                     ],
                 }
             ),
-            "substantive",
+            "validation",
         )
 
     def test_long_entity_correction_is_clarification_not_research(self):
@@ -261,6 +271,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
             'result': {
                 'response_id': 'resp-owned',
                 'answer': 'Completed research answer.',
+                'answer_type': 'substantive',
                 'answer_artifacts': {'platform_dossier': pack},
             },
         }
@@ -357,6 +368,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
             'result': {
                 'response_id': 'resp-company',
                 'answer': 'Completed company research answer.',
+                'answer_type': 'substantive',
                 'release_binding_id': 'release-binding',
                 'answer_artifacts': {'company_site_dossier': pack},
             },
@@ -643,7 +655,10 @@ class DurableJobTests(unittest.TestCase):
             "answer": "AMRAAM report",
             "response_id": "test-answer",
             "answer_artifacts": {
-                "platform_dossier": {"scope": {"platform_id": "AMRAAM"}},
+                "platform_dossier": {
+                    "scope": {"platform_id": "AMRAAM"},
+                    "top_prime_awards": [{"contract_id": "TEST-AWARD"}],
+                },
                 "evidence_pack": {
                     "format": "zip",
                     "download_url": "/api/evidence/platform.zip?platform_id=AMRAAM",
@@ -673,6 +688,119 @@ class DurableJobTests(unittest.TestCase):
         finally:
             restarted.executor.shutdown()
 
+    def test_auxiliary_failures_cannot_turn_a_delivered_answer_into_a_charged_failure(self):
+        self.manager.create(self.request, self.access, self.route)
+        answer = {
+            "answer": "AMRAAM report with evidence. " * 20,
+            "response_id": "test-answer",
+            "answer_artifacts": {
+                "platform_dossier": {
+                    "scope": {"platform_id": "AMRAAM"},
+                    "top_prime_awards": [{"contract_id": "TEST-AWARD"}],
+                }
+            },
+            "tool_trace": [],
+        }
+        real_used_today = self.ledger.used_today
+
+        def fail_only_after_completion(subject_id):
+            row = self.ledger.connection.execute(
+                "SELECT status FROM query_events WHERE request_id = ?",
+                ["a" * 32],
+            ).fetchone()
+            if row and row[0] == "completed":
+                raise OSError("allowance summary temporarily unavailable")
+            return real_used_today(subject_id)
+
+        self.runtime.write_audit_record.side_effect = OSError("audit unavailable")
+        with patch.object(
+            self.ledger, "save_conversation_scope", side_effect=OSError("scope unavailable")
+        ), patch.object(
+            self.ledger, "complete_routing_event", side_effect=OSError("routing unavailable")
+        ), patch.object(
+            self.ledger, "used_today", side_effect=fail_only_after_completion
+        ), patch.object(
+            lab, "generate_answer", return_value=answer
+        ), patch.object(
+            lab, "finalize_customer_result", side_effect=lambda result, *args: dict(result)
+        ):
+            self.manager._run("a" * 32, self.request, self.access, self.route)
+
+        recovered = self.ledger.load_job("a" * 32)
+        self.assertEqual(recovered["status"], "completed")
+        self.assertEqual(recovered["result"]["answer"], answer["answer"])
+        self.assertEqual(real_used_today("alice"), 1)
+
+    def test_credit_release_is_retried_if_the_first_refund_attempt_fails(self):
+        self.manager.create(self.request, self.access, self.route)
+        real_fail = self.ledger.fail
+        attempts = 0
+
+        def flaky_fail(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("transient state-store failure")
+            return real_fail(*args, **kwargs)
+
+        with patch.object(self.ledger, "fail", side_effect=flaky_fail), patch.object(
+            lab, "generate_answer", side_effect=TimeoutError("provider timeout")
+        ):
+            self.manager._run("a" * 32, self.request, self.access, self.route)
+
+        status = self.ledger.connection.execute(
+            "SELECT status FROM query_events WHERE request_id = ?", ["a" * 32]
+        ).fetchone()[0]
+        self.assertEqual(attempts, 2)
+        self.assertEqual(status, "failed_refunded")
+        self.assertEqual(self.ledger.used_today("alice"), 0)
+
+    def test_persistent_refund_failure_is_scheduled_for_reconciliation(self):
+        self.manager.create(self.request, self.access, self.route)
+        with patch.object(
+            self.ledger, "fail", side_effect=OSError("state store unavailable")
+        ), patch.object(
+            self.manager, "_schedule_credit_release"
+        ) as schedule, patch.object(
+            lab, "generate_answer", side_effect=TimeoutError("provider timeout")
+        ):
+            self.manager._run("a" * 32, self.request, self.access, self.route)
+
+        schedule.assert_called_once_with(
+            "a" * 32, self.request, self.access, self.route
+        )
+
+    def test_health_snapshot_reports_pending_credit_reconciliation(self):
+        self.manager.pending_credit_releases.add("a" * 32)
+        self.assertEqual(self.manager.snapshot()["pending_credit_releases"], 1)
+
+    def test_clarification_remains_deliverable_when_durable_result_save_fails(self):
+        clarification_route = self.route.model_copy(update={"clarification_needed": True})
+        self.manager.create(self.request, self.access, clarification_route)
+        clarification = {
+            "answer": "Which platform did you mean?",
+            "response_id": "routing-clarification",
+            "requires_clarification": True,
+            "answer_type": "clarification",
+            "answer_artifacts": {"routing_clarification": {"options": []}},
+            "tool_trace": [],
+        }
+        with patch.object(
+            lab, "routing_clarification_result", return_value=clarification
+        ), patch.object(
+            lab, "finalize_customer_result", side_effect=lambda result, *args: dict(result)
+        ), patch.object(
+            self.ledger, "save_job", side_effect=OSError("result store unavailable")
+        ):
+            self.manager._run(
+                "a" * 32, self.request, self.access, clarification_route
+            )
+
+        recovered = self.manager.get("a" * 32, self.access)
+        self.assertEqual(recovered["status"], "completed")
+        self.assertEqual(recovered["result"]["answer_type"], "clarification")
+        self.assertEqual(self.ledger.used_today("alice"), 0)
+
     def test_admission_rejection_does_not_reserve_allowance(self):
         self.manager.capacity = 1
         self.manager.create(self.request, self.access, self.route)
@@ -700,6 +828,35 @@ class DurableJobTests(unittest.TestCase):
             self.manager.create(self.request, public, self.route)
         self.assertFalse(self.manager.jobs)
         self.assertEqual(self.ledger.used_today("guest"), 1)
+
+    def test_public_guest_gets_exactly_one_substantive_answer(self):
+        public = AccessContext("guest", "public", False)
+        self.manager.create(self.request, public, self.route)
+        answer = {
+            "answer": "Substantive AMRAAM research with evidence. " * 20,
+            "response_id": "resp_public_answer",
+            "answer_artifacts": {
+                "platform_dossier": {
+                    "scope": {"platform_id": "AMRAAM"},
+                    "top_prime_awards": [{"contract_id": "TEST-AWARD"}],
+                }
+            },
+            "tool_trace": [],
+        }
+        with patch.object(
+            lab, "generate_answer", return_value=answer
+        ), patch.object(
+            lab, "finalize_customer_result", side_effect=lambda result, *args: dict(result)
+        ):
+            self.manager._run("a" * 32, self.request, public, self.route)
+
+        delivered = self.ledger.load_job("a" * 32)
+        self.assertEqual(delivered["status"], "completed")
+        self.assertEqual(delivered["result"]["answer_type"], "substantive")
+        self.assertEqual(self.ledger.used_today("guest"), 1)
+        second = self.request.model_copy(update={"client_request_id": "b" * 32})
+        with self.assertRaises(lab.DailyQuotaExceeded):
+            self.manager.create(second, public, self.route)
 
     def test_clarification_is_accepted_after_allowance_is_exhausted(self):
         public = AccessContext("guest", "public", False)
@@ -801,7 +958,12 @@ class DurableJobTests(unittest.TestCase):
         answer = {
             "answer": "Substantive platform research " + "with evidence. " * 30,
             "response_id": "resp_answer",
-            "answer_artifacts": {"platform_dossier": {"scope": {}}},
+            "answer_artifacts": {
+                "platform_dossier": {
+                    "scope": {},
+                    "top_prime_awards": [{"contract_id": "TEST-AWARD"}],
+                }
+            },
             "tool_trace": [],
         }
         with patch.object(lab, "generate_answer", return_value=answer), patch.object(

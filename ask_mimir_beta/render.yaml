@@ -37,7 +37,9 @@ services:
       - key: ASK_MIMIR_JOB_QUEUE
         value: "8"
       - key: ASK_MIMIR_MAX_QUEUE_SECONDS
-        value: "900"
+        value: "1800"
+      - key: ASK_MIMIR_MAX_JOB_SECONDS
+        value: "2700"
       - key: ASK_MIMIR_RESULT_RETENTION_DAYS
         value: "7"
       - key: OPENAI_MAX_OUTPUT_TOKENS

@@ -442,7 +442,7 @@ class BetaStateStore:
                     request_id,
                     conversation_id,
                     subject_id,
-                    question,
+                    question if os.getenv("ASK_MIMIR_AUDIT_CONTENT", "0") == "1" else "",
                     decision.get("intended_workflow"),
                     decision.get("workflow"),
                     json.dumps(decision.get("candidates") or [], default=str),
