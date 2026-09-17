@@ -6187,8 +6187,8 @@ def generate_answer(
     if request.article_context:
         input_items.append({"role": "user", "content": article_context_note(request)})
     provider_timeout_seconds = min(
-        max(float(os.getenv("ASK_MIMIR_PROVIDER_TIMEOUT_SECONDS", "300")), 30.0),
-        600.0,
+        max(float(os.getenv("ASK_MIMIR_PROVIDER_TIMEOUT_SECONDS", "900")), 30.0),
+        1_200.0,
     )
     client = TimedOpenAIClient(
         OpenAI(timeout=provider_timeout_seconds, max_retries=1)
