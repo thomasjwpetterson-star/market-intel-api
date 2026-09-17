@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import base64
+import binascii
 import hashlib
+import hmac
 import logging
 import os
 import re
@@ -19,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote, unquote, urlsplit, parse_qs
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
@@ -3161,6 +3165,38 @@ class LabRuntime:
 
 runtime = LabRuntime()
 app = FastAPI(title="Ask Mimir", docs_url="/api/docs", redoc_url=None)
+_browser_origin_env = (
+    os.getenv("ASK_MIMIR_CORS_ORIGINS")
+    or os.getenv("CORS_ORIGINS")
+    or ""
+)
+_browser_origins = [
+    origin.strip()
+    for origin in _browser_origin_env.split(",")
+    if origin.strip()
+] or [
+    "https://mimiradvisors.org",
+    "https://www.mimiradvisors.org",
+    "https://market-intel-ui.vercel.app",
+    "https://market-intel-ui-git-main-tom-pettersons-projects.vercel.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_browser_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "HEAD", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+    expose_headers=[
+        "Retry-After",
+        "X-Ask-Mimir-Workflow",
+        "X-Ask-Mimir-Route-Reason",
+        "X-Ask-Mimir-Route-Confidence",
+        "X-Ask-Mimir-Route-Fallback",
+        "X-Ask-Mimir-Clarification",
+    ],
+)
 app.mount("/assets", StaticFiles(directory=LAB_DIR / "assets"), name="assets")
 
 
@@ -3811,6 +3847,13 @@ def workflow_for_request(request: AskRequest) -> str:
 
 
 def access_from_request(request: Request) -> AccessContext:
+    authorization = str(request.headers.get("authorization") or "").strip()
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not token:
+            raise HTTPException(status_code=401, detail="Ask Mimir access token is invalid.")
+        return access_from_direct_token(token, request)
+
     requested_tier = normalize_tier(request.headers.get("x-ask-mimir-tier"))
     requested_subject = str(request.headers.get("x-ask-mimir-subject") or "").strip()
     proxy_secret = os.getenv("ASK_MIMIR_TRUSTED_PROXY_SECRET")
@@ -3842,6 +3885,61 @@ def access_from_request(request: Request) -> AccessContext:
     ).hexdigest()[:24]
     return AccessContext(
         subject_id=f"anonymous:{fingerprint}", tier="public", authenticated=False
+    )
+
+
+def _decode_base64url(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def access_from_direct_token(token: str, request: Request) -> AccessContext:
+    """Verify a short-lived browser grant minted by the trusted website proxy.
+
+    This gives job submission and polling an independent path to Render without
+    exposing the shared proxy secret or changing the quota subject.
+    """
+    proxy_secret = os.getenv("ASK_MIMIR_TRUSTED_PROXY_SECRET")
+    if not proxy_secret:
+        raise HTTPException(status_code=503, detail="Direct Ask Mimir access is not configured.")
+    try:
+        payload_segment, supplied_signature = token.split(".", 1)
+        expected_signature = base64.urlsafe_b64encode(
+            hmac.new(
+                proxy_secret.encode("utf-8"),
+                payload_segment.encode("ascii"),
+                hashlib.sha256,
+            ).digest()
+        ).decode("ascii").rstrip("=")
+        if not hmac.compare_digest(supplied_signature, expected_signature):
+            raise ValueError("signature mismatch")
+        payload = json.loads(_decode_base64url(payload_segment).decode("utf-8"))
+        now = int(time.time())
+        issued_at = int(payload.get("iat") or 0)
+        expires_at = int(payload.get("exp") or 0)
+        if payload.get("aud") != "ask-mimir-direct-v1":
+            raise ValueError("invalid audience")
+        if issued_at > now + 60 or expires_at <= now or expires_at > now + 2 * 60 * 60:
+            raise ValueError("invalid expiry")
+        subject = str(payload.get("sub") or "").strip()
+        tier = normalize_tier(payload.get("tier"))
+        if not subject or len(subject) > 160:
+            raise ValueError("invalid subject")
+        expected_user_agent = hashlib.sha256(
+            str(request.headers.get("user-agent") or "").encode("utf-8")
+        ).hexdigest()
+        if not hmac.compare_digest(
+            str(payload.get("uah") or ""), expected_user_agent
+        ):
+            raise ValueError("user agent mismatch")
+    except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+        raise HTTPException(
+            status_code=401,
+            detail="Ask Mimir direct access expired or could not be verified.",
+        ) from None
+    return AccessContext(
+        subject_id=f"user:{subject}",
+        tier=tier,
+        authenticated=tier != "public",
     )
 
 

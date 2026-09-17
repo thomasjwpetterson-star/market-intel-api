@@ -1,4 +1,8 @@
 import json
+import base64
+import hashlib
+import hmac
+import os
 import tempfile
 import threading
 import time
@@ -20,6 +24,83 @@ from reviewed_platform_links import recovered_platform_sql
 from lab_test_support import load_lab
 
 lab = load_lab()
+
+
+def direct_access_token(secret, subject, tier="public", *, user_agent="test-browser", expires_in=3600):
+    now = int(time.time())
+    payload = base64.urlsafe_b64encode(json.dumps({
+        "aud": "ask-mimir-direct-v1",
+        "sub": subject,
+        "tier": tier,
+        "iat": now,
+        "exp": now + expires_in,
+        "uah": hashlib.sha256(user_agent.encode()).hexdigest(),
+    }, separators=(",", ":")).encode()).decode().rstrip("=")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(secret.encode(), payload.encode(), hashlib.sha256).digest()
+    ).decode().rstrip("=")
+    return f"{payload}.{signature}"
+
+
+class DirectAccessTests(unittest.TestCase):
+    def setUp(self):
+        self.secret = "direct-access-test-secret"
+        self.user_agent = "test-browser"
+        app = FastAPI()
+
+        @app.get("/access")
+        def access(request: lab.Request):
+            resolved = lab.access_from_request(request)
+            return {
+                "subject_id": resolved.subject_id,
+                "tier": resolved.tier,
+                "authenticated": resolved.authenticated,
+            }
+
+        self.client = TestClient(app)
+
+    def request(self, token):
+        with patch.dict(os.environ, {"ASK_MIMIR_TRUSTED_PROXY_SECRET": self.secret}):
+            return self.client.get("/access", headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": self.user_agent,
+            })
+
+    def test_direct_grant_preserves_the_proxy_quota_subject(self):
+        subject = "guest:68fe3c4f-5787-4f18-85ce-93023919d39a"
+        response = self.request(direct_access_token(
+            self.secret, subject, user_agent=self.user_agent
+        ))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {
+            "subject_id": f"user:{subject}",
+            "tier": "public",
+            "authenticated": False,
+        })
+
+    def test_direct_grant_rejects_tampering_expiry_and_a_different_browser(self):
+        valid = direct_access_token(self.secret, "guest:abc", user_agent=self.user_agent)
+        tampered = f"{valid[:-1]}{'A' if valid[-1] != 'A' else 'B'}"
+        self.assertEqual(self.request(tampered).status_code, 401)
+        expired = direct_access_token(
+            self.secret, "guest:abc", user_agent=self.user_agent, expires_in=-1
+        )
+        self.assertEqual(self.request(expired).status_code, 401)
+        with patch.dict(os.environ, {"ASK_MIMIR_TRUSTED_PROXY_SECRET": self.secret}):
+            wrong_browser = self.client.get("/access", headers={
+                "Authorization": f"Bearer {valid}",
+                "User-Agent": "another-browser",
+            })
+        self.assertEqual(wrong_browser.status_code, 401)
+
+    def test_production_site_can_preflight_the_direct_job_endpoint(self):
+        source = (Path(__file__).resolve().parents[1] / "lab_api.py").read_text()
+        app_definition = source.index('app = FastAPI(title="Ask Mimir"')
+        route_definition = source.index('@app.post("/api/ask/jobs"')
+        cors_definition = source.index("app.add_middleware(\n    CORSMiddleware", app_definition)
+        self.assertLess(cors_definition, route_definition)
+        self.assertIn('"https://www.mimiradvisors.org"', source[app_definition:route_definition])
+        self.assertIn('allow_headers=["Authorization", "Content-Type"]', source[app_definition:route_definition])
 
 
 class StopAtEvidence(Exception):

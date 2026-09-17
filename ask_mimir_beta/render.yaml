@@ -64,3 +64,5 @@ services:
         generateValue: true
       - key: ASK_MIMIR_TRUSTED_PROXY_SECRET
         sync: false
+      - key: ASK_MIMIR_CORS_ORIGINS
+        value: https://mimiradvisors.org,https://www.mimiradvisors.org,https://market-intel-ui.vercel.app,https://market-intel-ui-git-main-tom-pettersons-projects.vercel.app
