@@ -318,6 +318,13 @@ class RequestPerformanceTests(unittest.TestCase):
 
 
 class ClarificationDetectionTests(unittest.TestCase):
+    def test_explicit_user_correction_flag_is_a_clarification(self):
+        self.assertTrue(response_requires_clarification({
+            "answer_type": "validation",
+            "requires_user_correction": True,
+            "answer": "Enter the exact company name.",
+        }))
+
     def test_unresolved_company_correction_is_a_clarification(self):
         result = {
             "answer": (

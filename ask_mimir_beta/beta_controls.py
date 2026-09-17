@@ -65,7 +65,11 @@ CLARIFICATION_QUESTION_PATTERNS = (
 
 def response_requires_clarification(result: Dict[str, Any]) -> bool:
     """Identify a scope question that should not consume an Ask Mimir allowance."""
-    if result.get("requires_clarification") is True:
+    if (
+        result.get("requires_clarification") is True
+        or result.get("requires_user_correction") is True
+        or str(result.get("answer_type") or "").strip().lower() == "clarification"
+    ):
         return True
 
     answer = re.sub(r"\s+", " ", str(result.get("answer") or "")).strip()

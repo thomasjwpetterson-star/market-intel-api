@@ -4097,7 +4097,7 @@ def finalize_customer_result(
         )
     ):
         response_id = str(safe_result.get("response_id") or "").strip()
-        if response_id and not response_requires_clarification(safe_result):
+        if response_id and is_substantive_deliverable(safe_result):
             artifacts["evidence_pack"] = {
                 **artifacts["evidence_pack"],
                 "download_url": (
@@ -4149,6 +4149,14 @@ ACTIONABLE_VALIDATION_RESPONSE_IDS = frozenset(
     }
 )
 
+USER_CORRECTION_PATTERNS = (
+    r"\bno (?:matching|valid|unambiguous)\s+"
+    r"(?:company|supplier|site|entity|cage|platform|program|record)\b",
+    r"\b(?:choose|select|confirm)\s+(?:one|an option|a candidate|the correct)\b",
+    r"\b(?:enter|provide|add|specify|send)\s+(?:the |an? )?"
+    r"(?:exact (?:legal )?name|company name|cage code|location|identifier)\b",
+)
+
 
 def response_is_non_deliverable(result: Dict[str, Any]) -> bool:
     """Detect provider text that describes a failure instead of an answer."""
@@ -4176,13 +4184,45 @@ def validation_requires_user_correction(result: Dict[str, Any]) -> bool:
         return True
     answer = re.sub(r"\s+", " ", str(result.get("answer") or "")).strip().lower()
     return bool(
-        len(answer) <= 1_500
-        and re.search(
-            r"(?:missing (?:a |the )?(?:valid )?(?:subject|identifier|company|cage|platform|program)|"
-            r"please (?:add|provide|choose|specify|check|correct)|"
-            r"try narrowing (?:the |your )?(?:question|request))",
-            answer,
+        (
+            len(answer) <= 1_500
+            and re.search(
+                r"(?:missing (?:a |the )?(?:valid )?(?:subject|identifier|company|cage|platform|program)|"
+                r"please (?:add|provide|choose|specify|check|correct)|"
+                r"try narrowing (?:the |your )?(?:question|request))",
+                answer,
+            )
         )
+        or any(re.search(pattern, answer) for pattern in USER_CORRECTION_PATTERNS)
+    )
+
+
+def _has_meaningful_tool_result(value: Any) -> bool:
+    """Reject empty lookup envelopes as research evidence."""
+    if value is None or value is False or value == "":
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return bool(value)
+    if isinstance(value, dict):
+        return any(_has_meaningful_tool_result(item) for item in value.values())
+    return True
+
+
+def result_has_research_evidence(result: Dict[str, Any]) -> bool:
+    artifacts = result.get("answer_artifacts") or {}
+    trusted_artifacts = {
+        key: value
+        for key, value in artifacts.items()
+        if key not in {"routing_clarification", "company_resolution"}
+    }
+    if any(bool(value) for value in trusted_artifacts.values()):
+        return True
+    return any(
+        isinstance(entry, dict)
+        and not entry.get("error")
+        and str(entry.get("tool") or "").startswith(("get_", "explain_", "compare_"))
+        and _has_meaningful_tool_result(entry.get("result"))
+        for entry in (result.get("tool_trace") or [])
     )
 
 
@@ -4195,38 +4235,121 @@ def answer_type_for_result(result: Dict[str, Any]) -> str:
         return "clarification"
     if response_is_non_deliverable(result):
         return "error"
-    if explicit == "substantive":
-        return explicit
     response_id = str(result.get("response_id") or "")
     if response_id in VALIDATION_RESPONSE_IDS:
         return "validation"
+    if validation_requires_user_correction(result):
+        return "validation"
+    if explicit == "substantive":
+        return explicit
     answer = re.sub(r"\s+", " ", str(result.get("answer") or "")).strip()
     if not answer:
         return "error"
 
-    # A provider-generated correction/missing-subject prompt previously slipped
-    # through because it had a normal resp_* identifier. A short answer with no
-    # evidence is not completed research, regardless of who generated it.
-    artifacts = result.get("answer_artifacts") or {}
-    has_research_evidence = bool(
-        any(
-            key not in {"routing_clarification", "company_resolution"}
-            for key in artifacts
-        )
-        or any(
-            isinstance(entry, dict)
-            and not entry.get("error")
-            and str(entry.get("tool") or "").startswith(("get_", "explain_"))
-            for entry in (result.get("tool_trace") or [])
-        )
-    )
-    if not has_research_evidence and len(answer) < 400:
+    # A response without positive research evidence is not billable merely
+    # because it is long or because an empty lookup was attempted.
+    if not result_has_research_evidence(result):
         return "validation"
     return "substantive"
 
 
+def is_substantive_deliverable(result: Dict[str, Any]) -> bool:
+    """Single contract shared by billing, download gates and response links."""
+    return bool(
+        answer_type_for_result(result) == "substantive"
+        and not response_requires_clarification(result)
+        and not validation_requires_user_correction(result)
+        and not response_is_non_deliverable(result)
+    )
+
+
 def result_counts_toward_quota(result: Dict[str, Any]) -> bool:
-    return answer_type_for_result(result) == "substantive"
+    return is_substantive_deliverable(result)
+
+
+def request_failure_details(exc: Exception) -> Dict[str, Any]:
+    """Return stable, content-free diagnostics for customer-visible failures."""
+    if isinstance(exc, DailyQuotaExceeded):
+        return {
+            "failure_stage": "quota",
+            "error_code": "quota_exceeded",
+            "http_status": 429,
+            "retryable": False,
+            "credit_reason": "quota_race",
+        }
+    exception_name = type(exc).__name__.lower()
+    if isinstance(exc, TimeoutError) or "timeout" in exception_name:
+        return {
+            "failure_stage": "model",
+            "error_code": "provider_timeout",
+            "http_status": 504,
+            "retryable": True,
+            "credit_reason": "provider_timeout",
+        }
+    provider_status = getattr(exc, "status_code", None)
+    if isinstance(provider_status, int) and not isinstance(exc, HTTPException):
+        return {
+            "failure_stage": "model",
+            "error_code": (
+                "provider_rate_limited"
+                if provider_status == 429
+                else f"provider_http_{provider_status}"
+            ),
+            "http_status": 503 if provider_status == 429 else provider_status,
+            "retryable": provider_status in {408, 409, 425, 429, 500, 502, 503, 504},
+            "credit_reason": "provider_error",
+        }
+    if "connection" in exception_name:
+        return {
+            "failure_stage": "model",
+            "error_code": "provider_connection_error",
+            "http_status": 503,
+            "retryable": True,
+            "credit_reason": "provider_error",
+        }
+    if isinstance(exc, OSError):
+        return {
+            "failure_stage": "persistence",
+            "error_code": "persistence_failed",
+            "http_status": 503,
+            "retryable": True,
+            "credit_reason": "persistence_failed",
+        }
+    if isinstance(exc, HTTPException):
+        detail = str(exc.detail or "").lower()
+        status = int(exc.status_code)
+        if "queue" in detail:
+            code, stage = "queue_timeout", "queue"
+        elif "save" in detail or "write" in detail:
+            code, stage = "persistence_failed", "persistence"
+        elif status in {400, 409, 422}:
+            code, stage = "validation_failed", "validation"
+        elif status in {502, 503, 504}:
+            code, stage = "provider_unavailable", "model"
+        else:
+            code, stage = f"upstream_http_{status}", "api_request"
+        return {
+            "failure_stage": stage,
+            "error_code": code,
+            "http_status": status,
+            "retryable": status in {408, 425, 500, 502, 503, 504},
+            "credit_reason": code,
+        }
+    if isinstance(exc, ValueError) and "deliverable" in str(exc).lower():
+        return {
+            "failure_stage": "validation",
+            "error_code": "non_deliverable_answer",
+            "http_status": 500,
+            "retryable": True,
+            "credit_reason": "non_deliverable_answer",
+        }
+    return {
+        "failure_stage": "model",
+        "error_code": "generation_failed",
+        "http_status": 500,
+        "retryable": True,
+        "credit_reason": "generation_failed",
+    }
 
 
 def write_credit_event(
@@ -4586,6 +4709,8 @@ class AskJobManager:
             used = runtime.beta_state.used_today(access.subject_id)
             job = {
                 "request_id": request_id,
+                "client_request_id": request.client_request_id,
+                "conversation_id": request.conversation_id,
                 "subject_id": access.subject_id,
                 "status": "queued",
                 "workflow": workflow,
@@ -4801,12 +4926,12 @@ class AskJobManager:
                     runtime.beta_state.complete(
                         request_id, latency_ms=result.get("latency_ms"),
                         estimated_cost_usd=cost,
-                        billable=answer_type == "substantive",
+                        billable=is_substantive_deliverable(result),
                         performance=performance_snapshot, job=completed_job,
                     )
                     write_credit_event(
                         "ask_credit_consumed"
-                        if answer_type == "substantive"
+                        if is_substantive_deliverable(result)
                         else "ask_credit_released",
                         request_id=request_id,
                         request=request,
@@ -4814,7 +4939,7 @@ class AskJobManager:
                         workflow=routing.workflow,
                         reason=(
                             "substantive_answer_delivered"
-                            if answer_type == "substantive"
+                            if is_substantive_deliverable(result)
                             else f"{answer_type}_answer_delivered"
                         ),
                         answer_type=answer_type,
@@ -4835,6 +4960,7 @@ class AskJobManager:
                 validation_ms=validation_ms,
                 total_request_ms=(time.perf_counter() - request_started_perf) * 1000,
             )
+            failure = request_failure_details(exc)
             if credit_reserved:
                 runtime.beta_state.fail(
                     request_id,
@@ -4847,11 +4973,7 @@ class AskJobManager:
                     request=request,
                     access=access,
                     workflow=routing.workflow,
-                    reason=(
-                        "timeout"
-                        if isinstance(exc, TimeoutError)
-                        else "request_failed"
-                    ),
+                    reason=str(failure["credit_reason"]),
                     answer_type="error",
                 )
             runtime.write_audit_record(
@@ -4881,12 +5003,6 @@ class AskJobManager:
                 if isinstance(exc, DailyQuotaExceeded)
                 else PUBLIC_REQUEST_FAILURE
             )
-            http_status = 429 if isinstance(exc, DailyQuotaExceeded) else None
-            error_code = (
-                "quota_exceeded"
-                if isinstance(exc, DailyQuotaExceeded)
-                else "request_failed"
-            )
             if "credit_balance_exhausted" in str(detail) or "insufficient_quota" in str(detail):
                 detail = (
                     "Ask Mimir is temporarily unavailable. Your query allowance has been "
@@ -4904,8 +5020,13 @@ class AskJobManager:
                         "detail": detail,
                         "percent": 100,
                         "error": detail,
-                        "error_code": error_code,
-                        "http_status": http_status,
+                        "error_code": failure["error_code"],
+                        "failure_stage": failure["failure_stage"],
+                        "http_status": failure["http_status"],
+                        "retryable": failure["retryable"],
+                        "latency_ms": round(
+                            float(performance_snapshot.get("total_request_ms") or 0), 1
+                        ),
                         "access": refreshed_access,
                     }
                 )
@@ -4920,6 +5041,10 @@ class AskJobManager:
                     remaining.update({
                         "status": "failed", "stage": "Research interrupted",
                         "error": "The research service could not save this answer. Please try again shortly.",
+                        "error_code": "persistence_failed",
+                        "failure_stage": "persistence",
+                        "http_status": 503,
+                        "retryable": True,
                         "percent": 100,
                     })
                 terminal = [key for key, value in self.jobs.items() if value.get("status") in {"completed", "failed"}]
@@ -4952,7 +5077,7 @@ class AskJobManager:
                         )
                     )
                     and delivered.get("response_id")
-                    and not response_requires_clarification(delivered)
+                    and is_substantive_deliverable(delivered)
                 ):
                     artifacts = {
                         **artifacts,
@@ -5158,7 +5283,11 @@ def _answer_report_export(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="This saved answer is no longer available for download.") from exc
     result = job.get("result") or {}
-    if job.get("status") != "completed" or result.get("response_id") != response_id or response_requires_clarification(result):
+    if (
+        job.get("status") != "completed"
+        or result.get("response_id") != response_id
+        or not is_substantive_deliverable(result)
+    ):
         raise HTTPException(status_code=409, detail="PDF downloads are available for completed research answers, not clarification questions.")
     saved = runtime.beta_state.load_job(request_id) or {}
     question = str(saved.get("_question") or "Ask Mimir research")
@@ -5295,7 +5424,7 @@ def answer_evidence_export_download(
     if (
         job.get("status") != "completed"
         or result.get("response_id") != response_id
-        or response_requires_clarification(result)
+        or not is_substantive_deliverable(result)
     ):
         raise HTTPException(
             status_code=409,
@@ -6057,7 +6186,13 @@ def generate_answer(
     ]
     if request.article_context:
         input_items.append({"role": "user", "content": article_context_note(request)})
-    client = TimedOpenAIClient(OpenAI(timeout=900.0, max_retries=1))
+    provider_timeout_seconds = min(
+        max(float(os.getenv("ASK_MIMIR_PROVIDER_TIMEOUT_SECONDS", "300")), 30.0),
+        600.0,
+    )
+    client = TimedOpenAIClient(
+        OpenAI(timeout=provider_timeout_seconds, max_retries=1)
+    )
     if selected_workflow == "news_article_implications":
         emit_progress(progress, "Reading the article", "Verifying the report and resolving the entities it names", 24)
         article_tools = [*TOOLS, {"type": "web_search", "search_context_size": "low"}]

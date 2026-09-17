@@ -27,6 +27,24 @@ class StopAtEvidence(Exception):
 
 
 class AnswerTypeTests(unittest.TestCase):
+    def test_failure_taxonomy_distinguishes_queue_and_provider_limits(self):
+        queue = lab.request_failure_details(lab.HTTPException(
+            status_code=503,
+            detail="The research queue took too long.",
+        ))
+        self.assertEqual(queue["failure_stage"], "queue")
+        self.assertEqual(queue["error_code"], "queue_timeout")
+        self.assertTrue(queue["retryable"])
+
+        class ProviderLimitError(Exception):
+            status_code = 429
+
+        provider = lab.request_failure_details(ProviderLimitError("limited"))
+        self.assertEqual(provider["failure_stage"], "model")
+        self.assertEqual(provider["error_code"], "provider_rate_limited")
+        self.assertEqual(provider["http_status"], 503)
+        self.assertTrue(provider["retryable"])
+
     def test_short_provider_correction_is_clarification_not_research(self):
         result = {
             "answer": "I couldn't resolve that company. Please add a CAGE code or location.",
@@ -107,6 +125,34 @@ class AnswerTypeTests(unittest.TestCase):
             ),
             "substantive",
         )
+
+    def test_long_entity_correction_is_clarification_not_research(self):
+        result = {
+            "answer": (
+                "I could not resolve the requested company to a unique legal entity. "
+                "Several similarly named organizations appear in the available records, and "
+                "selecting one without confirmation could attach awards to the wrong business. "
+                "Please provide the exact legal name, CAGE code, or operating location. "
+            ) * 4,
+            "response_id": "resp_provider_generated",
+            "answer_artifacts": {},
+            "tool_trace": [],
+        }
+        self.assertGreater(len(result["answer"]), 400)
+        self.assertEqual(lab.answer_type_for_result(result), "clarification")
+        self.assertTrue(lab.validation_requires_user_correction(result))
+        self.assertFalse(lab.result_counts_toward_quota(result))
+
+    def test_empty_company_lookup_is_not_research_evidence(self):
+        result = {
+            "answer": "No matching company was found. Enter a CAGE code or exact legal name.",
+            "response_id": "resp_provider_generated",
+            "answer_artifacts": {},
+            "tool_trace": [{"tool": "get_company_context", "result": {}}],
+        }
+        self.assertFalse(lab.result_has_research_evidence(result))
+        self.assertEqual(lab.answer_type_for_result(result), "validation")
+        self.assertFalse(lab.result_counts_toward_quota(result))
 
     def test_ambiguous_company_selection_is_returned_as_clarification(self):
         matches = [
@@ -930,8 +976,13 @@ class DurableJobTests(unittest.TestCase):
             for call in self.runtime.write_audit_record.call_args_list
             if call.args and call.args[0].get("record_type") == "ask_credit_released"
         )
-        self.assertEqual(release_event["reason"], "timeout")
+        self.assertEqual(release_event["reason"], "provider_timeout")
         self.assertEqual(release_event["answer_type"], "error")
+        recovered = self.ledger.load_job("a" * 32)
+        self.assertEqual(recovered["failure_stage"], "model")
+        self.assertEqual(recovered["error_code"], "provider_timeout")
+        self.assertEqual(recovered["http_status"], 504)
+        self.assertTrue(recovered["retryable"])
 
     def test_empty_provider_response_fails_and_releases_credit(self):
         self.manager.create(self.request, self.access, self.route)
@@ -982,7 +1033,8 @@ class DurableJobTests(unittest.TestCase):
         app.get('/api/evidence/answer.pdf')(lab.answer_report_export_download)
         job = {'request_id':'pdf-request','subject_id':'alice','status':'completed',
             '_question':'Original question', 'result':{'response_id':'pdf-response',
-            'answer':'Saved research', 'active_scope':{'scope_name':'AMRAAM'}}}
+            'answer':'Saved research', 'answer_type':'substantive',
+            'active_scope':{'scope_name':'AMRAAM'}}}
         self.ledger.save_job(job)
         client = TestClient(app)
         payload = {'request_id':'pdf-request','response_id':'pdf-response','answer':'Forged answer'}
@@ -996,6 +1048,11 @@ class DurableJobTests(unittest.TestCase):
             with patch.object(lab,'require_report_download',return_value=AccessContext('bob','enterprise',True)):
                 self.assertEqual(client.post('/api/evidence/answer.pdf',json=payload).status_code,404)
             job['result']['requires_clarification'] = True
+            self.ledger.save_job(job)
+            self.assertEqual(client.post('/api/evidence/answer.pdf',json=payload).status_code,409)
+            job['result'].pop('requires_clarification')
+            job['result']['answer_type'] = 'validation'
+            job['result']['requires_user_correction'] = True
             self.ledger.save_job(job)
             self.assertEqual(client.post('/api/evidence/answer.pdf',json=payload).status_code,409)
 
