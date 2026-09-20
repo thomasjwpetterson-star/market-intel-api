@@ -1360,31 +1360,190 @@ def build_public_intelligence_release(conn):
     finally:
         conn.unregister("public_intelligence_manifest_release_df")
 
-    manifest_path = LOCAL_CACHE_DIR / "public_intelligence_manifest.parquet"
-    temp_manifest_path = LOCAL_CACHE_DIR / "public_intelligence_manifest.parquet.tmp"
-    escaped_temp_path = str(temp_manifest_path).replace("'", "''")
-    if temp_manifest_path.exists():
-        temp_manifest_path.unlink()
-    conn.execute(
-        f"COPY public_intelligence_manifest_next TO '{escaped_temp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+    # Build only the expensive, reusable public-page projections here. The
+    # resulting tables are tiny compared with their sources and let request
+    # handlers avoid scanning the multi-gigabyte transaction/award files for
+    # each first-time page render. DuckDB's configured memory cap and temp
+    # directory still apply, so these builds spill to disk instead of requiring
+    # another reader connection or a larger in-memory cache.
+    projection_started_at = time.perf_counter()
+    rolled_columns = {
+        str(row[0]).strip().lower()
+        for row in conn.execute("DESCRIBE v_contracts_rolled").fetchall()
+    }
+    rolled_description_column = (
+        "base_award_description"
+        if "base_award_description" in rolled_columns
+        else "description"
+        if "description" in rolled_columns
+        else None
     )
-    os.replace(temp_manifest_path, manifest_path)
+    if rolled_description_column:
+        conn.execute(f"""
+            CREATE OR REPLACE TABLE public_company_top_award_next AS
+            WITH released AS (
+                SELECT entity_id AS cage
+                FROM public_intelligence_manifest_next
+                WHERE entity_type = 'cage_company'
+            ), ranked AS (
+                SELECT
+                    UPPER(TRIM(CAST(a.vendor_cage AS VARCHAR))) AS cage,
+                    ARG_MAX(
+                        STRUCT_PACK(
+                            contract_id := CAST(a.contract_id AS VARCHAR),
+                            description := CAST(a.{rolled_description_column} AS VARCHAR),
+                            total_spend := TRY_CAST(a.total_spend AS DOUBLE)
+                        ),
+                        TRY_CAST(a.total_spend AS DOUBLE)
+                    ) AS top_award
+                FROM v_contracts_rolled a
+                INNER JOIN released r
+                    ON UPPER(TRIM(CAST(a.vendor_cage AS VARCHAR))) = r.cage
+                WHERE NULLIF(TRIM(CAST(a.{rolled_description_column} AS VARCHAR)), '') IS NOT NULL
+                GROUP BY 1
+            )
+            SELECT
+                cage,
+                top_award.contract_id AS contract_id,
+                top_award.description AS base_award_description,
+                top_award.total_spend AS total_spend
+            FROM ranked
+        """)
+    else:
+        conn.execute("""
+            CREATE OR REPLACE TABLE public_company_top_award_next AS
+            SELECT
+                CAST(NULL AS VARCHAR) AS cage,
+                CAST(NULL AS VARCHAR) AS contract_id,
+                CAST(NULL AS VARCHAR) AS base_award_description,
+                CAST(NULL AS DOUBLE) AS total_spend
+            WHERE FALSE
+        """)
+
+    transaction_columns = {
+        str(row[0]).strip().lower()
+        for row in conn.execute("DESCRIBE v_transactions").fetchall()
+    }
+    transaction_description_expr = (
+        "COALESCE(NULLIF(TRIM(CAST(t.base_award_description AS VARCHAR)), ''), "
+        "NULLIF(TRIM(CAST(t.description AS VARCHAR)), ''))"
+        if "base_award_description" in transaction_columns
+        else "NULLIF(TRIM(CAST(t.description AS VARCHAR)), '')"
+    )
+    conn.execute(f"""
+        CREATE OR REPLACE TABLE public_platform_award_scope_next AS
+        WITH released AS (
+            SELECT
+                entity_id AS slug,
+                UPPER(TRIM(display_name)) AS platform_name
+            FROM public_intelligence_manifest_next
+            WHERE entity_type = 'platform'
+        ), award_scopes AS (
+            SELECT
+                r.slug,
+                UPPER(TRIM(CAST(t.vendor_cage AS VARCHAR))) AS vendor_cage,
+                CAST(t.contract_id AS VARCHAR) AS contract_id,
+                MAX_BY(
+                    {transaction_description_expr},
+                    COALESCE(TRY_CAST(t.action_date AS TIMESTAMP), TIMESTAMP '1900-01-01')
+                ) AS award_description,
+                MAX(TRY_CAST(t.action_date AS DATE)) AS award_date
+            FROM v_transactions t
+            INNER JOIN released r
+                ON UPPER(TRIM(CAST(t.platform_family AS VARCHAR))) = r.platform_name
+            WHERE NULLIF(TRIM(CAST(t.vendor_cage AS VARCHAR)), '') IS NOT NULL
+              AND {transaction_description_expr} IS NOT NULL
+            GROUP BY 1, 2, 3
+        ), distinct_scopes AS (
+            SELECT
+                slug,
+                vendor_cage,
+                award_description,
+                MAX_BY(contract_id, award_date) AS contract_id,
+                MAX(award_date) AS award_date
+            FROM award_scopes
+            GROUP BY 1, 2, 3
+        ), ranked AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY slug, vendor_cage
+                    ORDER BY award_date DESC NULLS LAST, contract_id
+                ) AS scope_rank
+            FROM distinct_scopes
+        )
+        SELECT
+            slug,
+            vendor_cage,
+            contract_id,
+            award_description,
+            award_date,
+            scope_rank
+        FROM ranked
+        WHERE scope_rank <= 3
+    """)
+
+    projection_tables = {
+        "public_intelligence_manifest_next": "public_intelligence_manifest.parquet",
+        "public_company_top_award_next": "public_company_top_award.parquet",
+        "public_platform_award_scope_next": "public_platform_award_scope.parquet",
+    }
+    pending_projection_files = []
+    for table_name, filename in projection_tables.items():
+        final_path = LOCAL_CACHE_DIR / filename
+        temp_path = LOCAL_CACHE_DIR / f"{filename}.tmp"
+        if temp_path.exists():
+            temp_path.unlink()
+        escaped_temp_path = str(temp_path).replace("'", "''")
+        conn.execute(
+            f"COPY {table_name} TO '{escaped_temp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+        pending_projection_files.append((temp_path, final_path))
 
     conn.execute("BEGIN TRANSACTION")
     try:
         conn.execute("DROP TABLE IF EXISTS public_intelligence_manifest")
+        conn.execute("DROP TABLE IF EXISTS public_company_top_award")
+        conn.execute("DROP TABLE IF EXISTS public_platform_award_scope")
         conn.execute("ALTER TABLE public_intelligence_manifest_next RENAME TO public_intelligence_manifest")
+        conn.execute("ALTER TABLE public_company_top_award_next RENAME TO public_company_top_award")
+        conn.execute("ALTER TABLE public_platform_award_scope_next RENAME TO public_platform_award_scope")
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
+    for temp_path, final_path in pending_projection_files:
+        os.replace(temp_path, final_path)
     try:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_public_intelligence_manifest_entity
             ON public_intelligence_manifest(entity_type, entity_id)
         """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_public_company_top_award_cage
+            ON public_company_top_award(cage)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_public_platform_award_scope_entity
+            ON public_platform_award_scope(slug, vendor_cage)
+        """)
     except Exception:
-        logger.warning("Could not create public intelligence manifest index", exc_info=True)
+        logger.warning("Could not create public intelligence projection indexes", exc_info=True)
+
+    projection_stats = {
+        "build_seconds": round(time.perf_counter() - projection_started_at, 3),
+        "company_top_award_rows": int(
+            conn.execute("SELECT COUNT(*) FROM public_company_top_award").fetchone()[0]
+        ),
+        "platform_award_scope_rows": int(
+            conn.execute("SELECT COUNT(*) FROM public_platform_award_scope").fetchone()[0]
+        ),
+        "storage_bytes": sum(
+            final_path.stat().st_size
+            for _, final_path in pending_projection_files
+            if final_path.exists()
+        ),
+    }
 
     counts = {}
     for entry in entries:
@@ -1397,6 +1556,7 @@ def build_public_intelligence_release(conn):
         "counts": counts,
         "requested_cohort_size": cohort_size,
         "platform_exclusions": sorted(platform_exclusions),
+        "projection_stats": projection_stats,
     }
     index = {
         f'{entry["entity_type"]}:{entry["entity_id"]}': entry
@@ -4666,6 +4826,12 @@ def resolve_public_platform_slug(slug: str) -> Optional[str]:
     if not safe_slug:
         return None
 
+    manifest_entry = get_public_intelligence_manifest_entry("platform", safe_slug)
+    if manifest_entry:
+        display_name = str(manifest_entry.get("display_name") or "").strip()
+        if display_name:
+            return display_name
+
     try:
         df = duck_fetch_df(
             """
@@ -4754,10 +4920,54 @@ def get_public_intelligence_manifest(
     }
 
 
+@app.get("/api/public/intelligence/search")
+def search_public_intelligence_manifest(
+    response: Response,
+    q: str,
+    limit: int = 8,
+):
+    """Search only entities included in the current public release."""
+    require_public_snapshot_ready()
+    clean_query = str(q or "").strip()[:100]
+    if len(clean_query) < 2:
+        return {"query": clean_query, "entries": []}
+
+    safe_limit = max(1, min(int(limit or 8), 20))
+    try:
+        df = duck_fetch_df(
+            """
+            SELECT
+                entity_type,
+                entity_id,
+                canonical_path,
+                display_name,
+                richness_score
+            FROM public_intelligence_manifest
+            WHERE STRPOS(LOWER(display_name), LOWER(?)) > 0
+               OR STRPOS(LOWER(entity_id), LOWER(?)) > 0
+            ORDER BY
+                CASE WHEN LOWER(entity_id) = LOWER(?) THEN 0 ELSE 1 END,
+                CASE WHEN STARTS_WITH(LOWER(display_name), LOWER(?)) THEN 0 ELSE 1 END,
+                richness_score DESC,
+                entity_id
+            LIMIT ?
+            """,
+            [clean_query, clean_query, clean_query, clean_query, safe_limit],
+        )
+        entries = df.to_dict(orient="records") if not df.empty else []
+    except Exception:
+        logger.exception("Public intelligence manifest search failed for q=%s", clean_query)
+        entries = []
+
+    response.headers["Cache-Control"] = "public, max-age=60, s-maxage=300"
+    return {"query": clean_query, "entries": entries}
+
+
 @app.get("/api/public/intelligence/platforms/{slug}")
 def get_public_platform_page_snapshot(slug: str, response: Response):
     """Stable public platform summary assembled from existing platform queries."""
     require_public_snapshot_ready()
+    safe_slug = _public_entity_slug(slug)
     name = resolve_public_platform_slug(slug)
     if not name:
         raise HTTPException(status_code=404, detail="Platform not found")
@@ -4833,63 +5043,21 @@ def get_public_platform_page_snapshot(slug: str, response: Response):
     latest_award_by_cage: Dict[str, Dict[str, Any]] = {}
     if vendor_cages:
         try:
-            transaction_cols = get_duck_table_columns("v_transactions")
-            description_expr = (
-                "COALESCE(NULLIF(TRIM(CAST(base_award_description AS VARCHAR)), ''), "
-                "NULLIF(TRIM(CAST(description AS VARCHAR)), ''))"
-                if "base_award_description" in transaction_cols
-                else "NULLIF(TRIM(CAST(description AS VARCHAR)), '')"
-            )
             cage_placeholders = ",".join(["?"] * len(vendor_cages))
             latest_awards_df = duck_fetch_df(
                 f"""
-                WITH award_scopes AS (
-                    SELECT
-                        UPPER(TRIM(CAST(vendor_cage AS VARCHAR))) AS vendor_cage,
-                        contract_id,
-                        MAX_BY(
-                            {description_expr},
-                            COALESCE(TRY_CAST(action_date AS TIMESTAMP), TIMESTAMP '1900-01-01')
-                        ) AS award_description,
-                        MAX(TRY_CAST(action_date AS DATE)) AS award_date
-                    FROM v_transactions
-                    WHERE UPPER(TRIM(CAST(platform_family AS VARCHAR))) = ?
-                      AND UPPER(TRIM(CAST(vendor_cage AS VARCHAR))) IN ({cage_placeholders})
-                      AND {description_expr} IS NOT NULL
-                    GROUP BY
-                        UPPER(TRIM(CAST(vendor_cage AS VARCHAR))),
-                        contract_id
-                ),
-                distinct_scopes AS (
-                    SELECT
-                        vendor_cage,
-                        award_description,
-                        MAX_BY(contract_id, award_date) AS contract_id,
-                        MAX(award_date) AS award_date
-                    FROM award_scopes
-                    WHERE award_description IS NOT NULL
-                    GROUP BY vendor_cage, award_description
-                ),
-                ranked_scopes AS (
-                    SELECT
-                        *,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY vendor_cage
-                            ORDER BY award_date DESC NULLS LAST, contract_id
-                        ) AS scope_rank
-                    FROM distinct_scopes
-                )
                 SELECT
                     vendor_cage,
                     contract_id AS latest_award_id,
                     award_description AS latest_award_description,
                     award_date AS latest_award_date,
                     scope_rank
-                FROM ranked_scopes
-                WHERE scope_rank <= 3
+                FROM public_platform_award_scope
+                WHERE slug = ?
+                  AND vendor_cage IN ({cage_placeholders})
                 ORDER BY vendor_cage, scope_rank
                 """,
-                [str(name).strip().upper(), *vendor_cages],
+                [safe_slug, *vendor_cages],
             )
             for row in latest_awards_df.to_dict(orient="records"):
                 cage = str(row.get("vendor_cage") or "").strip().upper()
@@ -6025,20 +6193,36 @@ def build_public_company_snapshot(
     top_contract_id = None
     top_contract_value = 0.0
     try:
-        award_df = duck_fetch_df(
-            """
-            SELECT
-                contract_id,
-                base_award_description,
-                TRY_CAST(total_spend AS DOUBLE) AS total_spend
-            FROM v_contracts_rolled
-            WHERE UPPER(TRIM(CAST(vendor_cage AS VARCHAR))) = ?
-              AND NULLIF(TRIM(CAST(base_award_description AS VARCHAR)), '') IS NOT NULL
-            ORDER BY total_spend DESC NULLS LAST, contract_id
-            LIMIT 1
-            """,
-            [safe_cage],
-        )
+        try:
+            award_df = duck_fetch_df(
+                """
+                SELECT
+                    contract_id,
+                    base_award_description,
+                    total_spend
+                FROM public_company_top_award
+                WHERE cage = ?
+                LIMIT 1
+                """,
+                [safe_cage],
+            )
+        except Exception:
+            # Backwards-compatible fallback while an older release is still
+            # active or if a local developer has not rebuilt the projections.
+            award_df = duck_fetch_df(
+                """
+                SELECT
+                    contract_id,
+                    base_award_description,
+                    TRY_CAST(total_spend AS DOUBLE) AS total_spend
+                FROM v_contracts_rolled
+                WHERE UPPER(TRIM(CAST(vendor_cage AS VARCHAR))) = ?
+                  AND NULLIF(TRIM(CAST(base_award_description AS VARCHAR)), '') IS NOT NULL
+                ORDER BY total_spend DESC NULLS LAST, contract_id
+                LIMIT 1
+                """,
+                [safe_cage],
+            )
         if not award_df.empty:
             row = award_df.iloc[0]
             desc = str(row.get("base_award_description") or "").strip()
