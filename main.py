@@ -1124,6 +1124,11 @@ def build_public_intelligence_release(conn):
     cohort_size = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_COHORT_SIZE", "25000")))
     company_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_COMPANY_COHORT_SIZE", "18000")))
     platform_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_PLATFORM_COHORT_SIZE", "1000")))
+    platform_exclusions = {
+        value.strip().upper()
+        for value in os.getenv("PUBLIC_INTELLIGENCE_PLATFORM_EXCLUSIONS", "HEALTHCARE").split(",")
+        if value.strip()
+    }
 
     entries = []
 
@@ -1227,6 +1232,8 @@ def build_public_intelligence_release(conn):
         platform_by_slug = {}
         for row in platform_df.to_dict("records"):
             display_name = str(row.get("display_name") or "").strip()
+            if display_name.upper() in platform_exclusions:
+                continue
             slug = _public_entity_slug(display_name)
             if not slug:
                 continue
@@ -1281,12 +1288,13 @@ def build_public_intelligence_release(conn):
             ), profile AS (
                 SELECT
                     LPAD(TRIM(CAST(niin AS VARCHAR)), 9, '0') AS niin,
-                    MAX(NULLIF(REGEXP_REPLACE(CAST(nsn AS VARCHAR), '[^0-9]', '', 'g'), '')) AS nsn
+                    MAX(NULLIF(REGEXP_REPLACE(CAST(nsn AS VARCHAR), '[^0-9]', '', 'g'), '')) AS nsn,
+                    MAX(NULLIF(TRIM(CAST(item_name AS VARCHAR)), '')) AS item_name
                 FROM v_nsn_profile_lookup
                 WHERE niin IS NOT NULL
                 GROUP BY 1
             )
-            SELECT supplier.*, profile.nsn
+            SELECT supplier.*, profile.nsn, profile.item_name
             FROM supplier
             LEFT JOIN profile USING (niin)
         """).fetchdf()
@@ -1322,7 +1330,11 @@ def build_public_intelligence_release(conn):
                 "entity_type": "nsn",
                 "entity_id": entity_id,
                 "canonical_path": f"/intelligence/nsn/{entity_id}",
-                "display_name": f"NSN {entity_id}",
+                "display_name": (
+                    str(row.get("item_name") or "").strip()
+                    if str(row.get("item_name") or "").strip().upper() not in {"", "NAN", "NONE", "NULL"}
+                    else f"NSN {entity_id}"
+                ),
                 "richness_score": round(score, 4),
                 "decision_reasons": ",".join(reasons),
                 "last_modified": last_modified,
@@ -1384,6 +1396,7 @@ def build_public_intelligence_release(conn):
         "total_entries": len(entries),
         "counts": counts,
         "requested_cohort_size": cohort_size,
+        "platform_exclusions": sorted(platform_exclusions),
     }
     index = {
         f'{entry["entity_type"]}:{entry["entity_id"]}': entry
@@ -4687,12 +4700,15 @@ def get_public_intelligence_manifest(
     entity_type: Optional[str] = None,
     page: int = 1,
     page_size: int = 10000,
+    order: str = "entity_id",
 ):
     """Return a stable, paginated view of the current daily publication release."""
     require_public_snapshot_ready()
     allowed_types = {"cage_company", "platform", "nsn"}
     if entity_type and entity_type not in allowed_types:
         raise HTTPException(status_code=400, detail="Unsupported public intelligence entity type.")
+    if order not in {"entity_id", "richness"}:
+        raise HTTPException(status_code=400, detail="Unsupported public intelligence manifest order.")
 
     safe_page = max(1, int(page or 1))
     safe_page_size = max(1, min(int(page_size or 10000), 10000))
@@ -4700,7 +4716,16 @@ def get_public_intelligence_manifest(
     all_entries = list(GLOBAL_CACHE.get("public_intelligence_index", {}).values())
     if entity_type:
         all_entries = [entry for entry in all_entries if entry.get("entity_type") == entity_type]
-    all_entries.sort(key=lambda entry: (entry.get("entity_type", ""), entry.get("entity_id", "")))
+    if order == "richness":
+        all_entries.sort(
+            key=lambda entry: (
+                -float(entry.get("richness_score") or 0),
+                entry.get("entity_type", ""),
+                entry.get("entity_id", ""),
+            )
+        )
+    else:
+        all_entries.sort(key=lambda entry: (entry.get("entity_type", ""), entry.get("entity_id", "")))
     start = (safe_page - 1) * safe_page_size
     selected = all_entries[start:start + safe_page_size]
     public_entries = [
@@ -4708,6 +4733,7 @@ def get_public_intelligence_manifest(
             "entity_type": entry.get("entity_type"),
             "entity_id": entry.get("entity_id"),
             "canonical_path": entry.get("canonical_path"),
+            "display_name": entry.get("display_name"),
             "last_modified": entry.get("last_modified"),
             "richness_score": entry.get("richness_score"),
         }
@@ -4721,6 +4747,7 @@ def get_public_intelligence_manifest(
         "entity_type": entity_type,
         "page": safe_page,
         "page_size": safe_page_size,
+        "order": order,
         "total_entries": len(all_entries),
         "total_pages": math.ceil(len(all_entries) / safe_page_size) if all_entries else 0,
         "entries": public_entries,
