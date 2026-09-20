@@ -1124,9 +1124,14 @@ def build_public_intelligence_release(conn):
     cohort_size = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_COHORT_SIZE", "25000")))
     company_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_COMPANY_COHORT_SIZE", "18000")))
     platform_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_PLATFORM_COHORT_SIZE", "1000")))
+    award_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_AWARD_COHORT_SIZE", "2500")))
+    solicitation_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_SOLICITATION_COHORT_SIZE", "500")))
     platform_exclusions = {
         value.strip().upper()
-        for value in os.getenv("PUBLIC_INTELLIGENCE_PLATFORM_EXCLUSIONS", "HEALTHCARE").split(",")
+        for value in os.getenv(
+            "PUBLIC_INTELLIGENCE_PLATFORM_EXCLUSIONS",
+            "HEALTHCARE,COMMON MISSILE SYSTEMS,STATUS OF FORCES AGREEMENT,OTHER ENVIRONMENTAL PROGRAMS",
+        ).split(",")
         if value.strip()
     }
 
@@ -1266,6 +1271,120 @@ def build_public_intelligence_release(conn):
             key=lambda item: (-item["richness_score"], item["entity_id"]),
         )
         entries.extend(platform_candidates[:min(platform_cap, remaining)])
+
+    remaining = max(0, cohort_size - len(entries))
+    if remaining and award_cap:
+        award_df = conn.execute(
+            """
+            SELECT
+                TRIM(CAST(contract_id AS VARCHAR)) AS contract_id,
+                TRIM(CAST(vendor_name AS VARCHAR)) AS vendor_name,
+                UPPER(TRIM(CAST(vendor_cage AS VARCHAR))) AS vendor_cage,
+                COALESCE(
+                    NULLIF(TRIM(CAST(base_award_description AS VARCHAR)), ''),
+                    NULLIF(TRIM(CAST(description AS VARCHAR)), '')
+                ) AS award_description,
+                total_spend,
+                action_count,
+                TRY_CAST(last_action_date AS DATE) AS last_action_date,
+                TRIM(CAST(platform_family AS VARCHAR)) AS platform_family
+            FROM v_contracts_rolled
+            WHERE NULLIF(TRIM(CAST(contract_id AS VARCHAR)), '') IS NOT NULL
+              AND NULLIF(TRIM(CAST(vendor_name AS VARCHAR)), '') IS NOT NULL
+              AND LENGTH(COALESCE(
+                    NULLIF(TRIM(CAST(base_award_description AS VARCHAR)), ''),
+                    NULLIF(TRIM(CAST(description AS VARCHAR)), '')
+              )) >= 30
+              AND total_spend >= 1000000
+              AND action_count >= 2
+            ORDER BY total_spend DESC NULLS LAST, contract_id
+            LIMIT ?
+            """,
+            [max(award_cap * 2, award_cap)],
+        ).fetchdf()
+        award_candidates = []
+        seen_award_ids = set()
+        for row in award_df.to_dict("records"):
+            platform_name = str(row.get("platform_family") or "").strip()
+            if platform_name.upper() in platform_exclusions:
+                continue
+            contract_id = str(row.get("contract_id") or "").strip().upper()
+            vendor_name = str(row.get("vendor_name") or "").strip()
+            description = str(row.get("award_description") or "").strip()
+            if not contract_id or contract_id in seen_award_ids or not vendor_name or not description:
+                continue
+            seen_award_ids.add(contract_id)
+            total_spend = _safe_public_number(row.get("total_spend"))
+            action_count = int(_safe_public_number(row.get("action_count")))
+            score = math.log(total_spend + 1) * 4 + math.log(action_count + 1) * 3
+            award_candidates.append({
+                "entity_type": "contract_award",
+                "entity_id": contract_id,
+                "canonical_path": f"/intelligence/awards/{urllib.parse.quote(contract_id, safe='')}",
+                "display_name": f"{vendor_name} — {description[:120]}",
+                "richness_score": round(score, 4),
+                "decision_reasons": "material-obligation-value,multiple-actions,meaningful-description",
+                "last_modified": (
+                    row.get("last_action_date").isoformat()
+                    if hasattr(row.get("last_action_date"), "isoformat") and not pd.isna(row.get("last_action_date"))
+                    else generated_at[:10]
+                ),
+                "release_id": release_id,
+                "schema_version": schema_version,
+            })
+        award_candidates.sort(key=lambda item: (-item["richness_score"], item["entity_id"]))
+        entries.extend(award_candidates[:min(award_cap, remaining)])
+
+    remaining = max(0, cohort_size - len(entries))
+    if remaining and solicitation_cap:
+        solicitation_df = conn.execute(
+            """
+            SELECT
+                TRIM(CAST(id AS VARCHAR)) AS opportunity_id,
+                TRIM(CAST(sol_num AS VARCHAR)) AS solicitation_number,
+                TRIM(CAST(title AS VARCHAR)) AS title,
+                TRIM(CAST(agency AS VARCHAR)) AS agency,
+                TRY_CAST(SUBSTR(CAST(deadline AS VARCHAR), 1, 10) AS DATE) AS deadline_date,
+                LENGTH(TRIM(CAST(description AS VARCHAR))) AS description_length,
+                (CASE WHEN NULLIF(TRIM(CAST(sub_agency AS VARCHAR)), '') IS NOT NULL THEN 1 ELSE 0 END
+                 + CASE WHEN NULLIF(TRIM(CAST(naics AS VARCHAR)), '') IS NOT NULL THEN 1 ELSE 0 END
+                 + CASE WHEN NULLIF(TRIM(CAST(psc AS VARCHAR)), '') IS NOT NULL THEN 1 ELSE 0 END
+                 + CASE WHEN NULLIF(TRIM(CAST(set_aside_type AS VARCHAR)), '') IS NOT NULL THEN 1 ELSE 0 END) AS metadata_fields
+            FROM v_opportunities
+            WHERE NULLIF(TRIM(CAST(id AS VARCHAR)), '') IS NOT NULL
+              AND NULLIF(TRIM(CAST(sol_num AS VARCHAR)), '') IS NOT NULL
+              AND LENGTH(TRIM(CAST(title AS VARCHAR))) >= 12
+              AND LENGTH(TRIM(CAST(description AS VARCHAR))) >= 150
+              AND TRY_CAST(SUBSTR(CAST(deadline AS VARCHAR), 1, 10) AS DATE) >= CURRENT_DATE
+            ORDER BY metadata_fields DESC, description_length DESC, deadline_date ASC
+            LIMIT ?
+            """,
+            [solicitation_cap],
+        ).fetchdf()
+        solicitation_candidates = []
+        for row in solicitation_df.to_dict("records"):
+            opportunity_id = str(row.get("opportunity_id") or "").strip()
+            title = str(row.get("title") or "").strip()
+            sol_num = str(row.get("solicitation_number") or "").strip()
+            slug = _public_entity_slug(title)
+            if not opportunity_id or not title or not sol_num or not slug:
+                continue
+            description_length = int(_safe_public_number(row.get("description_length")))
+            metadata_fields = int(_safe_public_number(row.get("metadata_fields")))
+            score = math.log(description_length + 1) * 4 + metadata_fields * 5
+            solicitation_candidates.append({
+                "entity_type": "solicitation",
+                "entity_id": opportunity_id,
+                "canonical_path": f"/intelligence/solicitations/{urllib.parse.quote(opportunity_id, safe='')}/{slug}",
+                "display_name": title,
+                "richness_score": round(score, 4),
+                "decision_reasons": "active-opportunity,meaningful-description,procurement-metadata",
+                "last_modified": generated_at[:10],
+                "release_id": release_id,
+                "schema_version": schema_version,
+            })
+        solicitation_candidates.sort(key=lambda item: (-item["richness_score"], item["entity_id"]))
+        entries.extend(solicitation_candidates[:min(solicitation_cap, remaining)])
 
     remaining = max(0, cohort_size - len(entries))
     if remaining:
@@ -1483,10 +1602,161 @@ def build_public_intelligence_release(conn):
         WHERE scope_rank <= 3
     """)
 
+    conn.execute("""
+        CREATE OR REPLACE TABLE public_award_profile_next AS
+        WITH released AS (
+            SELECT entity_id
+            FROM public_intelligence_manifest_next
+            WHERE entity_type = 'contract_award'
+        ), released_solicitations AS (
+            SELECT entity_id
+            FROM public_intelligence_manifest_next
+            WHERE entity_type = 'solicitation'
+        ), solicitation_map AS (
+            SELECT
+                UPPER(TRIM(CAST(o.sol_num AS VARCHAR))) AS solicitation_number,
+                MAX(CAST(o.id AS VARCHAR)) AS public_solicitation_id
+            FROM v_opportunities o
+            INNER JOIN released_solicitations r
+                ON CAST(o.id AS VARCHAR) = r.entity_id
+            WHERE NULLIF(TRIM(CAST(o.sol_num AS VARCHAR)), '') IS NOT NULL
+            GROUP BY 1
+        ), matched AS (
+            SELECT a.*
+            FROM v_contracts_rolled a
+            INNER JOIN released r
+                ON UPPER(TRIM(CAST(a.contract_id AS VARCHAR))) = r.entity_id
+        )
+        SELECT
+            UPPER(TRIM(CAST(a.contract_id AS VARCHAR))) AS contract_id,
+            CAST(a.vendor_name AS VARCHAR) AS vendor_name,
+            UPPER(TRIM(CAST(a.vendor_cage AS VARCHAR))) AS vendor_cage,
+            CAST(a.sub_agency AS VARCHAR) AS sub_agency,
+            CAST(a.parent_agency AS VARCHAR) AS parent_agency,
+            COALESCE(
+                NULLIF(TRIM(CAST(a.base_award_description AS VARCHAR)), ''),
+                NULLIF(TRIM(CAST(a.description AS VARCHAR)), '')
+            ) AS base_award_description,
+            NULLIF(TRIM(CAST(a.latest_action_description AS VARCHAR)), '') AS latest_action_description,
+            NULLIF(TRIM(CAST(a.platform_family AS VARCHAR)), '') AS platform_family,
+            CAST(a.city AS VARCHAR) AS city,
+            CAST(a.state AS VARCHAR) AS state,
+            CAST(a.country AS VARCHAR) AS country,
+            CAST(a.naics_code AS VARCHAR) AS naics_code,
+            CAST(a.naics_description AS VARCHAR) AS naics_description,
+            CAST(a.psc AS VARCHAR) AS psc,
+            CAST(a.pricing_type AS VARCHAR) AS pricing_type,
+            CAST(a.competition_type AS VARCHAR) AS competition_type,
+            CAST(a.offers_count AS VARCHAR) AS offers_count,
+            CAST(a.set_aside_type AS VARCHAR) AS set_aside_type,
+            NULLIF(TRIM(CAST(a.solicitation_id AS VARCHAR)), '') AS solicitation_id,
+            sm.public_solicitation_id,
+            TRY_CAST(a.total_spend AS DOUBLE) AS total_spend,
+            TRY_CAST(a.action_count AS BIGINT) AS action_count,
+            TRY_CAST(a.start_date AS DATE) AS start_date,
+            TRY_CAST(a.last_action_date AS DATE) AS last_action_date,
+            TRY_CAST(a.first_year AS INTEGER) AS first_year,
+            TRY_CAST(a.year AS INTEGER) AS last_year,
+            TRY_CAST(a.obligations_fy2019 AS DOUBLE) AS obligations_fy2019,
+            TRY_CAST(a.obligations_fy2020 AS DOUBLE) AS obligations_fy2020,
+            TRY_CAST(a.obligations_fy2021 AS DOUBLE) AS obligations_fy2021,
+            TRY_CAST(a.obligations_fy2022 AS DOUBLE) AS obligations_fy2022,
+            TRY_CAST(a.obligations_fy2023 AS DOUBLE) AS obligations_fy2023,
+            TRY_CAST(a.obligations_fy2024 AS DOUBLE) AS obligations_fy2024,
+            TRY_CAST(a.obligations_fy2025 AS DOUBLE) AS obligations_fy2025,
+            TRY_CAST(a.obligations_fy2026 AS DOUBLE) AS obligations_fy2026
+        FROM matched a
+        LEFT JOIN solicitation_map sm
+            ON UPPER(TRIM(CAST(a.solicitation_id AS VARCHAR))) = sm.solicitation_number
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY UPPER(TRIM(CAST(a.contract_id AS VARCHAR)))
+            ORDER BY TRY_CAST(a.total_spend AS DOUBLE) DESC NULLS LAST
+        ) = 1
+    """)
+
+    conn.execute("""
+        CREATE OR REPLACE TABLE public_solicitation_profile_next AS
+        SELECT
+            CAST(o.id AS VARCHAR) AS opportunity_id,
+            CAST(o.sol_num AS VARCHAR) AS solicitation_number,
+            CAST(o.title AS VARCHAR) AS title,
+            CAST(o.agency AS VARCHAR) AS agency,
+            CAST(o.sub_agency AS VARCHAR) AS sub_agency,
+            CAST(o.deadline AS VARCHAR) AS deadline,
+            CAST(o.set_aside_type AS VARCHAR) AS set_aside_type,
+            CAST(o.naics AS VARCHAR) AS naics,
+            CAST(o.psc AS VARCHAR) AS psc,
+            SUBSTR(TRIM(CAST(o.description AS VARCHAR)), 1, 5000) AS description,
+            CAST(o.source_system AS VARCHAR) AS source_system,
+            CAST(o.state AS VARCHAR) AS state,
+            CAST(o.url AS VARCHAR) AS source_url
+        FROM v_opportunities o
+        INNER JOIN public_intelligence_manifest_next r
+            ON CAST(o.id AS VARCHAR) = r.entity_id
+           AND r.entity_type = 'solicitation'
+    """)
+
+    conn.execute("""
+        CREATE OR REPLACE TABLE public_intelligence_search_next AS
+        WITH released_nsns AS (
+            SELECT
+                entity_id,
+                RIGHT(REGEXP_REPLACE(entity_id, '[^0-9]', '', 'g'), 9) AS niin
+            FROM public_intelligence_manifest_next
+            WHERE entity_type = 'nsn'
+        ), nsn_aliases AS (
+            SELECT
+                m.entity_id,
+                STRING_AGG(DISTINCT NULLIF(TRIM(CAST(r.part_number AS VARCHAR)), ''), ' ') AS part_numbers
+            FROM released_nsns m
+            INNER JOIN v_nsn_cage_reference r
+                ON LPAD(TRIM(CAST(r.niin AS VARCHAR)), 9, '0') = m.niin
+            GROUP BY m.entity_id
+        ), award_aliases AS (
+            SELECT
+                contract_id,
+                MAX_BY(vendor_name, total_spend) AS vendor_name,
+                MAX_BY(vendor_cage, total_spend) AS vendor_cage,
+                MAX_BY(base_award_description, total_spend) AS base_award_description,
+                MAX_BY(solicitation_id, total_spend) AS solicitation_id
+            FROM public_award_profile_next
+            GROUP BY contract_id
+        )
+        SELECT
+            m.entity_type,
+            m.entity_id,
+            m.canonical_path,
+            m.display_name,
+            m.richness_score,
+            LOWER(CONCAT_WS(
+                ' ',
+                m.entity_id,
+                m.display_name,
+                n.part_numbers,
+                a.vendor_name,
+                a.vendor_cage,
+                a.base_award_description,
+                a.solicitation_id,
+                s.solicitation_number,
+                s.agency,
+                s.sub_agency
+            )) AS search_text
+        FROM public_intelligence_manifest_next m
+        LEFT JOIN nsn_aliases n
+            ON m.entity_type = 'nsn' AND m.entity_id = n.entity_id
+        LEFT JOIN award_aliases a
+            ON m.entity_type = 'contract_award' AND m.entity_id = a.contract_id
+        LEFT JOIN public_solicitation_profile_next s
+            ON m.entity_type = 'solicitation' AND m.entity_id = s.opportunity_id
+    """)
+
     projection_tables = {
         "public_intelligence_manifest_next": "public_intelligence_manifest.parquet",
         "public_company_top_award_next": "public_company_top_award.parquet",
         "public_platform_award_scope_next": "public_platform_award_scope.parquet",
+        "public_award_profile_next": "public_award_profile.parquet",
+        "public_solicitation_profile_next": "public_solicitation_profile.parquet",
+        "public_intelligence_search_next": "public_intelligence_search.parquet",
     }
     pending_projection_files = []
     for table_name, filename in projection_tables.items():
@@ -1505,9 +1775,15 @@ def build_public_intelligence_release(conn):
         conn.execute("DROP TABLE IF EXISTS public_intelligence_manifest")
         conn.execute("DROP TABLE IF EXISTS public_company_top_award")
         conn.execute("DROP TABLE IF EXISTS public_platform_award_scope")
+        conn.execute("DROP TABLE IF EXISTS public_award_profile")
+        conn.execute("DROP TABLE IF EXISTS public_solicitation_profile")
+        conn.execute("DROP TABLE IF EXISTS public_intelligence_search")
         conn.execute("ALTER TABLE public_intelligence_manifest_next RENAME TO public_intelligence_manifest")
         conn.execute("ALTER TABLE public_company_top_award_next RENAME TO public_company_top_award")
         conn.execute("ALTER TABLE public_platform_award_scope_next RENAME TO public_platform_award_scope")
+        conn.execute("ALTER TABLE public_award_profile_next RENAME TO public_award_profile")
+        conn.execute("ALTER TABLE public_solicitation_profile_next RENAME TO public_solicitation_profile")
+        conn.execute("ALTER TABLE public_intelligence_search_next RENAME TO public_intelligence_search")
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -1527,6 +1803,14 @@ def build_public_intelligence_release(conn):
             CREATE INDEX IF NOT EXISTS idx_public_platform_award_scope_entity
             ON public_platform_award_scope(slug, vendor_cage)
         """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_public_award_profile_id
+            ON public_award_profile(contract_id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_public_solicitation_profile_id
+            ON public_solicitation_profile(opportunity_id)
+        """)
     except Exception:
         logger.warning("Could not create public intelligence projection indexes", exc_info=True)
 
@@ -1537,6 +1821,12 @@ def build_public_intelligence_release(conn):
         ),
         "platform_award_scope_rows": int(
             conn.execute("SELECT COUNT(*) FROM public_platform_award_scope").fetchone()[0]
+        ),
+        "award_profile_rows": int(
+            conn.execute("SELECT COUNT(*) FROM public_award_profile").fetchone()[0]
+        ),
+        "solicitation_profile_rows": int(
+            conn.execute("SELECT COUNT(*) FROM public_solicitation_profile").fetchone()[0]
         ),
         "storage_bytes": sum(
             final_path.stat().st_size
@@ -4870,7 +5160,7 @@ def get_public_intelligence_manifest(
 ):
     """Return a stable, paginated view of the current daily publication release."""
     require_public_snapshot_ready()
-    allowed_types = {"cage_company", "platform", "nsn"}
+    allowed_types = {"cage_company", "platform", "nsn", "contract_award", "solicitation"}
     if entity_type and entity_type not in allowed_types:
         raise HTTPException(status_code=400, detail="Unsupported public intelligence entity type.")
     if order not in {"entity_id", "richness"}:
@@ -4942,9 +5232,8 @@ def search_public_intelligence_manifest(
                 canonical_path,
                 display_name,
                 richness_score
-            FROM public_intelligence_manifest
-            WHERE STRPOS(LOWER(display_name), LOWER(?)) > 0
-               OR STRPOS(LOWER(entity_id), LOWER(?)) > 0
+            FROM public_intelligence_search
+            WHERE STRPOS(search_text, LOWER(?)) > 0
             ORDER BY
                 CASE WHEN LOWER(entity_id) = LOWER(?) THEN 0 ELSE 1 END,
                 CASE WHEN STARTS_WITH(LOWER(display_name), LOWER(?)) THEN 0 ELSE 1 END,
@@ -4952,7 +5241,7 @@ def search_public_intelligence_manifest(
                 entity_id
             LIMIT ?
             """,
-            [clean_query, clean_query, clean_query, clean_query, safe_limit],
+            [clean_query, clean_query, clean_query, safe_limit],
         )
         entries = df.to_dict(orient="records") if not df.empty else []
     except Exception:
@@ -4961,6 +5250,161 @@ def search_public_intelligence_manifest(
 
     response.headers["Cache-Control"] = "public, max-age=60, s-maxage=300"
     return {"query": clean_query, "entries": entries}
+
+
+@app.get("/api/public/intelligence/awards/{contract_id}")
+def get_public_award_page_snapshot(contract_id: str, response: Response):
+    """Public award-level representation; actions remain available in the platform."""
+    require_public_snapshot_ready()
+    safe_id = sanitize(contract_id).strip().upper()
+    if not safe_id:
+        raise HTTPException(status_code=404, detail="Contract award not found")
+
+    row = None
+    try:
+        df = duck_fetch_df(
+            "SELECT * FROM public_award_profile WHERE contract_id = ? ORDER BY total_spend DESC NULLS LAST LIMIT 1",
+            [safe_id],
+        )
+        if not df.empty:
+            row = df_sanitize_for_json(df).to_dict(orient="records")[0]
+    except Exception:
+        logger.warning("Public award projection unavailable for %s", safe_id, exc_info=True)
+
+    if row is None:
+        legacy = get_award_profile(safe_id)
+        if not legacy:
+            raise HTTPException(status_code=404, detail="Contract award not found")
+        row = {
+            **legacy,
+            "base_award_description": legacy.get("description"),
+            "parent_agency": legacy.get("agency"),
+            "action_count": 0,
+            "first_year": None,
+            "last_year": None,
+            "public_solicitation_id": None,
+        }
+
+    annual_obligations = []
+    for year in range(2019, 2027):
+        value = _safe_public_number(row.get(f"obligations_fy{year}"))
+        if value != 0:
+            annual_obligations.append({"year": year, "value": value})
+
+    snapshot = {
+        "found": True,
+        "entity_type": "contract_award",
+        "entity_id": safe_id,
+        "contract_id": safe_id,
+        "vendor_name": _clean_optional_value(row.get("vendor_name")),
+        "vendor_cage": _clean_optional_value(row.get("vendor_cage")),
+        "agency": _clean_optional_value(row.get("sub_agency")) or _clean_optional_value(row.get("parent_agency")) or _clean_optional_value(row.get("agency")),
+        "parent_agency": _clean_optional_value(row.get("parent_agency")),
+        "description": _clean_optional_value(row.get("base_award_description")) or _clean_optional_value(row.get("description")),
+        "latest_action_description": _clean_optional_value(row.get("latest_action_description")),
+        "platform_family": _clean_optional_value(row.get("platform_family")),
+        "location": ", ".join(filter(None, [
+            _clean_optional_value(row.get("city")),
+            _clean_optional_value(row.get("state")),
+            _clean_optional_value(row.get("country")),
+        ])) or None,
+        "naics_code": _clean_optional_value(row.get("naics_code")),
+        "naics_description": _clean_optional_value(row.get("naics_description")),
+        "psc": _clean_optional_value(row.get("psc")),
+        "pricing_type": _clean_optional_value(row.get("pricing_type")),
+        "competition_type": _clean_optional_value(row.get("competition_type")),
+        "offers_count": _clean_optional_value(row.get("offers_count")),
+        "set_aside_type": _clean_optional_value(row.get("set_aside_type")),
+        "solicitation_id": _clean_optional_value(row.get("solicitation_id")),
+        "public_solicitation_id": _clean_optional_value(row.get("public_solicitation_id")),
+        "total_obligations": _safe_public_number(row.get("total_spend")),
+        "action_count": int(_safe_public_number(row.get("action_count"))),
+        "start_date": _clean_optional_value(row.get("start_date")),
+        "last_action_date": _clean_optional_value(row.get("last_action_date")),
+        "first_year": int(_safe_public_number(row.get("first_year"))) or None,
+        "last_year": int(_safe_public_number(row.get("last_year"))) or None,
+        "annual_obligations": annual_obligations,
+    }
+    attach_publication_metadata(snapshot, "contract_award", safe_id)
+    response.headers["Cache-Control"] = (
+        "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
+    )
+    return snapshot
+
+
+@app.get("/api/public/intelligence/solicitations/{opportunity_id}")
+def get_public_solicitation_page_snapshot(opportunity_id: str, response: Response):
+    """Public representation of a current defense opportunity."""
+    require_public_snapshot_ready()
+    safe_id = str(opportunity_id or "").strip()
+    if not safe_id or len(safe_id) > 128 or not re.fullmatch(r"[A-Za-z0-9_-]+", safe_id):
+        raise HTTPException(status_code=404, detail="Solicitation not found")
+
+    row = None
+    try:
+        df = duck_fetch_df(
+            "SELECT * FROM public_solicitation_profile WHERE opportunity_id = ? LIMIT 1",
+            [safe_id],
+        )
+        if not df.empty:
+            row = df_sanitize_for_json(df).to_dict(orient="records")[0]
+    except Exception:
+        logger.warning("Public solicitation projection unavailable for %s", safe_id, exc_info=True)
+
+    if row is None:
+        try:
+            df = duck_fetch_df(
+                """
+                SELECT
+                    CAST(id AS VARCHAR) AS opportunity_id,
+                    CAST(sol_num AS VARCHAR) AS solicitation_number,
+                    title,
+                    agency,
+                    sub_agency,
+                    deadline,
+                    set_aside_type,
+                    CAST(naics AS VARCHAR) AS naics,
+                    psc,
+                    SUBSTR(TRIM(CAST(description AS VARCHAR)), 1, 5000) AS description,
+                    source_system,
+                    state,
+                    url AS source_url
+                FROM v_opportunities
+                WHERE CAST(id AS VARCHAR) = ?
+                LIMIT 1
+                """,
+                [safe_id],
+            )
+            if not df.empty:
+                row = df_sanitize_for_json(df).to_dict(orient="records")[0]
+        except Exception:
+            logger.exception("Public solicitation lookup failed for %s", safe_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Solicitation not found")
+
+    snapshot = {
+        "found": True,
+        "entity_type": "solicitation",
+        "entity_id": safe_id,
+        "opportunity_id": safe_id,
+        "solicitation_number": _clean_optional_value(row.get("solicitation_number")),
+        "title": _clean_optional_value(row.get("title")) or "Defense solicitation",
+        "agency": _clean_optional_value(row.get("agency")),
+        "sub_agency": _clean_optional_value(row.get("sub_agency")),
+        "deadline": _clean_optional_value(row.get("deadline")),
+        "set_aside_type": _clean_optional_value(row.get("set_aside_type")),
+        "naics": _clean_optional_value(row.get("naics")),
+        "psc": _clean_optional_value(row.get("psc")),
+        "description": _clean_optional_value(row.get("description")),
+        "source_system": _clean_optional_value(row.get("source_system")),
+        "state": _clean_optional_value(row.get("state")),
+        "source_url": _clean_optional_value(row.get("source_url")),
+    }
+    attach_publication_metadata(snapshot, "solicitation", safe_id)
+    response.headers["Cache-Control"] = (
+        "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
+    )
+    return snapshot
 
 
 @app.get("/api/public/intelligence/platforms/{slug}")
@@ -8491,14 +8935,19 @@ def build_public_nsn_snapshot(
 
     approved_candidates = []
     supplier_candidates = []
+    part_numbers = []
     for cage, supplier in supplier_map.items():
+        supplier_part_numbers = [
+            value.strip()
+            for value in str(supplier.get("part_numbers") or "").split(",")
+            if value.strip() and value.strip() != "—"
+        ]
+        for value in supplier_part_numbers:
+            if value not in part_numbers:
+                part_numbers.append(value)
         vendor = str(supplier.get("vendor") or "").strip()
         part_number = next(
-            (
-                value.strip()
-                for value in str(supplier.get("part_numbers") or "").split(",")
-                if value.strip() and value.strip() != "—"
-            ),
+            iter(supplier_part_numbers),
             None,
         )
         is_active_authorized = bool(supplier.get("is_active_authorized_source"))
@@ -8607,6 +9056,8 @@ def build_public_nsn_snapshot(
         "niin": safe_niin,
         "fsc_code": fsc_code or None,
         "associated_part_number_count": part_number_count,
+        "part_numbers": part_numbers[:8],
+        "part_numbers_hidden": max(0, part_number_count - min(8, len(part_numbers))),
         "associated_supplier_site_count": supplier_count,
         "approved_source": approved_source,
         "approved_sources_hidden": max(0, len(approved_candidates) - (1 if approved_source else 0)),
