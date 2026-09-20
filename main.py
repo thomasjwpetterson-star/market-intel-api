@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from contextlib import asynccontextmanager
@@ -14,6 +14,7 @@ import threading
 import time
 from functools import lru_cache 
 import re
+import unicodedata
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -69,7 +70,9 @@ GLOBAL_CACHE = {
     "last_loaded": 0,
     "cage_name_map": {},
     "location_map": {},
-    "naics_map": {}
+    "naics_map": {},
+    "public_intelligence_release": None,
+    "public_intelligence_index": {},
 }
 
 # NOTE: global_data is no longer needed as we use DuckDB for heavy data
@@ -505,6 +508,17 @@ def ready_check():
         "geo_ok": bool(s["geo_ok"]),
         "profiles_ok": bool(s["profiles_ok"]),
     }
+
+
+def require_public_snapshot_ready() -> None:
+    """Never let a crawler or server cache a partially loaded public entity."""
+    if get_readiness_state()["ready"]:
+        return
+    raise HTTPException(
+        status_code=503,
+        detail="Public intelligence data is refreshing. Retry shortly.",
+        headers={"Cache-Control": "no-store", "Retry-After": "5"},
+    )
 
 
 @app.get("/")
@@ -1088,6 +1102,309 @@ def _calc_child_kpis_from_kpis_disk(cage_code: str, years: Optional[List[int]] =
         return {"has_kpis": False}
 
 
+def _safe_public_number(value, default=0.0):
+    """Convert DuckDB/pandas numeric values without leaking NaN into JSON."""
+    try:
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def build_public_intelligence_release(conn):
+    """Build the deterministic daily publication cohort and atomically publish it.
+
+    The manifest is deliberately separate from page availability: every supported
+    entity may have a public URL, while only entities in this release are eligible
+    for indexing and sitemap inclusion.
+    """
+    generated_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    release_id = "public-intelligence-" + datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    schema_version = 1
+    cohort_size = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_COHORT_SIZE", "25000")))
+    company_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_COMPANY_COHORT_SIZE", "18000")))
+    platform_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_PLATFORM_COHORT_SIZE", "1000")))
+
+    entries = []
+
+    company_df = conn.execute("""
+        WITH company AS (
+            SELECT
+                UPPER(TRIM(CAST(cage_code AS VARCHAR))) AS entity_id,
+                MAX_BY(TRIM(CAST(vendor_name AS VARCHAR)), TRY_CAST(total_spend AS DOUBLE)) AS display_name,
+                SUM(COALESCE(TRY_CAST(total_spend AS DOUBLE), 0)) AS observed_value,
+                SUM(COALESCE(TRY_CAST(contract_count AS BIGINT), 0)) AS contract_count,
+                COUNT(DISTINCT NULLIF(TRIM(CAST(platform_family AS VARCHAR)), '')) AS platform_count,
+                COUNT(DISTINCT NULLIF(TRIM(CAST(psc_description AS VARCHAR)), '')) AS capability_count,
+                COUNT(DISTINCT NULLIF(TRIM(CAST(sub_agency AS VARCHAR)), '')) AS customer_count,
+                MIN(TRY_CAST(year AS INTEGER)) AS first_year,
+                MAX(TRY_CAST(year AS INTEGER)) AS last_year
+            FROM v_summary
+            WHERE cage_code IS NOT NULL
+              AND TRIM(CAST(cage_code AS VARCHAR)) <> ''
+              AND vendor_name IS NOT NULL
+              AND TRIM(CAST(vendor_name AS VARCHAR)) <> ''
+            GROUP BY 1
+        ), geo AS (
+            SELECT
+                UPPER(TRIM(CAST(cage_code AS VARCHAR))) AS entity_id,
+                MAX(NULLIF(TRIM(CAST(city AS VARCHAR)), '')) AS city,
+                MAX(NULLIF(TRIM(CAST(state AS VARCHAR)), '')) AS state
+            FROM v_geo
+            WHERE cage_code IS NOT NULL
+            GROUP BY 1
+        )
+        SELECT company.*, geo.city, geo.state
+        FROM company
+        LEFT JOIN geo USING (entity_id)
+        WHERE company.observed_value > 0
+          AND company.contract_count > 0
+          AND (
+                CASE WHEN company.platform_count > 0 THEN 1 ELSE 0 END
+              + CASE WHEN company.capability_count > 0 THEN 1 ELSE 0 END
+              + CASE WHEN company.customer_count > 0 THEN 1 ELSE 0 END
+          ) >= 2
+    """).fetchdf()
+
+    company_candidates = []
+    for row in company_df.to_dict("records"):
+        entity_id = str(row.get("entity_id") or "").strip().upper()
+        display_name = str(row.get("display_name") or "").strip()
+        if not entity_id or not display_name:
+            continue
+        observed_value = _safe_public_number(row.get("observed_value"))
+        contract_count = int(_safe_public_number(row.get("contract_count")))
+        platform_count = int(_safe_public_number(row.get("platform_count")))
+        capability_count = int(_safe_public_number(row.get("capability_count")))
+        customer_count = int(_safe_public_number(row.get("customer_count")))
+        slug_parts = [display_name, row.get("city"), row.get("state")]
+        slug = _public_entity_slug(" ".join(str(part) for part in slug_parts if part))
+        if not slug:
+            continue
+        score = (
+            math.log10(observed_value + 1) * 8
+            + min(math.log1p(contract_count), 12) * 3
+            + min(platform_count, 10) * 2
+            + min(capability_count, 10)
+            + min(customer_count, 10)
+        )
+        reasons = ["prime-award-history", "customer-relationships", "observed-capabilities"]
+        if platform_count:
+            reasons.append("platform-mappings")
+        company_candidates.append({
+            "entity_type": "cage_company",
+            "entity_id": entity_id,
+            "canonical_path": f"/intelligence/companies/{entity_id}/{slug}",
+            "display_name": display_name,
+            "richness_score": round(score, 4),
+            "decision_reasons": ",".join(reasons),
+            "last_modified": generated_at[:10],
+            "release_id": release_id,
+            "schema_version": schema_version,
+        })
+    company_candidates.sort(key=lambda item: (-item["richness_score"], item["entity_id"]))
+    entries.extend(company_candidates[:min(company_cap, cohort_size)])
+
+    remaining = max(0, cohort_size - len(entries))
+    if remaining and platform_cap:
+        platform_df = conn.execute("""
+            SELECT
+                TRIM(CAST(platform_family AS VARCHAR)) AS display_name,
+                SUM(COALESCE(TRY_CAST(total_spend AS DOUBLE), 0)) AS observed_value,
+                SUM(COALESCE(TRY_CAST(contract_count AS BIGINT), 0)) AS contract_count,
+                COUNT(DISTINCT NULLIF(UPPER(TRIM(CAST(cage_code AS VARCHAR))), '')) AS contractor_count,
+                COUNT(DISTINCT NULLIF(TRIM(CAST(sub_agency AS VARCHAR)), '')) AS customer_count,
+                MAX(TRY_CAST(year AS INTEGER)) AS last_year
+            FROM v_summary
+            WHERE platform_family IS NOT NULL
+              AND TRIM(CAST(platform_family AS VARCHAR)) <> ''
+            GROUP BY 1
+            HAVING SUM(COALESCE(TRY_CAST(total_spend AS DOUBLE), 0)) > 0
+               AND SUM(COALESCE(TRY_CAST(contract_count AS BIGINT), 0)) > 0
+               AND COUNT(DISTINCT NULLIF(UPPER(TRIM(CAST(cage_code AS VARCHAR))), '')) > 0
+               AND COUNT(DISTINCT NULLIF(TRIM(CAST(sub_agency AS VARCHAR)), '')) > 0
+        """).fetchdf()
+        platform_by_slug = {}
+        for row in platform_df.to_dict("records"):
+            display_name = str(row.get("display_name") or "").strip()
+            slug = _public_entity_slug(display_name)
+            if not slug:
+                continue
+            observed_value = _safe_public_number(row.get("observed_value"))
+            contract_count = int(_safe_public_number(row.get("contract_count")))
+            contractor_count = int(_safe_public_number(row.get("contractor_count")))
+            customer_count = int(_safe_public_number(row.get("customer_count")))
+            score = (
+                math.log10(observed_value + 1) * 8
+                + min(math.log1p(contract_count), 12) * 3
+                + min(contractor_count, 20)
+                + min(customer_count, 10)
+            )
+            candidate = {
+                "entity_type": "platform",
+                "entity_id": slug,
+                "canonical_path": f"/intelligence/platforms/{slug}",
+                "display_name": display_name,
+                "richness_score": round(score, 4),
+                "decision_reasons": "prime-award-history,contractor-network,customer-relationships",
+                "last_modified": generated_at[:10],
+                "release_id": release_id,
+                "schema_version": schema_version,
+            }
+            previous = platform_by_slug.get(slug)
+            if previous is None or candidate["richness_score"] > previous["richness_score"]:
+                platform_by_slug[slug] = candidate
+        platform_candidates = sorted(
+            platform_by_slug.values(),
+            key=lambda item: (-item["richness_score"], item["entity_id"]),
+        )
+        entries.extend(platform_candidates[:min(platform_cap, remaining)])
+
+    remaining = max(0, cohort_size - len(entries))
+    if remaining:
+        nsn_df = conn.execute("""
+            WITH supplier AS (
+                SELECT
+                    LPAD(TRIM(CAST(niin AS VARCHAR)), 9, '0') AS niin,
+                    SUM(COALESCE(TRY_CAST(total_revenue AS DOUBLE), 0)) AS observed_value,
+                    COUNT(DISTINCT NULLIF(TRIM(CAST(contract_id AS VARCHAR)), '')) AS contract_count,
+                    COUNT(DISTINCT NULLIF(UPPER(TRIM(CAST(cage AS VARCHAR))), '')) AS supplier_count,
+                    MAX(COALESCE(TRY_CAST(platform_count AS INTEGER), 0)) AS platform_count,
+                    MAX(TRY_CAST(last_sold AS DATE)) AS last_activity
+                FROM v_nsn_supplier_lookup
+                WHERE niin IS NOT NULL
+                  AND TRIM(CAST(niin AS VARCHAR)) <> ''
+                GROUP BY 1
+                HAVING SUM(COALESCE(TRY_CAST(total_revenue AS DOUBLE), 0)) > 0
+                   AND COUNT(DISTINCT NULLIF(TRIM(CAST(contract_id AS VARCHAR)), '')) > 0
+                   AND COUNT(DISTINCT NULLIF(UPPER(TRIM(CAST(cage AS VARCHAR))), '')) > 0
+            ), profile AS (
+                SELECT
+                    LPAD(TRIM(CAST(niin AS VARCHAR)), 9, '0') AS niin,
+                    MAX(NULLIF(REGEXP_REPLACE(CAST(nsn AS VARCHAR), '[^0-9]', '', 'g'), '')) AS nsn
+                FROM v_nsn_profile_lookup
+                WHERE niin IS NOT NULL
+                GROUP BY 1
+            )
+            SELECT supplier.*, profile.nsn
+            FROM supplier
+            LEFT JOIN profile USING (niin)
+        """).fetchdf()
+        nsn_candidates = []
+        seen_nsn_ids = set()
+        for row in nsn_df.to_dict("records"):
+            niin = re.sub(r"\D", "", str(row.get("niin") or ""))[-9:].zfill(9)
+            nsn_digits = re.sub(r"\D", "", str(row.get("nsn") or ""))
+            entity_id = nsn_digits if len(nsn_digits) == 13 else niin
+            if len(entity_id) not in (9, 13) or entity_id in seen_nsn_ids:
+                continue
+            seen_nsn_ids.add(entity_id)
+            observed_value = _safe_public_number(row.get("observed_value"))
+            contract_count = int(_safe_public_number(row.get("contract_count")))
+            supplier_count = int(_safe_public_number(row.get("supplier_count")))
+            platform_count = int(_safe_public_number(row.get("platform_count")))
+            score = (
+                math.log10(observed_value + 1) * 8
+                + min(math.log1p(contract_count), 12) * 3
+                + min(supplier_count, 15)
+                + min(platform_count, 10) * 2
+            )
+            last_activity = row.get("last_activity")
+            last_modified = (
+                last_activity.isoformat()
+                if hasattr(last_activity, "isoformat") and not pd.isna(last_activity)
+                else generated_at[:10]
+            )
+            reasons = ["procurement-history", "supplier-network"]
+            if platform_count:
+                reasons.append("platform-mappings")
+            nsn_candidates.append({
+                "entity_type": "nsn",
+                "entity_id": entity_id,
+                "canonical_path": f"/intelligence/nsn/{entity_id}",
+                "display_name": f"NSN {entity_id}",
+                "richness_score": round(score, 4),
+                "decision_reasons": ",".join(reasons),
+                "last_modified": last_modified,
+                "release_id": release_id,
+                "schema_version": schema_version,
+            })
+        nsn_candidates.sort(key=lambda item: (-item["richness_score"], item["entity_id"]))
+        entries.extend(nsn_candidates[:remaining])
+
+    manifest_columns = [
+        "entity_type", "entity_id", "canonical_path", "display_name",
+        "richness_score", "decision_reasons", "last_modified", "release_id",
+        "schema_version",
+    ]
+    manifest_df = pd.DataFrame(entries, columns=manifest_columns)
+    conn.register("public_intelligence_manifest_release_df", manifest_df)
+    try:
+        conn.execute("DROP TABLE IF EXISTS public_intelligence_manifest_next")
+        conn.execute("""
+            CREATE TABLE public_intelligence_manifest_next AS
+            SELECT * FROM public_intelligence_manifest_release_df
+        """)
+    finally:
+        conn.unregister("public_intelligence_manifest_release_df")
+
+    manifest_path = LOCAL_CACHE_DIR / "public_intelligence_manifest.parquet"
+    temp_manifest_path = LOCAL_CACHE_DIR / "public_intelligence_manifest.parquet.tmp"
+    escaped_temp_path = str(temp_manifest_path).replace("'", "''")
+    if temp_manifest_path.exists():
+        temp_manifest_path.unlink()
+    conn.execute(
+        f"COPY public_intelligence_manifest_next TO '{escaped_temp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+    )
+    os.replace(temp_manifest_path, manifest_path)
+
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        conn.execute("DROP TABLE IF EXISTS public_intelligence_manifest")
+        conn.execute("ALTER TABLE public_intelligence_manifest_next RENAME TO public_intelligence_manifest")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    try:
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_public_intelligence_manifest_entity
+            ON public_intelligence_manifest(entity_type, entity_id)
+        """)
+    except Exception:
+        logger.warning("Could not create public intelligence manifest index", exc_info=True)
+
+    counts = {}
+    for entry in entries:
+        counts[entry["entity_type"]] = counts.get(entry["entity_type"], 0) + 1
+    release = {
+        "release_id": release_id,
+        "generated_at": generated_at,
+        "schema_version": schema_version,
+        "total_entries": len(entries),
+        "counts": counts,
+        "requested_cohort_size": cohort_size,
+    }
+    index = {
+        f'{entry["entity_type"]}:{entry["entity_id"]}': entry
+        for entry in entries
+    }
+    return {"release": release, "index": index}
+
+
+def get_public_intelligence_manifest_entry(entity_type: str, entity_id: str):
+    return GLOBAL_CACHE.get("public_intelligence_index", {}).get(f"{entity_type}:{entity_id}")
+
+
+def attach_publication_metadata(payload: dict, entity_type: str, entity_id: str):
+    entry = get_public_intelligence_manifest_entry(entity_type, entity_id)
+    release = GLOBAL_CACHE.get("public_intelligence_release") or {}
+    payload["seo_indexable"] = entry is not None
+    payload["public_release_id"] = release.get("release_id")
+    payload["public_last_modified"] = entry.get("last_modified") if entry else None
+    return payload
+
+
 def reload_all_data():
     # Lock is the single source of truth for in-progress reloads
     if not RELOAD_LOCK.acquire(blocking=False):
@@ -1120,7 +1437,9 @@ def reload_all_data():
             "profiles_df": pd.DataFrame(),
             "risk_df": pd.DataFrame(),
             "kpis_path": None,
-            "df_opportunities": pd.DataFrame()
+            "df_opportunities": pd.DataFrame(),
+            "public_intelligence_release": None,
+            "public_intelligence_index": {},
         }
 
         # 2. DOWNLOAD FILES
@@ -1799,9 +2118,27 @@ def reload_all_data():
             logger.exception("Search index build failed")
             new_global_cache["search_index"] = []
 
+        # 9. BUILD THE VERSIONED PUBLICATION MANIFEST
+        # This is the single release-owned source for indexability and sitemap
+        # membership. Public routes remain available outside this cohort, but
+        # those pages are noindex and never submitted to a sitemap.
+        try:
+            public_release = build_public_intelligence_release(conn)
+            new_global_cache["public_intelligence_release"] = public_release["release"]
+            new_global_cache["public_intelligence_index"] = public_release["index"]
+            logger.info(
+                "PUBLIC INTELLIGENCE RELEASE READY release_id=%s entries=%d",
+                public_release["release"]["release_id"],
+                public_release["release"]["total_entries"],
+            )
+        except Exception:
+            logger.exception("Public intelligence release build failed; all entity pages will remain noindex")
+            new_global_cache["public_intelligence_release"] = None
+            new_global_cache["public_intelligence_index"] = {}
+
         gc.collect()
 
-        # 9. ATOMIC POINTER SWAP
+        # 10. ATOMIC POINTER SWAP
         new_global_cache["is_loading"] = False
         new_global_cache["last_loaded"] = time.time()
 
@@ -1814,6 +2151,12 @@ def reload_all_data():
             idx_count = conn.execute("SELECT COUNT(*) FROM search_index;").fetchone()[0]
         except Exception:
             pass
+
+        # A request can arrive while the first atomic load is still in progress.
+        # Do not retain a temporary platform miss after the new views are live.
+        platform_resolver = globals().get("resolve_public_platform_slug")
+        if platform_resolver is not None and hasattr(platform_resolver, "cache_clear"):
+            platform_resolver.cache_clear()
 
         logger.info("RELOAD COMPLETE (Atomic Swap). search_index=%d (Native)", idx_count)
         
@@ -4297,6 +4640,284 @@ def get_platform_profile(
     }
 
 
+def _public_entity_slug(value: str) -> str:
+    """Create the URL-safe identifier used by public intelligence pages."""
+    ascii_value = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "-", ascii_value.lower()).strip("-")
+
+
+@lru_cache(maxsize=512)
+def resolve_public_platform_slug(slug: str) -> Optional[str]:
+    """Resolve a public platform slug to the most active matching canonical label."""
+    safe_slug = _public_entity_slug(slug)
+    if not safe_slug:
+        return None
+
+    try:
+        df = duck_fetch_df(
+            """
+            SELECT
+                platform_family,
+                SUM(TRY_CAST(total_spend AS DOUBLE)) AS observed_value
+            FROM v_summary
+            WHERE platform_family IS NOT NULL
+              AND TRIM(CAST(platform_family AS VARCHAR)) <> ''
+            GROUP BY platform_family
+            ORDER BY observed_value DESC NULLS LAST
+            LIMIT 2000
+            """
+        )
+    except Exception:
+        logger.exception("Unable to resolve public platform slug=%s", safe_slug)
+        return None
+
+    matches = []
+    for row in df.to_dict(orient="records"):
+        name = str(row.get("platform_family") or "").strip()
+        if name and _public_entity_slug(name) == safe_slug:
+            matches.append((float(row.get("observed_value") or 0.0), name))
+    if not matches:
+        return None
+    return max(matches, key=lambda item: item[0])[1]
+
+
+@app.get("/api/public/intelligence/manifest")
+def get_public_intelligence_manifest(
+    response: Response,
+    entity_type: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 10000,
+):
+    """Return a stable, paginated view of the current daily publication release."""
+    require_public_snapshot_ready()
+    allowed_types = {"cage_company", "platform", "nsn"}
+    if entity_type and entity_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Unsupported public intelligence entity type.")
+
+    safe_page = max(1, int(page or 1))
+    safe_page_size = max(1, min(int(page_size or 10000), 10000))
+    release = GLOBAL_CACHE.get("public_intelligence_release")
+    all_entries = list(GLOBAL_CACHE.get("public_intelligence_index", {}).values())
+    if entity_type:
+        all_entries = [entry for entry in all_entries if entry.get("entity_type") == entity_type]
+    all_entries.sort(key=lambda entry: (entry.get("entity_type", ""), entry.get("entity_id", "")))
+    start = (safe_page - 1) * safe_page_size
+    selected = all_entries[start:start + safe_page_size]
+    public_entries = [
+        {
+            "entity_type": entry.get("entity_type"),
+            "entity_id": entry.get("entity_id"),
+            "canonical_path": entry.get("canonical_path"),
+            "last_modified": entry.get("last_modified"),
+            "richness_score": entry.get("richness_score"),
+        }
+        for entry in selected
+    ]
+    response.headers["Cache-Control"] = (
+        "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
+    )
+    return {
+        "release": release,
+        "entity_type": entity_type,
+        "page": safe_page,
+        "page_size": safe_page_size,
+        "total_entries": len(all_entries),
+        "total_pages": math.ceil(len(all_entries) / safe_page_size) if all_entries else 0,
+        "entries": public_entries,
+    }
+
+
+@app.get("/api/public/intelligence/platforms/{slug}")
+def get_public_platform_page_snapshot(slug: str, response: Response):
+    """Stable public platform summary assembled from existing platform queries."""
+    require_public_snapshot_ready()
+    name = resolve_public_platform_slug(slug)
+    if not name:
+        raise HTTPException(status_code=404, detail="Platform not found")
+
+    profile = get_platform_profile(name=name, years=None, agency=None, domain=None)
+    if not profile or not profile.get("found"):
+        raise HTTPException(status_code=404, detail="Platform not found")
+
+    parts = get_platform_parts(
+        name=name,
+        include_zero=False,
+        limit=4,
+        offset=0,
+        min_spend=0,
+        years=None,
+        agency=None,
+    )
+    parts_count = get_platform_parts_count(name=name, years=None, agency=None, domain=None, platform=None)
+    awards = get_platform_awards(
+        name=name,
+        limit=4,
+        offset=0,
+        years=None,
+        agency=None,
+        threshold=0.5,
+    )
+
+    observed_period = None
+    try:
+        period_df = duck_fetch_df(
+            """
+            SELECT
+                MIN(TRY_CAST(year AS INTEGER)) AS first_year,
+                MAX(TRY_CAST(year AS INTEGER)) AS last_year
+            FROM v_summary
+            WHERE UPPER(TRIM(CAST(platform_family AS VARCHAR))) = ?
+            """,
+            [str(name).strip().upper()],
+        )
+        if not period_df.empty:
+            first_year = period_df.iloc[0].get("first_year")
+            last_year = period_df.iloc[0].get("last_year")
+            if pd.notna(first_year) and pd.notna(last_year):
+                observed_period = f"FY{int(first_year)}–FY{int(last_year)}"
+    except Exception:
+        logger.exception("Public platform observed-period lookup failed for platform=%s", name)
+
+    # Historical parent-name changes can produce several labels for one CAGE.
+    # Public navigation is CAGE-based, so collapse those labels into one row.
+    vendor_by_cage: Dict[str, Dict[str, Any]] = {}
+    for vendor in list(profile.get("top_vendors") or []):
+        cage = str(vendor.get("cage") or "").strip().upper()
+        vendor_name = str(vendor.get("name") or "Unknown contractor").strip()
+        key = cage or vendor_name.upper()
+        total = float(vendor.get("total") or 0.0)
+        current = vendor_by_cage.get(key)
+        if current is None:
+            vendor_by_cage[key] = {"name": vendor_name, "cage": cage, "total": total, "largest_row": total}
+            continue
+        current["total"] += total
+        if total > current["largest_row"]:
+            current["name"] = vendor_name
+            current["largest_row"] = total
+
+    top_vendors = sorted(vendor_by_cage.values(), key=lambda item: item["total"], reverse=True)[:6]
+    for vendor in top_vendors:
+        vendor.pop("largest_row", None)
+
+    # Add one factual scope line to each displayed contractor without issuing
+    # a query per card. This is evidence from the contractor's most recently
+    # observed award mapped to the platform, not a generated role description.
+    vendor_cages = [vendor["cage"] for vendor in top_vendors if vendor.get("cage")]
+    latest_award_by_cage: Dict[str, Dict[str, Any]] = {}
+    if vendor_cages:
+        try:
+            transaction_cols = get_duck_table_columns("v_transactions")
+            description_expr = (
+                "COALESCE(NULLIF(TRIM(CAST(base_award_description AS VARCHAR)), ''), "
+                "NULLIF(TRIM(CAST(description AS VARCHAR)), ''))"
+                if "base_award_description" in transaction_cols
+                else "NULLIF(TRIM(CAST(description AS VARCHAR)), '')"
+            )
+            cage_placeholders = ",".join(["?"] * len(vendor_cages))
+            latest_awards_df = duck_fetch_df(
+                f"""
+                WITH award_scopes AS (
+                    SELECT
+                        UPPER(TRIM(CAST(vendor_cage AS VARCHAR))) AS vendor_cage,
+                        contract_id,
+                        MAX_BY(
+                            {description_expr},
+                            COALESCE(TRY_CAST(action_date AS TIMESTAMP), TIMESTAMP '1900-01-01')
+                        ) AS award_description,
+                        MAX(TRY_CAST(action_date AS DATE)) AS award_date
+                    FROM v_transactions
+                    WHERE UPPER(TRIM(CAST(platform_family AS VARCHAR))) = ?
+                      AND UPPER(TRIM(CAST(vendor_cage AS VARCHAR))) IN ({cage_placeholders})
+                      AND {description_expr} IS NOT NULL
+                    GROUP BY
+                        UPPER(TRIM(CAST(vendor_cage AS VARCHAR))),
+                        contract_id
+                ),
+                distinct_scopes AS (
+                    SELECT
+                        vendor_cage,
+                        award_description,
+                        MAX_BY(contract_id, award_date) AS contract_id,
+                        MAX(award_date) AS award_date
+                    FROM award_scopes
+                    WHERE award_description IS NOT NULL
+                    GROUP BY vendor_cage, award_description
+                ),
+                ranked_scopes AS (
+                    SELECT
+                        *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY vendor_cage
+                            ORDER BY award_date DESC NULLS LAST, contract_id
+                        ) AS scope_rank
+                    FROM distinct_scopes
+                )
+                SELECT
+                    vendor_cage,
+                    contract_id AS latest_award_id,
+                    award_description AS latest_award_description,
+                    award_date AS latest_award_date,
+                    scope_rank
+                FROM ranked_scopes
+                WHERE scope_rank <= 3
+                ORDER BY vendor_cage, scope_rank
+                """,
+                [str(name).strip().upper(), *vendor_cages],
+            )
+            for row in latest_awards_df.to_dict(orient="records"):
+                cage = str(row.get("vendor_cage") or "").strip().upper()
+                description = _clean_optional_value(row.get("latest_award_description"))
+                if cage and description:
+                    scope = {
+                        "description": description,
+                        "contract_id": _clean_optional_value(row.get("latest_award_id")),
+                        "date": (
+                            str(row.get("latest_award_date"))
+                            if _clean_optional_value(row.get("latest_award_date"))
+                            else None
+                        ),
+                    }
+                    contractor_awards = latest_award_by_cage.setdefault(cage, {"recent_award_scopes": []})
+                    contractor_awards["recent_award_scopes"].append(scope)
+                    if int(row.get("scope_rank") or 0) == 1:
+                        contractor_awards.update({
+                            "latest_award_description": description,
+                            "latest_award_id": scope["contract_id"],
+                            "latest_award_date": scope["date"],
+                        })
+        except Exception:
+            logger.exception("Public platform contractor-scope lookup failed for platform=%s", name)
+
+    for vendor in top_vendors:
+        vendor.update(latest_award_by_cage.get(vendor.get("cage"), {}))
+
+    total_parts = int((parts_count or {}).get("count") or len(parts))
+    snapshot = {
+        "found": True,
+        "entity_type": "platform",
+        "entity_id": _public_entity_slug(profile.get("name") or name),
+        "slug": _public_entity_slug(profile.get("name") or name),
+        "name": profile.get("name") or name,
+        "time_period": observed_period or "Observed period unavailable",
+        "total_obligations": float(profile.get("total_obligations") or 0.0),
+        "contract_count": int(profile.get("contract_count") or 0),
+        "contractor_count": int(profile.get("contractor_count") or 0),
+        "top_vendors": top_vendors,
+        "vendors_hidden": max(0, int(profile.get("contractor_count") or 0) - len(top_vendors)),
+        "top_agencies": list(profile.get("top_agencies") or [])[:5],
+        "parts": parts,
+        "parts_hidden": max(0, total_parts - len(parts)),
+        "part_count": total_parts,
+        "recent_awards": awards,
+        "awards_hidden": max(0, int(profile.get("contract_count") or 0) - len(awards)),
+    }
+    attach_publication_metadata(snapshot, "platform", snapshot["entity_id"])
+    response.headers["Cache-Control"] = (
+        "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
+    )
+    return snapshot
+
+
 @app.get("/api/platform/shared-exposure")
 def get_platform_shared_exposure(
     name: str,
@@ -5168,7 +5789,20 @@ def get_public_company_teaser(
     """
     # Expose the remaining lookups to the frontend via a custom header
     response.headers["X-RateLimit-Remaining"] = str(remaining_lookups)
-    
+
+    return build_public_company_snapshot(
+        cage=cage,
+        name=name,
+        remaining_lookups=remaining_lookups,
+    )
+
+
+def build_public_company_snapshot(
+    cage: Optional[str] = None,
+    name: Optional[str] = None,
+    remaining_lookups: Optional[int] = None,
+):
+    """Build the deterministic public company payload shared by tools and pages."""
     full_profile = get_company_profile(cage=cage, name=name, years=None)
     if not full_profile or not full_profile.get("found"):
         return {"found": False, "message": "Entity not found in the defense intelligence database."}
@@ -5184,10 +5818,30 @@ def get_public_company_teaser(
     net_data = get_company_network(name=safe_name, cage=safe_cage if not is_parent else None, years=None, limit=100)
     primes_list = net_data.get("primes", []) if isinstance(net_data, dict) else []
     subs_list = net_data.get("subs", []) if isinstance(net_data, dict) else []
-    
-    sub_spend = sum(float(p.get("total", 0) or 0) for p in primes_list)
-    
-    # Smart Toggle for Prime vs Sub
+
+    def summarize_network(rows):
+        if not rows:
+            return [], 0, 0.0
+        network_total = float(rows[0].get("network_total") or 0.0)
+        if network_total <= 0:
+            network_total = sum(float(row.get("total") or 0.0) for row in rows)
+        partner_count = int(rows[0].get("partner_count") or len(rows))
+        visible = []
+        if network_total > 0:
+            for row in rows[:3]:
+                share = int(round((float(row.get("total") or 0.0) / network_total) * 100))
+                if share > 0:
+                    visible.append({
+                        "name": row.get("name"),
+                        "cage": row.get("cage"),
+                        "share": share,
+                    })
+        return visible, max(0, partner_count - len(visible)), network_total
+
+    prime_customers, prime_customers_hidden, sub_spend = summarize_network(primes_list)
+    subcontractors, subcontractors_hidden, downstream_subcontract_value = summarize_network(subs_list)
+
+    # Keep the legacy single-network fields for the existing lookup-tool contract.
     is_primarily_prime = prime_spend >= sub_spend
     
     if is_primarily_prime and len(subs_list) > 0:
@@ -5203,7 +5857,9 @@ def get_public_company_teaser(
         network_type = "Network Partners"
         target_network = []
 
-    target_total = sum(float(x.get("total", 0) or 0) for x in target_network)
+    target_total = float(target_network[0].get("network_total") or 0.0) if target_network else 0.0
+    if target_total <= 0:
+        target_total = sum(float(x.get("total", 0) or 0) for x in target_network)
     network_partners = []
     top_customer_dependency = 0
     
@@ -5211,10 +5867,11 @@ def get_public_company_teaser(
         for i, p in enumerate(target_network[:3]):
             pct = int(round((float(p.get("total", 0) or 0) / target_total) * 100))
             if pct > 0:
-                network_partners.append({"name": p.get("name"), "share": pct})
+                network_partners.append({"name": p.get("name"), "cage": p.get("cage"), "share": pct})
                 if i == 0: top_customer_dependency = pct
-                
-    network_hidden = max(0, len(target_network) - 3)
+
+    target_partner_count = int(target_network[0].get("partner_count") or len(target_network)) if target_network else 0
+    network_hidden = max(0, target_partner_count - len(network_partners))
 
     # Platform, Capabilities, and NSNs via DuckDB
     filters = {"cage": safe_cage} if not is_parent else {"parent": safe_name}
@@ -5222,14 +5879,32 @@ def get_public_company_teaser(
     
     top_platforms = []
     plats_hidden = 0
+    mapped_platform_value = 0.0
+    platform_mapping_coverage = 0.0
     top_plat_name = None
     top_plat_dependency = 0
+    government_customers = []
+    government_customers_hidden = 0
+    government_customer_coverage = 0.0
     top_capabilities = []
     caps_hidden = 0
     top_nsns = []
     nsns_hidden = 0
+    observed_period = None
 
     try:
+        period_df = query_summary_df(
+            where_sql,
+            params,
+            select_sql="MIN(TRY_CAST(year AS INTEGER)) AS first_year, MAX(TRY_CAST(year AS INTEGER)) AS last_year",
+            limit=0,
+        )
+        if not period_df.empty:
+            first_year = period_df.iloc[0].get("first_year")
+            last_year = period_df.iloc[0].get("last_year")
+            if pd.notna(first_year) and pd.notna(last_year):
+                observed_period = f"FY{int(first_year)}–FY{int(last_year)}"
+
         # A. Fetch Platforms
         plats_df = query_summary_df(
             where_sql, params, select_sql="platform_family, sum(total_spend) as spend",
@@ -5238,18 +5913,48 @@ def get_public_company_teaser(
         if not plats_df.empty and "platform_family" in plats_df.columns:
             valid_plats = plats_df.dropna(subset=['platform_family'])
             valid_plats = valid_plats[valid_plats['platform_family'].astype(str).str.strip() != ""]
-            plat_total = valid_plats['spend'].sum()
+            valid_plats = valid_plats[pd.to_numeric(valid_plats['spend'], errors='coerce').fillna(0) > 0]
+            mapped_platform_value = float(valid_plats['spend'].sum())
+            if prime_spend > 0:
+                platform_mapping_coverage = (mapped_platform_value / prime_spend) * 100
             
-            if plat_total > 0:
+            if prime_spend > 0:
                 top_plat_name = valid_plats.iloc[0]['platform_family']
-                for i, row in valid_plats.head(3).iterrows():
-                    pct = int(round((row['spend'] / plat_total) * 100))
+                for position, (_, row) in enumerate(valid_plats.head(3).iterrows()):
+                    # A platform's importance is measured against all observed
+                    # prime obligation value for the facility, not merely the
+                    # subset of obligations that has been mapped to a platform.
+                    pct = (float(row['spend']) / prime_spend) * 100
                     if pct > 0: 
                         top_platforms.append({"name": row['platform_family'], "share": pct})
-                        if i == 0: top_plat_dependency = pct
+                        if position == 0: top_plat_dependency = pct
             plats_hidden = max(0, len(valid_plats) - 3)
 
-        # B. Fetch Top Capabilities (By PSC)
+        # B. Fetch direct government customers for prime obligations. These
+        # are deliberately separate from upstream prime customers, which come
+        # from subcontract awards received by this facility.
+        agencies_df = query_summary_df(
+            where_sql, params, select_sql="sub_agency, sum(total_spend) as spend",
+            group_by_sql="sub_agency", order_by_sql="spend DESC", limit=5000
+        )
+        if not agencies_df.empty and "sub_agency" in agencies_df.columns:
+            valid_agencies = agencies_df.dropna(subset=['sub_agency'])
+            valid_agencies = valid_agencies[valid_agencies['sub_agency'].astype(str).str.strip() != ""]
+            valid_agencies = valid_agencies[pd.to_numeric(valid_agencies['spend'], errors='coerce').fillna(0) > 0]
+            mapped_government_value = float(valid_agencies['spend'].sum())
+            if prime_spend > 0:
+                government_customer_coverage = (mapped_government_value / prime_spend) * 100
+                for _, row in valid_agencies.head(3).iterrows():
+                    pct = (float(row['spend']) / prime_spend) * 100
+                    if pct > 0:
+                        government_customers.append({
+                            "name": str(row['sub_agency']).title(),
+                            "cage": None,
+                            "share": pct,
+                        })
+            government_customers_hidden = max(0, len(valid_agencies) - 3)
+
+        # C. Fetch Top Capabilities (By PSC)
         caps_df = query_summary_df(
             where_sql, params, select_sql="psc_description, sum(total_spend) as spend",
             group_by_sql="psc_description", order_by_sql="spend DESC", limit=15
@@ -5261,7 +5966,7 @@ def get_public_company_teaser(
                 top_capabilities.append(str(row['psc_description']).title())
             caps_hidden = max(0, len(valid_caps) - 3)
             
-        # C. Fetch Top NSNs (Components)
+        # D. Fetch Top NSNs (Components)
         txn_nsn_where = "vendor_cage = ? AND nsn IS NOT NULL AND nsn != ''" if not is_parent else "upper(vendor_name) LIKE ? AND nsn IS NOT NULL AND nsn != ''"
         txn_nsn_params = [safe_cage] if not is_parent else [f"%{safe_name.upper()}%"]
         nsn_df = duck_fetch_df(f"""
@@ -5287,25 +5992,35 @@ def get_public_company_teaser(
     except Exception as e:
         logger.error(f"Teaser Aggregate Query Error: {e}")
 
-    # Fetch a Single Top Contract for the "Aha" moment
+    # Fetch the largest rolled-up award and its base-award description. This is
+    # deliberately award-level, not the description on the largest action.
     top_contract_desc = None
+    top_contract_id = None
+    top_contract_value = 0.0
     try:
-        txn_where, txn_params = ("vendor_cage = ?", [safe_cage]) if not is_parent else ("upper(vendor_name) LIKE ?", [f"%{safe_name.upper()}%"])
-        txn_df = get_subset_from_disk(
-            "transactions.parquet",
-            where_clause=txn_where, params=tuple(txn_params),
-            columns_sql="description, spend_amount", order_by_sql="spend_amount DESC", limit=1
+        award_df = duck_fetch_df(
+            """
+            SELECT
+                contract_id,
+                base_award_description,
+                TRY_CAST(total_spend AS DOUBLE) AS total_spend
+            FROM v_contracts_rolled
+            WHERE UPPER(TRIM(CAST(vendor_cage AS VARCHAR))) = ?
+              AND NULLIF(TRIM(CAST(base_award_description AS VARCHAR)), '') IS NOT NULL
+            ORDER BY total_spend DESC NULLS LAST, contract_id
+            LIMIT 1
+            """,
+            [safe_cage],
         )
-        if not txn_df.empty:
-            raw_desc = str(txn_df.iloc[0]['description']).strip()
-            if '!' in raw_desc:
-                raw_desc = raw_desc.split('!', 1)[-1]
-                
-            desc = raw_desc.strip()
-            if desc and len(desc) > 3 and desc.upper() != "NAN":
+        if not award_df.empty:
+            row = award_df.iloc[0]
+            desc = str(row.get("base_award_description") or "").strip()
+            if desc and desc.upper() not in {"NAN", "NONE", "NULL"}:
                 top_contract_desc = desc
+                top_contract_id = _clean_optional_value(row.get("contract_id"))
+                top_contract_value = float(row.get("total_spend") or 0.0)
     except Exception:
-        pass
+        logger.exception("Public company base-award lookup failed for CAGE=%s", safe_cage)
 
     # ==========================================
     # AGGRESSIVE STRATEGIC SIGNAL GENERATION
@@ -5329,9 +6044,9 @@ def get_public_company_teaser(
 
     # 2. Platform Dependency
     if top_platforms and top_plat_dependency >= 50:
-        insight_parts.append(f"High structural dependency on the {top_plat_name} program (~{top_plat_dependency}% of mapped platform revenue).")
+        insight_parts.append(f"High structural dependency on the {top_plat_name} platform (~{top_plat_dependency:.1f}% of observed prime obligations).")
     elif top_platforms:
-        insight_parts.append(f"Portfolio is diversified across multiple defense programs, led by {top_plat_name}.")
+        insight_parts.append(f"Portfolio is diversified across multiple defense platforms, led by {top_plat_name}.")
 
     # 3. Network Dependency (Only flag if the network bucket is a meaningful part of their overall business)
     if network_partners and top_customer_dependency >= 40:
@@ -5347,29 +6062,105 @@ def get_public_company_teaser(
 
     insight = " ".join(insight_parts)
 
+    def compact_usd(value):
+        amount = float(value or 0.0)
+        if abs(amount) >= 1_000_000_000:
+            return f"${amount / 1_000_000_000:.1f}B"
+        if abs(amount) >= 1_000_000:
+            return f"${amount / 1_000_000:.1f}M"
+        if abs(amount) >= 1_000:
+            return f"${amount / 1_000:.1f}K"
+        return f"${amount:,.0f}"
+
+    location = f"{full_profile.get('city', '')}, {full_profile.get('state', '')}".strip(', ')
+    summary_parts = [
+        f"{safe_name} is a defense supplier facility identified by CAGE {safe_cage}"
+        + (f" in {location}" if location else "")
+        + "."
+    ]
+    if prime_spend > 0 or sub_spend > 0:
+        summary_parts.append(
+            f"Mimir observed {compact_usd(prime_spend)} in prime obligations and {compact_usd(sub_spend)} in tracked subcontract awards to this facility"
+            + (f" across {observed_period}" if observed_period else "")
+            + "."
+        )
+    if top_capabilities:
+        capability_names = "; ".join(top_capabilities[:2])
+        summary_parts.append(f"Observed award classifications include {capability_names}.")
+    if top_platforms:
+        platform_names = ", ".join(str(item["name"]) for item in top_platforms[:2])
+        coverage_text = (
+            "less than 0.1%"
+            if 0 < platform_mapping_coverage < 0.1
+            else f"{platform_mapping_coverage:.1f}%"
+        )
+        summary_parts.append(
+            f"Platform mappings cover {coverage_text} of observed prime obligation value and include {platform_names}."
+        )
+    public_description = " ".join(summary_parts)
+
     return {
         "found": True,
         "name": safe_name,
         "cage": safe_cage,
         "is_parent": is_parent,
-        "location": f"{full_profile.get('city', '')}, {full_profile.get('state', '')}".strip(', '),
-        "time_period": "FY18–Present",
+        "location": location,
+        "time_period": observed_period or "Observed period unavailable",
+        "description": public_description,
         "prime_exposure": prime_spend,
         "sub_exposure": sub_spend,
+        "downstream_subcontract_value": downstream_subcontract_value,
         "total_exposure": total_exposure,
         "top_capabilities": top_capabilities,
         "capabilities_hidden": caps_hidden,
         "top_platforms": top_platforms,
         "platforms_hidden": plats_hidden,
+        "mapped_platform_value": mapped_platform_value,
+        "platform_mapping_coverage": platform_mapping_coverage,
         "network_type": network_type,
         "network_partners": network_partners,
         "network_hidden": network_hidden,
+        "prime_customers": prime_customers,
+        "prime_customers_hidden": prime_customers_hidden,
+        "government_customers": government_customers,
+        "government_customers_hidden": government_customers_hidden,
+        "government_customer_coverage": government_customer_coverage,
+        "subcontractors": subcontractors,
+        "subcontractors_hidden": subcontractors_hidden,
+        "platform_share_basis": "Share of all observed prime obligation value",
+        "prime_customer_share_basis": "Share of all tracked subcontract award value received",
+        "government_customer_share_basis": "Share of all observed prime obligation value",
+        "subcontractor_share_basis": "Share of tracked subcontract awards issued",
         "top_nsns": top_nsns,
         "nsns_hidden": nsns_hidden,
         "insight": insight,
         "top_contract_desc": top_contract_desc,
+        "top_contract_id": top_contract_id,
+        "top_contract_value": top_contract_value,
         "remaining_lookups": remaining_lookups 
     }
+
+
+@app.get("/api/public/intelligence/companies/{cage}")
+def get_public_company_page_snapshot(cage: str, response: Response):
+    """Stable, cacheable DTO for a canonical public CAGE entity page."""
+    require_public_snapshot_ready()
+    clean_cage = str(cage or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{5}", clean_cage):
+        raise HTTPException(status_code=400, detail="Enter a valid five-character CAGE code.")
+
+    payload = build_public_company_snapshot(cage=clean_cage)
+    if not payload.get("found"):
+        raise HTTPException(status_code=404, detail=payload.get("message") or "Company not found.")
+
+    payload.pop("remaining_lookups", None)
+    payload["entity_type"] = "cage_company"
+    payload["entity_id"] = clean_cage
+    attach_publication_metadata(payload, "cage_company", clean_cage)
+    response.headers["Cache-Control"] = (
+        "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
+    )
+    return payload
 # ==========================================
 #        COMPANY INTELLIGENCE
 # ==========================================
@@ -5657,6 +6448,8 @@ def get_company_network(
             {cage_col} as cage,
             arbitrary(platform_family) as platform, 
             sum(subaward_value) as total,
+            sum(sum(subaward_value)) OVER () as network_total,
+            count(*) OVER () as partner_count,
             sum(subaward_value_raw) as total_raw,
             count(subaward_value) as included_reports,
             count(*) as source_reports,
@@ -7429,22 +8222,17 @@ def get_nsn_contracts(
         return []
 
 
-@app.get("/api/public/nsn/teaser")
-def get_public_nsn_teaser(
-    request: Request,
-    response: Response,
+def build_public_nsn_snapshot(
     nsn: str,
+    remaining_lookups: Optional[int] = None,
 ):
-    """A deliberately limited public preview of the full NSN workspace."""
+    """Build the shared, deterministic public representation of an NSN/NIIN."""
     clean = re.sub(r"[^0-9]", "", str(nsn or ""))
     if len(clean) not in {8, 9, 13}:
         raise HTTPException(status_code=400, detail="Enter a valid 13-digit NSN or 9-digit NIIN.")
 
-    remaining_lookups = check_nsn_rate_limit(request)
     safe_niin = clean.zfill(9) if len(clean) < 9 else clean[-9:]
     input_fsc = clean[:4] if len(clean) == 13 else ""
-    if remaining_lookups is not None:
-        response.headers["X-RateLimit-Remaining"] = str(remaining_lookups)
 
     profile = get_nsn_profile(
         nsn=clean,
@@ -7491,27 +8279,47 @@ def get_public_nsn_teaser(
     part_number_count = int(ref_profile.get("reference_part_count") or 0)
 
     approved_candidates = []
+    supplier_candidates = []
     for cage, supplier in supplier_map.items():
-        if not supplier.get("is_active_authorized_source"):
-            continue
         vendor = str(supplier.get("vendor") or "").strip()
-        approved_candidates.append(
-            {
-                "cage": cage,
-                "vendor": vendor if vendor and vendor.upper() not in {"NAN", "NONE", "NULL"} else f"CAGE {cage}",
-                "part_number": next(
-                    (
-                        value.strip()
-                        for value in str(supplier.get("part_numbers") or "").split(",")
-                        if value.strip() and value.strip() != "—"
-                    ),
-                    None,
-                ),
-            }
+        part_number = next(
+            (
+                value.strip()
+                for value in str(supplier.get("part_numbers") or "").split(",")
+                if value.strip() and value.strip() != "—"
+            ),
+            None,
         )
+        is_active_authorized = bool(supplier.get("is_active_authorized_source"))
+        is_procurement_authorized = bool(supplier.get("is_procurement_authorized"))
+        supplier_item = {
+            "cage": cage,
+            "vendor": vendor if vendor and vendor.upper() not in {"NAN", "NONE", "NULL"} else f"CAGE {cage}",
+            "part_number": part_number,
+            "status": (
+                "Active DLA-authorised source"
+                if is_active_authorized
+                else "DLA procurement-authorised; CAGE not active"
+                if is_procurement_authorized
+                else str(supplier.get("supplier_status") or "Observed or reference-linked supplier")
+            ),
+            "is_active_authorized_source": is_active_authorized,
+            "is_procurement_authorized": is_procurement_authorized,
+        }
+        supplier_candidates.append(supplier_item)
+        if is_active_authorized:
+            approved_candidates.append(supplier_item)
 
     approved_candidates.sort(key=lambda item: (item["vendor"].startswith("CAGE "), item["vendor"]))
     approved_source = approved_candidates[0] if approved_candidates else None
+    supplier_candidates.sort(
+        key=lambda item: (
+            not item["is_active_authorized_source"],
+            not item["is_procurement_authorized"],
+            item["vendor"].startswith("CAGE "),
+            item["vendor"],
+        )
+    )
 
     platform_rows = get_nsn_platforms(
         nsn=clean,
@@ -7591,6 +8399,8 @@ def get_public_nsn_teaser(
         "associated_supplier_site_count": supplier_count,
         "approved_source": approved_source,
         "approved_sources_hidden": max(0, len(approved_candidates) - (1 if approved_source else 0)),
+        "supplier_sites": supplier_candidates[:2],
+        "supplier_sites_hidden": max(0, len(supplier_candidates) - min(2, len(supplier_candidates))),
         "platforms": platform_names[:2],
         "platforms_hidden": max(0, platform_count - min(2, len(platform_names))),
         "is_multi_platform": platform_count > 1,
@@ -7599,6 +8409,40 @@ def get_public_nsn_teaser(
         "contracts_hidden": max(0, observed_contract_count - len(recent_contracts)),
         "remaining_lookups": remaining_lookups,
     }
+
+
+@app.get("/api/public/nsn/teaser")
+def get_public_nsn_teaser(
+    request: Request,
+    response: Response,
+    nsn: str,
+):
+    """A deliberately limited, rate-limited preview used by the NSN lookup tool."""
+    remaining_lookups = check_nsn_rate_limit(request)
+    if remaining_lookups is not None:
+        response.headers["X-RateLimit-Remaining"] = str(remaining_lookups)
+    return build_public_nsn_snapshot(nsn, remaining_lookups=remaining_lookups)
+
+
+@app.get("/api/public/intelligence/nsn/{nsn}")
+def get_public_nsn_page_snapshot(nsn: str, response: Response):
+    """Stable, cacheable NSN page payload; public-page access is metered separately."""
+    require_public_snapshot_ready()
+    snapshot = build_public_nsn_snapshot(nsn)
+    if not snapshot.get("found"):
+        raise HTTPException(status_code=404, detail=snapshot.get("message") or "NSN not found")
+
+    snapshot.pop("remaining_lookups", None)
+    snapshot["entity_type"] = "nsn"
+    snapshot["entity_id"] = snapshot.get("nsn") or snapshot.get("niin")
+    manifest_entity_id = re.sub(r"\D", "", str(snapshot["entity_id"] or ""))
+    if len(manifest_entity_id) not in (9, 13):
+        manifest_entity_id = re.sub(r"\D", "", str(snapshot.get("niin") or ""))[-9:].zfill(9)
+    attach_publication_metadata(snapshot, "nsn", manifest_entity_id)
+    response.headers["Cache-Control"] = (
+        "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
+    )
+    return snapshot
 
 DEFAULT_TOP_NSN_CACHE = None  # Put this at the top of your file
 # ✅ NEW: Cache to store the default dashboard state in memory
