@@ -6448,6 +6448,8 @@ def build_public_company_snapshot(
 
     safe_name = full_profile.get("name")
     safe_cage = full_profile.get("cage")
+    ultimate_parent_name = _clean_entity_name(full_profile.get("ultimate_parent_name"))
+    ultimate_parent_uei = _clean_optional_value(full_profile.get("ultimate_parent_uei"))
     is_parent = safe_cage == "AGGREGATE"
 
     # Prime Spend
@@ -6759,6 +6761,8 @@ def build_public_company_snapshot(
         "name": safe_name,
         "cage": safe_cage,
         "is_parent": is_parent,
+        "ultimate_parent_name": ultimate_parent_name,
+        "ultimate_parent_uei": ultimate_parent_uei,
         "location": location,
         "time_period": observed_period or "Observed period unavailable",
         "description": public_description,
@@ -6991,6 +6995,8 @@ def format_profile_response_with_loc(row, city, state, type="CHILD", overrides: 
         "type": type,
         "name": row.get('vendor_name'),
         "cage": row.get('cage_code'),
+        "ultimate_parent_name": _clean_entity_name(row.get('ultimate_parent_name')),
+        "ultimate_parent_uei": _clean_optional_value(row.get('ultimate_parent_uei')),
 
         # ✅ NEW: prefer overrides (disk KPIs) but fallback to profiles.parquet columns
         "total_obligations": float(overrides.get("total_obligations", row.get("total_lifetime_spend", 0) or 0)),
@@ -7220,6 +7226,13 @@ def _clean_optional_value(value, default=None):
     if text.upper() in ("", "NAN", "NONE", "NULL", "NAT"):
         return default
     return value
+
+def _clean_entity_name(value, default=None):
+    """Clean source-system punctuation that is not part of a display name."""
+    cleaned = _clean_optional_value(value, default=default)
+    if cleaned is None:
+        return default
+    return str(cleaned).strip().rstrip(" ,.;") or default
 
 def nsn_profile_fast_lookup(safe_niin: str, years: Optional[List[int]] = None) -> Optional[Dict[str, Any]]:
     """
