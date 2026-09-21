@@ -41,6 +41,12 @@ from dod_contract_enrichment import (
     lookup_contract_announcements,
     lookup_scope_announcements,
 )
+from public_intelligence_release import (
+    PUBLIC_INTELLIGENCE_QUALITY_GATE_VERSION,
+    PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE,
+    previous_publication_entries,
+    public_content_fingerprint,
+)
 
 load_dotenv()
 
@@ -1129,12 +1135,14 @@ def build_public_intelligence_release(conn):
     """
     generated_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
     release_id = "public-intelligence-" + datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    schema_version = 1
-    cohort_size = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_COHORT_SIZE", "25000")))
-    company_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_COMPANY_COHORT_SIZE", "18000")))
+    schema_version = 2
+    quality_gate_version = PUBLIC_INTELLIGENCE_QUALITY_GATE_VERSION
+    cohort_size = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_COHORT_SIZE", "200000")))
+    company_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_COMPANY_COHORT_SIZE", "45000")))
     platform_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_PLATFORM_COHORT_SIZE", "1000")))
-    award_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_AWARD_COHORT_SIZE", "2500")))
-    solicitation_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_SOLICITATION_COHORT_SIZE", "500")))
+    award_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_AWARD_COHORT_SIZE", "30000")))
+    solicitation_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_SOLICITATION_COHORT_SIZE", "4000")))
+    nsn_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_NSN_COHORT_SIZE", "120000")))
     platform_exclusions = {
         value.strip().upper()
         for value in os.getenv(
@@ -1145,6 +1153,14 @@ def build_public_intelligence_release(conn):
     }
 
     entries = []
+    previous_entries = previous_publication_entries(conn)
+    platform_candidates = []
+    award_candidates = []
+    solicitation_candidates = []
+    nsn_candidates = []
+    award_quality_gate_matches = 0
+    solicitation_quality_gate_matches = 0
+    nsn_quality_gate_matches = 0
 
     company_df = conn.execute("""
         WITH company AS (
@@ -1157,7 +1173,15 @@ def build_public_intelligence_release(conn):
                 COUNT(DISTINCT NULLIF(TRIM(CAST(psc_description AS VARCHAR)), '')) AS capability_count,
                 COUNT(DISTINCT NULLIF(TRIM(CAST(sub_agency AS VARCHAR)), '')) AS customer_count,
                 MIN(TRY_CAST(year AS INTEGER)) AS first_year,
-                MAX(TRY_CAST(year AS INTEGER)) AS last_year
+                MAX(TRY_CAST(year AS INTEGER)) AS last_year,
+                BIT_XOR(HASH(
+                    COALESCE(TRIM(CAST(vendor_name AS VARCHAR)), ''),
+                    COALESCE(TRIM(CAST(platform_family AS VARCHAR)), ''),
+                    COALESCE(TRIM(CAST(psc_description AS VARCHAR)), ''),
+                    COALESCE(TRIM(CAST(sub_agency AS VARCHAR)), ''),
+                    COALESCE(TRY_CAST(total_spend AS DOUBLE), 0),
+                    COALESCE(TRY_CAST(contract_count AS BIGINT), 0)
+                )) AS source_fingerprint
             FROM v_summary
             WHERE cage_code IS NOT NULL
               AND TRIM(CAST(cage_code AS VARCHAR)) <> ''
@@ -1172,10 +1196,39 @@ def build_public_intelligence_release(conn):
             FROM v_geo
             WHERE cage_code IS NOT NULL
             GROUP BY 1
+        ), network_rows AS (
+            SELECT
+                UPPER(TRIM(CAST(prime_cage AS VARCHAR))) AS entity_id,
+                HASH(
+                    COALESCE(TRIM(CAST(prime_cage AS VARCHAR)), ''),
+                    COALESCE(TRIM(CAST(subcontractor_cage AS VARCHAR)), ''),
+                    COALESCE(TRIM(CAST(prime_award_id AS VARCHAR)), ''),
+                    COALESCE(TRY_CAST(subcontract_value_usd AS DOUBLE), 0),
+                    COALESCE(TRIM(CAST(subcontract_action_date AS VARCHAR)), '')
+                ) AS relationship_fingerprint
+            FROM v_subcontracts
+            WHERE NULLIF(TRIM(CAST(prime_cage AS VARCHAR)), '') IS NOT NULL
+            UNION ALL
+            SELECT
+                UPPER(TRIM(CAST(subcontractor_cage AS VARCHAR))) AS entity_id,
+                HASH(
+                    COALESCE(TRIM(CAST(prime_cage AS VARCHAR)), ''),
+                    COALESCE(TRIM(CAST(subcontractor_cage AS VARCHAR)), ''),
+                    COALESCE(TRIM(CAST(prime_award_id AS VARCHAR)), ''),
+                    COALESCE(TRY_CAST(subcontract_value_usd AS DOUBLE), 0),
+                    COALESCE(TRIM(CAST(subcontract_action_date AS VARCHAR)), '')
+                ) AS relationship_fingerprint
+            FROM v_subcontracts
+            WHERE NULLIF(TRIM(CAST(subcontractor_cage AS VARCHAR)), '') IS NOT NULL
+        ), network AS (
+            SELECT entity_id, BIT_XOR(relationship_fingerprint) AS network_fingerprint
+            FROM network_rows
+            GROUP BY 1
         )
-        SELECT company.*, geo.city, geo.state
+        SELECT company.*, geo.city, geo.state, network.network_fingerprint
         FROM company
         LEFT JOIN geo USING (entity_id)
+        LEFT JOIN network USING (entity_id)
         WHERE company.observed_value > 0
           AND company.contract_count > 0
           AND (
@@ -1207,9 +1260,20 @@ def build_public_intelligence_release(conn):
             + min(capability_count, 10)
             + min(customer_count, 10)
         )
-        reasons = ["prime-award-history", "customer-relationships", "observed-capabilities"]
+        reasons = ["prime-award-history"]
+        if customer_count:
+            reasons.append("customer-relationships")
+        if capability_count:
+            reasons.append("observed-capabilities")
         if platform_count:
             reasons.append("platform-mappings")
+        content_fingerprint = public_content_fingerprint(
+            entity_id, display_name, slug, observed_value, contract_count,
+            platform_count, capability_count, customer_count,
+            row.get("first_year"), row.get("last_year"), row.get("city"),
+            row.get("state"), row.get("source_fingerprint"),
+            row.get("network_fingerprint"),
+        )
         company_candidates.append({
             "entity_type": "cage_company",
             "entity_id": entity_id,
@@ -1218,6 +1282,8 @@ def build_public_intelligence_release(conn):
             "richness_score": round(score, 4),
             "decision_reasons": ",".join(reasons),
             "last_modified": generated_at[:10],
+            "content_fingerprint": content_fingerprint,
+            "quality_gate_version": quality_gate_version,
             "release_id": release_id,
             "schema_version": schema_version,
         })
@@ -1233,7 +1299,13 @@ def build_public_intelligence_release(conn):
                 SUM(COALESCE(TRY_CAST(contract_count AS BIGINT), 0)) AS contract_count,
                 COUNT(DISTINCT NULLIF(UPPER(TRIM(CAST(cage_code AS VARCHAR))), '')) AS contractor_count,
                 COUNT(DISTINCT NULLIF(TRIM(CAST(sub_agency AS VARCHAR)), '')) AS customer_count,
-                MAX(TRY_CAST(year AS INTEGER)) AS last_year
+                MAX(TRY_CAST(year AS INTEGER)) AS last_year,
+                BIT_XOR(HASH(
+                    COALESCE(TRIM(CAST(cage_code AS VARCHAR)), ''),
+                    COALESCE(TRIM(CAST(sub_agency AS VARCHAR)), ''),
+                    COALESCE(TRY_CAST(total_spend AS DOUBLE), 0),
+                    COALESCE(TRY_CAST(contract_count AS BIGINT), 0)
+                )) AS source_fingerprint
             FROM v_summary
             WHERE platform_family IS NOT NULL
               AND TRIM(CAST(platform_family AS VARCHAR)) <> ''
@@ -1269,6 +1341,12 @@ def build_public_intelligence_release(conn):
                 "richness_score": round(score, 4),
                 "decision_reasons": "prime-award-history,contractor-network,customer-relationships",
                 "last_modified": generated_at[:10],
+                "content_fingerprint": public_content_fingerprint(
+                    slug, display_name, observed_value, contract_count,
+                    contractor_count, customer_count, row.get("last_year"),
+                    row.get("source_fingerprint"),
+                ),
+                "quality_gate_version": quality_gate_version,
                 "release_id": release_id,
                 "schema_version": schema_version,
             }
@@ -1296,7 +1374,8 @@ def build_public_intelligence_release(conn):
                 total_spend,
                 action_count,
                 TRY_CAST(last_action_date AS DATE) AS last_action_date,
-                TRIM(CAST(platform_family AS VARCHAR)) AS platform_family
+                TRIM(CAST(platform_family AS VARCHAR)) AS platform_family,
+                COUNT(*) OVER () AS quality_gate_matches
             FROM v_contracts_rolled
             WHERE NULLIF(TRIM(CAST(contract_id AS VARCHAR)), '') IS NOT NULL
               AND NULLIF(TRIM(CAST(vendor_name AS VARCHAR)), '') IS NOT NULL
@@ -1311,6 +1390,8 @@ def build_public_intelligence_release(conn):
             """,
             [max(award_cap * 2, award_cap)],
         ).fetchdf()
+        if not award_df.empty:
+            award_quality_gate_matches = int(award_df.iloc[0].get("quality_gate_matches") or 0)
         award_candidates = []
         seen_award_ids = set()
         for row in award_df.to_dict("records"):
@@ -1338,6 +1419,11 @@ def build_public_intelligence_release(conn):
                     if hasattr(row.get("last_action_date"), "isoformat") and not pd.isna(row.get("last_action_date"))
                     else generated_at[:10]
                 ),
+                "content_fingerprint": public_content_fingerprint(
+                    contract_id, vendor_name, row.get("vendor_cage"), description,
+                    total_spend, action_count, row.get("last_action_date"), platform_name,
+                ),
+                "quality_gate_version": quality_gate_version,
                 "release_id": release_id,
                 "schema_version": schema_version,
             })
@@ -1355,6 +1441,8 @@ def build_public_intelligence_release(conn):
                 TRIM(CAST(agency AS VARCHAR)) AS agency,
                 TRY_CAST(SUBSTR(CAST(deadline AS VARCHAR), 1, 10) AS DATE) AS deadline_date,
                 LENGTH(TRIM(CAST(description AS VARCHAR))) AS description_length,
+                HASH(CAST(description AS VARCHAR)) AS description_fingerprint,
+                COUNT(*) OVER () AS quality_gate_matches,
                 (CASE WHEN NULLIF(TRIM(CAST(sub_agency AS VARCHAR)), '') IS NOT NULL THEN 1 ELSE 0 END
                  + CASE WHEN NULLIF(TRIM(CAST(naics AS VARCHAR)), '') IS NOT NULL THEN 1 ELSE 0 END
                  + CASE WHEN NULLIF(TRIM(CAST(psc AS VARCHAR)), '') IS NOT NULL THEN 1 ELSE 0 END
@@ -1370,6 +1458,10 @@ def build_public_intelligence_release(conn):
             """,
             [solicitation_cap],
         ).fetchdf()
+        if not solicitation_df.empty:
+            solicitation_quality_gate_matches = int(
+                solicitation_df.iloc[0].get("quality_gate_matches") or 0
+            )
         solicitation_candidates = []
         for row in solicitation_df.to_dict("records"):
             opportunity_id = str(row.get("opportunity_id") or "").strip()
@@ -1389,6 +1481,12 @@ def build_public_intelligence_release(conn):
                 "richness_score": round(score, 4),
                 "decision_reasons": "active-opportunity,meaningful-description,procurement-metadata",
                 "last_modified": generated_at[:10],
+                "content_fingerprint": public_content_fingerprint(
+                    opportunity_id, sol_num, title, row.get("agency"),
+                    row.get("deadline_date"), description_length, metadata_fields,
+                    row.get("description_fingerprint"),
+                ),
+                "quality_gate_version": quality_gate_version,
                 "release_id": release_id,
                 "schema_version": schema_version,
             })
@@ -1396,7 +1494,7 @@ def build_public_intelligence_release(conn):
         entries.extend(solicitation_candidates[:min(solicitation_cap, remaining)])
 
     remaining = max(0, cohort_size - len(entries))
-    if remaining:
+    if remaining and nsn_cap:
         nsn_df = conn.execute("""
             WITH supplier AS (
                 SELECT
@@ -1405,7 +1503,14 @@ def build_public_intelligence_release(conn):
                     COUNT(DISTINCT NULLIF(TRIM(CAST(contract_id AS VARCHAR)), '')) AS contract_count,
                     COUNT(DISTINCT NULLIF(UPPER(TRIM(CAST(cage AS VARCHAR))), '')) AS supplier_count,
                     MAX(COALESCE(TRY_CAST(platform_count AS INTEGER), 0)) AS platform_count,
-                    MAX(TRY_CAST(last_sold AS DATE)) AS last_activity
+                    MAX(TRY_CAST(last_sold AS DATE)) AS last_activity,
+                    BIT_XOR(HASH(
+                        COALESCE(UPPER(TRIM(CAST(cage AS VARCHAR))), ''),
+                        COALESCE(TRIM(CAST(vendor AS VARCHAR)), ''),
+                        COALESCE(TRIM(CAST(contract_id AS VARCHAR)), ''),
+                        COALESCE(TRIM(CAST(platform_family AS VARCHAR)), ''),
+                        COALESCE(TRY_CAST(total_revenue AS DOUBLE), 0)
+                    )) AS supplier_fingerprint
                 FROM v_nsn_supplier_lookup
                 WHERE niin IS NOT NULL
                   AND TRIM(CAST(niin AS VARCHAR)) <> ''
@@ -1421,12 +1526,47 @@ def build_public_intelligence_release(conn):
                 FROM v_nsn_profile_lookup
                 WHERE niin IS NOT NULL
                 GROUP BY 1
+            ), parts AS (
+                SELECT
+                    LPAD(TRIM(CAST(niin AS VARCHAR)), 9, '0') AS niin,
+                    COUNT(DISTINCT NULLIF(TRIM(CAST(part_number AS VARCHAR)), '')) AS part_number_count,
+                    BIT_XOR(HASH(
+                        COALESCE(UPPER(TRIM(CAST(cage AS VARCHAR))), ''),
+                        COALESCE(TRIM(CAST(part_number AS VARCHAR)), ''),
+                        COALESCE(TRIM(CAST(supplier_status AS VARCHAR)), '')
+                    )) AS parts_fingerprint
+                FROM v_nsn_cage_reference
+                WHERE niin IS NOT NULL
+                GROUP BY 1
             )
-            SELECT supplier.*, profile.nsn, profile.item_name
-            FROM supplier
-            LEFT JOIN profile USING (niin)
-        """).fetchdf()
-        nsn_candidates = []
+            , eligible AS (
+                SELECT
+                    supplier.*,
+                    profile.nsn,
+                    profile.item_name,
+                    COALESCE(parts.part_number_count, 0) AS part_number_count,
+                    parts.parts_fingerprint
+                FROM supplier
+                INNER JOIN profile USING (niin)
+                LEFT JOIN parts USING (niin)
+                WHERE NULLIF(TRIM(CAST(profile.item_name AS VARCHAR)), '') IS NOT NULL
+                  AND UPPER(TRIM(CAST(profile.item_name AS VARCHAR))) NOT IN ('NAN', 'NONE', 'NULL')
+                  AND (supplier.platform_count > 0 OR COALESCE(parts.part_number_count, 0) > 0)
+            )
+            SELECT
+                *,
+                LOG10(observed_value + 1) * 8
+                  + LEAST(LN(contract_count + 1), 12) * 3
+                  + LEAST(supplier_count, 15)
+                  + LEAST(platform_count, 10) * 2
+                  + LEAST(part_number_count, 10) AS richness_score,
+                COUNT(*) OVER () AS quality_gate_matches
+            FROM eligible
+            ORDER BY richness_score DESC, COALESCE(NULLIF(nsn, ''), niin)
+            LIMIT ?
+        """, [min(nsn_cap, remaining)]).fetchdf()
+        if not nsn_df.empty:
+            nsn_quality_gate_matches = int(nsn_df.iloc[0].get("quality_gate_matches") or 0)
         seen_nsn_ids = set()
         for row in nsn_df.to_dict("records"):
             niin = re.sub(r"\D", "", str(row.get("niin") or ""))[-9:].zfill(9)
@@ -1439,12 +1579,11 @@ def build_public_intelligence_release(conn):
             contract_count = int(_safe_public_number(row.get("contract_count")))
             supplier_count = int(_safe_public_number(row.get("supplier_count")))
             platform_count = int(_safe_public_number(row.get("platform_count")))
-            score = (
-                math.log10(observed_value + 1) * 8
-                + min(math.log1p(contract_count), 12) * 3
-                + min(supplier_count, 15)
-                + min(platform_count, 10) * 2
-            )
+            part_number_count = int(_safe_public_number(row.get("part_number_count")))
+            item_name = str(row.get("item_name") or "").strip()
+            if item_name.upper() in {"", "NAN", "NONE", "NULL"}:
+                continue
+            score = _safe_public_number(row.get("richness_score"))
             last_activity = row.get("last_activity")
             last_modified = (
                 last_activity.isoformat()
@@ -1454,28 +1593,52 @@ def build_public_intelligence_release(conn):
             reasons = ["procurement-history", "supplier-network"]
             if platform_count:
                 reasons.append("platform-mappings")
+            if part_number_count:
+                reasons.append("part-number-cross-references")
             nsn_candidates.append({
                 "entity_type": "nsn",
                 "entity_id": entity_id,
                 "canonical_path": f"/intelligence/nsn/{entity_id}",
-                "display_name": (
-                    str(row.get("item_name") or "").strip()
-                    if str(row.get("item_name") or "").strip().upper() not in {"", "NAN", "NONE", "NULL"}
-                    else f"NSN {entity_id}"
-                ),
+                "display_name": item_name,
                 "richness_score": round(score, 4),
                 "decision_reasons": ",".join(reasons),
                 "last_modified": last_modified,
+                "content_fingerprint": public_content_fingerprint(
+                    entity_id, niin, row.get("nsn"), item_name, observed_value,
+                    contract_count, supplier_count, platform_count, part_number_count,
+                    last_activity, row.get("supplier_fingerprint"), row.get("parts_fingerprint"),
+                ),
+                "quality_gate_version": quality_gate_version,
                 "release_id": release_id,
                 "schema_version": schema_version,
             })
         nsn_candidates.sort(key=lambda item: (-item["richness_score"], item["entity_id"]))
-        entries.extend(nsn_candidates[:remaining])
+        entries.extend(nsn_candidates[:min(nsn_cap, remaining)])
+
+    # Sitemaps are sorted by canonical entity id. Persist the batch assignment so
+    # analytics and release audits use the exact same boundary as Search Console.
+    entries_by_type = {}
+    for entry in entries:
+        entries_by_type.setdefault(entry["entity_type"], []).append(entry)
+    for entity_entries in entries_by_type.values():
+        entity_entries.sort(key=lambda item: item["entity_id"])
+        for index, entry in enumerate(entity_entries):
+            entry["sitemap_batch"] = index // PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE + 1
+            previous = previous_entries.get(f'{entry["entity_type"]}:{entry["entity_id"]}')
+            if (
+                previous
+                and previous.get("content_fingerprint") == entry["content_fingerprint"]
+                and re.fullmatch(r"\d{4}-\d{2}-\d{2}", previous.get("last_modified") or "")
+            ):
+                entry["last_modified"] = previous["last_modified"]
+            else:
+                entry["last_modified"] = generated_at[:10]
 
     manifest_columns = [
         "entity_type", "entity_id", "canonical_path", "display_name",
         "richness_score", "decision_reasons", "last_modified", "release_id",
-        "schema_version",
+        "schema_version", "content_fingerprint", "quality_gate_version",
+        "sitemap_batch",
     ]
     manifest_df = pd.DataFrame(entries, columns=manifest_columns)
     conn.register("public_intelligence_manifest_release_df", manifest_df)
@@ -1547,6 +1710,42 @@ def build_public_intelligence_release(conn):
                 CAST(NULL AS DOUBLE) AS total_spend
             WHERE FALSE
         """)
+
+    # The company page previously scanned the multi-gigabyte transaction dataset
+    # for every first request. Materialise its small ranked NSN module once during
+    # the atomic release so crawler misses remain cheap and deterministic.
+    conn.execute("""
+        CREATE OR REPLACE TABLE public_company_top_nsn_next AS
+        WITH released AS (
+            SELECT entity_id AS cage
+            FROM public_intelligence_manifest_next
+            WHERE entity_type = 'cage_company'
+        ), grouped AS (
+            SELECT
+                r.cage,
+                TRIM(CAST(t.nsn AS VARCHAR)) AS nsn,
+                MAX_BY(
+                    NULLIF(TRIM(CAST(t.description AS VARCHAR)), ''),
+                    COALESCE(TRY_CAST(t.spend_amount AS DOUBLE), 0)
+                ) AS description,
+                SUM(COALESCE(TRY_CAST(t.spend_amount AS DOUBLE), 0)) AS spend
+            FROM v_transactions t
+            INNER JOIN released r
+                ON UPPER(TRIM(CAST(t.vendor_cage AS VARCHAR))) = r.cage
+            WHERE NULLIF(TRIM(CAST(t.nsn AS VARCHAR)), '') IS NOT NULL
+            GROUP BY 1, 2
+        ), ranked AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (PARTITION BY cage ORDER BY spend DESC, nsn) AS nsn_rank,
+                COUNT(*) OVER (PARTITION BY cage) AS nsn_count
+            FROM grouped
+            WHERE spend > 0
+        )
+        SELECT cage, nsn, description, spend, nsn_rank, nsn_count
+        FROM ranked
+        WHERE nsn_rank <= 15
+    """)
 
     transaction_columns = {
         str(row[0]).strip().lower()
@@ -1821,6 +2020,7 @@ def build_public_intelligence_release(conn):
     projection_tables = {
         "public_intelligence_manifest_next": "public_intelligence_manifest.parquet",
         "public_company_top_award_next": "public_company_top_award.parquet",
+        "public_company_top_nsn_next": "public_company_top_nsn.parquet",
         "public_platform_award_scope_next": "public_platform_award_scope.parquet",
         "public_award_profile_next": "public_award_profile.parquet",
         "public_solicitation_profile_next": "public_solicitation_profile.parquet",
@@ -1842,12 +2042,14 @@ def build_public_intelligence_release(conn):
     try:
         conn.execute("DROP TABLE IF EXISTS public_intelligence_manifest")
         conn.execute("DROP TABLE IF EXISTS public_company_top_award")
+        conn.execute("DROP TABLE IF EXISTS public_company_top_nsn")
         conn.execute("DROP TABLE IF EXISTS public_platform_award_scope")
         conn.execute("DROP TABLE IF EXISTS public_award_profile")
         conn.execute("DROP TABLE IF EXISTS public_solicitation_profile")
         conn.execute("DROP TABLE IF EXISTS public_intelligence_search")
         conn.execute("ALTER TABLE public_intelligence_manifest_next RENAME TO public_intelligence_manifest")
         conn.execute("ALTER TABLE public_company_top_award_next RENAME TO public_company_top_award")
+        conn.execute("ALTER TABLE public_company_top_nsn_next RENAME TO public_company_top_nsn")
         conn.execute("ALTER TABLE public_platform_award_scope_next RENAME TO public_platform_award_scope")
         conn.execute("ALTER TABLE public_award_profile_next RENAME TO public_award_profile")
         conn.execute("ALTER TABLE public_solicitation_profile_next RENAME TO public_solicitation_profile")
@@ -1868,6 +2070,10 @@ def build_public_intelligence_release(conn):
             ON public_company_top_award(cage)
         """)
         conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_public_company_top_nsn_cage
+            ON public_company_top_nsn(cage, nsn_rank)
+        """)
+        conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_public_platform_award_scope_entity
             ON public_platform_award_scope(slug, vendor_cage)
         """)
@@ -1886,6 +2092,9 @@ def build_public_intelligence_release(conn):
         "build_seconds": round(time.perf_counter() - projection_started_at, 3),
         "company_top_award_rows": int(
             conn.execute("SELECT COUNT(*) FROM public_company_top_award").fetchone()[0]
+        ),
+        "company_top_nsn_rows": int(
+            conn.execute("SELECT COUNT(*) FROM public_company_top_nsn").fetchone()[0]
         ),
         "platform_award_scope_rows": int(
             conn.execute("SELECT COUNT(*) FROM public_platform_award_scope").fetchone()[0]
@@ -1912,15 +2121,55 @@ def build_public_intelligence_release(conn):
         "schema_version": schema_version,
         "total_entries": len(entries),
         "counts": counts,
+        "quality_gate_matches": {
+            "cage_company": len(company_candidates),
+            "platform": len(platform_candidates),
+            "contract_award": award_quality_gate_matches,
+            "solicitation": solicitation_quality_gate_matches,
+            "nsn": nsn_quality_gate_matches,
+        },
+        "cohort_caps": {
+            "cage_company": company_cap,
+            "platform": platform_cap,
+            "contract_award": award_cap,
+            "solicitation": solicitation_cap,
+            "nsn": nsn_cap,
+        },
         "requested_cohort_size": cohort_size,
+        "quality_gate_version": quality_gate_version,
+        "sitemap_batch_size": PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE,
+        "sitemap_batches": {
+            entity_type: math.ceil(count / PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE)
+            for entity_type, count in counts.items()
+        },
         "platform_exclusions": sorted(platform_exclusions),
         "projection_stats": projection_stats,
     }
+    runtime_entry_fields = (
+        "entity_type", "entity_id", "canonical_path", "display_name",
+        "richness_score", "decision_reasons", "last_modified",
+        "quality_gate_version", "sitemap_batch",
+    )
     index = {
-        f'{entry["entity_type"]}:{entry["entity_id"]}': entry
+        f'{entry["entity_type"]}:{entry["entity_id"]}': {
+            field: entry[field] for field in runtime_entry_fields
+        }
         for entry in entries
     }
-    return {"release": release, "index": index}
+    ordered_by_type = {
+        entity_type: sorted(entity_entries, key=lambda entry: entry["entity_id"])
+        for entity_type, entity_entries in entries_by_type.items()
+    }
+    ordered_entries = [
+        entry
+        for entity_type in sorted(ordered_by_type)
+        for entry in ordered_by_type[entity_type]
+    ]
+    return {
+        "release": release,
+        "index": index,
+        "entries": ordered_entries,
+    }
 
 
 def get_public_intelligence_manifest_entry(entity_type: str, entity_id: str):
@@ -1933,6 +2182,11 @@ def attach_publication_metadata(payload: dict, entity_type: str, entity_id: str)
     payload["seo_indexable"] = entry is not None
     payload["public_release_id"] = release.get("release_id")
     payload["public_last_modified"] = entry.get("last_modified") if entry else None
+    payload["public_sitemap_batch"] = entry.get("sitemap_batch") if entry else None
+    payload["public_richness_score"] = entry.get("richness_score") if entry else None
+    payload["public_quality_gate_version"] = (
+        entry.get("quality_gate_version") if entry else release.get("quality_gate_version")
+    )
     return payload
 
 
@@ -5256,43 +5510,73 @@ def get_public_intelligence_manifest(
     safe_page = max(1, int(page or 1))
     safe_page_size = max(1, min(int(page_size or 10000), 10000))
     release = GLOBAL_CACHE.get("public_intelligence_release")
-    all_entries = list(GLOBAL_CACHE.get("public_intelligence_index", {}).values())
-    if entity_type:
-        all_entries = [entry for entry in all_entries if entry.get("entity_type") == entity_type]
-    if order == "richness":
-        all_entries.sort(
-            key=lambda entry: (
+    start = (safe_page - 1) * safe_page_size
+    total_entries = int(
+        (release.get("counts", {}).get(entity_type, 0) if entity_type else release.get("total_entries", 0))
+        if release else 0
+    )
+    where_sql = "WHERE entity_type = ?" if entity_type else ""
+    query_params = [entity_type] if entity_type else []
+    order_sql = (
+        "richness_score DESC, entity_type, entity_id"
+        if order == "richness"
+        else "entity_type, entity_id"
+    )
+    try:
+        manifest_df = duck_fetch_df(
+            f"""
+            SELECT
+                entity_type,
+                entity_id,
+                canonical_path,
+                display_name,
+                last_modified,
+                richness_score,
+                sitemap_batch,
+                quality_gate_version,
+                decision_reasons
+            FROM public_intelligence_manifest
+            {where_sql}
+            ORDER BY {order_sql}
+            LIMIT ? OFFSET ?
+            """,
+            [*query_params, safe_page_size, start],
+        )
+        public_entries = (
+            df_sanitize_for_json(manifest_df).to_dict(orient="records")
+            if not manifest_df.empty else []
+        )
+    except Exception:
+        logger.exception("Public intelligence manifest page query failed")
+        all_entries = list(GLOBAL_CACHE.get("public_intelligence_index", {}).values())
+        if entity_type:
+            all_entries = [entry for entry in all_entries if entry.get("entity_type") == entity_type]
+        if order == "richness":
+            all_entries.sort(key=lambda entry: (
                 -float(entry.get("richness_score") or 0),
                 entry.get("entity_type", ""),
                 entry.get("entity_id", ""),
+            ))
+        else:
+            all_entries.sort(
+                key=lambda entry: (entry.get("entity_type", ""), entry.get("entity_id", ""))
             )
-        )
-    else:
-        all_entries.sort(key=lambda entry: (entry.get("entity_type", ""), entry.get("entity_id", "")))
-    start = (safe_page - 1) * safe_page_size
-    selected = all_entries[start:start + safe_page_size]
-    public_entries = [
-        {
-            "entity_type": entry.get("entity_type"),
-            "entity_id": entry.get("entity_id"),
-            "canonical_path": entry.get("canonical_path"),
-            "display_name": entry.get("display_name"),
-            "last_modified": entry.get("last_modified"),
-            "richness_score": entry.get("richness_score"),
-        }
-        for entry in selected
-    ]
+        public_entries = all_entries[start:start + safe_page_size]
+        total_entries = len(all_entries)
     response.headers["Cache-Control"] = (
         "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
     )
+    if release:
+        response.headers["X-Mimir-Public-Release"] = str(release.get("release_id") or "")
+        response.headers["X-Mimir-Manifest-Entries"] = str(total_entries)
     return {
         "release": release,
         "entity_type": entity_type,
         "page": safe_page,
         "page_size": safe_page_size,
         "order": order,
-        "total_entries": len(all_entries),
-        "total_pages": math.ceil(len(all_entries) / safe_page_size) if all_entries else 0,
+        "total_entries": total_entries,
+        "total_pages": math.ceil(total_entries / safe_page_size) if total_entries else 0,
         "entries": public_entries,
     }
 
@@ -6714,14 +6998,40 @@ def build_public_company_snapshot(
         # D. Fetch Top NSNs (Components)
         txn_nsn_where = "vendor_cage = ? AND nsn IS NOT NULL AND nsn != ''" if not is_parent else "upper(vendor_name) LIKE ? AND nsn IS NOT NULL AND nsn != ''"
         txn_nsn_params = [safe_cage] if not is_parent else [f"%{safe_name.upper()}%"]
-        nsn_df = duck_fetch_df(f"""
-            SELECT nsn, ANY_VALUE(description) as description, sum(spend_amount) as spend
-            FROM v_transactions
-            WHERE {txn_nsn_where}
-            GROUP BY nsn
-            ORDER BY spend DESC
-            LIMIT 15
-        """, params=txn_nsn_params)
+        released_company = (
+            not is_parent
+            and get_public_intelligence_manifest_entry("cage_company", safe_cage) is not None
+        )
+        if released_company:
+            try:
+                nsn_df = duck_fetch_df(
+                    """
+                    SELECT nsn, description, spend, nsn_count
+                    FROM public_company_top_nsn
+                    WHERE cage = ?
+                    ORDER BY nsn_rank
+                    """,
+                    [safe_cage],
+                )
+            except Exception:
+                # Release-schema fallback while an older snapshot is active.
+                nsn_df = duck_fetch_df(f"""
+                    SELECT nsn, ANY_VALUE(description) as description, sum(spend_amount) as spend
+                    FROM v_transactions
+                    WHERE {txn_nsn_where}
+                    GROUP BY nsn
+                    ORDER BY spend DESC
+                    LIMIT 15
+                """, params=txn_nsn_params)
+        else:
+            nsn_df = duck_fetch_df(f"""
+                SELECT nsn, ANY_VALUE(description) as description, sum(spend_amount) as spend
+                FROM v_transactions
+                WHERE {txn_nsn_where}
+                GROUP BY nsn
+                ORDER BY spend DESC
+                LIMIT 15
+            """, params=txn_nsn_params)
         
         if not nsn_df.empty:
             for _, row in nsn_df.head(3).iterrows():
@@ -6732,7 +7042,8 @@ def build_public_company_snapshot(
                 desc = raw_desc.title().strip()
                 if desc.lower() in ["nan", "none", ""]: desc = "Unspecified Component"
                 top_nsns.append({"nsn": str(row['nsn']).strip(), "desc": desc})
-            nsns_hidden = max(0, len(nsn_df) - 3)
+            nsn_count = int(nsn_df.iloc[0].get("nsn_count") or len(nsn_df))
+            nsns_hidden = max(0, nsn_count - 3)
 
     except Exception as e:
         logger.error(f"Teaser Aggregate Query Error: {e}")

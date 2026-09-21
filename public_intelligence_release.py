@@ -1,0 +1,38 @@
+"""Small, dependency-free helpers for public intelligence release manifests."""
+
+import hashlib
+import json
+
+
+PUBLIC_INTELLIGENCE_QUALITY_GATE_VERSION = "2026-09-22-v2"
+PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE = 5_000
+
+
+def public_content_fingerprint(*values) -> str:
+    """Return a stable digest for the source fields that materially shape a page."""
+    encoded = json.dumps(values, default=str, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def previous_publication_entries(conn) -> dict:
+    """Load just enough of the previous manifest to preserve truthful lastmod dates."""
+    try:
+        columns = {
+            str(row[0]).strip().lower()
+            for row in conn.execute("DESCRIBE public_intelligence_manifest").fetchall()
+        }
+        if not {"entity_type", "entity_id", "content_fingerprint", "last_modified"}.issubset(columns):
+            return {}
+        rows = conn.execute("""
+            SELECT entity_type, entity_id, content_fingerprint, last_modified
+            FROM public_intelligence_manifest
+        """).fetchall()
+        return {
+            f"{entity_type}:{entity_id}": {
+                "content_fingerprint": str(content_fingerprint or ""),
+                "last_modified": str(last_modified or ""),
+            }
+            for entity_type, entity_id, content_fingerprint, last_modified in rows
+        }
+    except Exception:
+        return {}
