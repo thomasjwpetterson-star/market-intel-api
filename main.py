@@ -14,7 +14,6 @@ import threading
 import time
 from functools import lru_cache 
 import re
-import unicodedata
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -46,6 +45,7 @@ from public_intelligence_release import (
     PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE,
     previous_publication_entries,
     public_content_fingerprint,
+    public_entity_slug,
 )
 
 load_dotenv()
@@ -1166,7 +1166,7 @@ def build_public_intelligence_release(conn):
         WITH company AS (
             SELECT
                 UPPER(TRIM(CAST(cage_code AS VARCHAR))) AS entity_id,
-                MAX_BY(TRIM(CAST(vendor_name AS VARCHAR)), TRY_CAST(total_spend AS DOUBLE)) AS display_name,
+                MAX_BY(TRIM(CAST(vendor_name AS VARCHAR)), TRY_CAST(total_spend AS DOUBLE)) AS activity_display_name,
                 SUM(COALESCE(TRY_CAST(total_spend AS DOUBLE), 0)) AS observed_value,
                 SUM(COALESCE(TRY_CAST(contract_count AS BIGINT), 0)) AS contract_count,
                 COUNT(DISTINCT NULLIF(TRIM(CAST(platform_family AS VARCHAR)), '')) AS platform_count,
@@ -1183,6 +1183,22 @@ def build_public_intelligence_release(conn):
                     COALESCE(TRY_CAST(contract_count AS BIGINT), 0)
                 )) AS source_fingerprint
             FROM v_summary
+            WHERE cage_code IS NOT NULL
+              AND TRIM(CAST(cage_code AS VARCHAR)) <> ''
+              AND vendor_name IS NOT NULL
+              AND TRIM(CAST(vendor_name AS VARCHAR)) <> ''
+            GROUP BY 1
+        ), identity AS (
+            SELECT
+                UPPER(TRIM(CAST(cage_code AS VARCHAR))) AS entity_id,
+                MAX_BY(
+                    TRIM(CAST(vendor_name AS VARCHAR)),
+                    GREATEST(
+                        COALESCE(TRY_CAST(total_lifetime_spend AS DOUBLE), 0),
+                        COALESCE(TRY_CAST(network_flow_total AS DOUBLE), 0)
+                    )
+                ) AS display_name
+            FROM v_profiles
             WHERE cage_code IS NOT NULL
               AND TRIM(CAST(cage_code AS VARCHAR)) <> ''
               AND vendor_name IS NOT NULL
@@ -1225,8 +1241,22 @@ def build_public_intelligence_release(conn):
             FROM network_rows
             GROUP BY 1
         )
-        SELECT company.*, geo.city, geo.state, network.network_fingerprint
+        SELECT
+            company.entity_id,
+            COALESCE(identity.display_name, company.activity_display_name) AS display_name,
+            company.observed_value,
+            company.contract_count,
+            company.platform_count,
+            company.capability_count,
+            company.customer_count,
+            company.first_year,
+            company.last_year,
+            company.source_fingerprint,
+            geo.city,
+            geo.state,
+            network.network_fingerprint
         FROM company
+        LEFT JOIN identity USING (entity_id)
         LEFT JOIN geo USING (entity_id)
         LEFT JOIN network USING (entity_id)
         WHERE company.observed_value > 0
@@ -5446,8 +5476,7 @@ def get_platform_profile(
 
 def _public_entity_slug(value: str) -> str:
     """Create the URL-safe identifier used by public intelligence pages."""
-    ascii_value = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
-    return re.sub(r"[^a-z0-9]+", "-", ascii_value.lower()).strip("-")
+    return public_entity_slug(value)
 
 
 @lru_cache(maxsize=512)

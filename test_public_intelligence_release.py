@@ -7,6 +7,7 @@ from public_intelligence_release import (
     PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE,
     previous_publication_entries,
     public_content_fingerprint,
+    public_entity_slug,
 )
 
 
@@ -43,6 +44,13 @@ class PublicIntelligenceReleaseTests(unittest.TestCase):
     def test_sitemap_contract_stays_within_google_limit(self):
         self.assertLessEqual(PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE, 50_000)
         self.assertTrue(PUBLIC_INTELLIGENCE_QUALITY_GATE_VERSION)
+
+    def test_slug_matches_public_route_rules(self):
+        self.assertEqual(
+            public_entity_slug("STEAMCO VENTILATION & EXHAUST SYSTEMS INC Meridian ID"),
+            "steamco-ventilation-and-exhaust-systems-inc-meridian-id",
+        )
+        self.assertLessEqual(len(public_entity_slug("A" * 120)), 90)
 
 
 if __name__ == "__main__":

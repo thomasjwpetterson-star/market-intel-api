@@ -14,6 +14,7 @@ import duckdb
 
 SOURCE_VIEWS = {
     "v_summary": "summary.parquet",
+    "v_profiles": "profiles.parquet",
     "v_geo": "geo.parquet",
     "v_contracts_rolled": "contracts_rolled.parquet",
     "v_opportunities": "opportunities.parquet",
