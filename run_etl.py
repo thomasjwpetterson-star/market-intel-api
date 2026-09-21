@@ -192,6 +192,16 @@ def list_s3_keys(prefix: str):
         for obj in page.get('Contents', []):
             yield obj['Key']
 
+def delete_s3_prefix(prefix: str):
+    """Remove transient Athena UNLOAD parts after their consolidated cache is published."""
+    keys = list(list_s3_keys(prefix))
+    for offset in range(0, len(keys), 1000):
+        s3.delete_objects(
+            Bucket=BUCKET_NAME,
+            Delete={"Objects": [{"Key": key} for key in keys[offset:offset + 1000]]},
+        )
+    return len(keys)
+
 def download_unload_parts(part_keys, destination_dir, max_workers=6):
     """Download Athena parts concurrently without changing their contents."""
     if not part_keys:
@@ -1364,7 +1374,9 @@ def optimize_and_upload():
                 MAX_BY(contract_id, action_date) AS contract_id,
                 MAX(action_date) AS last_action_date,
                 MIN(action_date) AS start_date,
+                MIN(action_date) AS first_observed_action_date,
                 SUM(COALESCE(spend_amount, 0)) AS total_spend,
+                SUM(COALESCE(spend_amount, 0)) AS observed_net_obligations,
                 COUNT(*) AS action_count,
                 MIN(year) AS first_year,
                 MAX_BY(vendor_name, action_date) AS vendor_name,
@@ -1515,6 +1527,80 @@ def optimize_and_upload():
         out_prefix = unload_to_s3(select_sql, unload_prefix)
 
         merge_unload_parts_with_duckdb(out_prefix, "contracts_rolled.parquet")
+
+    # A narrow source-reported sidecar keeps cumulative values and reported
+    # performance dates separate from Mimir's FY2019+ observed-action rollup.
+    # It is cheap to refresh daily and avoids rewriting the multi-gigabyte
+    # contracts cache merely to update seven scalar award attributes.
+    print("📥 Fetching Source-reported Contract Metadata...")
+    if is_cache_fresh("contract_award_metadata.parquet", max_age_hours=12):
+        print("   ↩️ Skipping contract_award_metadata.parquet (Fresh file already in S3)")
+    else:
+        metadata_select_sql = """
+            WITH candidate_awards AS (
+                SELECT award_key
+                FROM "market_intel_gold"."dashboard_master_view"
+                WHERE year >= 2019
+                  AND award_key IS NOT NULL
+                  AND NULLIF(TRIM(CAST(vendor_name AS VARCHAR)), '') IS NOT NULL
+                GROUP BY award_key
+                HAVING SUM(COALESCE(spend_amount, 0)) >= 1000000
+                   AND COUNT(*) >= 2
+                   AND LENGTH(COALESCE(
+                        MAX_BY(NULLIF(TRIM(base_award_description), ''), action_date),
+                        MAX_BY(NULLIF(TRIM(description), ''), action_date),
+                        ''
+                   )) >= 30
+                ORDER BY SUM(COALESCE(spend_amount, 0)) DESC
+                LIMIT 5000
+            )
+            SELECT
+                p.contract_award_unique_key AS award_key,
+                MAX_BY(
+                    TRY_CAST(NULLIF(p.period_of_performance_start_date, '') AS DATE),
+                    CONCAT(COALESCE(p.action_date, ''), '|', COALESCE(p.last_modified_date, ''))
+                ) AS reported_performance_start_date,
+                MAX_BY(
+                    TRY_CAST(p.total_dollars_obligated AS DOUBLE),
+                    CONCAT(COALESCE(p.action_date, ''), '|', COALESCE(p.last_modified_date, ''))
+                ) AS latest_reported_total_obligated,
+                MAX_BY(
+                    TRY_CAST(p.current_total_value_of_award AS DOUBLE),
+                    CONCAT(COALESCE(p.action_date, ''), '|', COALESCE(p.last_modified_date, ''))
+                ) AS latest_reported_current_value,
+                MAX_BY(
+                    TRY_CAST(p.potential_total_value_of_award AS DOUBLE),
+                    CONCAT(COALESCE(p.action_date, ''), '|', COALESCE(p.last_modified_date, ''))
+                ) AS latest_reported_potential_value,
+                MAX_BY(
+                    NULLIF(TRIM(p.recipient_uei), ''),
+                    CONCAT(COALESCE(p.action_date, ''), '|', COALESCE(p.last_modified_date, ''))
+                ) AS recipient_uei,
+                MAX_BY(
+                    NULLIF(TRIM(p.recipient_parent_uei), ''),
+                    CONCAT(COALESCE(p.action_date, ''), '|', COALESCE(p.last_modified_date, ''))
+                ) AS recipient_parent_uei,
+                MAX_BY(
+                    COALESCE(NULLIF(TRIM(p.recipient_parent_name_raw), ''), NULLIF(TRIM(p.recipient_parent_name), '')),
+                    CONCAT(COALESCE(p.action_date, ''), '|', COALESCE(p.last_modified_date, ''))
+                ) AS recipient_parent_name
+            FROM "market_intel_silver"."dataset_prime_contracts" p
+            INNER JOIN candidate_awards c
+                ON p.contract_award_unique_key = c.award_key
+            GROUP BY p.contract_award_unique_key
+        """
+        metadata_unload_prefix = f"{UNLOAD_OUTPUT_PREFIX}contract_award_metadata/{uuid.uuid4().hex}/"
+        metadata_out_prefix = unload_to_s3(metadata_select_sql, metadata_unload_prefix)
+        merge_unload_parts_with_duckdb(
+            metadata_out_prefix,
+            "contract_award_metadata.parquet",
+            order_by="award_key",
+        )
+        try:
+            removed_parts = delete_s3_prefix(metadata_out_prefix)
+            print(f"   🧹 Removed {removed_parts} temporary contract metadata parts")
+        except Exception as exc:
+            print(f"   ⚠️ Could not remove temporary contract metadata parts: {exc}")
 
     # ---------------------------------------------------------
     # ### [NEW] FETCH PRODUCTS (With Logistics Data) ###

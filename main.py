@@ -1111,6 +1111,15 @@ def _safe_public_number(value, default=0.0):
         return default
 
 
+def _optional_public_number(value):
+    """Return a finite source-reported number, preserving an unavailable value as null."""
+    try:
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
+    except (TypeError, ValueError):
+        return None
+
+
 def build_public_intelligence_release(conn):
     """Build the deterministic daily publication cohort and atomically publish it.
 
@@ -1602,7 +1611,62 @@ def build_public_intelligence_release(conn):
         WHERE scope_rank <= 3
     """)
 
-    conn.execute("""
+    reported_performance_start_expr = (
+        "COALESCE(TRY_CAST(a.reported_performance_start_date AS DATE), TRY_CAST(m.reported_performance_start_date AS DATE))"
+        if "reported_performance_start_date" in rolled_columns
+        else "TRY_CAST(m.reported_performance_start_date AS DATE)"
+    )
+    first_observed_action_expr = (
+        "TRY_CAST(a.first_observed_action_date AS DATE)"
+        if "first_observed_action_date" in rolled_columns
+        else "TRY_CAST(a.start_date AS DATE)"
+    )
+    observed_net_obligations_expr = (
+        "TRY_CAST(a.observed_net_obligations AS DOUBLE)"
+        if "observed_net_obligations" in rolled_columns
+        else "TRY_CAST(a.total_spend AS DOUBLE)"
+    )
+    latest_reported_total_expr = (
+        "COALESCE(TRY_CAST(a.latest_reported_total_obligated AS DOUBLE), TRY_CAST(m.latest_reported_total_obligated AS DOUBLE))"
+        if "latest_reported_total_obligated" in rolled_columns
+        else "TRY_CAST(m.latest_reported_total_obligated AS DOUBLE)"
+    )
+    latest_reported_current_expr = (
+        "COALESCE(TRY_CAST(a.latest_reported_current_value AS DOUBLE), TRY_CAST(m.latest_reported_current_value AS DOUBLE))"
+        if "latest_reported_current_value" in rolled_columns
+        else "TRY_CAST(m.latest_reported_current_value AS DOUBLE)"
+    )
+    latest_reported_potential_expr = (
+        "COALESCE(TRY_CAST(a.latest_reported_potential_value AS DOUBLE), TRY_CAST(m.latest_reported_potential_value AS DOUBLE))"
+        if "latest_reported_potential_value" in rolled_columns
+        else "TRY_CAST(m.latest_reported_potential_value AS DOUBLE)"
+    )
+    recipient_uei_expr = (
+        "COALESCE(NULLIF(TRIM(CAST(a.recipient_uei AS VARCHAR)), ''), NULLIF(TRIM(CAST(m.recipient_uei AS VARCHAR)), ''))"
+        if "recipient_uei" in rolled_columns
+        else "NULLIF(TRIM(CAST(m.recipient_uei AS VARCHAR)), '')"
+    )
+    recipient_parent_uei_expr = (
+        "COALESCE(NULLIF(TRIM(CAST(a.recipient_parent_uei AS VARCHAR)), ''), NULLIF(TRIM(CAST(m.recipient_parent_uei AS VARCHAR)), ''))"
+        if "recipient_parent_uei" in rolled_columns
+        else "NULLIF(TRIM(CAST(m.recipient_parent_uei AS VARCHAR)), '')"
+    )
+    recipient_parent_name_expr = (
+        "COALESCE(NULLIF(TRIM(CAST(a.recipient_parent_name AS VARCHAR)), ''), NULLIF(TRIM(CAST(m.recipient_parent_name AS VARCHAR)), ''))"
+        if "recipient_parent_name" in rolled_columns
+        else "NULLIF(TRIM(CAST(m.recipient_parent_name AS VARCHAR)), '')"
+    )
+    annual_award_years = sorted(
+        int(match.group(1))
+        for column in rolled_columns
+        if (match := re.fullmatch(r"obligations_fy(\d{4})", column))
+    )
+    annual_award_columns_sql = "".join(
+        f",\n            TRY_CAST(a.obligations_fy{year} AS DOUBLE) AS obligations_fy{year}"
+        for year in annual_award_years
+    )
+
+    conn.execute(f"""
         CREATE OR REPLACE TABLE public_award_profile_next AS
         WITH released AS (
             SELECT entity_id
@@ -1652,20 +1716,24 @@ def build_public_intelligence_release(conn):
             NULLIF(TRIM(CAST(a.solicitation_id AS VARCHAR)), '') AS solicitation_id,
             sm.public_solicitation_id,
             TRY_CAST(a.total_spend AS DOUBLE) AS total_spend,
+            {observed_net_obligations_expr} AS observed_net_obligations,
+            {latest_reported_total_expr} AS latest_reported_total_obligated,
+            {latest_reported_current_expr} AS latest_reported_current_value,
+            {latest_reported_potential_expr} AS latest_reported_potential_value,
             TRY_CAST(a.action_count AS BIGINT) AS action_count,
             TRY_CAST(a.start_date AS DATE) AS start_date,
+            {first_observed_action_expr} AS first_observed_action_date,
+            {reported_performance_start_expr} AS reported_performance_start_date,
             TRY_CAST(a.last_action_date AS DATE) AS last_action_date,
+            {recipient_uei_expr} AS recipient_uei,
+            {recipient_parent_uei_expr} AS recipient_parent_uei,
+            {recipient_parent_name_expr} AS recipient_parent_name,
             TRY_CAST(a.first_year AS INTEGER) AS first_year,
-            TRY_CAST(a.year AS INTEGER) AS last_year,
-            TRY_CAST(a.obligations_fy2019 AS DOUBLE) AS obligations_fy2019,
-            TRY_CAST(a.obligations_fy2020 AS DOUBLE) AS obligations_fy2020,
-            TRY_CAST(a.obligations_fy2021 AS DOUBLE) AS obligations_fy2021,
-            TRY_CAST(a.obligations_fy2022 AS DOUBLE) AS obligations_fy2022,
-            TRY_CAST(a.obligations_fy2023 AS DOUBLE) AS obligations_fy2023,
-            TRY_CAST(a.obligations_fy2024 AS DOUBLE) AS obligations_fy2024,
-            TRY_CAST(a.obligations_fy2025 AS DOUBLE) AS obligations_fy2025,
-            TRY_CAST(a.obligations_fy2026 AS DOUBLE) AS obligations_fy2026
+            TRY_CAST(a.year AS INTEGER) AS last_year
+            {annual_award_columns_sql}
         FROM matched a
+        LEFT JOIN v_contract_award_metadata m
+            ON CAST(a.award_key AS VARCHAR) = CAST(m.award_key AS VARCHAR)
         LEFT JOIN solicitation_map sm
             ON UPPER(TRIM(CAST(a.solicitation_id AS VARCHAR))) = sm.solicitation_number
         QUALIFY ROW_NUMBER() OVER (
@@ -1917,6 +1985,7 @@ def reload_all_data():
             "nsn_supplier_lookup.parquet",
             "nsn_cage_reference.parquet",
             "dod_contract_announcements.parquet",
+            "contract_award_metadata.parquet",
             "platform_bom.parquet" # unrelated to NSN/CAGE reference, leave only if another feature uses it
         ]
 
@@ -2052,6 +2121,7 @@ def reload_all_data():
                 ("v_nsn_profile_lookup", "nsn_profile_lookup.parquet"),
                 ("v_nsn_supplier_lookup", "nsn_supplier_lookup.parquet"),
                 ("v_nsn_cage_reference", "nsn_cage_reference.parquet"),
+                ("v_contract_award_metadata", "contract_award_metadata.parquet"),
                 ("v_platform_bom", "platform_bom.parquet") # ✅ Added here
             ]
             
@@ -2061,6 +2131,23 @@ def reload_all_data():
                     conn.execute(f"DROP VIEW IF EXISTS {view_name};")
                     conn.execute(f"DROP TABLE IF EXISTS {view_name};")
                     conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{file_path}');")
+
+            contract_metadata_path = (LOCAL_CACHE_DIR / "contract_award_metadata.parquet").resolve()
+            if not contract_metadata_path.exists():
+                conn.execute("DROP VIEW IF EXISTS v_contract_award_metadata")
+                conn.execute("""
+                    CREATE VIEW v_contract_award_metadata AS
+                    SELECT
+                        CAST(NULL AS VARCHAR) AS award_key,
+                        CAST(NULL AS DATE) AS reported_performance_start_date,
+                        CAST(NULL AS DOUBLE) AS latest_reported_total_obligated,
+                        CAST(NULL AS DOUBLE) AS latest_reported_current_value,
+                        CAST(NULL AS DOUBLE) AS latest_reported_potential_value,
+                        CAST(NULL AS VARCHAR) AS recipient_uei,
+                        CAST(NULL AS VARCHAR) AS recipient_parent_uei,
+                        CAST(NULL AS VARCHAR) AS recipient_parent_name
+                    WHERE FALSE
+                """)
 
             description_path = str(
                 (LOCAL_CACHE_DIR / "subcontract_descriptions.parquet").resolve()
@@ -5286,7 +5373,12 @@ def get_public_award_page_snapshot(contract_id: str, response: Response):
         }
 
     annual_obligations = []
-    for year in range(2019, 2027):
+    annual_years = sorted(
+        int(match.group(1))
+        for key in row
+        if (match := re.fullmatch(r"obligations_fy(\d{4})", str(key)))
+    )
+    for year in annual_years:
         value = _safe_public_number(row.get(f"obligations_fy{year}"))
         if value != 0:
             annual_obligations.append({"year": year, "value": value})
@@ -5317,10 +5409,22 @@ def get_public_award_page_snapshot(contract_id: str, response: Response):
         "set_aside_type": _clean_optional_value(row.get("set_aside_type")),
         "solicitation_id": _clean_optional_value(row.get("solicitation_id")),
         "public_solicitation_id": _clean_optional_value(row.get("public_solicitation_id")),
+        # Backwards-compatible total_obligations remains the FY2019+ observed
+        # transaction sum. The reported cumulative fields are kept separate so
+        # public pages never imply that an observation-window value is lifetime.
         "total_obligations": _safe_public_number(row.get("total_spend")),
+        "observed_net_obligations": _safe_public_number(row.get("observed_net_obligations") or row.get("total_spend")),
+        "latest_reported_total_obligated": _optional_public_number(row.get("latest_reported_total_obligated")),
+        "latest_reported_current_value": _optional_public_number(row.get("latest_reported_current_value")),
+        "latest_reported_potential_value": _optional_public_number(row.get("latest_reported_potential_value")),
         "action_count": int(_safe_public_number(row.get("action_count"))),
         "start_date": _clean_optional_value(row.get("start_date")),
+        "first_observed_action_date": _clean_optional_value(row.get("first_observed_action_date")) or _clean_optional_value(row.get("start_date")),
+        "reported_performance_start_date": _clean_optional_value(row.get("reported_performance_start_date")),
         "last_action_date": _clean_optional_value(row.get("last_action_date")),
+        "recipient_uei": _clean_optional_value(row.get("recipient_uei")),
+        "recipient_parent_uei": _clean_optional_value(row.get("recipient_parent_uei")),
+        "recipient_parent_name": _clean_entity_name(row.get("recipient_parent_name")),
         "first_year": int(_safe_public_number(row.get("first_year"))) or None,
         "last_year": int(_safe_public_number(row.get("last_year"))) or None,
         "annual_obligations": annual_obligations,
