@@ -82,7 +82,12 @@ def main():
         result = api.build_public_intelligence_release(connection)
         elapsed = time.perf_counter() - started_at
         release = result["release"]
-        entries = result["entries"]
+        entries = connection.execute("""
+            SELECT
+                entity_type, entity_id, canonical_path, last_modified,
+                sitemap_batch
+            FROM public_intelligence_manifest
+        """).fetchdf().to_dict("records")
 
         assert release["total_entries"] == len(entries)
         assert release["total_entries"] <= release["requested_cohort_size"]

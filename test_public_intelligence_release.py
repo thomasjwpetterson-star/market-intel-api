@@ -3,8 +3,19 @@ import unittest
 import duckdb
 
 from public_intelligence_release import (
+    PUBLIC_AWARD_MIN_ACTIONS,
+    PUBLIC_AWARD_MIN_DESCRIPTION_LENGTH,
+    PUBLIC_AWARD_MIN_OBSERVED_VALUE,
+    PUBLIC_COMPANY_MIN_OBSERVED_VALUE,
+    PUBLIC_HEALTHCARE_DOMINANCE_SHARE,
     PUBLIC_INTELLIGENCE_QUALITY_GATE_VERSION,
     PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE,
+    PUBLIC_NSN_MIN_CONTEXT_COUNT,
+    PUBLIC_NSN_MIN_OBSERVED_VALUE,
+    PUBLIC_NSN_UNMAPPED_MIN_OBSERVED_VALUE,
+    PUBLIC_SOLICITATION_MIN_DESCRIPTION_LENGTH,
+    PUBLIC_SOLICITATION_MIN_METADATA_FIELDS,
+    PUBLIC_SOLICITATION_MIN_TITLE_LENGTH,
     previous_publication_entries,
     public_content_fingerprint,
     public_entity_slug,
@@ -44,6 +55,19 @@ class PublicIntelligenceReleaseTests(unittest.TestCase):
     def test_sitemap_contract_stays_within_google_limit(self):
         self.assertLessEqual(PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE, 50_000)
         self.assertTrue(PUBLIC_INTELLIGENCE_QUALITY_GATE_VERSION)
+
+    def test_quality_gate_thresholds_are_explicit(self):
+        self.assertEqual(PUBLIC_COMPANY_MIN_OBSERVED_VALUE, 10_000)
+        self.assertEqual(PUBLIC_HEALTHCARE_DOMINANCE_SHARE, 0.8)
+        self.assertEqual(PUBLIC_AWARD_MIN_OBSERVED_VALUE, 1_000_000)
+        self.assertEqual(PUBLIC_AWARD_MIN_ACTIONS, 2)
+        self.assertEqual(PUBLIC_AWARD_MIN_DESCRIPTION_LENGTH, 30)
+        self.assertEqual(PUBLIC_SOLICITATION_MIN_TITLE_LENGTH, 12)
+        self.assertEqual(PUBLIC_SOLICITATION_MIN_DESCRIPTION_LENGTH, 150)
+        self.assertEqual(PUBLIC_SOLICITATION_MIN_METADATA_FIELDS, 1)
+        self.assertEqual(PUBLIC_NSN_MIN_OBSERVED_VALUE, 100)
+        self.assertEqual(PUBLIC_NSN_UNMAPPED_MIN_OBSERVED_VALUE, 1_000)
+        self.assertEqual(PUBLIC_NSN_MIN_CONTEXT_COUNT, 2)
 
     def test_slug_matches_public_route_rules(self):
         self.assertEqual(
