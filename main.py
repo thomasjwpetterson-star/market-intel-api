@@ -1496,11 +1496,11 @@ def build_public_intelligence_release(conn):
             SELECT
                 TRIM(CAST(id AS VARCHAR)) AS opportunity_id,
                 TRIM(CAST(sol_num AS VARCHAR)) AS solicitation_number,
-                TRIM(CAST(title AS VARCHAR)) AS title,
+                TRIM(REGEXP_REPLACE(CAST(title AS VARCHAR), '�+', '-', 'g')) AS title,
                 TRIM(CAST(agency AS VARCHAR)) AS agency,
                 TRY_CAST(SUBSTR(CAST(deadline AS VARCHAR), 1, 10) AS DATE) AS deadline_date,
                 LENGTH(TRIM(CAST(description AS VARCHAR))) AS description_length,
-                HASH(CAST(description AS VARCHAR)) AS description_fingerprint,
+                HASH(REGEXP_REPLACE(CAST(description AS VARCHAR), '�+', '-', 'g')) AS description_fingerprint,
                 COUNT(*) OVER () AS quality_gate_matches,
                 (CASE WHEN NULLIF(TRIM(CAST(sub_agency AS VARCHAR)), '') IS NOT NULL THEN 1 ELSE 0 END
                  + CASE WHEN NULLIF(TRIM(CAST(naics AS VARCHAR)), '') IS NOT NULL THEN 1 ELSE 0 END
@@ -2106,14 +2106,14 @@ def build_public_intelligence_release(conn):
         SELECT
             CAST(o.id AS VARCHAR) AS opportunity_id,
             CAST(o.sol_num AS VARCHAR) AS solicitation_number,
-            CAST(o.title AS VARCHAR) AS title,
+            REGEXP_REPLACE(CAST(o.title AS VARCHAR), '�+', '-', 'g') AS title,
             CAST(o.agency AS VARCHAR) AS agency,
             CAST(o.sub_agency AS VARCHAR) AS sub_agency,
             CAST(o.deadline AS VARCHAR) AS deadline,
             CAST(o.set_aside_type AS VARCHAR) AS set_aside_type,
             CAST(o.naics AS VARCHAR) AS naics,
             CAST(o.psc AS VARCHAR) AS psc,
-            SUBSTR(TRIM(CAST(o.description AS VARCHAR)), 1, 5000) AS description,
+            SUBSTR(TRIM(REGEXP_REPLACE(CAST(o.description AS VARCHAR), '�+', '-', 'g')), 1, 5000) AS description,
             CAST(o.source_system AS VARCHAR) AS source_system,
             CAST(o.state AS VARCHAR) AS state,
             CAST(o.url AS VARCHAR) AS source_url
