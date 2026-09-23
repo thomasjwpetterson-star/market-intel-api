@@ -7025,6 +7025,7 @@ def build_public_company_snapshot(
 
     safe_name = full_profile.get("name")
     safe_cage = full_profile.get("cage")
+    uei = _clean_optional_value(full_profile.get("uei"))
     ultimate_parent_name = _clean_entity_name(full_profile.get("ultimate_parent_name"))
     ultimate_parent_uei = _clean_optional_value(full_profile.get("ultimate_parent_uei"))
     is_parent = safe_cage == "AGGREGATE"
@@ -7364,6 +7365,7 @@ def build_public_company_snapshot(
         "found": True,
         "name": safe_name,
         "cage": safe_cage,
+        "uei": uei,
         "is_parent": is_parent,
         "ultimate_parent_name": ultimate_parent_name,
         "ultimate_parent_uei": ultimate_parent_uei,
@@ -7599,6 +7601,7 @@ def format_profile_response_with_loc(row, city, state, type="CHILD", overrides: 
         "type": type,
         "name": row.get('vendor_name'),
         "cage": row.get('cage_code'),
+        "uei": _clean_optional_value(row.get('uei')),
         "ultimate_parent_name": _clean_entity_name(row.get('ultimate_parent_name')),
         "ultimate_parent_uei": _clean_optional_value(row.get('ultimate_parent_uei')),
 
