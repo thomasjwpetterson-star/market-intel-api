@@ -33,6 +33,8 @@ from pydantic import BaseModel
 import uuid
 import hmac
 import csv
+import json
+import hashlib
 from fastapi import APIRouter
 from dotenv import load_dotenv
 
@@ -58,6 +60,7 @@ from public_intelligence_release import (
     public_content_fingerprint,
     public_entity_slug,
 )
+from public_page_projections import build_public_page_projections
 
 load_dotenv()
 
@@ -90,6 +93,7 @@ GLOBAL_CACHE = {
     "naics_map": {},
     "public_intelligence_release": None,
     "public_intelligence_index": {},
+    "public_page_projections_ready": False,
 }
 
 # NOTE: global_data is no longer needed as we use DuckDB for heavy data
@@ -2177,6 +2181,17 @@ def build_public_intelligence_release(conn):
             ON m.entity_type = 'solicitation' AND m.entity_id = s.opportunity_id
     """)
 
+    # Full entity-page payloads are deliberately built only by the daily,
+    # higher-memory release job.  A normal Render startup keeps using the
+    # existing component projections and request builders unless it can load a
+    # prebuilt release.  This prevents the million-row NSN materialisation from
+    # competing with the live API inside its 650 MB DuckDB memory limit.
+    build_page_profiles = os.getenv(
+        "PUBLIC_INTELLIGENCE_BUILD_PAGE_PROFILES", "0"
+    ).strip().lower() in {"1", "true", "yes"}
+    if build_page_profiles:
+        build_public_page_projections(conn)
+
     projection_tables = {
         "public_intelligence_manifest_next": "public_intelligence_manifest.parquet",
         "public_company_top_award_next": "public_company_top_award.parquet",
@@ -2186,6 +2201,12 @@ def build_public_intelligence_release(conn):
         "public_solicitation_profile_next": "public_solicitation_profile.parquet",
         "public_intelligence_search_next": "public_intelligence_search.parquet",
     }
+    if build_page_profiles:
+        projection_tables.update({
+            "public_company_profile_next": "public_company_profile.parquet",
+            "public_platform_profile_next": "public_platform_profile.parquet",
+            "public_nsn_profile_next": "public_nsn_profile.parquet",
+        })
     pending_projection_files = []
     for table_name, filename in projection_tables.items():
         final_path = LOCAL_CACHE_DIR / filename
@@ -2207,6 +2228,10 @@ def build_public_intelligence_release(conn):
         conn.execute("DROP TABLE IF EXISTS public_award_profile")
         conn.execute("DROP TABLE IF EXISTS public_solicitation_profile")
         conn.execute("DROP TABLE IF EXISTS public_intelligence_search")
+        if build_page_profiles:
+            conn.execute("DROP TABLE IF EXISTS public_company_profile")
+            conn.execute("DROP TABLE IF EXISTS public_platform_profile")
+            conn.execute("DROP TABLE IF EXISTS public_nsn_profile")
         conn.execute("ALTER TABLE public_intelligence_manifest_next RENAME TO public_intelligence_manifest")
         conn.execute("ALTER TABLE public_company_top_award_next RENAME TO public_company_top_award")
         conn.execute("ALTER TABLE public_company_top_nsn_next RENAME TO public_company_top_nsn")
@@ -2214,6 +2239,10 @@ def build_public_intelligence_release(conn):
         conn.execute("ALTER TABLE public_award_profile_next RENAME TO public_award_profile")
         conn.execute("ALTER TABLE public_solicitation_profile_next RENAME TO public_solicitation_profile")
         conn.execute("ALTER TABLE public_intelligence_search_next RENAME TO public_intelligence_search")
+        if build_page_profiles:
+            conn.execute("ALTER TABLE public_company_profile_next RENAME TO public_company_profile")
+            conn.execute("ALTER TABLE public_platform_profile_next RENAME TO public_platform_profile")
+            conn.execute("ALTER TABLE public_nsn_profile_next RENAME TO public_nsn_profile")
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -2247,6 +2276,23 @@ def build_public_intelligence_release(conn):
             CREATE INDEX IF NOT EXISTS idx_public_solicitation_profile_id
             ON public_solicitation_profile(opportunity_id)
         """)
+        if build_page_profiles:
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_public_company_profile_cage
+                ON public_company_profile(cage)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_public_platform_profile_slug
+                ON public_platform_profile(slug)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_public_nsn_profile_entity
+                ON public_nsn_profile(entity_id)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_public_nsn_profile_niin
+                ON public_nsn_profile(niin)
+            """)
     except Exception:
         logger.warning("Could not create public intelligence projection indexes", exc_info=True)
 
@@ -2273,6 +2319,18 @@ def build_public_intelligence_release(conn):
             if final_path.exists()
         ),
     }
+    if build_page_profiles:
+        projection_stats.update({
+            "company_profile_rows": int(
+                conn.execute("SELECT COUNT(*) FROM public_company_profile").fetchone()[0]
+            ),
+            "platform_profile_rows": int(
+                conn.execute("SELECT COUNT(*) FROM public_platform_profile").fetchone()[0]
+            ),
+            "nsn_profile_rows": int(
+                conn.execute("SELECT COUNT(*) FROM public_nsn_profile").fetchone()[0]
+            ),
+        })
 
     counts = {
         str(entity_type): int(count)
@@ -2377,6 +2435,319 @@ def attach_publication_metadata(payload: dict, entity_type: str, entity_id: str)
     return payload
 
 
+PUBLIC_INTELLIGENCE_POINTER_KEY = os.getenv(
+    "PUBLIC_INTELLIGENCE_POINTER_KEY",
+    f"{CACHE_PREFIX}public_intelligence/current.json",
+).strip()
+PUBLIC_INTELLIGENCE_RELEASE_FILES = {
+    "public_intelligence_manifest.parquet": "public_intelligence_manifest",
+    "public_company_top_award.parquet": "public_company_top_award",
+    "public_company_top_nsn.parquet": "public_company_top_nsn",
+    "public_platform_award_scope.parquet": "public_platform_award_scope",
+    "public_award_profile.parquet": "public_award_profile",
+    "public_solicitation_profile.parquet": "public_solicitation_profile",
+    "public_intelligence_search.parquet": "public_intelligence_search",
+    "public_company_profile.parquet": "public_company_profile",
+    "public_platform_profile.parquet": "public_platform_profile",
+    "public_nsn_profile.parquet": "public_nsn_profile",
+}
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def download_public_intelligence_release() -> Optional[dict]:
+    """Download one immutable public release selected by a last-written pointer.
+
+    The pointer is the only mutable object.  Every referenced Parquet object is
+    versioned by release id and verified before it replaces a local file, so a
+    deploy cannot observe half of one release and half of another.
+    """
+
+    if not PUBLIC_INTELLIGENCE_POINTER_KEY:
+        return None
+    try:
+        s3_client = boto3.client("s3", region_name=AWS_REGION, config=BOTO_CFG)
+        pointer = json.loads(
+            s3_client.get_object(
+                Bucket=BUCKET_NAME,
+                Key=PUBLIC_INTELLIGENCE_POINTER_KEY,
+            )["Body"].read()
+        )
+        release = pointer.get("release") or {}
+        entries = pointer.get("files") or []
+        entries_by_name = {
+            str(entry.get("filename") or ""): entry
+            for entry in entries
+            if isinstance(entry, dict)
+        }
+        missing = set(PUBLIC_INTELLIGENCE_RELEASE_FILES) - set(entries_by_name)
+        if not release.get("release_id") or missing:
+            raise ValueError(
+                "Public intelligence release pointer is incomplete: "
+                + ", ".join(sorted(missing))
+            )
+
+        for filename in PUBLIC_INTELLIGENCE_RELEASE_FILES:
+            entry = entries_by_name[filename]
+            s3_key = str(entry.get("s3_key") or "").strip()
+            expected_size = int(entry.get("size") or 0)
+            expected_hash = str(entry.get("sha256") or "").strip().lower()
+            if not s3_key or expected_size <= 0 or len(expected_hash) != 64:
+                raise ValueError(f"Invalid public release entry for {filename}")
+
+            final_path = (LOCAL_CACHE_DIR / filename).resolve()
+            temporary_path = (LOCAL_CACHE_DIR / f"{filename}.tmp").resolve()
+            if (
+                final_path.exists()
+                and final_path.stat().st_size == expected_size
+                and _file_sha256(final_path) == expected_hash
+            ):
+                continue
+            temporary_path.unlink(missing_ok=True)
+            s3_client.download_file(BUCKET_NAME, s3_key, str(temporary_path))
+            if temporary_path.stat().st_size != expected_size:
+                temporary_path.unlink(missing_ok=True)
+                raise ValueError(f"Size mismatch for {s3_key}")
+            if _file_sha256(temporary_path) != expected_hash:
+                temporary_path.unlink(missing_ok=True)
+                raise ValueError(f"SHA-256 mismatch for {s3_key}")
+            temporary_path.replace(final_path)
+
+        logger.info(
+            "Downloaded verified public intelligence release release_id=%s",
+            release.get("release_id"),
+        )
+        return pointer
+    except ClientError as exc:
+        error_code = str(exc.response.get("Error", {}).get("Code") or "")
+        if error_code in {"404", "NoSuchKey", "NotFound"}:
+            logger.info(
+                "No prebuilt public intelligence release at s3://%s/%s; using compatibility build",
+                BUCKET_NAME,
+                PUBLIC_INTELLIGENCE_POINTER_KEY,
+            )
+        else:
+            logger.warning("Unable to download prebuilt public intelligence release", exc_info=True)
+    except Exception:
+        logger.warning("Prebuilt public intelligence release failed verification", exc_info=True)
+    return None
+
+
+def load_public_intelligence_release(conn, pointer: Optional[dict]) -> Optional[dict]:
+    """Atomically load verified release Parquets into indexed DuckDB tables."""
+
+    if not pointer:
+        return None
+    release = pointer.get("release") or {}
+    staged_tables = []
+    try:
+        for filename, table_name in PUBLIC_INTELLIGENCE_RELEASE_FILES.items():
+            source = str((LOCAL_CACHE_DIR / filename).resolve()).replace("'", "''")
+            staged = f"{table_name}_prebuilt_next"
+            conn.execute(f"DROP TABLE IF EXISTS {staged}")
+            conn.execute(
+                f"CREATE TABLE {staged} AS SELECT * FROM read_parquet('{source}')"
+            )
+            staged_tables.append((staged, table_name))
+
+        actual_counts = {
+            str(entity_type): int(count)
+            for entity_type, count in conn.execute("""
+                SELECT entity_type, COUNT(*)
+                FROM public_intelligence_manifest_prebuilt_next
+                GROUP BY entity_type
+            """).fetchall()
+        }
+        expected_counts = {
+            str(key): int(value)
+            for key, value in (release.get("counts") or {}).items()
+        }
+        if actual_counts != expected_counts:
+            raise ValueError(
+                f"Public manifest count mismatch: expected={expected_counts} actual={actual_counts}"
+            )
+        total_entries = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM public_intelligence_manifest_prebuilt_next"
+            ).fetchone()[0]
+        )
+        if total_entries != int(release.get("total_entries") or -1):
+            raise ValueError("Public manifest total does not match release metadata")
+
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            for _, table_name in staged_tables:
+                conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+            for staged, table_name in staged_tables:
+                conn.execute(f"ALTER TABLE {staged} RENAME TO {table_name}")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+        index_statements = (
+            "CREATE INDEX IF NOT EXISTS idx_public_intelligence_manifest_entity ON public_intelligence_manifest(entity_type, entity_id)",
+            "CREATE INDEX IF NOT EXISTS idx_public_company_top_award_cage ON public_company_top_award(cage)",
+            "CREATE INDEX IF NOT EXISTS idx_public_company_top_nsn_cage ON public_company_top_nsn(cage, nsn_rank)",
+            "CREATE INDEX IF NOT EXISTS idx_public_platform_award_scope_entity ON public_platform_award_scope(slug, vendor_cage)",
+            "CREATE INDEX IF NOT EXISTS idx_public_award_profile_id ON public_award_profile(contract_id)",
+            "CREATE INDEX IF NOT EXISTS idx_public_solicitation_profile_id ON public_solicitation_profile(opportunity_id)",
+            "CREATE INDEX IF NOT EXISTS idx_public_company_profile_cage ON public_company_profile(cage)",
+            "CREATE INDEX IF NOT EXISTS idx_public_platform_profile_slug ON public_platform_profile(slug)",
+            "CREATE INDEX IF NOT EXISTS idx_public_nsn_profile_entity ON public_nsn_profile(entity_id)",
+            "CREATE INDEX IF NOT EXISTS idx_public_nsn_profile_niin ON public_nsn_profile(niin)",
+        )
+        for statement in index_statements:
+            conn.execute(statement)
+        logger.info(
+            "Loaded prebuilt public intelligence release release_id=%s entries=%d",
+            release.get("release_id"),
+            total_entries,
+        )
+        return release
+    except Exception:
+        logger.exception("Unable to load prebuilt public intelligence release")
+        for staged, _ in staged_tables:
+            try:
+                conn.execute(f"DROP TABLE IF EXISTS {staged}")
+            except Exception:
+                pass
+        return None
+
+
+def load_public_page_projection(
+    entity_type: str,
+    entity_id: str,
+) -> Optional[dict]:
+    """Return one precomputed page payload, or None for legacy releases."""
+
+    if not GLOBAL_CACHE.get("public_page_projections_ready"):
+        return None
+
+    if entity_type == "nsn":
+        if len(entity_id) == 13:
+            query_spec = (
+                "SELECT payload_json FROM public_nsn_profile WHERE entity_id = ? LIMIT 1",
+                [entity_id],
+            )
+        else:
+            query_spec = (
+                "SELECT payload_json FROM public_nsn_profile WHERE niin = ? LIMIT 1",
+                [entity_id[-9:].zfill(9)],
+            )
+    else:
+        query_spec = None
+    query_by_type = {
+        "cage_company": (
+            "SELECT payload_json FROM public_company_profile WHERE cage = ? LIMIT 1",
+            [entity_id],
+        ),
+        "platform": (
+            "SELECT payload_json FROM public_platform_profile WHERE slug = ? LIMIT 1",
+            [entity_id],
+        ),
+    }
+    query_spec = query_spec or query_by_type.get(entity_type)
+    if query_spec is None:
+        return None
+    try:
+        result = duck_fetch_df(query_spec[0], query_spec[1])
+        if result.empty:
+            return None
+        raw_payload = result.iloc[0].get("payload_json")
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+        return payload if isinstance(payload, dict) and payload.get("found") else None
+    except Exception:
+        # Older deployments intentionally do not have these tables.  The
+        # existing request builders below remain the compatibility path.
+        logger.debug(
+            "Public page projection unavailable entity_type=%s entity_id=%s",
+            entity_type,
+            entity_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _compact_public_usd(value: Any) -> str:
+    amount = float(value or 0.0)
+    if abs(amount) >= 1_000_000_000:
+        return f"${amount / 1_000_000_000:.1f}B"
+    if abs(amount) >= 1_000_000:
+        return f"${amount / 1_000_000:.1f}M"
+    if abs(amount) >= 1_000:
+        return f"${amount / 1_000:.1f}K"
+    return f"${amount:,.0f}"
+
+
+def complete_public_company_copy(payload: dict) -> dict:
+    """Add inexpensive narrative fields to a materialised company payload."""
+
+    if not payload.get("description"):
+        name = str(payload.get("name") or "This contractor")
+        cage = str(payload.get("cage") or "").strip()
+        location = str(payload.get("location") or "").strip()
+        summary_parts = [
+            f"{name} is a defense supplier facility"
+            + (f" identified by CAGE {cage}" if cage else "")
+            + (f" in {location}" if location else "")
+            + "."
+        ]
+        prime_value = float(payload.get("prime_exposure") or 0.0)
+        sub_value = float(payload.get("sub_exposure") or 0.0)
+        time_period = str(payload.get("time_period") or "").strip()
+        if prime_value > 0 or sub_value > 0:
+            summary_parts.append(
+                f"The contractor received {_compact_public_usd(prime_value)} in prime obligations "
+                f"and {_compact_public_usd(sub_value)} in tracked subcontract awards"
+                + (
+                    f" across {time_period}"
+                    if time_period and time_period != "Observed period unavailable"
+                    else ""
+                )
+                + "."
+            )
+        capabilities = [str(value) for value in payload.get("top_capabilities") or [] if value]
+        if capabilities:
+            summary_parts.append(
+                "Observed award classifications include "
+                + "; ".join(capabilities[:2])
+                + "."
+            )
+        platforms = [
+            str(item.get("name"))
+            for item in payload.get("top_platforms") or []
+            if isinstance(item, dict) and item.get("name")
+        ]
+        if platforms:
+            coverage = float(payload.get("platform_mapping_coverage") or 0.0)
+            coverage_text = "less than 0.1%" if 0 < coverage < 0.1 else f"{coverage:.1f}%"
+            summary_parts.append(
+                f"Platform mappings cover {coverage_text} of observed prime obligation value and include "
+                + ", ".join(platforms[:2])
+                + "."
+            )
+        payload["description"] = " ".join(summary_parts)
+
+    if not payload.get("insight"):
+        prime_value = float(payload.get("prime_exposure") or 0.0)
+        sub_value = float(payload.get("sub_exposure") or 0.0)
+        total_value = prime_value + sub_value
+        if total_value > 0 and prime_value / total_value >= 0.9:
+            payload["insight"] = "Observed activity is concentrated in direct prime contracting."
+        elif total_value > 0 and sub_value / total_value >= 0.9:
+            payload["insight"] = "Observed activity is concentrated in sub-tier supply-chain work."
+        else:
+            payload["insight"] = "Observed activity spans direct awards and supply-chain relationships."
+    return payload
+
+
 def reload_all_data():
     # Lock is the single source of truth for in-progress reloads
     if not RELOAD_LOCK.acquire(blocking=False):
@@ -2412,6 +2783,7 @@ def reload_all_data():
             "df_opportunities": pd.DataFrame(),
             "public_intelligence_release": None,
             "public_intelligence_index": {},
+            "public_page_projections_ready": False,
         }
 
         # 2. DOWNLOAD FILES
@@ -2535,6 +2907,12 @@ def reload_all_data():
 
         if not local_single.exists():
             fetch_prefix(f"{CACHE_PREFIX}contracts_rolled/", local_folder)
+
+        # Public entity pages follow their own immutable release pointer.  This
+        # download is intentionally independent of the legacy flat app_cache
+        # objects above; the files are verified before the active DuckDB tables
+        # are changed.
+        public_release_pointer = download_public_intelligence_release()
 
         kpis_local = (LOCAL_CACHE_DIR / "kpis.parquet").resolve()
         if kpis_local.exists():
@@ -3114,16 +3492,24 @@ def reload_all_data():
         # membership. Public routes remain available outside this cohort, but
         # those pages are noindex and never submitted to a sitemap.
         try:
-            public_release = build_public_intelligence_release(conn)
-            new_global_cache["public_intelligence_release"] = public_release["release"]
+            prebuilt_release = load_public_intelligence_release(
+                conn,
+                public_release_pointer,
+            )
+            if prebuilt_release is None:
+                public_release = build_public_intelligence_release(conn)
+                prebuilt_release = public_release["release"]
+            else:
+                new_global_cache["public_page_projections_ready"] = True
+            new_global_cache["public_intelligence_release"] = prebuilt_release
             # Manifest membership is queried from the indexed DuckDB table on
             # demand. Keeping every entry in a Python dict consumed hundreds of
             # MB at million-URL scale and duplicated the persisted manifest.
             new_global_cache["public_intelligence_index"] = {}
             logger.info(
                 "PUBLIC INTELLIGENCE RELEASE READY release_id=%s entries=%d",
-                public_release["release"]["release_id"],
-                public_release["release"]["total_entries"],
+                prebuilt_release["release_id"],
+                prebuilt_release["total_entries"],
             )
         except Exception:
             logger.exception("Public intelligence release build failed; all entity pages will remain noindex")
@@ -5989,6 +6375,15 @@ def get_public_platform_page_snapshot(slug: str, response: Response):
     """Stable public platform summary assembled from existing platform queries."""
     require_public_snapshot_ready()
     safe_slug = _public_entity_slug(slug)
+    projected = load_public_page_projection("platform", safe_slug)
+    if projected is not None:
+        attach_publication_metadata(projected, "platform", safe_slug)
+        response.headers["Cache-Control"] = (
+            "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
+        )
+        response.headers["X-Mimir-Public-Projection"] = "daily-release"
+        return projected
+
     name = resolve_public_platform_slug(slug)
     if not name:
         raise HTTPException(status_code=404, detail="Platform not found")
@@ -6131,6 +6526,7 @@ def get_public_platform_page_snapshot(slug: str, response: Response):
     response.headers["Cache-Control"] = (
         "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
     )
+    response.headers["X-Mimir-Public-Projection"] = "request-builder"
     return snapshot
 
 
@@ -7414,10 +7810,14 @@ def get_public_company_page_snapshot(cage: str, response: Response):
     if not re.fullmatch(r"[A-Z0-9]{5}", clean_cage):
         raise HTTPException(status_code=400, detail="Enter a valid five-character CAGE code.")
 
-    payload = build_public_company_snapshot(cage=clean_cage)
+    payload = load_public_page_projection("cage_company", clean_cage)
+    projection_source = "daily-release" if payload is not None else "request-builder"
+    if payload is None:
+        payload = build_public_company_snapshot(cage=clean_cage)
     if not payload.get("found"):
         raise HTTPException(status_code=404, detail=payload.get("message") or "Company not found.")
 
+    complete_public_company_copy(payload)
     payload.pop("remaining_lookups", None)
     payload["entity_type"] = "cage_company"
     payload["entity_id"] = clean_cage
@@ -7425,6 +7825,7 @@ def get_public_company_page_snapshot(cage: str, response: Response):
     response.headers["Cache-Control"] = (
         "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
     )
+    response.headers["X-Mimir-Public-Projection"] = projection_source
     return payload
 # ==========================================
 #        COMPANY INTELLIGENCE
@@ -9710,7 +10111,13 @@ def get_public_nsn_teaser(
 def get_public_nsn_page_snapshot(nsn: str, response: Response):
     """Stable, cacheable NSN page payload; public-page access is metered separately."""
     require_public_snapshot_ready()
-    snapshot = build_public_nsn_snapshot(nsn)
+    clean = re.sub(r"[^0-9]", "", str(nsn or ""))
+    if len(clean) not in {8, 9, 13}:
+        raise HTTPException(status_code=400, detail="Enter a valid 13-digit NSN or 9-digit NIIN.")
+    snapshot = load_public_page_projection("nsn", clean)
+    projection_source = "daily-release" if snapshot is not None else "request-builder"
+    if snapshot is None:
+        snapshot = build_public_nsn_snapshot(nsn)
     if not snapshot.get("found"):
         raise HTTPException(status_code=404, detail=snapshot.get("message") or "NSN not found")
 
@@ -9724,6 +10131,7 @@ def get_public_nsn_page_snapshot(nsn: str, response: Response):
     response.headers["Cache-Control"] = (
         "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
     )
+    response.headers["X-Mimir-Public-Projection"] = projection_source
     return snapshot
 
 DEFAULT_TOP_NSN_CACHE = None  # Put this at the top of your file
