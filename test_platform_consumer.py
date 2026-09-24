@@ -10,6 +10,8 @@ import duckdb
 if importlib.util.find_spec("fastapi") is None:
     raise unittest.SkipTest("FastAPI runtime dependencies are not installed")
 
+from fastapi import Response
+
 import main
 
 
@@ -24,6 +26,44 @@ class FileBackedS3:
 
 
 class PlatformConsumerTests(unittest.TestCase):
+    def test_ready_endpoint_returns_503_until_complete_generation_is_loaded(self):
+        response = Response()
+        with patch.object(
+            main,
+            "get_readiness_state",
+            return_value={
+                "ready": False,
+                "is_loading": True,
+                "last_loaded": 0,
+                "duck_ok": True,
+                "geo_ok": True,
+                "profiles_ok": False,
+            },
+        ):
+            payload = main.ready_check(response)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(payload["status"], "starting")
+
+    def test_ready_endpoint_returns_200_for_complete_generation(self):
+        response = Response()
+        with patch.object(
+            main,
+            "get_readiness_state",
+            return_value={
+                "ready": True,
+                "is_loading": False,
+                "last_loaded": 1,
+                "duck_ok": True,
+                "geo_ok": True,
+                "profiles_ok": True,
+            },
+        ):
+            payload = main.ready_check(response)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "ok")
+
     def test_public_child_is_hash_verified_schema_checked_and_installed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

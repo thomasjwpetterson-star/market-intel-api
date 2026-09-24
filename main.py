@@ -527,8 +527,12 @@ def get_readiness_state() -> Dict[str, Any]:
 
 
 @app.get("/ready")
-def ready_check():
+def ready_check(response: Response):
     s = get_readiness_state()
+    # Render must not switch traffic to a replacement instance until the
+    # complete cache generation is installed.  A JSON body that says
+    # "starting" with HTTP 200 is not a readiness check.
+    response.status_code = 200 if s["ready"] else 503
     return {
         "status": "ok" if s["ready"] else "starting",
         "ready": bool(s["ready"]),
