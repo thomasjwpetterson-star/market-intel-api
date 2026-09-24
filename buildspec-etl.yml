@@ -1,0 +1,17 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$REPOSITORY_URI"
+  build:
+    commands:
+      - IMAGE_URI="${REPOSITORY_URI}:build-${CODEBUILD_BUILD_NUMBER}"
+      - docker build --file Dockerfile.etl --tag "$IMAGE_URI" .
+  post_build:
+    commands:
+      - IMAGE_TAG="build-${CODEBUILD_BUILD_NUMBER}"
+      - IMAGE_URI="${REPOSITORY_URI}:${IMAGE_TAG}"
+      - docker push "$IMAGE_URI"
+      - IMAGE_DIGEST="$(aws ecr describe-images --repository-name "$REPOSITORY_NAME" --image-ids imageTag="$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)"
+      - printf 'ETL_IMAGE_URI=%s@%s\n' "$REPOSITORY_URI" "$IMAGE_DIGEST"

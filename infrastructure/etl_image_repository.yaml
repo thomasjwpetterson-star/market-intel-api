@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Immutable ECR repository for the Mimir automated ETL image.
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Default: mimir-etl-refresh
+  DataBucket:
+    Type: String
+    Default: a-and-d-intel-lake-newaccount
+  SourceObjectKey:
+    Type: String
+    Default: mimir/build-sources/mimir-etl-refresh.zip
+
+Resources:
+  EtlImageRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref RepositoryName
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Retain the newest 20 ETL images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": {"type": "expire"}
+              }
+            ]
+          }
+
+  EtlImageBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: codebuild.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BuildMimirEtlImage
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/mimir-etl-refresh*
+              - Sid: ReadBuildSource
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub arn:${AWS::Partition}:s3:::${DataBucket}/${SourceObjectKey}
+              - Sid: EcrLogin
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: PushEtlImage
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !GetAtt EtlImageRepository.Arn
+
+  EtlImageBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: mimir-etl-refresh
+      Description: Build and push the immutable Mimir ETL Fargate image.
+      ServiceRole: !GetAtt EtlImageBuildRole.Arn
+      TimeoutInMinutes: 60
+      Source:
+        Type: S3
+        Location: !Sub ${DataBucket}/${SourceObjectKey}
+        BuildSpec: buildspec-etl.yml
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux-x86_64-standard:5.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: REPOSITORY_URI
+            Value: !GetAtt EtlImageRepository.RepositoryUri
+          - Name: REPOSITORY_NAME
+            Value: !Ref EtlImageRepository
+
+Outputs:
+  RepositoryArn:
+    Value: !GetAtt EtlImageRepository.Arn
+  RepositoryUri:
+    Value: !GetAtt EtlImageRepository.RepositoryUri
+  BuildProjectName:
+    Value: !Ref EtlImageBuildProject

@@ -54,6 +54,10 @@ services:
         value: ask_mimir/runtime/current_manifest.json
       - key: ASK_MIMIR_FOLLOW_CURRENT_RELEASE
         value: "1"
+      - key: MIMIR_USE_PLATFORM_MANIFEST
+        value: "0"
+      - key: MIMIR_PLATFORM_MANIFEST_KEY
+        value: mimir/platform/current_manifest.json
       - key: OPENAI_API_KEY
         sync: false
       - key: AWS_ACCESS_KEY_ID

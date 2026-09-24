@@ -96,6 +96,15 @@ class ItemContextStore:
         missing = [str(path) for path in self.paths.values() if not path.exists()]
         if missing:
             raise FileNotFoundError(f"item context sources are missing: {missing}")
+        for name, filename in {
+            "supply_state": "nsn_supply_state_lookup.parquet",
+            "price_summary": "nsn_price_summary_lookup.parquet",
+            "opportunity_summary": "nsn_opportunity_summary_lookup.parquet",
+            "opportunity_detail": "nsn_opportunity_detail.parquet",
+        }.items():
+            candidate = self.data_root / filename
+            if candidate.exists():
+                self.paths[name] = candidate
         self.connection = duckdb.connect()
         configure_duckdb_scratch(self.connection, 'item')
         self.connection.execute("SET preserve_insertion_order=false")
@@ -215,9 +224,51 @@ class ItemContextStore:
         platforms = self._platforms(clean_niin)
         suppliers = self._suppliers(clean_niin, years, references)
         part_numbers = self._part_numbers(references, contracts)
+        supply_state = self._optional_sidecar("supply_state", clean_niin)
+        price_intelligence = self._optional_sidecar("price_summary", clean_niin)
+        opportunity_summary = self._optional_sidecar("opportunity_summary", clean_niin)
+        active_opportunities = self._optional_sidecar_rows(
+            "opportunity_detail", clean_niin, limit=50
+        )
         source_index = self._source_index(
             clean_niin, contracts, linked_prime_awards, platforms
         )
+        if supply_state:
+            source_index.append(
+                {
+                    "source": "DLA FOIA operational supply data",
+                    "record_locator": (
+                        f"NIIN {clean_niin}; inventory snapshot "
+                        f"{supply_state.get('inventory_snapshot_date')}"
+                    ),
+                    "supports": "Stock, backorder, reorder point and forecast demand observations",
+                    "public_url": "https://www.dla.mil/FOIA/Electronic-Reading-Room/",
+                }
+            )
+        if price_intelligence:
+            source_index.append(
+                {
+                    "source": "DLA FOIA price-reason observations",
+                    "record_locator": (
+                        f"NIIN {clean_niin}; latest observation "
+                        f"{price_intelligence.get('latest_price_date')}"
+                    ),
+                    "supports": "Observed price range, latest price and price-source depth",
+                    "public_url": "https://www.dla.mil/FOIA/Electronic-Reading-Room/",
+                }
+            )
+        if opportunity_summary:
+            source_index.append(
+                {
+                    "source": "DLA direct solicitation feed",
+                    "record_locator": (
+                        f"NIIN {clean_niin}; next response deadline "
+                        f"{opportunity_summary.get('next_response_deadline')}"
+                    ),
+                    "supports": "Active solicitation count, deadline, quantity and purchase request",
+                    "public_url": "https://www.dibbs.bsm.dla.mil/",
+                }
+            )
 
         identity = {
             "niin": clean_niin,
@@ -240,6 +291,10 @@ class ItemContextStore:
                 "platforms": platforms,
                 "contracts": contracts,
                 "references": references,
+                "supply_state": supply_state,
+                "price_intelligence": price_intelligence,
+                "opportunity_summary": opportunity_summary,
+                "active_opportunities": active_opportunities,
             },
             default=str,
             sort_keys=True,
@@ -260,6 +315,10 @@ class ItemContextStore:
             "supplier_summary": suppliers,
             "reference_relationships": references,
             "part_number_summary": part_numbers,
+            "supply_state": supply_state or None,
+            "price_intelligence": price_intelligence or None,
+            "opportunity_summary": opportunity_summary or None,
+            "active_opportunities": active_opportunities,
             "platform_associations": {
                 "platforms": platforms,
                 "platform_count": len(platforms),
@@ -284,6 +343,9 @@ class ItemContextStore:
                 "part_reference_rule": "Part-number reference rows do not inherit or duplicate NIIN financial value.",
                 "authorized_source_rule": "Current active-authorized-source status requires both an authorized FLIS relationship and an active CAGE status in the loaded reference snapshot.",
                 "platform_rule": "All mapped item-platform associations are retained; ambiguous multi-platform value remains shared-use exposure rather than being assigned arbitrarily.",
+                "operational_rule": "Stock, backorder and ADQ are de-duplicated at NIIN/snapshot grain; reorder status uses the stock reported in the reorder-point product. Full histories remain evidence facts rather than being repeated in the item dossier.",
+                "forecast_rule": "Forecast windows are summed from the source release's first forecast month and retain the release and source dates.",
+                "opportunity_rule": "Active opportunities are direct NSN matches from the DLA solicitation feed; expired deadlines are excluded at the release as-of date.",
             },
         }
         self._cache[cache_key] = context
@@ -414,6 +476,34 @@ class ItemContextStore:
         )
         rows = _rows(cursor)
         return rows[0] if rows else {}
+
+    def _optional_sidecar(self, name: str, niin: str) -> Dict[str, Any]:
+        path = self.paths.get(name)
+        if path is None:
+            return {}
+        cursor = self.connection.execute(
+            "SELECT * FROM read_parquet(?) WHERE niin=? LIMIT 1",
+            [str(path), niin],
+        )
+        rows = _rows(cursor)
+        return rows[0] if rows else {}
+
+    def _optional_sidecar_rows(
+        self, name: str, niin: str, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        path = self.paths.get(name)
+        if path is None:
+            return []
+        cursor = self.connection.execute(
+            """
+            SELECT * FROM read_parquet(?)
+            WHERE niin=?
+            ORDER BY response_deadline, solicitation_number, solicitation_line_number
+            LIMIT ?
+            """,
+            [str(path), niin, min(max(int(limit), 1), 100)],
+        )
+        return _rows(cursor)
 
     def _reference_profile(self, niin: str) -> Dict[str, Any]:
         optional_fields = []

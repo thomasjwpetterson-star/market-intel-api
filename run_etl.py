@@ -12,13 +12,19 @@ import warnings
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 
+from etl_automation.athena_retry import (
+    AthenaQueryFailure,
+    is_retryable_athena_reason,
+)
+from etl_automation.metadata import parquet_object_metadata
+
 # Suppress pandas warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # --- CONFIGURATION ---
 raw_bucket_input = os.getenv('ATHENA_OUTPUT_BUCKET', 'a-and-d-intel-lake-newaccount')
 BUCKET_NAME = raw_bucket_input.replace('s3://', '').split('/')[0]
-CACHE_PREFIX = "app_cache/"
+CACHE_PREFIX = os.getenv("CACHE_PREFIX", "app_cache/").strip().strip("/") + "/"
 DATABASE = 'market_intel_gold'
 
 # Keep the current subcontract totals unless the revised latest-report view is
@@ -50,6 +56,10 @@ if not os.path.exists(TEMP_DIR):
 
 ATHENA_OUTPUT_PREFIX = "temp_etl/"         # where Athena puts normal query CSV outputs
 UNLOAD_OUTPUT_PREFIX = "temp_etl_unload/"  # where Athena UNLOAD writes parquet parts
+ATHENA_WORKGROUP = os.getenv("ATHENA_WORKGROUP", "primary").strip() or "primary"
+ATHENA_QUERY_MAX_ATTEMPTS = max(
+    1, int(os.getenv("ATHENA_QUERY_MAX_ATTEMPTS", "3"))
+)
 
 # AWS Clients
 session = boto3.Session(region_name='us-east-1')
@@ -75,11 +85,13 @@ def file_sha256(path: str) -> str:
 def upload_cache_file(local_path: str, output_filename: str):
     """Upload one cache artifact with a reusable integrity hash."""
     digest = file_sha256(local_path)
+    metadata = parquet_object_metadata(local_path)
+    metadata["sha256"] = digest
     s3.upload_file(
         local_path,
         BUCKET_NAME,
         f"{CACHE_PREFIX}{output_filename}",
-        ExtraArgs={"Metadata": {"sha256": digest}},
+        ExtraArgs={"Metadata": metadata},
     )
     return digest
 
@@ -144,9 +156,11 @@ def start_query_raw(query: str) -> str:
     resp = athena.start_query_execution(
         QueryString=query,
         QueryExecutionContext={'Database': DATABASE},
-        ResultConfiguration={'OutputLocation': f's3://{BUCKET_NAME}/{ATHENA_OUTPUT_PREFIX}'}
+        ResultConfiguration={'OutputLocation': f's3://{BUCKET_NAME}/{ATHENA_OUTPUT_PREFIX}'},
+        WorkGroup=ATHENA_WORKGROUP,
     )
     return resp['QueryExecutionId']
+
 
 def wait_for_query(qid: str):
     while True:
@@ -159,7 +173,30 @@ def wait_for_query(qid: str):
     if state != 'SUCCEEDED':
         reason = status['QueryExecution']['Status'].get('StateChangeReason', 'Unknown Error')
         print(f"❌ ATHENA ERROR: {reason}")
-        raise Exception(f"Query Failed: {state} - {reason}")
+        raise AthenaQueryFailure(state, reason)
+    return status
+
+
+def execute_athena_query(query: str, cleanup_prefix=None):
+    for attempt in range(1, ATHENA_QUERY_MAX_ATTEMPTS + 1):
+        qid = start_query_raw(query)
+        try:
+            return qid, wait_for_query(qid)
+        except AthenaQueryFailure as exc:
+            if (
+                attempt >= ATHENA_QUERY_MAX_ATTEMPTS
+                or not is_retryable_athena_reason(exc.reason)
+            ):
+                raise
+            if cleanup_prefix:
+                removed = delete_s3_prefix(cleanup_prefix)
+                print(f"   🧹 Removed {removed} partial UNLOAD objects before retry")
+            delay_seconds = 5 * (2 ** (attempt - 1))
+            print(
+                f"   ↻ Retryable Athena failure; retrying in {delay_seconds}s "
+                f"(attempt {attempt + 1}/{ATHENA_QUERY_MAX_ATTEMPTS})"
+            )
+            time.sleep(delay_seconds)
 
 def unload_to_s3(select_sql: str, unload_prefix: str) -> str:
     """
@@ -182,8 +219,7 @@ def unload_to_s3(select_sql: str, unload_prefix: str) -> str:
     )
     """
 
-    qid = start_query_raw(unload_query)
-    wait_for_query(qid)
+    execute_athena_query(unload_query, cleanup_prefix=unload_prefix)
     return unload_prefix
 
 def list_s3_keys(prefix: str):
@@ -327,24 +363,7 @@ s3 = session.client('s3', config=s3_config)
 
 def run_query(query):
     print(f"⏳ Executing: {query[:60]}...")
-    resp = athena.start_query_execution(
-        QueryString=query,
-        QueryExecutionContext={'Database': DATABASE},
-        ResultConfiguration={'OutputLocation': f's3://{BUCKET_NAME}/{ATHENA_OUTPUT_PREFIX}'}
-    )
-    qid = resp['QueryExecutionId']
-    
-    while True:
-        status = athena.get_query_execution(QueryExecutionId=qid)
-        state = status['QueryExecution']['Status']['State']
-        if state in ['SUCCEEDED', 'FAILED', 'CANCELLED']: 
-            break
-        time.sleep(1)
-        
-    if state != 'SUCCEEDED':
-        reason = status['QueryExecution']['Status'].get('StateChangeReason', 'Unknown Error')
-        print(f"❌ ATHENA ERROR: {reason}")
-        raise Exception(f"Query Failed: {state} - {reason}")
+    qid, status = execute_athena_query(query)
     
     if query.strip().upper().startswith("DROP") or query.strip().upper().startswith("CREATE"):
         return pd.DataFrame() 

@@ -33,8 +33,15 @@ from pydantic import BaseModel
 import uuid
 import hmac
 import csv
+import hashlib
 from fastapi import APIRouter
 from dotenv import load_dotenv
+
+from ask_mimir_beta.platform_manifest import (
+    DEFAULT_PLATFORM_MANIFEST_KEY,
+    PlatformManifestError,
+    resolve_platform_release,
+)
 
 from dod_contract_enrichment import (
     lookup_contract_announcements,
@@ -54,9 +61,11 @@ from public_intelligence_release import (
     PUBLIC_SOLICITATION_MIN_DESCRIPTION_LENGTH,
     PUBLIC_SOLICITATION_MIN_METADATA_FIELDS,
     PUBLIC_SOLICITATION_MIN_TITLE_LENGTH,
-    previous_publication_entries,
+    last_known_good_public_release,
+    preserve_projection_for_unrefreshed_entities,
     public_content_fingerprint,
     public_entity_slug,
+    stage_public_intelligence_manifest,
 )
 
 load_dotenv()
@@ -90,6 +99,7 @@ GLOBAL_CACHE = {
     "naics_map": {},
     "public_intelligence_release": None,
     "public_intelligence_index": {},
+    "platform_release": None,
 }
 
 # NOTE: global_data is no longer needed as we use DuckDB for heavy data
@@ -553,6 +563,74 @@ BUCKET_NAME = raw_bucket.replace('s3://', '').split('/')[0]
 CACHE_PREFIX = "app_cache/"
 DATABASE = 'market_intel_gold'
 SUMMARY_PARQUET_CLEAN = "summary_clean.parquet"
+
+
+def platform_manifest_enabled() -> bool:
+    """Keep the legacy serving path unless the atomic root is explicitly enabled."""
+    return os.getenv("MIMIR_USE_PLATFORM_MANIFEST", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _manifest_file_map(manifest: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    entries: Dict[str, Dict[str, Any]] = {}
+    for raw_entry in manifest.get("files", []):
+        entry = dict(raw_entry)
+        local_path = str(entry.get("local_path") or "").strip()
+        if not local_path or Path(local_path).name != local_path:
+            raise PlatformManifestError(
+                f"Unsafe main runtime path in platform manifest: {local_path or '<missing>'}"
+            )
+        if local_path in entries:
+            raise PlatformManifestError(
+                f"Duplicate main runtime path in platform manifest: {local_path}"
+            )
+        entries[local_path] = entry
+    return entries
+
+
+def _download_platform_entry(
+    s3_client: Any,
+    entry: Dict[str, Any],
+    destination: Path,
+) -> None:
+    key = str(entry.get("s3_key") or "").strip()
+    version_id = str(entry.get("s3_version_id") or "").strip()
+    if not key or not version_id:
+        raise PlatformManifestError(
+            f"Platform artifact {destination.name} is not version-pinned"
+        )
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.unlink(missing_ok=True)
+    try:
+        s3_client.download_file(
+            BUCKET_NAME,
+            key,
+            str(temporary),
+            ExtraArgs={"VersionId": version_id},
+        )
+        expected_size = int(entry.get("size") or 0)
+        if expected_size and temporary.stat().st_size != expected_size:
+            raise PlatformManifestError(
+                f"Platform artifact size mismatch for {destination.name}"
+            )
+        expected_hash = str(entry.get("sha256") or "").strip()
+        if expected_hash and _file_sha256(temporary) != expected_hash:
+            raise PlatformManifestError(
+                f"Platform artifact hash mismatch for {destination.name}"
+            )
+        temporary.replace(destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 # Detect Environment
 IS_PRODUCTION = os.getenv('RENDER') or os.getenv('IS_PROD')
@@ -1526,13 +1604,21 @@ def build_public_intelligence_release(conn):
                 solicitation_df.iloc[0].get("quality_gate_matches") or 0
             )
         solicitation_candidates = []
+        seen_solicitation_ids = set()
         for row in solicitation_df.to_dict("records"):
             opportunity_id = str(row.get("opportunity_id") or "").strip()
             title = str(row.get("title") or "").strip()
             sol_num = str(row.get("solicitation_number") or "").strip()
             slug = _public_entity_slug(title)
-            if not opportunity_id or not title or not sol_num or not slug:
+            if (
+                not opportunity_id
+                or opportunity_id in seen_solicitation_ids
+                or not title
+                or not sol_num
+                or not slug
+            ):
                 continue
+            seen_solicitation_ids.add(opportunity_id)
             description_length = int(_safe_public_number(row.get("description_length")))
             metadata_fields = int(_safe_public_number(row.get("metadata_fields")))
             score = math.log(description_length + 1) * 4 + metadata_fields * 5
@@ -1563,6 +1649,54 @@ def build_public_intelligence_release(conn):
         # NSNs are the largest cohort by far. Build their manifest records in
         # DuckDB instead of fetching ~650k rows into pandas/Python dictionaries;
         # that previously added more than 1 GB to the atomic-release peak RSS.
+        # Keep `base` ahead of the relationship aggregation: joining the 17.5M
+        # reference rows to already-eligible NIINs preserves the final result
+        # while avoiding a full-reference hash aggregate.
+        operational_selects = []
+        operational_joins = []
+        operational_fingerprint_values = []
+        if get_duck_table_columns(NSN_SUPPLY_STATE_TABLE):
+            operational_selects.append(
+                "HASH(supply.supply_signal, supply.total_stock, supply.backorder_qty, "
+                "supply.forecast_12m_qty, supply.reorder_point_gap) AS supply_fingerprint"
+            )
+            operational_joins.append(
+                "LEFT JOIN v_nsn_supply_state supply ON base.niin = supply.niin"
+            )
+            operational_fingerprint_values.append("CAST(supply_fingerprint AS VARCHAR)")
+        if get_duck_table_columns(NSN_PRICE_SUMMARY_TABLE):
+            operational_selects.append(
+                "HASH(price.latest_price_date, price.latest_net_price, "
+                "price.trailing_12m_median_price, price.price_observation_count) "
+                "AS price_fingerprint"
+            )
+            operational_joins.append(
+                "LEFT JOIN v_nsn_price_summary price ON base.niin = price.niin"
+            )
+            operational_fingerprint_values.append("CAST(price_fingerprint AS VARCHAR)")
+        if get_duck_table_columns(NSN_OPPORTUNITY_SUMMARY_TABLE):
+            operational_selects.append(
+                "HASH(opportunity.active_solicitation_count, "
+                "opportunity.next_response_deadline, "
+                "opportunity.next_solicitation_number, opportunity.next_quantity) "
+                "AS opportunity_fingerprint"
+            )
+            operational_joins.append(
+                "LEFT JOIN v_nsn_opportunity_summary opportunity "
+                "ON base.niin = opportunity.niin"
+            )
+            operational_fingerprint_values.append(
+                "CAST(opportunity_fingerprint AS VARCHAR)"
+            )
+        operational_select_sql = (
+            ",\n                    " + ",\n                    ".join(operational_selects)
+            if operational_selects else ""
+        )
+        operational_join_sql = "\n                ".join(operational_joins)
+        operational_fingerprint_sql = (
+            ", " + ", ".join(operational_fingerprint_values)
+            if operational_fingerprint_values else ""
+        )
         conn.execute(f"""
             CREATE OR REPLACE TABLE public_nsn_manifest_candidates_next AS
             WITH supplier AS (
@@ -1596,46 +1730,54 @@ def build_public_intelligence_release(conn):
                 FROM v_nsn_profile_lookup
                 WHERE niin IS NOT NULL
                 GROUP BY 1
+            ), base AS (
+                SELECT
+                    supplier.*,
+                    profile.nsn,
+                    profile.item_name,
+                    profile.fsc_code
+                FROM supplier
+                INNER JOIN profile USING (niin)
+                WHERE NULLIF(TRIM(CAST(profile.item_name AS VARCHAR)), '') IS NOT NULL
+                  AND UPPER(TRIM(CAST(profile.item_name AS VARCHAR))) NOT IN ('NAN', 'NONE', 'NULL')
+                  AND supplier.observed_value >= {PUBLIC_NSN_MIN_OBSERVED_VALUE}
+                  AND UPPER(TRIM(COALESCE(profile.fsc_code, ''))) NOT LIKE '65%'
             ), parts AS (
                 SELECT
-                    LPAD(TRIM(CAST(niin AS VARCHAR)), 9, '0') AS niin,
+                    LPAD(TRIM(CAST(reference.niin AS VARCHAR)), 9, '0') AS niin,
                     COUNT(DISTINCT NULLIF(TRIM(CAST(part_number AS VARCHAR)), '')) AS part_number_count,
                     BIT_XOR(HASH(
                         COALESCE(UPPER(TRIM(CAST(cage AS VARCHAR))), ''),
                         COALESCE(TRIM(CAST(part_number AS VARCHAR)), ''),
                         COALESCE(TRIM(CAST(supplier_status AS VARCHAR)), '')
                     )) AS parts_fingerprint
-                FROM v_nsn_cage_reference
-                WHERE niin IS NOT NULL
+                FROM v_nsn_cage_reference reference
+                INNER JOIN base
+                  ON LPAD(TRIM(CAST(reference.niin AS VARCHAR)), 9, '0') = base.niin
+                WHERE reference.niin IS NOT NULL
                 GROUP BY 1
             )
             , eligible AS (
                 SELECT
-                    supplier.*,
-                    profile.nsn,
-                    profile.item_name,
-                    profile.fsc_code,
+                    base.*,
                     COALESCE(parts.part_number_count, 0) AS part_number_count,
                     parts.parts_fingerprint
-                FROM supplier
-                INNER JOIN profile USING (niin)
+                    {operational_select_sql}
+                FROM base
                 LEFT JOIN parts USING (niin)
-                WHERE NULLIF(TRIM(CAST(profile.item_name AS VARCHAR)), '') IS NOT NULL
-                  AND UPPER(TRIM(CAST(profile.item_name AS VARCHAR))) NOT IN ('NAN', 'NONE', 'NULL')
-                  AND (supplier.platform_count > 0 OR COALESCE(parts.part_number_count, 0) > 0)
-                  AND supplier.observed_value >= {PUBLIC_NSN_MIN_OBSERVED_VALUE}
+                {operational_join_sql}
+                WHERE (base.platform_count > 0 OR COALESCE(parts.part_number_count, 0) > 0)
                   AND (
-                        supplier.platform_count > 0
+                        base.platform_count > 0
                      OR (
-                            supplier.observed_value >= {PUBLIC_NSN_UNMAPPED_MIN_OBSERVED_VALUE}
+                            base.observed_value >= {PUBLIC_NSN_UNMAPPED_MIN_OBSERVED_VALUE}
                         AND (
-                               supplier.contract_count >= {PUBLIC_NSN_MIN_CONTEXT_COUNT}
-                            OR supplier.supplier_count >= {PUBLIC_NSN_MIN_CONTEXT_COUNT}
+                               base.contract_count >= {PUBLIC_NSN_MIN_CONTEXT_COUNT}
+                            OR base.supplier_count >= {PUBLIC_NSN_MIN_CONTEXT_COUNT}
                             OR COALESCE(parts.part_number_count, 0) >= {PUBLIC_NSN_MIN_CONTEXT_COUNT}
                         )
                      )
                   )
-                  AND UPPER(TRIM(COALESCE(profile.fsc_code, ''))) NOT LIKE '65%'
             )
             , scored AS (
                 SELECT
@@ -1685,6 +1827,7 @@ def build_public_intelligence_release(conn):
                     CAST(supplier_count AS VARCHAR), CAST(platform_count AS VARCHAR),
                     CAST(part_number_count AS VARCHAR), CAST(last_activity AS VARCHAR),
                     CAST(supplier_fingerprint AS VARCHAR), CAST(parts_fingerprint AS VARCHAR)
+                    {operational_fingerprint_sql}
                 )) AS content_fingerprint,
                 '{quality_gate_version}' AS quality_gate_version,
                 quality_gate_matches
@@ -1730,71 +1873,15 @@ def build_public_intelligence_release(conn):
         if remaining and nsn_cap:
             raise
 
-    previous_manifest_columns = set()
-    try:
-        previous_manifest_columns = {
-            str(row[0]).strip().lower()
-            for row in conn.execute("DESCRIBE public_intelligence_manifest").fetchall()
-        }
-    except Exception:
-        pass
-    can_preserve_lastmod = {
-        "entity_type", "entity_id", "content_fingerprint", "last_modified"
-    }.issubset(previous_manifest_columns)
-
-    # Assign stable batches in SQL and retain lastmod only when the material
-    # content fingerprint matches the previous atomic release. This avoids a
-    # second corpus-sized Python index while keeping sitemap dates truthful.
-    conn.execute("DROP TABLE IF EXISTS public_intelligence_manifest_next")
-    if can_preserve_lastmod:
-        conn.execute(f"""
-            CREATE TABLE public_intelligence_manifest_next AS
-            SELECT
-                candidate.entity_type,
-                candidate.entity_id,
-                candidate.canonical_path,
-                candidate.display_name,
-                candidate.richness_score,
-                candidate.decision_reasons,
-                CASE
-                    WHEN previous.content_fingerprint = candidate.content_fingerprint
-                     AND REGEXP_FULL_MATCH(COALESCE(previous.last_modified, ''), '\\d{{4}}-\\d{{2}}-\\d{{2}}')
-                    THEN previous.last_modified
-                    ELSE '{generated_at[:10]}'
-                END AS last_modified,
-                candidate.release_id,
-                candidate.schema_version,
-                candidate.content_fingerprint,
-                candidate.quality_gate_version,
-                CAST(
-                    FLOOR(
-                        (ROW_NUMBER() OVER (
-                            PARTITION BY candidate.entity_type
-                            ORDER BY candidate.entity_id
-                        ) - 1) / {PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE}
-                    ) + 1 AS INTEGER
-                ) AS sitemap_batch
-            FROM public_intelligence_manifest_candidates_next candidate
-            LEFT JOIN public_intelligence_manifest previous
-              ON previous.entity_type = candidate.entity_type
-             AND previous.entity_id = candidate.entity_id
-        """)
-    else:
-        conn.execute(f"""
-            CREATE TABLE public_intelligence_manifest_next AS
-            SELECT
-                candidate.* EXCLUDE(last_modified),
-                '{generated_at[:10]}' AS last_modified,
-                CAST(
-                    FLOOR(
-                        (ROW_NUMBER() OVER (
-                            PARTITION BY candidate.entity_type
-                            ORDER BY candidate.entity_id
-                        ) - 1) / {PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE}
-                    ) + 1 AS INTEGER
-                ) AS sitemap_batch
-            FROM public_intelligence_manifest_candidates_next candidate
-        """)
+    # Refresh candidates can add or update pages, but absence is never treated
+    # as a deletion instruction. Previously published entities stay in the
+    # release until a deliberate removal policy says otherwise.
+    manifest_merge_stats = stage_public_intelligence_manifest(
+        conn,
+        release_id=release_id,
+        generated_date=generated_at[:10],
+        sitemap_batch_size=PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE,
+    )
 
     quality_gate_counts = {
         "cage_company": len(company_candidates),
@@ -2121,7 +2208,54 @@ def build_public_intelligence_release(conn):
         INNER JOIN public_intelligence_manifest_next r
             ON CAST(o.id AS VARCHAR) = r.entity_id
            AND r.entity_type = 'solicitation'
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY CAST(o.id AS VARCHAR)
+            ORDER BY
+                LENGTH(TRIM(CAST(o.description AS VARCHAR))) DESC NULLS LAST,
+                TRY_CAST(SUBSTR(CAST(o.deadline AS VARCHAR), 1, 10) AS DATE) ASC NULLS LAST
+        ) = 1
     """)
+
+    # Retain each release-owned page module as a complete entity-level snapshot.
+    # This prevents a partial source refresh from mixing new and old module rows
+    # for an already published company, platform, award, or solicitation.
+    retained_projection_entities = {
+        "cage_company_top_award": preserve_projection_for_unrefreshed_entities(
+            conn,
+            next_table="public_company_top_award_next",
+            active_table="public_company_top_award",
+            entity_type="cage_company",
+            entity_column="cage",
+        ),
+        "cage_company_top_nsn": preserve_projection_for_unrefreshed_entities(
+            conn,
+            next_table="public_company_top_nsn_next",
+            active_table="public_company_top_nsn",
+            entity_type="cage_company",
+            entity_column="cage",
+        ),
+        "platform_award_scope": preserve_projection_for_unrefreshed_entities(
+            conn,
+            next_table="public_platform_award_scope_next",
+            active_table="public_platform_award_scope",
+            entity_type="platform",
+            entity_column="slug",
+        ),
+        "award_profile": preserve_projection_for_unrefreshed_entities(
+            conn,
+            next_table="public_award_profile_next",
+            active_table="public_award_profile",
+            entity_type="contract_award",
+            entity_column="contract_id",
+        ),
+        "solicitation_profile": preserve_projection_for_unrefreshed_entities(
+            conn,
+            next_table="public_solicitation_profile_next",
+            active_table="public_solicitation_profile",
+            entity_type="solicitation",
+            entity_column="opportunity_id",
+        ),
+    }
 
     conn.execute("""
         CREATE OR REPLACE TABLE public_intelligence_search_next AS
@@ -2285,6 +2419,7 @@ def build_public_intelligence_release(conn):
     total_entries = sum(counts.values())
     release = {
         "release_id": release_id,
+        "etl_run_id": os.getenv("ETL_AUTOMATION_RUN_ID"),
         "generated_at": generated_at,
         "schema_version": schema_version,
         "total_entries": total_entries,
@@ -2305,6 +2440,10 @@ def build_public_intelligence_release(conn):
             for entity_type, count in counts.items()
         },
         "platform_exclusions": sorted(platform_exclusions),
+        "retention": {
+            **manifest_merge_stats,
+            "projection_entities": retained_projection_entities,
+        },
         "projection_stats": projection_stats,
     }
     return {"release": release}
@@ -2377,6 +2516,109 @@ def attach_publication_metadata(payload: dict, entity_type: str, entity_id: str)
     return payload
 
 
+PUBLIC_PLATFORM_TABLES = {
+    "public_intelligence_manifest",
+    "public_company_top_award",
+    "public_company_top_nsn",
+    "public_platform_award_scope",
+    "public_award_profile",
+    "public_solicitation_profile",
+    "public_intelligence_search",
+}
+
+
+def load_public_platform_release(
+    conn: duckdb.DuckDBPyConnection,
+    public_manifest: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Cold-load and atomically install one immutable public child release."""
+    release_id = str(public_manifest.get("release_id") or "").strip()
+    release = public_manifest.get("release")
+    if not release_id or not isinstance(release, dict):
+        raise PlatformManifestError("Public component manifest is incomplete")
+    if str(release.get("release_id") or "") != release_id:
+        raise PlatformManifestError("Public component release metadata does not match")
+
+    artifacts_by_table: Dict[str, Dict[str, Any]] = {}
+    for raw_entry in public_manifest.get("artifacts", []):
+        entry = dict(raw_entry)
+        table_name = str(entry.get("table_name") or "").strip()
+        filename = str(entry.get("filename") or "").strip()
+        if table_name not in PUBLIC_PLATFORM_TABLES:
+            raise PlatformManifestError(
+                f"Unexpected public platform artifact table: {table_name or '<missing>'}"
+            )
+        if filename != f"{table_name}.parquet":
+            raise PlatformManifestError(
+                f"Unsafe public platform artifact filename: {filename or '<missing>'}"
+            )
+        if table_name in artifacts_by_table:
+            raise PlatformManifestError(
+                f"Duplicate public platform artifact table: {table_name}"
+            )
+        artifacts_by_table[table_name] = entry
+    missing = PUBLIC_PLATFORM_TABLES - set(artifacts_by_table)
+    if missing:
+        raise PlatformManifestError(
+            "Public component is missing artifacts: " + ", ".join(sorted(missing))
+        )
+
+    release_dir = LOCAL_CACHE_DIR / "public-platform-releases" / release_id
+    release_dir.mkdir(parents=True, exist_ok=True)
+    paths: Dict[str, Path] = {}
+    for table_name, entry in artifacts_by_table.items():
+        destination = (release_dir / entry["filename"]).resolve()
+        if release_dir.resolve() not in destination.parents:
+            raise PlatformManifestError("Unsafe public release destination")
+        _download_platform_entry(s3, entry, destination)
+        paths[table_name] = destination
+
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        for table_name in sorted(PUBLIC_PLATFORM_TABLES):
+            staging_name = f"platform_staged_{table_name}"
+            conn.execute(f"DROP TABLE IF EXISTS {staging_name}")
+            conn.execute(
+                f"CREATE TABLE {staging_name} AS SELECT * FROM read_parquet(?)",
+                [str(paths[table_name])],
+            )
+            expected_rows = int(artifacts_by_table[table_name].get("row_count") or 0)
+            actual_rows = int(
+                conn.execute(f"SELECT COUNT(*) FROM {staging_name}").fetchone()[0]
+            )
+            if expected_rows != actual_rows:
+                raise PlatformManifestError(
+                    f"Public platform row count mismatch for {table_name}: "
+                    f"{actual_rows} != {expected_rows}"
+                )
+            expected_schema = artifacts_by_table[table_name].get("schema") or []
+            actual_schema = [
+                {"name": row[0], "type": row[1], "nullable": row[2]}
+                for row in conn.execute(f"DESCRIBE {staging_name}").fetchall()
+            ]
+            if expected_schema != actual_schema:
+                raise PlatformManifestError(
+                    f"Public platform schema mismatch for {table_name}"
+                )
+        for table_name in sorted(PUBLIC_PLATFORM_TABLES):
+            staging_name = f"platform_staged_{table_name}"
+            conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+            conn.execute(f"ALTER TABLE {staging_name} RENAME TO {table_name}")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    manifest_rows = int(
+        conn.execute("SELECT COUNT(*) FROM public_intelligence_manifest").fetchone()[0]
+    )
+    if manifest_rows != int(release.get("total_entries") or -1):
+        raise PlatformManifestError(
+            "Public release total does not match its installed manifest table"
+        )
+    return dict(release)
+
+
 def reload_all_data():
     # Lock is the single source of truth for in-progress reloads
     if not RELOAD_LOCK.acquire(blocking=False):
@@ -2395,6 +2637,36 @@ def reload_all_data():
     try:
         logger.info("STARTING DATA LOAD (Chunked + RAM Optimized)...")
 
+        platform_bundle = None
+        main_platform_files: Dict[str, Dict[str, Any]] = {}
+        public_platform_manifest = None
+        if platform_manifest_enabled():
+            platform_key = os.getenv(
+                "MIMIR_PLATFORM_MANIFEST_KEY",
+                DEFAULT_PLATFORM_MANIFEST_KEY,
+            ).strip()
+            if not platform_key:
+                raise PlatformManifestError("MIMIR_PLATFORM_MANIFEST_KEY is empty")
+            platform_bundle = resolve_platform_release(
+                s3,
+                BUCKET_NAME,
+                platform_key=platform_key,
+                platform_version_id=(
+                    os.getenv("MIMIR_PLATFORM_MANIFEST_VERSION_ID", "").strip()
+                    or None
+                ),
+                components=("main", "public", "ask_mimir"),
+            )
+            main_platform_files = _manifest_file_map(
+                platform_bundle["components"]["main"]
+            )
+            public_platform_manifest = platform_bundle["components"]["public"]
+            logger.info(
+                "Resolved atomic platform release release_id=%s etl_run_id=%s",
+                platform_bundle["platform"]["release_id"],
+                platform_bundle["platform"]["etl_run_id"],
+            )
+
         # 1. PREPARE TEMPORARY STATE
         new_global_cache = {
             "is_loading": True,
@@ -2410,8 +2682,13 @@ def reload_all_data():
             "risk_df": pd.DataFrame(),
             "kpis_path": None,
             "df_opportunities": pd.DataFrame(),
-            "public_intelligence_release": None,
+            "public_intelligence_release": last_known_good_public_release(
+                GLOBAL_CACHE.get("public_intelligence_release")
+            ),
             "public_intelligence_index": {},
+            "platform_release": (
+                dict(platform_bundle["platform"]) if platform_bundle else None
+            ),
         }
 
         # 2. DOWNLOAD FILES
@@ -2425,13 +2702,49 @@ def reload_all_data():
             "nsn_profile_lookup.parquet",
             "nsn_supplier_lookup.parquet",
             "nsn_cage_reference.parquet",
+            "nsn_supply_state_lookup.parquet",
+            "nsn_price_summary_lookup.parquet",
+            "nsn_opportunity_summary_lookup.parquet",
+            "nsn_opportunity_detail.parquet",
             "dod_contract_announcements.parquet",
             "contract_award_metadata.parquet",
             "platform_bom.parquet" # unrelated to NSN/CAGE reference, leave only if another feature uses it
         ]
+        optional_release_files = {
+            "nsn_supply_state_lookup.parquet",
+            "nsn_price_summary_lookup.parquet",
+            "nsn_opportunity_summary_lookup.parquet",
+            "nsn_opportunity_detail.parquet",
+        }
+        if platform_bundle is not None:
+            missing_main_files = set(files) - optional_release_files - set(main_platform_files)
+            if missing_main_files:
+                raise PlatformManifestError(
+                    "Main platform component is missing required serving files: "
+                    + ", ".join(sorted(missing_main_files))
+                )
 
         def fetch_file(filename: str) -> str:
             final_path = (LOCAL_CACHE_DIR / filename).resolve()
+
+            if platform_bundle is not None:
+                entry = main_platform_files.get(filename)
+                if entry is None:
+                    if filename in optional_release_files:
+                        final_path.unlink(missing_ok=True)
+                        return filename
+                    raise PlatformManifestError(
+                        f"Main platform component is missing {filename}"
+                    )
+                logger.info(
+                    "Downloading version-pinned %s from platform release...", filename
+                )
+                _download_platform_entry(
+                    boto3.client("s3", region_name=AWS_REGION, config=BOTO_CFG),
+                    entry,
+                    final_path,
+                )
+                return filename
 
             # ✅ ADD THIS BLOCK: Skip download if we are in dev mode and file exists
             if os.getenv("SKIP_DOWNLOADS") == "1" and final_path.exists():
@@ -2454,6 +2767,18 @@ def reload_all_data():
 
             except Exception as e:
                 logger.error(f"Download failed for {filename}: {e}")
+                error_code = ""
+                if isinstance(e, ClientError):
+                    error_code = str(e.response.get("Error", {}).get("Code") or "")
+                if filename in optional_release_files and error_code in {
+                    "404", "NoSuchKey", "NotFound"
+                }:
+                    # A rollback to a pre-sidecar release must not leave a stale
+                    # enrichment file from the previously loaded generation.
+                    try:
+                        final_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
                 try:
                     if tmp_path.exists():
                         tmp_path.unlink()
@@ -2533,7 +2858,7 @@ def reload_all_data():
         local_single = (LOCAL_CACHE_DIR / "contracts_rolled.parquet").resolve()
         local_folder = (LOCAL_CACHE_DIR / "contracts_rolled").resolve()
 
-        if not local_single.exists():
+        if not local_single.exists() and platform_bundle is None:
             fetch_prefix(f"{CACHE_PREFIX}contracts_rolled/", local_folder)
 
         kpis_local = (LOCAL_CACHE_DIR / "kpis.parquet").resolve()
@@ -2562,16 +2887,99 @@ def reload_all_data():
                 ("v_nsn_profile_lookup", "nsn_profile_lookup.parquet"),
                 ("v_nsn_supplier_lookup", "nsn_supplier_lookup.parquet"),
                 ("v_nsn_cage_reference", "nsn_cage_reference.parquet"),
+                ("v_nsn_supply_state", "nsn_supply_state_lookup.parquet"),
+                ("v_nsn_price_summary", "nsn_price_summary_lookup.parquet"),
+                ("v_nsn_opportunity_summary", "nsn_opportunity_summary_lookup.parquet"),
+                ("v_nsn_opportunity_detail", "nsn_opportunity_detail.parquet"),
                 ("v_contract_award_metadata", "contract_award_metadata.parquet"),
                 ("v_platform_bom", "platform_bom.parquet") # ✅ Added here
             ]
-            
+
+            # Remove the dependent Explorer join before replacing its sources.
+            conn.execute("DROP VIEW IF EXISTS v_nsn_cage_reference_explorer;")
             for view_name, file_name in views_to_create:
                 file_path = str((LOCAL_CACHE_DIR / file_name).resolve())
                 if os.path.exists(file_path):
                     conn.execute(f"DROP VIEW IF EXISTS {view_name};")
                     conn.execute(f"DROP TABLE IF EXISTS {view_name};")
                     conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{file_path}');")
+                elif file_name in optional_release_files:
+                    conn.execute(f"DROP VIEW IF EXISTS {view_name};")
+                    conn.execute(f"DROP TABLE IF EXISTS {view_name};")
+
+            # Data Explorer presents operational metrics as optional columns on
+            # the existing NIIN/part/CAGE relationship view. Keep the physical
+            # Parquets separate: DuckDB performs this filtered, lazy join only
+            # for Explorer queries. NIIN-level metrics therefore repeat across
+            # relationship rows and must not be summed across those rows.
+            reference_path = (LOCAL_CACHE_DIR / "nsn_cage_reference.parquet").resolve()
+            if reference_path.exists():
+                explorer_selects = ["r.*"]
+                explorer_joins = []
+                supply_path = (LOCAL_CACHE_DIR / "nsn_supply_state_lookup.parquet").resolve()
+                price_path = (LOCAL_CACHE_DIR / "nsn_price_summary_lookup.parquet").resolve()
+                opportunity_path = (LOCAL_CACHE_DIR / "nsn_opportunity_summary_lookup.parquet").resolve()
+                if supply_path.exists():
+                    explorer_selects.extend([
+                        f"s.{column}"
+                        for column in (
+                            "total_stock", "backorder_qty", "annual_demand_quantity",
+                            "reorder_assessment_stock", "reorder_point", "reorder_point_gap",
+                            "below_reorder_point", "forecast_3m_qty", "forecast_6m_qty",
+                            "forecast_12m_qty", "forecast_24m_qty",
+                            "forecast_stock_cover_months", "adq_stock_cover_months",
+                            "supply_signal", "inventory_snapshot_date",
+                            "reorder_point_snapshot_date", "forecast_start_month",
+                            "stock_sources_agree",
+                        )
+                    ])
+                    explorer_selects.extend([
+                        "s.source_retrieval_date AS operational_source_retrieval_date",
+                        "s.source_release AS operational_source_release",
+                    ])
+                    explorer_joins.append(
+                        "LEFT JOIN v_nsn_supply_state s "
+                        "ON CAST(r.niin AS VARCHAR) = s.niin"
+                    )
+                if price_path.exists():
+                    explorer_selects.extend([
+                        f"p.{column}"
+                        for column in (
+                            "latest_price_date", "latest_net_price", "latest_order_quantity",
+                            "latest_unit_of_issue", "latest_cage_code",
+                            "latest_contract_number", "latest_price_reason_type",
+                            "price_observation_count", "price_contract_count", "price_cage_count",
+                            "trailing_12m_min_price", "trailing_12m_max_price",
+                            "trailing_12m_mean_price", "trailing_12m_median_price",
+                            "trailing_12m_quantity_weighted_price",
+                            "trailing_12m_observation_count",
+                        )
+                    ])
+                    explorer_joins.append(
+                        "LEFT JOIN v_nsn_price_summary p "
+                        "ON CAST(r.niin AS VARCHAR) = p.niin"
+                    )
+                if opportunity_path.exists():
+                    explorer_selects.extend([
+                        f"o.{column}"
+                        for column in (
+                            "active_solicitation_count", "next_response_deadline",
+                            "next_solicitation_number", "next_quantity",
+                            "next_unit_of_issue", "next_solicitation_type_indicator",
+                            "next_small_business_set_aside_indicator",
+                            "next_purchase_request_number", "source_as_of_date",
+                        )
+                    ])
+                    explorer_joins.append(
+                        "LEFT JOIN v_nsn_opportunity_summary o "
+                        "ON CAST(r.niin AS VARCHAR) = o.niin"
+                    )
+                conn.execute(
+                    "CREATE VIEW v_nsn_cage_reference_explorer AS SELECT "
+                    + ", ".join(explorer_selects)
+                    + " FROM v_nsn_cage_reference r "
+                    + " ".join(explorer_joins)
+                )
 
             contract_metadata_path = (LOCAL_CACHE_DIR / "contract_award_metadata.parquet").resolve()
             if not contract_metadata_path.exists():
@@ -2800,17 +3208,20 @@ def reload_all_data():
         # 4. FETCH MAPPINGS (Athena)
         cage_map: Dict[str, str] = {}
         naics_map: Dict[str, str] = {}
-        try:
-            parents_list = run_athena_query("SELECT child_cage, parent_name FROM ref_parent_child")
-            if parents_list:
-                p_df = pd.DataFrame(parents_list)
-                cage_map = dict(zip(p_df.child_cage, p_df.parent_name))
-            
-            naics_list = run_athena_query('SELECT code, title FROM "market_intel_silver"."ref_naics"')
-            if naics_list:
-                naics_map = {str(i["code"]).strip(): str(i["title"]).strip() for i in naics_list}
-        except Exception:
-            logger.exception("Mapping Error")
+        if os.getenv("OFFLINE_SMOKE") == "1":
+            logger.info("OFFLINE_SMOKE enabled: skipping Athena mapping refresh")
+        else:
+            try:
+                parents_list = run_athena_query("SELECT child_cage, parent_name FROM ref_parent_child")
+                if parents_list:
+                    p_df = pd.DataFrame(parents_list)
+                    cage_map = dict(zip(p_df.child_cage, p_df.parent_name))
+
+                naics_list = run_athena_query('SELECT code, title FROM "market_intel_silver"."ref_naics"')
+                if naics_list:
+                    naics_map = {str(i["code"]).strip(): str(i["title"]).strip() for i in naics_list}
+            except Exception:
+                logger.exception("Mapping Error")
         
         new_global_cache["naics_map"] = naics_map
 
@@ -3114,7 +3525,14 @@ def reload_all_data():
         # membership. Public routes remain available outside this cohort, but
         # those pages are noindex and never submitted to a sitemap.
         try:
-            public_release = build_public_intelligence_release(conn)
+            if platform_bundle is not None:
+                public_release_metadata = load_public_platform_release(
+                    conn,
+                    public_platform_manifest,
+                )
+                public_release = {"release": public_release_metadata}
+            else:
+                public_release = build_public_intelligence_release(conn)
             new_global_cache["public_intelligence_release"] = public_release["release"]
             # Manifest membership is queried from the indexed DuckDB table on
             # demand. Keeping every entry in a Python dict consumed hundreds of
@@ -3126,8 +3544,14 @@ def reload_all_data():
                 public_release["release"]["total_entries"],
             )
         except Exception:
-            logger.exception("Public intelligence release build failed; all entity pages will remain noindex")
-            new_global_cache["public_intelligence_release"] = None
+            if platform_bundle is not None:
+                raise
+            logger.exception(
+                "Public intelligence release build failed; retaining the last-known-good public release"
+            )
+            new_global_cache["public_intelligence_release"] = last_known_good_public_release(
+                GLOBAL_CACHE.get("public_intelligence_release")
+            )
             new_global_cache["public_intelligence_index"] = {}
 
         gc.collect()
@@ -3239,6 +3663,11 @@ class SubcontractDescriptionsRequest(BaseModel):
 
 
 NSN_REF_TABLE = "v_nsn_cage_reference"
+NSN_REF_EXPLORER_SOURCE = "v_nsn_cage_reference_explorer"
+NSN_SUPPLY_STATE_TABLE = "v_nsn_supply_state"
+NSN_PRICE_SUMMARY_TABLE = "v_nsn_price_summary"
+NSN_OPPORTUNITY_SUMMARY_TABLE = "v_nsn_opportunity_summary"
+NSN_OPPORTUNITY_DETAIL_TABLE = "v_nsn_opportunity_detail"
 CONTRACT_AWARD_EXPLORER_TABLE = "v_contract_awards_enriched"
 SUBCONTRACT_EXPLORER_TABLE = "v_subcontracts"
 
@@ -3263,6 +3692,13 @@ ALLOWED_EXPLORER_TABLES = {
     "v_transactions",
     "v_summary",
     NSN_REF_TABLE,
+}
+INTERNAL_DUCK_RELATIONS = {
+    NSN_REF_EXPLORER_SOURCE,
+    NSN_SUPPLY_STATE_TABLE,
+    NSN_PRICE_SUMMARY_TABLE,
+    NSN_OPPORTUNITY_SUMMARY_TABLE,
+    NSN_OPPORTUNITY_DETAIL_TABLE,
 }
 
 ALLOWED_EXPLORER_COLUMNS = {
@@ -3290,6 +3726,26 @@ ALLOWED_EXPLORER_COLUMNS = {
     "rncc_codes", "rnvc_codes", "rnsc_codes", "cage_status_codes",
     "is_procurement_authorized", "is_active_authorized_source",
     "supplier_status", "supplier_status_detail",
+
+    # Compact NIIN operational and pricing sidecars
+    "total_stock", "backorder_qty", "annual_demand_quantity",
+    "reorder_assessment_stock", "reorder_point", "reorder_point_gap",
+    "below_reorder_point", "forecast_3m_qty", "forecast_6m_qty",
+    "forecast_12m_qty", "forecast_24m_qty", "forecast_stock_cover_months",
+    "adq_stock_cover_months", "supply_signal", "inventory_snapshot_date",
+    "reorder_point_snapshot_date", "forecast_start_month", "stock_sources_agree",
+    "latest_price_date", "latest_net_price", "latest_order_quantity",
+    "latest_unit_of_issue", "latest_cage_code", "latest_contract_number",
+    "latest_price_reason_type", "price_observation_count", "price_contract_count",
+    "price_cage_count", "trailing_12m_min_price", "trailing_12m_max_price",
+    "trailing_12m_mean_price", "trailing_12m_median_price",
+    "trailing_12m_quantity_weighted_price", "trailing_12m_observation_count",
+    "source_retrieval_date", "source_release", "source_product",
+    "operational_source_retrieval_date", "operational_source_release",
+    "active_solicitation_count", "next_response_deadline",
+    "next_solicitation_number", "next_quantity", "next_unit_of_issue",
+    "next_solicitation_type_indicator", "next_small_business_set_aside_indicator",
+    "next_purchase_request_number", "source_as_of_date",
 
     # Contract-award explorer fields
     "base_award_description", "action_description", "latest_action_description",
@@ -3395,7 +3851,7 @@ def quote_ident(identifier: str) -> str:
 
 
 def get_duck_table_columns(table: str) -> set:
-    if table not in ALLOWED_EXPLORER_TABLES:
+    if table not in ALLOWED_EXPLORER_TABLES and table not in INTERNAL_DUCK_RELATIONS:
         return set()
 
     if table == CONTRACT_AWARD_EXPLORER_TABLE:
@@ -4186,7 +4642,10 @@ def build_explorer_query(
             count_only=count_only,
         )
 
-    actual_cols = get_duck_table_columns(table)
+    source_table = table
+    if table == NSN_REF_TABLE and get_duck_table_columns(NSN_REF_EXPLORER_SOURCE):
+        source_table = NSN_REF_EXPLORER_SOURCE
+    actual_cols = get_duck_table_columns(source_table)
 
     if not actual_cols:
         raise HTTPException(status_code=503, detail=f"{table} is not available yet. Reload may still be running.")
@@ -4325,7 +4784,21 @@ def build_explorer_query(
         # NSN / NIIN filters match the canonical 9-digit NIIN.
         if requested_col in {"nsn", "niin"}:
             safe_niin = get_niin(str(val))
-            where_parts.append(f"{normalised_niin_filter_expr(actual_col)} = ?")
+            if table == NSN_REF_TABLE and "niin" in actual_cols:
+                # The reference product guarantees a nine-character NIIN.
+                # Direct equality preserves Parquet row-group pushdown; the
+                # regex-normalized expression turns a sub-second lookup into a
+                # full 17.5-million-row scan.
+                where_parts.append(f"CAST({quote_ident('niin')} AS VARCHAR) = ?")
+            elif source_table in {
+                NSN_SUPPLY_STATE_TABLE,
+                NSN_PRICE_SUMMARY_TABLE,
+                NSN_OPPORTUNITY_SUMMARY_TABLE,
+                NSN_OPPORTUNITY_DETAIL_TABLE,
+            }:
+                where_parts.append(f"CAST({quote_ident(actual_col)} AS VARCHAR) = ?")
+            else:
+                where_parts.append(f"{normalised_niin_filter_expr(actual_col)} = ?")
             params.append(safe_niin)
             continue
 
@@ -4353,14 +4826,14 @@ def build_explorer_query(
     where_clause = " AND ".join(where_parts)
 
     if count_only:
-        sql = f"SELECT COUNT(*) AS count FROM {table} WHERE {where_clause}"
+        sql = f"SELECT COUNT(*) AS count FROM {source_table} WHERE {where_clause}"
         return sql, params
 
     row_limit = safe_int(row_limit, 50, 1, 500_000)
     offset = safe_int(offset, 0, 0, 10_000_000)
 
     select_clause = ", ".join(select_parts)
-    sql = f"SELECT {select_clause} FROM {table} WHERE {where_clause} LIMIT ? OFFSET ?"
+    sql = f"SELECT {select_clause} FROM {source_table} WHERE {where_clause} LIMIT ? OFFSET ?"
     params.extend([row_limit, offset])
 
     return sql, params
@@ -8892,6 +9365,88 @@ def nsn_ref_supplier_lookup(safe_niin: str) -> Dict[str, Dict[str, Any]]:
         return {}
 
 
+def nsn_operational_metric_lookup(safe_niin: str) -> Dict[str, Any]:
+    """Read narrow NIIN sidecars without touching historical facts."""
+    result: Dict[str, Any] = {}
+    for table, response_key, filename in (
+        (
+            NSN_SUPPLY_STATE_TABLE,
+            "supply_state",
+            "nsn_supply_state_lookup.parquet",
+        ),
+        (
+            NSN_PRICE_SUMMARY_TABLE,
+            "price_intelligence",
+            "nsn_price_summary_lookup.parquet",
+        ),
+        (
+            NSN_OPPORTUNITY_SUMMARY_TABLE,
+            "opportunity_summary",
+            "nsn_opportunity_summary_lookup.parquet",
+        ),
+    ):
+        if not (LOCAL_CACHE_DIR / filename).exists():
+            continue
+        if not get_duck_table_columns(table):
+            continue
+        try:
+            frame = duck_fetch_df(
+                f"SELECT * FROM {table} WHERE niin = ? LIMIT 1",
+                [safe_niin],
+            )
+            if not frame.empty:
+                result[response_key] = df_sanitize_for_json(frame).to_dict(
+                    orient="records"
+                )[0]
+        except Exception:
+            logger.exception(
+                "NSN operational lookup failed table=%s NIIN=%s",
+                table,
+                safe_niin,
+            )
+    return result
+
+
+@app.get("/api/nsn/opportunities")
+def get_nsn_opportunities(
+    nsn: str,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """Return direct, active DLA solicitation lines for one NIIN."""
+    clean = "".join(filter(str.isdigit, str(nsn)))
+    safe_niin = clean.zfill(9) if len(clean) < 9 else clean[-9:]
+    if len(safe_niin) != 9 or not safe_niin.isdigit():
+        raise HTTPException(status_code=400, detail="Enter a valid NSN or NIIN.")
+    if not (LOCAL_CACHE_DIR / "nsn_opportunity_detail.parquet").exists():
+        return []
+    if not get_duck_table_columns(NSN_OPPORTUNITY_DETAIL_TABLE):
+        return []
+    safe_limit = safe_int(limit, 50, 1, 100)
+    safe_offset = safe_int(offset, 0, 0, 10000)
+    try:
+        frame = duck_fetch_df(
+            f"""
+            SELECT
+                solicitation_number, solicitation_line_number,
+                response_deadline, quantity, unit_of_issue,
+                solicitation_type_indicator,
+                small_business_set_aside_indicator,
+                purchase_request_number, hazardous_material_id,
+                material_requirements
+            FROM {NSN_OPPORTUNITY_DETAIL_TABLE}
+            WHERE niin = ?
+            ORDER BY response_deadline, solicitation_number, solicitation_line_number
+            LIMIT ? OFFSET ?
+            """,
+            [safe_niin, safe_limit, safe_offset],
+        )
+        return df_sanitize_for_json(frame).to_dict(orient="records")
+    except Exception:
+        logger.exception("NSN opportunity lookup failed for NIIN=%s", safe_niin)
+        return []
+
+
 @app.get("/api/nsn/profile")
 def get_nsn_profile(
     nsn: str,
@@ -8906,12 +9461,13 @@ def get_nsn_profile(
     # 1) Clean Input
     clean = ''.join(filter(str.isdigit, str(nsn)))
     safe_niin = clean.zfill(9) if len(clean) < 9 else clean[-9:]
+    operational_metrics = nsn_operational_metric_lookup(safe_niin)
 
     # 2) Fast revenue-backed profile lookup. Falls back to the older products.parquet
     # scan if the new ETL sidecar has not been published yet.
     fast_profile = nsn_profile_fast_lookup(safe_niin, years)
     if fast_profile:
-        return fast_profile
+        return {**fast_profile, **operational_metrics}
 
     # 3) Revenue-backed product lookup remains unchanged.
     df = get_subset_from_disk(
@@ -8961,6 +9517,7 @@ def get_nsn_profile(
             "reference_part_count": int(ref_profile.get("reference_part_count") or 0),
             "reference_rows": int(ref_profile.get("reference_rows") or 0),
             "reference_sources": ref_profile.get("reference_sources"),
+            **operational_metrics,
         }
 
     match = df.copy()
@@ -9053,6 +9610,7 @@ def get_nsn_profile(
         "reference_part_count": int(ref_profile.get("reference_part_count") or 0) if ref_profile else 0,
         "reference_rows": int(ref_profile.get("reference_rows") or 0) if ref_profile else 0,
         "reference_sources": ref_profile.get("reference_sources") if ref_profile else None,
+        **operational_metrics,
     }
 
 
@@ -9553,6 +10111,37 @@ def build_public_nsn_snapshot(
     approved_candidates = []
     supplier_candidates = []
     part_numbers = []
+
+    def public_supplier_relationship(supplier: Dict[str, Any]) -> tuple[str, int]:
+        codes = lambda value: {
+            code.strip().upper()
+            for code in str(value or "").split(",")
+            if code.strip()
+        }
+        rncc = codes(supplier.get("rncc_codes"))
+        rnvc = codes(supplier.get("rnvc_codes"))
+        rnsc = codes(supplier.get("rnsc_codes"))
+        relationship_source = str(supplier.get("source") or "").upper()
+        if bool(supplier.get("is_active_authorized_source")):
+            return "DLA-authorised source", 0
+        if bool(supplier.get("is_procurement_authorized")):
+            return "DLA-authorised source · inactive CAGE", 1
+        if "3" in rncc and "2" in rnvc:
+            return "Item-identifying manufacturer", 2
+        if "1" in rncc:
+            return "Source-control reference", 3
+        if "7" in rncc:
+            return "Vendor item-control reference", 4
+        if "OBSERVED_DLA_SALE" in relationship_source:
+            return "DLA award recipient", 5
+        if "F" in rnsc:
+            return "Qualified-source requirement", 6
+        if "9" in rnvc:
+            return "Obsolete part reference", 8
+        if "5" in rncc:
+            return "Secondary part reference", 7
+        return "Part/CAGE reference", 7
+
     for cage, supplier in supplier_map.items():
         supplier_part_numbers = [
             value.strip()
@@ -9569,19 +10158,15 @@ def build_public_nsn_snapshot(
         )
         is_active_authorized = bool(supplier.get("is_active_authorized_source"))
         is_procurement_authorized = bool(supplier.get("is_procurement_authorized"))
+        relationship_status, relationship_rank = public_supplier_relationship(supplier)
         supplier_item = {
             "cage": cage,
             "vendor": vendor if vendor and vendor.upper() not in {"NAN", "NONE", "NULL"} else f"CAGE {cage}",
             "part_number": part_number,
-            "status": (
-                "Active DLA-authorised source"
-                if is_active_authorized
-                else "DLA procurement-authorised; CAGE not active"
-                if is_procurement_authorized
-                else str(supplier.get("supplier_status") or "Observed or reference-linked supplier")
-            ),
+            "status": relationship_status,
             "is_active_authorized_source": is_active_authorized,
             "is_procurement_authorized": is_procurement_authorized,
+            "_relationship_rank": relationship_rank,
         }
         supplier_candidates.append(supplier_item)
         if is_active_authorized:
@@ -9591,12 +10176,13 @@ def build_public_nsn_snapshot(
     approved_source = approved_candidates[0] if approved_candidates else None
     supplier_candidates.sort(
         key=lambda item: (
-            not item["is_active_authorized_source"],
-            not item["is_procurement_authorized"],
+            item["_relationship_rank"],
             item["vendor"].startswith("CAGE "),
             item["vendor"],
         )
     )
+    for item in supplier_candidates:
+        item.pop("_relationship_rank", None)
 
     platform_rows = get_nsn_platforms(
         nsn=clean,
@@ -9645,7 +10231,7 @@ def build_public_nsn_snapshot(
                 COUNT(*) OVER () AS observed_contract_count
             FROM rolled
             ORDER BY action_date DESC NULLS LAST, contract_id
-            LIMIT 3
+            LIMIT 2
             """,
             [safe_niin],
         )
@@ -9666,6 +10252,83 @@ def build_public_nsn_snapshot(
     except Exception:
         logger.exception("Public NSN activity lookup failed for NIIN=%s", safe_niin)
 
+    # Keep the public payload useful and indexable without reproducing the
+    # complete paid operational dataset. Exact stock, longer forecast windows,
+    # reorder gaps, and observed-price history remain available in the
+    # authenticated profile, Ask Mimir, and Data Explorer.
+    supply_state = profile.get("supply_state") or {}
+    price_intelligence = profile.get("price_intelligence") or {}
+    public_supply_teaser = None
+    if supply_state:
+        cover = supply_state.get("forecast_stock_cover_months")
+        try:
+            cover_value = float(cover) if cover is not None else None
+        except (TypeError, ValueError):
+            cover_value = None
+        if cover_value is not None and not math.isfinite(cover_value):
+            cover_value = None
+        if cover_value is None:
+            cover_band = None
+        elif cover_value < 3:
+            cover_band = "UNDER_3_MONTHS"
+        elif cover_value < 6:
+            cover_band = "3_TO_6_MONTHS"
+        elif cover_value < 12:
+            cover_band = "6_TO_12_MONTHS"
+        else:
+            cover_band = "12_MONTHS_OR_MORE"
+
+        public_supply_teaser = {
+            "supply_signal": supply_state.get("supply_signal"),
+            "has_backorder": float(supply_state.get("backorder_qty") or 0) > 0,
+            "below_reorder_point": bool(supply_state.get("below_reorder_point") or False),
+            "forecast_3m_qty": supply_state.get("forecast_3m_qty"),
+            "forecast_stock_cover_band": cover_band,
+            "inventory_snapshot_date": supply_state.get("inventory_snapshot_date"),
+            "forecast_start_month": supply_state.get("forecast_start_month"),
+            "source_release": supply_state.get("source_release"),
+            "full_metrics_available": [
+                "current stock and backorder quantities",
+                "reorder-point gap",
+                "6, 12 and 24 month forecast demand",
+                "observed price history and 12-month price benchmarks",
+            ],
+        }
+
+    public_logistics_summary = {
+        "unit_of_issue": profile.get("unit_of_issue"),
+        "source_of_supply": profile.get("source_of_supply"),
+        "acquisition_advice_code": profile.get("acquisition_advice_code"),
+        "shelf_life_code": profile.get("shelf_life_code"),
+    }
+    if not any(value not in (None, "") for value in public_logistics_summary.values()):
+        public_logistics_summary = None
+
+    public_price_summary = None
+    if price_intelligence:
+        public_price_summary = {
+            "latest_net_price": price_intelligence.get("latest_net_price"),
+            "latest_price_date": price_intelligence.get("latest_price_date"),
+            "latest_unit_of_issue": price_intelligence.get("latest_unit_of_issue"),
+            "trailing_12m_min_price": price_intelligence.get("trailing_12m_min_price"),
+            "trailing_12m_max_price": price_intelligence.get("trailing_12m_max_price"),
+            "trailing_12m_median_price": price_intelligence.get("trailing_12m_median_price"),
+            "trailing_12m_observation_count": price_intelligence.get("trailing_12m_observation_count"),
+        }
+
+    opportunity_summary = profile.get("opportunity_summary") or {}
+    public_opportunity_summary = None
+    if opportunity_summary:
+        public_opportunity_summary = {
+            "active_solicitation_count": opportunity_summary.get("active_solicitation_count"),
+            "next_response_deadline": opportunity_summary.get("next_response_deadline"),
+            "next_solicitation_number": opportunity_summary.get("next_solicitation_number"),
+            "next_quantity": opportunity_summary.get("next_quantity"),
+            "next_unit_of_issue": opportunity_summary.get("next_unit_of_issue"),
+            "next_solicitation_type_indicator": opportunity_summary.get("next_solicitation_type_indicator"),
+            "next_small_business_set_aside_indicator": opportunity_summary.get("next_small_business_set_aside_indicator"),
+        }
+
     return {
         "found": True,
         "item_name": profile.get("item_name") or ref_profile.get("item_name") or "Unknown item",
@@ -9673,8 +10336,8 @@ def build_public_nsn_snapshot(
         "niin": safe_niin,
         "fsc_code": fsc_code or None,
         "associated_part_number_count": part_number_count,
-        "part_numbers": part_numbers[:8],
-        "part_numbers_hidden": max(0, part_number_count - min(8, len(part_numbers))),
+        "part_numbers": part_numbers[:2],
+        "part_numbers_hidden": max(0, part_number_count - min(2, len(part_numbers))),
         "associated_supplier_site_count": supplier_count,
         "approved_source": approved_source,
         "approved_sources_hidden": max(0, len(approved_candidates) - (1 if approved_source else 0)),
@@ -9686,6 +10349,10 @@ def build_public_nsn_snapshot(
         "recent_contracts": recent_contracts,
         "observed_contract_count": observed_contract_count,
         "contracts_hidden": max(0, observed_contract_count - len(recent_contracts)),
+        "logistics_summary": public_logistics_summary,
+        "observed_price_summary": public_price_summary,
+        "opportunity_summary": public_opportunity_summary,
+        "demand_supply_teaser": public_supply_teaser,
         "remaining_lookups": remaining_lookups,
     }
 

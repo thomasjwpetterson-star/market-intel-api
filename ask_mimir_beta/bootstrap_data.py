@@ -10,9 +10,20 @@ from typing import Any, Dict
 
 import boto3
 
+from platform_manifest import (
+    DEFAULT_PLATFORM_MANIFEST_KEY,
+    resolve_platform_release,
+)
+
 
 DEFAULT_BUCKET = "a-and-d-intel-lake-newaccount"
 DEFAULT_CURRENT_MANIFEST_KEY = "ask_mimir/runtime/current_manifest.json"
+
+
+def platform_manifest_enabled() -> bool:
+    return os.getenv("MIMIR_USE_PLATFORM_MANIFEST", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
 
 
 def selected_manifest_key() -> str:
@@ -32,6 +43,37 @@ def selected_manifest_key() -> str:
             "ASK_MIMIR_PINNED_MANIFEST_KEY is required when current-release following is disabled"
         )
     return pinned_key
+
+
+def selected_runtime_manifest(s3: Any, bucket: str) -> tuple[Dict[str, Any], Dict[str, Any] | None]:
+    """Resolve Ask Mimir through the atomic root only when explicitly enabled."""
+    if platform_manifest_enabled():
+        platform_key = os.getenv(
+            "MIMIR_PLATFORM_MANIFEST_KEY",
+            DEFAULT_PLATFORM_MANIFEST_KEY,
+        ).strip()
+        if not platform_key:
+            raise RuntimeError("MIMIR_PLATFORM_MANIFEST_KEY is empty")
+        resolved = resolve_platform_release(
+            s3,
+            bucket,
+            platform_key=platform_key,
+            platform_version_id=(
+                os.getenv("MIMIR_PLATFORM_MANIFEST_VERSION_ID", "").strip() or None
+            ),
+            components=("ask_mimir",),
+        )
+        return resolved["components"]["ask_mimir"], resolved
+
+    manifest_key = selected_manifest_key()
+    if not manifest_key:
+        raise RuntimeError("Ask Mimir runtime manifest key is empty")
+    response = s3.get_object(Bucket=bucket, Key=manifest_key)
+    try:
+        manifest = json.loads(response["Body"].read())
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Invalid Ask Mimir runtime manifest: {manifest_key}") from error
+    return manifest, None
 
 
 def file_sha256(path: Path) -> str:
@@ -165,14 +207,10 @@ def bootstrap() -> Dict[str, Any]:
     runtime_root.mkdir(parents=True, exist_ok=True)
 
     bucket = os.getenv("ASK_MIMIR_BUCKET", DEFAULT_BUCKET)
-    manifest_key = selected_manifest_key()
-    if not manifest_key:
-        raise RuntimeError("Ask Mimir runtime manifest key is empty")
-
     s3 = boto3.client("s3", region_name=os.getenv("AWS_REGION", "us-east-1"))
     manifest_path = runtime_root / "runtime_manifest.json.tmp"
-    s3.download_file(bucket, manifest_key, str(manifest_path))
-    manifest = json.loads(manifest_path.read_text())
+    manifest, platform_release = selected_runtime_manifest(s3, bucket)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     if not manifest.get("release_id") or not manifest.get("files"):
         raise RuntimeError("Ask Mimir runtime manifest is incomplete")
 
@@ -200,6 +238,10 @@ def bootstrap() -> Dict[str, Any]:
     artifact_root = runtime_root / "artifacts"
     os.environ["ASK_MIMIR_DATA_ROOT"] = str(data_root)
     os.environ["ASK_MIMIR_RELEASE_ID"] = str(manifest["release_id"])
+    if platform_release is not None:
+        platform = platform_release["platform"]
+        os.environ["MIMIR_PLATFORM_RELEASE_ID"] = str(platform["release_id"])
+        os.environ["MIMIR_PLATFORM_ETL_RUN_ID"] = str(platform["etl_run_id"])
     os.environ["ASK_MIMIR_RELEASE_DIR"] = str(artifact_root / "metric-release")
     os.environ["ASK_MIMIR_TRANSACTIONS"] = str(data_root / "transactions.parquet")
     os.environ["ASK_MIMIR_COMPANY_CONTEXT_DIR"] = str(artifact_root / "company-context")

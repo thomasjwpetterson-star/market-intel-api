@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from bootstrap_data import (
     DEFAULT_CURRENT_MANIFEST_KEY,
@@ -11,6 +11,7 @@ from bootstrap_data import (
     manifest_entry_signature,
     manifest_fingerprint,
     selected_manifest_key,
+    selected_runtime_manifest,
     verified_release_is_ready,
     write_verified_release_marker,
 )
@@ -32,6 +33,38 @@ class RecordingDownloadS3:
 
 
 class BootstrapReleaseMarkerTests(unittest.TestCase):
+    def test_atomic_platform_opt_in_selects_ask_child_without_legacy_fallback(self):
+        resolved = {
+            "platform": {"release_id": "platform-run-1", "etl_run_id": "run-1"},
+            "components": {
+                "ask_mimir": {
+                    "release_id": "ask-run-1",
+                    "etl_run_id": "run-1",
+                    "files": [{"local_path": "data/sample.parquet", "size": 1}],
+                }
+            },
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "MIMIR_USE_PLATFORM_MANIFEST": "1",
+                "MIMIR_PLATFORM_MANIFEST_KEY": "rehearsal/platform.json",
+                "MIMIR_PLATFORM_MANIFEST_VERSION_ID": "version-9",
+            },
+            clear=True,
+        ), patch("bootstrap_data.resolve_platform_release", return_value=resolved) as resolver:
+            manifest, platform = selected_runtime_manifest(object(), "bucket")
+
+        self.assertEqual(manifest["release_id"], "ask-run-1")
+        self.assertEqual(platform["platform"]["release_id"], "platform-run-1")
+        resolver.assert_called_once_with(
+            ANY,
+            "bucket",
+            platform_key="rehearsal/platform.json",
+            platform_version_id="version-9",
+            components=("ask_mimir",),
+        )
+
     def test_reuses_unchanged_version_pinned_file_without_sha256(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

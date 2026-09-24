@@ -1,0 +1,815 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Candidate-only Mimir/Ask refresh, raw-source reconciliation, and manual shadow comparison.
+
+Parameters:
+  DataBucket:
+    Type: String
+    Default: a-and-d-intel-lake-newaccount
+  SamDailyStateMachineArn:
+    Type: String
+    Default: arn:aws:states:us-east-1:868631722720:stateMachine:sam-daily-pipeline
+  EtlImageUri:
+    Type: String
+    Description: Immutable ECR image URI, preferably pinned by digest.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  AssignPublicIp:
+    Type: String
+    Default: ENABLED
+    AllowedValues: [ENABLED, DISABLED]
+  ScheduleExpression:
+    Type: String
+    Default: cron(0 5 * * ? *)
+  ScheduleState:
+    Type: String
+    Default: DISABLED
+    AllowedValues: [ENABLED, DISABLED]
+  RawSourceScheduleExpression:
+    Type: String
+    Default: cron(0 7 8 * ? *)
+  RawSourceScheduleState:
+    Type: String
+    Default: DISABLED
+    AllowedValues: [ENABLED, DISABLED]
+  UsaSpendingCandidateScriptKey:
+    Type: String
+    Default: glue-scripts/source_automation/glue_usaspending_archive_to_candidate.py
+  AlertEmail:
+    Type: String
+    Default: ""
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+
+Resources:
+  EtlCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: mimir-etl-refresh
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  EtlLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /mimir/etl-refresh
+      RetentionInDays: 30
+
+  EtlSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Outbound HTTPS only for the Mimir ETL Fargate task.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress: []
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  EtlExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  EtlTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: MimirEtlDataAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BucketMetadata
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:GetBucketVersioning
+                  - s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${DataBucket}
+              - Sid: ReadSourceData
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectAttributes
+                  - s3:GetObjectVersion
+                Resource: !Sub arn:${AWS::Partition}:s3:::${DataBucket}/*
+              - Sid: WritePipelineData
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:AbortMultipartUpload
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${DataBucket}/mimir/*
+                  - !Sub arn:${AWS::Partition}:s3:::${DataBucket}/ask_mimir/*
+                  - !Sub arn:${AWS::Partition}:s3:::${DataBucket}/temp_etl/*
+                  - !Sub arn:${AWS::Partition}:s3:::${DataBucket}/temp_etl_unload/*
+                  - !Sub arn:${AWS::Partition}:s3:::${DataBucket}/gold/dla/operational_metrics_candidate/*
+              - Sid: QueryAthena
+                Effect: Allow
+                Action:
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                  - athena:StartQueryExecution
+                  - athena:StopQueryExecution
+                Resource: "*"
+              - Sid: ReadGlueCatalog
+                Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetPartition
+                  - glue:GetPartitions
+                  - glue:GetJobRuns
+                Resource: "*"
+              - Sid: ReadSamPipelineHistory
+                Effect: Allow
+                Action: states:ListExecutions
+                Resource: !Ref SamDailyStateMachineArn
+
+  EtlAthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: mimir-etl-refresh
+      Description: Cost-isolated workgroup for candidate and shadow ETL refreshes.
+      State: ENABLED
+      RecursiveDeleteOption: false
+      WorkGroupConfiguration:
+        BytesScannedCutoffPerQuery: 68719476736
+        EnforceWorkGroupConfiguration: false
+        PublishCloudWatchMetricsEnabled: true
+
+  EtlTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: mimir-etl-refresh
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "4096"
+      Memory: "16384"
+      ExecutionRoleArn: !GetAtt EtlExecutionRole.Arn
+      TaskRoleArn: !GetAtt EtlTaskRole.Arn
+      EphemeralStorage:
+        SizeInGiB: 100
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: mimir-etl
+          Image: !Ref EtlImageUri
+          Essential: true
+          StopTimeout: 120
+          Environment:
+            - Name: ATHENA_OUTPUT_BUCKET
+              Value: !Ref DataBucket
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: SAM_DAILY_STATE_MACHINE_ARN
+              Value: !Ref SamDailyStateMachineArn
+            - Name: ATHENA_WORKGROUP
+              Value: !Ref EtlAthenaWorkGroup
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EtlLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: task
+
+  PipelineAlerts:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: mimir-etl-refresh-alerts
+
+  PipelineAlertSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+      TopicArn: !Ref PipelineAlerts
+
+  EtlStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: states.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RunEtlTasks
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecs:RunTask
+                Resource: !Ref EtlTaskDefinition
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeTasks
+                  - ecs:StopTask
+                Resource: "*"
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !GetAtt EtlExecutionRole.Arn
+                  - !GetAtt EtlTaskRole.Arn
+              - Effect: Allow
+                Action:
+                  - events:PutTargets
+                  - events:PutRule
+                  - events:DescribeRule
+                Resource: !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForECSTaskRule
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref PipelineAlerts
+              - Effect: Allow
+                Action:
+                  - glue:StartJobRun
+                  - glue:GetJobRun
+                  - glue:GetJobRuns
+                  - glue:BatchStopJobRun
+                Resource: !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:job/${UsaSpendingArchiveCandidateJob}
+
+  UsaSpendingCandidateGlueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: glue.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: UsaSpendingCandidateData
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${DataBucket}
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${DataBucket}/${UsaSpendingCandidateScriptKey}
+                  - !Sub arn:${AWS::Partition}:s3:::${DataBucket}/mimir/raw-source-candidates/usaspending-contract-archive/*
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:AbortMultipartUpload
+                Resource: !Sub arn:${AWS::Partition}:s3:::${DataBucket}/mimir/raw-source-candidates/usaspending-contract-archive/*
+
+  UsaSpendingArchiveCandidateJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: mimir-usaspending-archive-to-candidate
+      Description: Transform full USAspending prime and subaward archives into isolated Silver candidates.
+      Role: !GetAtt UsaSpendingCandidateGlueRole.Arn
+      GlueVersion: "4.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 10
+      Timeout: 240
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub s3://${DataBucket}/${UsaSpendingCandidateScriptKey}
+      DefaultArguments:
+        "--enable-metrics": "true"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--job-language": python
+
+  EtlStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: mimir-etl-refresh
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt EtlStateMachineRole.Arn
+      Definition:
+        Comment: Build isolated artifacts, validate candidates, and stop before promotion.
+        StartAt: Initialize
+        States:
+          Initialize:
+            Type: Pass
+            Parameters:
+              run_id.$: States.UUID()
+              run_started_at.$: $$.Execution.StartTime
+              request.$: $
+            Next: ValidateUpstreams
+          ValidateUpstreams:
+            Type: Task
+            Resource: arn:aws:states:::ecs:runTask.sync
+            TimeoutSeconds: 900
+            ResultPath: $.preflight_result
+            Parameters:
+              Cluster: !GetAtt EtlCluster.Arn
+              TaskDefinition: !Ref EtlTaskDefinition
+              LaunchType: FARGATE
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  AssignPublicIp: !Ref AssignPublicIp
+                  Subnets: !Ref SubnetIds
+                  SecurityGroups: [!GetAtt EtlSecurityGroup.GroupId]
+              Overrides:
+                ContainerOverrides:
+                  - Name: mimir-etl
+                    Command.$: !Sub "States.Array('--stage', 'preflight', '--bucket', '${DataBucket}', '--run-id', $.run_id, '--run-started-at', $.run_started_at, '--sam-state-machine-arn', '${SamDailyStateMachineArn}')"
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: NotifyFailure
+            Next: SelectRunMode
+          SelectRunMode:
+            Type: Choice
+            Choices:
+              - And:
+                  - Variable: $.request.mode
+                    IsPresent: true
+                  - Variable: $.request.mode
+                    StringEquals: candidate
+                Next: RefreshCoreCandidate
+            Default: SeedManualControl
+          RefreshCoreCandidate:
+            Type: Task
+            Resource: arn:aws:states:::ecs:runTask.sync
+            TimeoutSeconds: 21600
+            ResultPath: $.core_result
+            Parameters:
+              Cluster: !GetAtt EtlCluster.Arn
+              TaskDefinition: !Ref EtlTaskDefinition
+              LaunchType: FARGATE
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  AssignPublicIp: !Ref AssignPublicIp
+                  Subnets: !Ref SubnetIds
+                  SecurityGroups: [!GetAtt EtlSecurityGroup.GroupId]
+              Overrides:
+                ContainerOverrides:
+                  - Name: mimir-etl
+                    Command.$: !Sub "States.Array('--stage', 'core', '--bucket', '${DataBucket}', '--run-id', $.run_id, '--run-started-at', $.run_started_at)"
+            Retry:
+              - ErrorEquals: [ECS.AmazonECSException, ECS.ServiceException]
+                IntervalSeconds: 30
+                MaxAttempts: 2
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: NotifyFailure
+            Next: RefreshDependentsCandidate
+          RefreshDependentsCandidate:
+            Type: Task
+            Resource: arn:aws:states:::ecs:runTask.sync
+            TimeoutSeconds: 10800
+            ResultPath: $.dependent_result
+            Parameters:
+              Cluster: !GetAtt EtlCluster.Arn
+              TaskDefinition: !Ref EtlTaskDefinition
+              LaunchType: FARGATE
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  AssignPublicIp: !Ref AssignPublicIp
+                  Subnets: !Ref SubnetIds
+                  SecurityGroups: [!GetAtt EtlSecurityGroup.GroupId]
+              Overrides:
+                ContainerOverrides:
+                  - Name: mimir-etl
+                    Command.$: !Sub "States.Array('--stage', 'dependents', '--bucket', '${DataBucket}', '--run-id', $.run_id, '--run-started-at', $.run_started_at)"
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: NotifyFailure
+            Next: ValidateMainCandidate
+          SeedManualControl:
+            Type: Task
+            Resource: arn:aws:states:::ecs:runTask.sync
+            TimeoutSeconds: 3600
+            ResultPath: $.manual_seed_result
+            Parameters:
+              Cluster: !GetAtt EtlCluster.Arn
+              TaskDefinition: !Ref EtlTaskDefinition
+              LaunchType: FARGATE
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  AssignPublicIp: !Ref AssignPublicIp
+                  Subnets: !Ref SubnetIds
+                  SecurityGroups: [!GetAtt EtlSecurityGroup.GroupId]
+              Overrides:
+                ContainerOverrides:
+                  - Name: mimir-etl
+                    Command.$: !Sub "States.Array('--stage', 'seed-manual', '--bucket', '${DataBucket}', '--run-id', $.run_id, '--run-started-at', $.run_started_at)"
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: NotifyFailure
+            Next: BuildComparisonInputs
+          BuildComparisonInputs:
+            Type: Parallel
+            ResultPath: $.build_results
+            Branches:
+              - StartAt: RunManualControl
+                States:
+                  RunManualControl:
+                    Type: Task
+                    Resource: arn:aws:states:::ecs:runTask.sync
+                    TimeoutSeconds: 21600
+                    ResultPath: $.manual_control_result
+                    Parameters:
+                      Cluster: !GetAtt EtlCluster.Arn
+                      TaskDefinition: !Ref EtlTaskDefinition
+                      LaunchType: FARGATE
+                      NetworkConfiguration:
+                        AwsvpcConfiguration:
+                          AssignPublicIp: !Ref AssignPublicIp
+                          Subnets: !Ref SubnetIds
+                          SecurityGroups: [!GetAtt EtlSecurityGroup.GroupId]
+                      Overrides:
+                        ContainerOverrides:
+                          - Name: mimir-etl
+                            Command.$: !Sub "States.Array('--stage', 'manual-control', '--bucket', '${DataBucket}', '--run-id', $.run_id, '--run-started-at', $.run_started_at)"
+                    End: true
+              - StartAt: RefreshCore
+                States:
+                  RefreshCore:
+                    Type: Task
+                    Resource: arn:aws:states:::ecs:runTask.sync
+                    TimeoutSeconds: 21600
+                    ResultPath: $.core_result
+                    Parameters:
+                      Cluster: !GetAtt EtlCluster.Arn
+                      TaskDefinition: !Ref EtlTaskDefinition
+                      LaunchType: FARGATE
+                      NetworkConfiguration:
+                        AwsvpcConfiguration:
+                          AssignPublicIp: !Ref AssignPublicIp
+                          Subnets: !Ref SubnetIds
+                          SecurityGroups: [!GetAtt EtlSecurityGroup.GroupId]
+                      Overrides:
+                        ContainerOverrides:
+                          - Name: mimir-etl
+                            Command.$: !Sub "States.Array('--stage', 'core', '--bucket', '${DataBucket}', '--run-id', $.run_id, '--run-started-at', $.run_started_at)"
+                    Retry:
+                      - ErrorEquals: [ECS.AmazonECSException, ECS.ServiceException]
+                        IntervalSeconds: 30
+                        MaxAttempts: 2
+                        BackoffRate: 2
+                    Next: RefreshDependents
+                  RefreshDependents:
+                    Type: Task
+                    Resource: arn:aws:states:::ecs:runTask.sync
+                    TimeoutSeconds: 10800
+                    ResultPath: $.dependent_result
+                    Parameters:
+                      Cluster: !GetAtt EtlCluster.Arn
+                      TaskDefinition: !Ref EtlTaskDefinition
+                      LaunchType: FARGATE
+                      NetworkConfiguration:
+                        AwsvpcConfiguration:
+                          AssignPublicIp: !Ref AssignPublicIp
+                          Subnets: !Ref SubnetIds
+                          SecurityGroups: [!GetAtt EtlSecurityGroup.GroupId]
+                      Overrides:
+                        ContainerOverrides:
+                          - Name: mimir-etl
+                            Command.$: !Sub "States.Array('--stage', 'dependents', '--bucket', '${DataBucket}', '--run-id', $.run_id, '--run-started-at', $.run_started_at)"
+                    End: true
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: NotifyFailure
+            Next: ValidateMainCandidate
+          ValidateMainCandidate:
+            Type: Task
+            Resource: arn:aws:states:::ecs:runTask.sync
+            TimeoutSeconds: 1800
+            ResultPath: $.main_candidate_result
+            Parameters:
+              Cluster: !GetAtt EtlCluster.Arn
+              TaskDefinition: !Ref EtlTaskDefinition
+              LaunchType: FARGATE
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  AssignPublicIp: !Ref AssignPublicIp
+                  Subnets: !Ref SubnetIds
+                  SecurityGroups: [!GetAtt EtlSecurityGroup.GroupId]
+              Overrides:
+                ContainerOverrides:
+                  - Name: mimir-etl
+                    Command.$: !Sub "States.Array('--stage', 'validate-main', '--bucket', '${DataBucket}', '--run-id', $.run_id, '--run-started-at', $.run_started_at)"
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: NotifyFailure
+            Next: SelectPostValidation
+          SelectPostValidation:
+            Type: Choice
+            Choices:
+              - And:
+                  - Variable: $.request.mode
+                    IsPresent: true
+                  - Variable: $.request.mode
+                    StringEquals: candidate
+                Next: PublishAskCandidate
+            Default: CompareReleases
+          CompareReleases:
+            Type: Task
+            Resource: arn:aws:states:::ecs:runTask.sync
+            TimeoutSeconds: 21600
+            ResultPath: $.comparison_result
+            Parameters:
+              Cluster: !GetAtt EtlCluster.Arn
+              TaskDefinition: !Ref EtlTaskDefinition
+              LaunchType: FARGATE
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  AssignPublicIp: !Ref AssignPublicIp
+                  Subnets: !Ref SubnetIds
+                  SecurityGroups: [!GetAtt EtlSecurityGroup.GroupId]
+              Overrides:
+                ContainerOverrides:
+                  - Name: mimir-etl
+                    Command.$: !Sub "States.Array('--stage', 'compare', '--bucket', '${DataBucket}', '--run-id', $.run_id, '--run-started-at', $.run_started_at)"
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: NotifyFailure
+            Next: PublishAskCandidate
+          PublishAskCandidate:
+            Type: Task
+            Resource: arn:aws:states:::ecs:runTask.sync
+            TimeoutSeconds: 7200
+            ResultPath: $.ask_candidate_result
+            Parameters:
+              Cluster: !GetAtt EtlCluster.Arn
+              TaskDefinition: !Ref EtlTaskDefinition
+              LaunchType: FARGATE
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  AssignPublicIp: !Ref AssignPublicIp
+                  Subnets: !Ref SubnetIds
+                  SecurityGroups: [!GetAtt EtlSecurityGroup.GroupId]
+              Overrides:
+                ContainerOverrides:
+                  - Name: mimir-etl
+                    Command.$: !Sub "States.Array('--stage', 'publish-ask', '--bucket', '${DataBucket}', '--run-id', $.run_id, '--run-started-at', $.run_started_at)"
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: NotifyFailure
+            End: true
+          NotifyFailure:
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              TopicArn: !Ref PipelineAlerts
+              Subject: Mimir automated ETL failed
+              Message.$: States.JsonToString($)
+            Next: PipelineFailed
+          PipelineFailed:
+            Type: Fail
+            Error: MimirEtlRefreshFailed
+
+  RawSourceStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: mimir-raw-source-candidates
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt EtlStateMachineRole.Arn
+      Definition:
+        Comment: Acquire and transform raw-source candidates without touching production paths.
+        StartAt: InitializeRawSourceRun
+        States:
+          InitializeRawSourceRun:
+            Type: Pass
+            Parameters:
+              run_id.$: States.UUID()
+              run_started_at.$: $$.Execution.StartTime
+            Next: AcquireUsaSpendingArchive
+          AcquireUsaSpendingArchive:
+            Type: Task
+            Resource: arn:aws:states:::ecs:runTask.sync
+            TimeoutSeconds: 21600
+            ResultPath: $.acquisition_result
+            Parameters:
+              Cluster: !GetAtt EtlCluster.Arn
+              TaskDefinition: !Ref EtlTaskDefinition
+              LaunchType: FARGATE
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  AssignPublicIp: !Ref AssignPublicIp
+                  Subnets: !Ref SubnetIds
+                  SecurityGroups: [!GetAtt EtlSecurityGroup.GroupId]
+              Overrides:
+                ContainerOverrides:
+                  - Name: mimir-etl
+                    Command.$: !Sub "States.Array('--stage', 'source-usaspending-archive', '--bucket', '${DataBucket}', '--run-id', $.run_id, '--run-started-at', $.run_started_at)"
+            Retry:
+              - ErrorEquals: [ECS.AmazonECSException, ECS.ServiceException]
+                IntervalSeconds: 30
+                MaxAttempts: 2
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: NotifyRawSourceFailure
+            Next: TransformUsaSpendingCandidate
+          TransformUsaSpendingCandidate:
+            Type: Task
+            Resource: arn:aws:states:::glue:startJobRun.sync
+            TimeoutSeconds: 18000
+            ResultPath: $.transform_result
+            Parameters:
+              JobName: !Ref UsaSpendingArchiveCandidateJob
+              Arguments:
+                "--BUCKET": !Ref DataBucket
+                "--RUN_ID.$": $.run_id
+                "--MANIFEST_KEY.$": States.Format('mimir/raw-source-candidates/usaspending-contract-archive/{}/manifest.json', $.run_id)
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: NotifyRawSourceFailure
+            End: true
+          NotifyRawSourceFailure:
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              TopicArn: !Ref PipelineAlerts
+              Subject: Mimir raw-source candidate failed
+              Message.$: States.JsonToString($)
+            Next: RawSourcePipelineFailed
+          RawSourcePipelineFailed:
+            Type: Fail
+            Error: MimirRawSourceCandidateFailed
+
+  SchedulerDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: mimir-etl-refresh-scheduler-dlq
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: scheduler.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartMimirEtl
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource:
+                  - !Ref EtlStateMachine
+                  - !Ref RawSourceStateMachine
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt SchedulerDeadLetterQueue.Arn
+
+  EtlSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: mimir-etl-refresh-daily
+      Description: Candidate-only refresh; enable only after successful shadow runs.
+      State: !Ref ScheduleState
+      ScheduleExpression: !Ref ScheduleExpression
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow: {Mode: "OFF"}
+      Target:
+        Arn: !Ref EtlStateMachine
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"mode":"candidate"}'
+        DeadLetterConfig:
+          Arn: !GetAtt SchedulerDeadLetterQueue.Arn
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 21600
+          MaximumRetryAttempts: 2
+
+  RawSourceSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: mimir-raw-source-candidates-monthly
+      Description: Monthly full USAspending reconciliation and subaward candidate; never promotes.
+      State: !Ref RawSourceScheduleState
+      ScheduleExpression: !Ref RawSourceScheduleExpression
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow: {Mode: "OFF"}
+      Target:
+        Arn: !Ref RawSourceStateMachine
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{}'
+        DeadLetterConfig:
+          Arn: !GetAtt SchedulerDeadLetterQueue.Arn
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 21600
+          MaximumRetryAttempts: 1
+
+  FailedExecutionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: mimir-etl-refresh-failed
+      AlarmDescription: At least one Mimir ETL state-machine execution failed.
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Ref EtlStateMachine
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref PipelineAlerts]
+
+  HighAthenaScanAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: mimir-etl-refresh-athena-scan-high
+      AlarmDescription: ETL workgroup scanned more than 500 GB in six hours.
+      Namespace: AWS/Athena
+      MetricName: ProcessedBytes
+      Dimensions:
+        - Name: WorkGroup
+          Value: !Ref EtlAthenaWorkGroup
+      Statistic: Sum
+      Period: 21600
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 500000000000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref PipelineAlerts]
+
+  RawSourceFailedExecutionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: mimir-raw-source-candidates-failed
+      AlarmDescription: At least one raw-source candidate execution failed.
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Ref RawSourceStateMachine
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref PipelineAlerts]
+
+Outputs:
+  StateMachineArn:
+    Value: !Ref EtlStateMachine
+  TaskDefinitionArn:
+    Value: !Ref EtlTaskDefinition
+  SecurityGroupId:
+    Value: !GetAtt EtlSecurityGroup.GroupId
+  AlertTopicArn:
+    Value: !Ref PipelineAlerts
+  ScheduleName:
+    Value: !Ref EtlSchedule
+  ScheduleStartsEnabled:
+    Value: !Ref ScheduleState
+  RawSourceStateMachineArn:
+    Value: !Ref RawSourceStateMachine
+  RawSourceScheduleName:
+    Value: !Ref RawSourceSchedule
+  RawSourceScheduleStartsEnabled:
+    Value: !Ref RawSourceScheduleState

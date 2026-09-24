@@ -1,0 +1,12 @@
+.git
+.DS_Store
+venv
+__pycache__
+*.pyc
+*.db
+local_data
+temp_etl_downloads
+ducktmp
+ask_mimir_beta/.runtime-data
+ask_mimir_beta/validation-output
+

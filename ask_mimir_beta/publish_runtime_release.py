@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterable, Tuple
 
 import boto3
 import duckdb
+from botocore.exceptions import ClientError
 
 from bootstrap_data import DEFAULT_BUCKET, file_sha256
 from build_platform_source_depth import build_platform_source_depth
@@ -47,6 +48,10 @@ DATA_FILES = (
     "nsn_supplier_lookup.parquet",
     "nsn_profile_lookup.parquet",
     "nsn_cage_reference.parquet",
+    "nsn_supply_state_lookup.parquet",
+    "nsn_price_summary_lookup.parquet",
+    "nsn_opportunity_summary_lookup.parquet",
+    "nsn_opportunity_detail.parquet",
     "platform_bom.parquet",
     "cage_locations.parquet",
     "geo.parquet",
@@ -54,6 +59,12 @@ DATA_FILES = (
     "contracts_rolled.parquet",
     "profiles.parquet",
 )
+OPTIONAL_DATA_FILES = {
+    "nsn_supply_state_lookup.parquet",
+    "nsn_price_summary_lookup.parquet",
+    "nsn_opportunity_summary_lookup.parquet",
+    "nsn_opportunity_detail.parquet",
+}
 ANNOUNCEMENT_FILENAME = "dod_contract_announcements.parquet"
 PINNED_REFERENCE_FILES = (
     (
@@ -210,6 +221,8 @@ def artifact_files(
     destinations: Iterable[str] | None = None,
 ) -> Iterable[Tuple[Path, str]]:
     selected = None if destinations is None else set(destinations)
+    if selected == set():
+        return
     included = set()
     for source_dir, destination_dir in artifact_directories():
         if selected is not None and destination_dir not in selected:
@@ -445,6 +458,14 @@ def parse_domains(value: str | None) -> set[str] | None:
     if not domains:
         raise ValueError("--only requires at least one release domain")
     return domains
+
+
+def serving_source_key(prefix: str, filename: str) -> str:
+    """Build a safe S3 source key for default or run-scoped serving data."""
+    normalized = prefix.strip().strip("/")
+    if not normalized:
+        raise ValueError("serving source prefix cannot be empty")
+    return f"{normalized}/{filename}"
 
 
 def load_manifest(s3: Any, bucket: str, key: str) -> Dict[str, Any]:
@@ -789,6 +810,7 @@ def publish(
     promote: bool = False,
     verify_local_inputs: bool = True,
     reuse_prebuilt_capabilities: bool = False,
+    serving_source_prefix: str = "app_cache/",
 ) -> Dict[str, Any]:
     session = boto3.Session(profile_name=profile) if profile else boto3.Session()
     s3 = session.client("s3", region_name="us-east-1")
@@ -818,34 +840,56 @@ def publish(
     if "serving-data" in selected_domains:
         for filename in DATA_FILES:
             local_path = f"data/{filename}"
-            source_key = f"app_cache/{filename}"
-            if verify_local_inputs:
-                print(f"Verifying serving data locally: {filename}", file=sys.stderr)
-                entry = verified_serving_manifest_entry(
-                    s3,
-                    bucket,
-                    source_key,
-                    local_path,
-                    DATA_ROOT / filename,
+            source_key = serving_source_key(serving_source_prefix, filename)
+            if (
+                filename in OPTIONAL_DATA_FILES
+                and verify_local_inputs
+                and not (DATA_ROOT / filename).exists()
+            ):
+                print(
+                    f"Optional serving data not present; skipping: {filename}",
+                    file=sys.stderr,
                 )
-            else:
-                print(f"Pinning serving data remotely: {filename}", file=sys.stderr)
-                remote_entry = remote_serving_manifest_entry(
-                    s3,
-                    bucket,
-                    source_key,
-                    local_path,
-                )
-                base_entry = base_entries_by_path.get(local_path)
-                if (
-                    base_entry
-                    and base_entry.get("s3_key") == remote_entry.get("s3_key")
-                    and base_entry.get("s3_version_id")
-                    == remote_entry.get("s3_version_id")
-                ):
-                    entry = base_entry
+                continue
+            try:
+                if verify_local_inputs:
+                    print(f"Verifying serving data locally: {filename}", file=sys.stderr)
+                    entry = verified_serving_manifest_entry(
+                        s3,
+                        bucket,
+                        source_key,
+                        local_path,
+                        DATA_ROOT / filename,
+                    )
                 else:
-                    entry = remote_entry
+                    print(f"Pinning serving data remotely: {filename}", file=sys.stderr)
+                    remote_entry = remote_serving_manifest_entry(
+                        s3,
+                        bucket,
+                        source_key,
+                        local_path,
+                    )
+                    base_entry = base_entries_by_path.get(local_path)
+                    if (
+                        base_entry
+                        and base_entry.get("s3_key") == remote_entry.get("s3_key")
+                        and base_entry.get("s3_version_id")
+                        == remote_entry.get("s3_version_id")
+                    ):
+                        entry = base_entry
+                    else:
+                        entry = remote_entry
+            except ClientError as error:
+                error_code = str(error.response.get("Error", {}).get("Code") or "")
+                if filename in OPTIONAL_DATA_FILES and error_code in {
+                    "404", "NoSuchKey", "NotFound"
+                }:
+                    print(
+                        f"Optional remote serving data not present; skipping: {filename}",
+                        file=sys.stderr,
+                    )
+                    continue
+                raise
             entries_by_path[entry["local_path"]] = entry
 
     if "announcements" in selected_domains:
@@ -1008,6 +1052,9 @@ def publish(
         "derived_release": derived_release,
         "files": [entries_by_path[path] for path in sorted(entries_by_path)],
     }
+    etl_run_id = os.getenv("ETL_AUTOMATION_RUN_ID", "").strip()
+    if etl_run_id:
+        manifest["etl_run_id"] = etl_run_id
     manifest_key = f"{prefix}/runtime_manifest.json"
     manifest_body = json.dumps(manifest, indent=2).encode()
     write_release_pointer(s3, bucket, manifest_key, manifest_body)
@@ -1098,6 +1145,11 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--serving-source-prefix",
+        default="app_cache/",
+        help="S3 prefix containing serving-data Parquets for this candidate.",
+    )
+    parser.add_argument(
         "--reuse-prebuilt-capabilities",
         action="store_true",
         help=(
@@ -1132,6 +1184,7 @@ if __name__ == "__main__":
             promote=arguments.promote,
             verify_local_inputs=not arguments.skip_local_input_verification,
             reuse_prebuilt_capabilities=arguments.reuse_prebuilt_capabilities,
+            serving_source_prefix=arguments.serving_source_prefix,
         )
     print(
         json.dumps(result, indent=2)

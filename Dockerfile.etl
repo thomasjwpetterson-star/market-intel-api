@@ -1,0 +1,32 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app:/app/ask_mimir_beta \
+    MIMIR_DUCKDB_EXTENSION_DIRECTORY=/opt/mimir-duckdb-extensions
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r /app/requirements.txt \
+    && python -c "import duckdb; c=duckdb.connect(config={'extension_directory':'/opt/mimir-duckdb-extensions'}); c.execute('INSTALL httpfs'); c.execute('INSTALL aws'); c.close()"
+
+COPY run_etl.py /app/run_etl.py
+COPY main.py /app/main.py
+COPY public_intelligence_release.py /app/public_intelligence_release.py
+COPY dod_contract_enrichment.py /app/dod_contract_enrichment.py
+COPY rehearse_public_release.py /app/rehearse_public_release.py
+COPY verify_public_rehearsal.py /app/verify_public_rehearsal.py
+COPY smoke_atomic_platform.py /app/smoke_atomic_platform.py
+COPY etl_automation /app/etl_automation
+COPY dla_operational_v2 /app/dla_operational_v2
+COPY source_automation /app/source_automation
+COPY ask_mimir_beta /app/ask_mimir_beta
+
+ENTRYPOINT ["python", "-m", "etl_automation.orchestrator"]

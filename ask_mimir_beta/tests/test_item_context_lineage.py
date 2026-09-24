@@ -70,6 +70,71 @@ class ItemContextLineageTests(unittest.TestCase):
         self.assertNotIn("reported_end_item_context", profile)
         self.assertEqual(profile["description"], "INDICATOR,SYMBOL INDICATING")
 
+    def test_reads_optional_operational_sidecars_without_changing_reference_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference_path = root / "reference.parquet"
+            supply_path = root / "nsn_supply_state_lookup.parquet"
+            price_path = root / "nsn_price_summary_lookup.parquet"
+            opportunity_summary_path = root / "nsn_opportunity_summary_lookup.parquet"
+            opportunity_detail_path = root / "nsn_opportunity_detail.parquet"
+            duckdb.sql(f"COPY (SELECT {BASE_COLUMNS}) TO '{reference_path}' (FORMAT PARQUET)")
+            duckdb.sql(
+                f"""
+                COPY (SELECT '003214003'::VARCHAR AS niin,
+                             'BACKORDERED'::VARCHAR AS supply_signal,
+                             12::BIGINT AS forecast_3m_qty)
+                TO '{supply_path}' (FORMAT PARQUET)
+                """
+            )
+            duckdb.sql(
+                f"""
+                COPY (SELECT '003214003'::VARCHAR AS niin,
+                             2::BIGINT AS active_solicitation_count,
+                             DATE '2026-10-01' AS next_response_deadline,
+                             'SPE7M226T6958'::VARCHAR AS next_solicitation_number)
+                TO '{opportunity_summary_path}' (FORMAT PARQUET)
+                """
+            )
+            duckdb.sql(
+                f"""
+                COPY (SELECT '003214003'::VARCHAR AS niin,
+                             'SPE7M226T6958'::VARCHAR AS solicitation_number,
+                             '0001'::VARCHAR AS solicitation_line_number,
+                             DATE '2026-10-01' AS response_deadline)
+                TO '{opportunity_detail_path}' (FORMAT PARQUET)
+                """
+            )
+            duckdb.sql(
+                f"""
+                COPY (SELECT '003214003'::VARCHAR AS niin,
+                             42.50::DOUBLE AS latest_net_price,
+                             9::BIGINT AS price_observation_count)
+                TO '{price_path}' (FORMAT PARQUET)
+                """
+            )
+            store = self._store(reference_path)
+            store.paths["supply_state"] = supply_path
+            store.paths["price_summary"] = price_path
+            store.paths["opportunity_summary"] = opportunity_summary_path
+            store.paths["opportunity_detail"] = opportunity_detail_path
+            supply = store._optional_sidecar("supply_state", "003214003")
+            price = store._optional_sidecar("price_summary", "003214003")
+            opportunity = store._optional_sidecar("opportunity_summary", "003214003")
+            opportunity_rows = store._optional_sidecar_rows(
+                "opportunity_detail", "003214003"
+            )
+            missing = store._optional_sidecar("supply_state", "999999999")
+            store.connection.close()
+
+        self.assertEqual(supply["supply_signal"], "BACKORDERED")
+        self.assertEqual(supply["forecast_3m_qty"], 12)
+        self.assertEqual(price["latest_net_price"], 42.5)
+        self.assertEqual(price["price_observation_count"], 9)
+        self.assertEqual(opportunity["active_solicitation_count"], 2)
+        self.assertEqual(opportunity_rows[0]["solicitation_number"], "SPE7M226T6958")
+        self.assertEqual(missing, {})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,42 @@ WITH vendor_sites AS (
     FROM "market_intel_gold"."view_vendor_sites_hybrid"
     WHERE cage_code IS NOT NULL
 ),
+wsdc_by_niin AS (
+    SELECT
+        TRIM(niin) AS niin,
+        ARRAY_JOIN(
+            ARRAY_SORT(ARRAY_DISTINCT(ARRAY_AGG(UPPER(TRIM(wsdc_code))) FILTER (
+                WHERE wsdc_code IS NOT NULL AND TRIM(wsdc_code) <> ''
+            ))),
+            ' | '
+        ) AS wsdc_codes,
+        ARRAY_JOIN(
+            ARRAY_SORT(ARRAY_DISTINCT(ARRAY_AGG(TRIM(weapon_system_name)) FILTER (
+                WHERE weapon_system_name IS NOT NULL
+                  AND TRIM(weapon_system_name) <> ''
+                  AND UPPER(TRIM(weapon_system_name)) NOT IN ('NONE', 'N/A', 'UNKNOWN')
+            ))),
+            ' | '
+        ) AS wsdc_systems,
+        ARBITRARY(TRIM(wsdc_code)) AS representative_wsdc_code
+    FROM "market_intel_silver"."ref_wsdc"
+    WHERE niin IS NOT NULL
+      AND TRIM(niin) <> ''
+      AND wsdc_code IS NOT NULL
+      AND TRIM(wsdc_code) <> ''
+    GROUP BY 1
+),
+platform_by_wsdc AS (
+    SELECT
+        TRIM(wsdc_code_ref) AS wsdc_code_ref,
+        ARBITRARY(raw_input_name) AS raw_input_name
+    FROM "market_intel_silver"."ref_platform_map"
+    WHERE wsdc_code_ref IS NOT NULL
+      AND TRIM(wsdc_code_ref) <> ''
+      AND raw_input_name IS NOT NULL
+      AND TRIM(raw_input_name) <> ''
+    GROUP BY 1
+),
 usaspending_ranked AS (
     SELECT
         t.*,
@@ -19,6 +55,21 @@ usaspending_ranked AS (
             ORDER BY t.last_modified_date DESC, t.action_date DESC
         ) AS source_row_rank
     FROM "market_intel_silver"."dataset_prime_contracts" t
+),
+action_unit_pricing AS (
+    SELECT
+        transaction_key,
+        unit_price_item_name,
+        unit_price_nsn,
+        unit_price_quantity,
+        unit_price_quantity_unit,
+        unit_price_usd,
+        unit_price_basis,
+        unit_price_status,
+        unit_price_record_count,
+        wsdc_systems,
+        wsdc_codes
+    FROM "market_intel_silver"."v_data_explorer_unit_pricing"
 ),
 usa_award_identity AS (
     SELECT
@@ -82,7 +133,16 @@ usaspending AS (
         t.action_date,
         TRY_CAST(t.action_date_fiscal_year AS INTEGER) AS year,
         TRY_CAST(t.federal_action_obligation AS DOUBLE) AS spend_amount,
-        b.nsn,
+        TRY_CAST(up.unit_price_usd AS DOUBLE) AS unit_price_usd,
+        TRY_CAST(up.unit_price_quantity AS DOUBLE) AS unit_price_quantity,
+        up.unit_price_quantity_unit,
+        up.unit_price_basis,
+        CAST(up.unit_price_status AS VARCHAR(64)) AS unit_price_status,
+        up.unit_price_record_count,
+        up.unit_price_item_name,
+        up.wsdc_systems,
+        up.wsdc_codes,
+        COALESCE(up.unit_price_nsn, b.nsn) AS nsn,
         b.niin,
         CAST(NULL AS VARCHAR) AS part_number,
         COALESCE(NULLIF(t.transaction_description, ''), t.prime_award_base_transaction_description) AS description,
@@ -134,6 +194,8 @@ usaspending AS (
     LEFT JOIN safe_award_nsn b
         ON UPPER(TRIM(CAST(t.award_id_piid AS VARCHAR))) = b.contract_id
        AND t.contract_award_unique_key = b.award_key
+    LEFT JOIN action_unit_pricing up
+        ON t.contract_transaction_unique_key = up.transaction_key
     WHERE t.source_row_rank = 1
 ),
 usa_dla_contracts AS (
@@ -160,6 +222,52 @@ dla AS (
         CAST(YEAR(h.award_date) + IF(MONTH(h.award_date) >= 10, 1, 0) AS INTEGER) AS year,
         TRY_CAST(h.netprice AS DOUBLE) * TRY_CAST(h.order_qty AS DOUBLE) AS spend_amount,
         CASE
+            WHEN TRY_CAST(h.netprice AS DOUBLE) > 0
+             AND TRY_CAST(h.netprice AS DOUBLE) < 99999999
+             AND TRY_CAST(h.order_qty AS DOUBLE) > 0
+            THEN TRY_CAST(h.netprice AS DOUBLE)
+        END AS unit_price_usd,
+        CASE
+            WHEN TRY_CAST(h.netprice AS DOUBLE) > 0
+             AND TRY_CAST(h.netprice AS DOUBLE) < 99999999
+             AND TRY_CAST(h.order_qty AS DOUBLE) > 0
+            THEN TRY_CAST(h.order_qty AS DOUBLE)
+        END AS unit_price_quantity,
+        CASE
+            WHEN TRY_CAST(h.netprice AS DOUBLE) > 0
+             AND TRY_CAST(h.netprice AS DOUBLE) < 99999999
+             AND TRY_CAST(h.order_qty AS DOUBLE) > 0
+            THEN CAST(h.unit AS VARCHAR)
+        END AS unit_price_quantity_unit,
+        CASE
+            WHEN TRY_CAST(h.netprice AS DOUBLE) > 0
+             AND TRY_CAST(h.netprice AS DOUBLE) < 99999999
+             AND TRY_CAST(h.order_qty AS DOUBLE) > 0
+            THEN 'DLA_CONTRACT_HISTORY_NET_PRICE'
+        END AS unit_price_basis,
+        CAST(
+            CASE
+                WHEN TRY_CAST(h.netprice AS DOUBLE) > 0
+                 AND TRY_CAST(h.netprice AS DOUBLE) < 99999999
+                 AND TRY_CAST(h.order_qty AS DOUBLE) > 0
+                THEN 'OBSERVED_UNIT_PRICE'
+            END AS VARCHAR(64)
+        ) AS unit_price_status,
+        CASE
+            WHEN TRY_CAST(h.netprice AS DOUBLE) > 0
+             AND TRY_CAST(h.netprice AS DOUBLE) < 99999999
+             AND TRY_CAST(h.order_qty AS DOUBLE) > 0
+            THEN 1 ELSE 0
+        END AS unit_price_record_count,
+        CASE
+            WHEN TRY_CAST(h.netprice AS DOUBLE) > 0
+             AND TRY_CAST(h.netprice AS DOUBLE) < 99999999
+             AND TRY_CAST(h.order_qty AS DOUBLE) > 0
+            THEN h.item_name
+        END AS unit_price_item_name,
+        w.wsdc_systems,
+        w.wsdc_codes,
+        CASE
             WHEN REGEXP_LIKE(TRIM(h.fsc), '^[0-9]{4}$')
              AND REGEXP_LIKE(TRIM(h.niin), '^[0-9]{9}$')
             THEN CONCAT(TRIM(h.fsc), TRIM(h.niin))
@@ -175,7 +283,7 @@ dla AS (
         vs.latitude,
         vs.longitude,
         vs.location_quality,
-        COALESCE(NULLIF(h.item_name, ''), 'NONE') AS join_key_mapping,
+        COALESCE(NULLIF(pw.raw_input_name, ''), NULLIF(h.item_name, ''), 'NONE') AS join_key_mapping,
         h.item_name AS base_award_description,
         h.item_name AS action_description,
         CAST(NULL AS VARCHAR) AS place_of_performance_city,
@@ -184,7 +292,9 @@ dla AS (
         CAST(NULL AS VARCHAR) AS place_of_performance_zip,
         CONCAT(
             'DLA_AWARD|',
-            COALESCE(UPPER(TRIM(CAST(h.contract_number AS VARCHAR))), '<NULL>')
+            COALESCE(UPPER(TRIM(CAST(h.contract_number AS VARCHAR))), '<NULL>'),
+            '|CAGE|',
+            COALESCE(UPPER(TRIM(CAST(h.cage AS VARCHAR))), '<NULL>')
         ) AS award_key,
         CONCAT(
             'DLA_LINE|',
@@ -219,6 +329,10 @@ dla AS (
         ON UPPER(REGEXP_REPLACE(h.cage, '[^A-Za-z0-9]', '')) = vs.cage_norm
     LEFT JOIN "market_intel_gold"."ref_niin_platform_summary" p
         ON LPAD(TRIM(CAST(h.niin AS VARCHAR)), 9, '0') = p.niin
+    LEFT JOIN wsdc_by_niin w
+        ON TRIM(h.niin) = w.niin
+    LEFT JOIN platform_by_wsdc pw
+        ON w.representative_wsdc_code = pw.wsdc_code_ref
     WHERE NOT EXISTS (
         SELECT 1
         FROM usa_dla_contracts u

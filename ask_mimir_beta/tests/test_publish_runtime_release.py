@@ -9,8 +9,10 @@ from pathlib import Path
 
 from publish_runtime_release import (
     CAPABILITY_DEFINITIONS,
+    artifact_files,
     refresh_prebuilt_capability_metadata,
     remote_serving_manifest_entry,
+    serving_source_key,
     validate_prebuilt_capability_bundle,
     verified_serving_manifest_entry,
 )
@@ -59,6 +61,18 @@ class FakeS3:
 
 
 class VerifiedServingManifestEntryTests(unittest.TestCase):
+    def test_empty_artifact_selection_needs_no_local_bundles(self):
+        self.assertEqual(list(artifact_files(set())), [])
+
+    def test_builds_run_scoped_serving_source_key(self):
+        self.assertEqual(
+            serving_source_key(
+                "/mimir/staging/run-123/app_cache/",
+                "transactions.parquet",
+            ),
+            "mimir/staging/run-123/app_cache/transactions.parquet",
+        )
+
     def test_pins_remote_object_without_downloading_it(self):
         payload = b"remote-release-input"
         entry = remote_serving_manifest_entry(
