@@ -18,13 +18,19 @@ SOURCE_VIEWS = {
     "v_summary": "summary.parquet",
     "v_profiles": "profiles.parquet",
     "v_geo": "geo.parquet",
+    "v_cage_locations": "cage_locations.parquet",
     "v_contracts_rolled": "contracts_rolled.parquet",
+    "v_transactions": "transactions.parquet",
+    "v_network": "network.parquet",
     "v_opportunities": "opportunities.parquet",
+    "v_nsn_summary": "nsn_summary.parquet",
     "v_nsn_supplier_lookup": "nsn_supplier_lookup.parquet",
     "v_nsn_profile_lookup": "nsn_profile_lookup.parquet",
     "v_nsn_cage_reference": "nsn_cage_reference.parquet",
-    "v_transactions": "transactions.parquet",
+    "v_nsn_supply_state": "nsn_supply_state_lookup.parquet",
+    "v_nsn_price_summary": "nsn_price_summary_lookup.parquet",
     "v_contract_award_metadata": "contract_award_metadata.parquet",
+    "v_platform_bom": "platform_bom.parquet",
 }
 
 PUBLIC_ARTIFACT_TABLES = {
