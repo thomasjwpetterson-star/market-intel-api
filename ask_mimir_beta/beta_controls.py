@@ -45,7 +45,7 @@ TIER_POLICIES: Dict[str, TierPolicy] = {
 
 CLARIFICATION_OPENING_PATTERNS = (
     r"do you mean\b",
-    r"which .{1,120} did you mean\b",
+    r"which .{1,120} (?:do|did) you mean\b",
     r"which scope do you mean\b",
     r"could you (?:clarify|specify|choose|confirm)\b",
     r"please (?:clarify|specify|choose|confirm)\b",

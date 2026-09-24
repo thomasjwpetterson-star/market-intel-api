@@ -132,6 +132,8 @@ def is_platform_centered_request(text: str, *, has_platform_mention: bool) -> bo
 def platform_answer_mode(text: str) -> str:
     """Classify the latest platform question without inheriting prior answer language."""
     lowered = str(text or "").lower()
+    if platform_award_follow_up_intent(lowered):
+        return "platform_awards"
     has_supplier = any(
         term in lowered
         for term in ("supplier", "supply chain", "subcontractor", "sub-contractor")
@@ -229,10 +231,27 @@ def platform_answer_mode(text: str) -> str:
     return "platform_overview"
 
 
+def platform_award_follow_up_intent(text: str) -> bool:
+    """Recognize an award-topic continuation without inventing a named company."""
+    words = set(re.findall(r"[a-z]+", str(text or "").lower()))
+    topics = {"award", "awards", "contract", "contracts", "modernization", "modernisation", "upgrades"}
+    modifiers = {
+        "what", "how", "about", "the", "a", "an", "and", "or", "of", "for",
+        "in", "on", "is", "are", "with", "those", "these", "their", "its",
+        "that", "this", "them", "ongoing", "active", "current", "recent", "new",
+        "larger", "largest", "major", "big", "bigger", "biggest", "main",
+        "other", "more", "large", "existing", "future", "planned", "upcoming",
+        "status", "progress", "funding", "spending", "value", "values", "worth",
+        "details", "detail", "tell", "me", "show", "please", "explain",
+        "program", "programs", "programme", "programmes", "upgrade",
+    }
+    return bool(words & topics) and words <= topics | modifiers
+
+
 def platform_follow_up_intent(text: str) -> bool:
     """Return whether a short follow-up should retain the active platform scope."""
     lowered = str(text or "").lower()
-    return platform_answer_mode(lowered) in {
+    return platform_award_follow_up_intent(lowered) or platform_answer_mode(lowered) in {
         "platform_conclusions",
         "supplier_overview",
         "supplier_roles",

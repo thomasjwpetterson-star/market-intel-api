@@ -389,6 +389,12 @@ class ClarificationDetectionTests(unittest.TestCase):
         }
         self.assertTrue(response_requires_clarification(result))
 
+    def test_company_or_platform_scope_question_is_a_clarification(self):
+        self.assertTrue(response_requires_clarification({
+            "answer": "Which company, platform, or modernization portfolio do you mean—and should ongoing cover active contracts, open solicitations, or both?",
+            "answer_type": "validation",
+        }))
+
     def test_completed_answer_with_follow_up_question_is_not_a_clarification(self):
         result = {
             "answer": (
