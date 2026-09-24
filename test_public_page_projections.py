@@ -23,8 +23,7 @@ class PublicPageProjectionTests(unittest.TestCase):
         """)
         self.connection.execute("""
             INSERT INTO v_nsn_profile_lookup VALUES
-            ('001860967', 'WASHER,FLAT', '5310', 'EA', 'SMS', 'D', '0'),
-            ('000013841', 'FILTER ELEMENT', '2910', 'EA', 'S9I', 'J', 'A')
+            ('001860967', 'WASHER,FLAT', '5310', 'EA', 'SMS', 'D', '0')
         """)
         self.connection.execute("""
             CREATE TABLE v_nsn_cage_reference (
@@ -32,20 +31,27 @@ class PublicPageProjectionTests(unittest.TestCase):
                 part_number VARCHAR, is_active_authorized_source BOOLEAN,
                 is_procurement_authorized BOOLEAN, supplier_status VARCHAR,
                 rncc_codes VARCHAR, rnvc_codes VARCHAR, rnsc_codes VARCHAR,
-                reference_source VARCHAR
+                reference_source VARCHAR, description VARCHAR, fsc_code VARCHAR
             )
         """)
         for index in range(12):
             self.connection.execute(
-                "INSERT INTO v_nsn_cage_reference VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO v_nsn_cage_reference VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     "001860967", f"C{index:04d}", f"SUPPLIER {index}", f"PART-{index:02d}",
                     index == 0, index == 1, "legacy wording must not leak",
                     "3" if index == 2 else ("1" if index == 3 else "5"),
                     "2" if index == 2 else "", "F" if index == 4 else "",
                     "OBSERVED_DLA_SALE" if index == 5 else "DLA_FLIS_PART_REFERENCE",
+                    "WASHER,FLAT", "5310",
                 ],
             )
+        self.connection.execute("""
+            INSERT INTO v_nsn_cage_reference VALUES
+            ('000013841', '32195', 'OUTBOARD MARINE CORP JOHNSON MOTORS',
+             '552331', FALSE, TRUE, '', '', '', '', 'DLA_FLIS_PART_REFERENCE',
+             'ANCHOR,CAP', '2910')
+        """)
         self.connection.execute("""
             CREATE TABLE v_nsn_supplier_lookup (
                 niin VARCHAR, cage VARCHAR, contract_id VARCHAR,
@@ -141,7 +147,10 @@ class PublicPageProjectionTests(unittest.TestCase):
 
     def test_opportunity_niin_is_distinct_limited_and_reports_hidden_count(self):
         build_public_nsn_profiles(self.connection)
-        summary = self.payload("2910000013841")["opportunity_summary"]
+        payload = self.payload("2910000013841")
+        self.assertEqual(payload["item_name"], "ANCHOR,CAP")
+        self.assertEqual(payload["fsc_code"], "2910")
+        summary = payload["opportunity_summary"]
         self.assertEqual((summary["active_solicitation_count"], len(summary["active_solicitations"]), summary["solicitations_hidden"]), (4, 3, 1))
         self.assertEqual(summary["active_solicitations"][0], {
             "solicitation_number": "SPE7L526T5482", "response_deadline": "2026-09-28",

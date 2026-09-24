@@ -983,7 +983,7 @@ def build_public_nsn_profiles(conn) -> None:
 
     conn.execute("""
         CREATE TABLE public_nsn_profile_next AS
-        WITH profile AS (
+        WITH profile_lookup AS (
             SELECT
                 r.entity_id,
                 r.niin,
@@ -993,6 +993,23 @@ def build_public_nsn_profiles(conn) -> None:
             LEFT JOIN v_nsn_profile_lookup p
                 ON LPAD(TRIM(CAST(p.niin AS VARCHAR)), 9, '0') = r.niin
             GROUP BY 1, 2
+        ), reference_profile AS (
+            SELECT
+                r.entity_id,
+                MAX(NULLIF(TRIM(CAST(reference.description AS VARCHAR)), '')) AS item_name,
+                MAX(NULLIF(TRIM(CAST(reference.fsc_code AS VARCHAR)), '')) AS fsc_code
+            FROM public_nsn_released_work r
+            INNER JOIN v_nsn_cage_reference reference
+                ON LPAD(TRIM(CAST(reference.niin AS VARCHAR)), 9, '0') = r.niin
+            GROUP BY 1
+        ), profile AS (
+            SELECT
+                profile_lookup.entity_id,
+                profile_lookup.niin,
+                COALESCE(profile_lookup.item_name, reference_profile.item_name) AS item_name,
+                COALESCE(profile_lookup.fsc_code, reference_profile.fsc_code) AS fsc_code
+            FROM profile_lookup
+            LEFT JOIN reference_profile USING (entity_id)
         )
         SELECT
             entity_id,
