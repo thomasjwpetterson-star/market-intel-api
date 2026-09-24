@@ -54,6 +54,149 @@ def public_content_fingerprint(*values) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def append_active_opportunity_nsn_candidates(
+    conn,
+    *,
+    remaining_slots: int,
+    generated_date: str,
+    release_id: str,
+    schema_version: int,
+    quality_gate_version: str,
+) -> dict:
+    """Add valid opportunity-only NSNs without displacing procurement candidates.
+
+    The primary NSN quality gate is intentionally procurement-history based.  An
+    active solicitation is independently useful public information, however, and
+    may exist before an NSN has any observed award history.  Append those records
+    only after the normal ranked cohort has been selected so an opportunity cannot
+    evict a previously eligible page.
+    """
+    slots = max(0, int(remaining_slots))
+    required_candidate_columns = {
+        "entity_type", "entity_id", "canonical_path", "display_name",
+        "richness_score", "decision_reasons", "last_modified", "release_id",
+        "schema_version", "content_fingerprint", "quality_gate_version",
+        "quality_gate_matches",
+    }
+    if slots == 0 or not required_candidate_columns.issubset(
+        _table_columns(conn, "public_nsn_manifest_candidates_next")
+    ):
+        return {"added": 0, "quality_gate_matches": 0}
+    if not {
+        "niin", "active_solicitation_count", "nsn",
+    }.issubset(_table_columns(conn, "v_nsn_opportunity_summary")):
+        return {"added": 0, "quality_gate_matches": 0}
+    if not {"niin", "nsn", "item_name", "fsc_code"}.issubset(
+        _table_columns(conn, "v_nsn_profile_lookup")
+    ):
+        return {"added": 0, "quality_gate_matches": 0}
+
+    escaped_date = str(generated_date).replace("'", "''")
+    escaped_release = str(release_id).replace("'", "''")
+    escaped_quality_gate = str(quality_gate_version).replace("'", "''")
+    existing_quality_matches = int(conn.execute("""
+        SELECT COALESCE(MAX(quality_gate_matches), 0)
+        FROM public_nsn_manifest_candidates_next
+    """).fetchone()[0])
+
+    conn.execute("DROP TABLE IF EXISTS public_nsn_opportunity_manifest_additions")
+    conn.execute(f"""
+        CREATE TABLE public_nsn_opportunity_manifest_additions AS
+        WITH profile AS (
+            SELECT
+                LPAD(TRIM(CAST(niin AS VARCHAR)), 9, '0') AS niin,
+                MAX(NULLIF(REGEXP_REPLACE(CAST(nsn AS VARCHAR), '[^0-9]', '', 'g'), '')) AS nsn,
+                MAX(NULLIF(TRIM(CAST(item_name AS VARCHAR)), '')) AS item_name,
+                MAX(NULLIF(TRIM(CAST(fsc_code AS VARCHAR)), '')) AS fsc_code
+            FROM v_nsn_profile_lookup
+            WHERE niin IS NOT NULL
+            GROUP BY 1
+        ), active AS (
+            SELECT
+                LPAD(TRIM(CAST(opportunity.niin AS VARCHAR)), 9, '0') AS niin,
+                MAX(NULLIF(REGEXP_REPLACE(CAST(opportunity.nsn AS VARCHAR), '[^0-9]', '', 'g'), '')) AS opportunity_nsn,
+                MAX(COALESCE(TRY_CAST(active_solicitation_count AS INTEGER), 0)) AS active_solicitation_count,
+                MAX(TRY_CAST(next_response_deadline AS TIMESTAMP)) AS next_response_deadline,
+                MAX(NULLIF(TRIM(CAST(next_solicitation_number AS VARCHAR)), '')) AS next_solicitation_number,
+                MAX(TRY_CAST(next_quantity AS DOUBLE)) AS next_quantity
+            FROM v_nsn_opportunity_summary opportunity
+            WHERE COALESCE(TRY_CAST(active_solicitation_count AS INTEGER), 0) > 0
+              AND opportunity.niin IS NOT NULL
+            GROUP BY 1
+        ), canonical AS (
+            SELECT
+                active.*,
+                profile.item_name,
+                profile.fsc_code,
+                CASE
+                    WHEN LENGTH(active.opportunity_nsn) = 13 THEN active.opportunity_nsn
+                    WHEN LENGTH(profile.nsn) = 13 THEN profile.nsn
+                    WHEN LENGTH(REGEXP_REPLACE(COALESCE(profile.fsc_code, ''), '[^0-9]', '', 'g')) = 4
+                    THEN REGEXP_REPLACE(profile.fsc_code, '[^0-9]', '', 'g') || active.niin
+                    ELSE active.niin
+                END AS canonical_entity_id
+            FROM active
+            INNER JOIN profile USING (niin)
+            WHERE NULLIF(TRIM(CAST(profile.item_name AS VARCHAR)), '') IS NOT NULL
+              AND UPPER(TRIM(CAST(profile.item_name AS VARCHAR))) NOT IN ('NAN', 'NONE', 'NULL')
+              AND UPPER(TRIM(COALESCE(profile.fsc_code, ''))) NOT LIKE '65%'
+        ), eligible AS (
+            SELECT canonical.*
+            FROM canonical
+            LEFT JOIN public_nsn_manifest_candidates_next existing
+              ON existing.entity_type = 'nsn'
+             AND (
+                    existing.entity_id = canonical.canonical_entity_id
+                 OR RIGHT(REGEXP_REPLACE(existing.entity_id, '[^0-9]', '', 'g'), 9) = canonical.niin
+             )
+            WHERE existing.entity_id IS NULL
+              AND LENGTH(canonical.canonical_entity_id) IN (9, 13)
+        )
+        SELECT
+            'nsn' AS entity_type,
+            canonical_entity_id AS entity_id,
+            '/intelligence/nsn/' || canonical_entity_id AS canonical_path,
+            item_name AS display_name,
+            ROUND(20 + LEAST(active_solicitation_count, 10) * 2, 4) AS richness_score,
+            'active-solicitation' AS decision_reasons,
+            '{escaped_date}' AS last_modified,
+            '{escaped_release}' AS release_id,
+            {int(schema_version)} AS schema_version,
+            SHA256(CONCAT_WS(
+                '|', canonical_entity_id, niin, item_name,
+                CAST(active_solicitation_count AS VARCHAR),
+                CAST(next_response_deadline AS VARCHAR),
+                next_solicitation_number, CAST(next_quantity AS VARCHAR)
+            )) AS content_fingerprint,
+            '{escaped_quality_gate}' AS quality_gate_version,
+            0::BIGINT AS quality_gate_matches
+        FROM eligible
+        ORDER BY next_response_deadline, canonical_entity_id
+        LIMIT ?
+    """, [slots])
+    added = int(conn.execute(
+        "SELECT COUNT(*) FROM public_nsn_opportunity_manifest_additions"
+    ).fetchone()[0])
+    if added:
+        quality_matches = existing_quality_matches + added
+        conn.execute(
+            "UPDATE public_nsn_manifest_candidates_next SET quality_gate_matches = ?",
+            [quality_matches],
+        )
+        conn.execute(
+            "UPDATE public_nsn_opportunity_manifest_additions SET quality_gate_matches = ?",
+            [quality_matches],
+        )
+        conn.execute("""
+            INSERT INTO public_nsn_manifest_candidates_next
+            SELECT * FROM public_nsn_opportunity_manifest_additions
+        """)
+    else:
+        quality_matches = existing_quality_matches
+    conn.execute("DROP TABLE public_nsn_opportunity_manifest_additions")
+    return {"added": added, "quality_gate_matches": quality_matches}
+
+
 def previous_publication_entries(conn) -> dict:
     """Load just enough of the previous manifest to preserve truthful lastmod dates."""
     try:

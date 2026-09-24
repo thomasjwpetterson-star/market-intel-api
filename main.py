@@ -62,6 +62,7 @@ from public_intelligence_release import (
     PUBLIC_SOLICITATION_MIN_DESCRIPTION_LENGTH,
     PUBLIC_SOLICITATION_MIN_METADATA_FIELDS,
     PUBLIC_SOLICITATION_MIN_TITLE_LENGTH,
+    append_active_opportunity_nsn_candidates,
     last_known_good_public_release,
     preserve_projection_for_unrefreshed_entities,
     public_content_fingerprint,
@@ -1858,6 +1859,22 @@ def build_public_intelligence_release(conn):
                 "SELECT COALESCE(MAX(quality_gate_matches), 0) FROM public_nsn_manifest_candidates_next"
             ).fetchone()[0]
         )
+        if get_duck_table_columns(NSN_OPPORTUNITY_SUMMARY_TABLE):
+            selected_nsn_count = int(conn.execute(
+                "SELECT COUNT(*) FROM public_nsn_manifest_candidates_next"
+            ).fetchone()[0])
+            opportunity_append_stats = append_active_opportunity_nsn_candidates(
+                conn,
+                remaining_slots=max(0, min(nsn_cap, remaining) - selected_nsn_count),
+                generated_date=generated_at[:10],
+                release_id=release_id,
+                schema_version=schema_version,
+                quality_gate_version=quality_gate_version,
+            )
+            nsn_quality_gate_matches = max(
+                nsn_quality_gate_matches,
+                int(opportunity_append_stats["quality_gate_matches"]),
+            )
     else:
         conn.execute("DROP TABLE IF EXISTS public_nsn_manifest_candidates_next")
 

@@ -16,6 +16,7 @@ from public_intelligence_release import (
     PUBLIC_SOLICITATION_MIN_DESCRIPTION_LENGTH,
     PUBLIC_SOLICITATION_MIN_METADATA_FIELDS,
     PUBLIC_SOLICITATION_MIN_TITLE_LENGTH,
+    append_active_opportunity_nsn_candidates,
     last_known_good_public_release,
     preserve_projection_for_unrefreshed_entities,
     previous_publication_entries,
@@ -26,6 +27,56 @@ from public_intelligence_release import (
 
 
 class PublicIntelligenceReleaseTests(unittest.TestCase):
+    def test_active_opportunity_only_nsn_is_admitted_without_displacing_existing_pages(self):
+        connection = duckdb.connect()
+        connection.execute("""
+            CREATE TABLE public_nsn_manifest_candidates_next (
+                entity_type VARCHAR, entity_id VARCHAR, canonical_path VARCHAR,
+                display_name VARCHAR, richness_score DOUBLE, decision_reasons VARCHAR,
+                last_modified VARCHAR, release_id VARCHAR, schema_version INTEGER,
+                content_fingerprint VARCHAR, quality_gate_version VARCHAR,
+                quality_gate_matches BIGINT
+            );
+            INSERT INTO public_nsn_manifest_candidates_next VALUES
+            ('nsn', '5310001860967', '/intelligence/nsn/5310001860967',
+             'WASHER,KEY', 99, 'procurement-history', '2026-09-25', 'release',
+             3, 'existing-fingerprint', 'gate', 1);
+            CREATE TABLE v_nsn_profile_lookup (
+                niin VARCHAR, nsn VARCHAR, item_name VARCHAR, fsc_code VARCHAR
+            );
+            INSERT INTO v_nsn_profile_lookup VALUES
+            ('000013841', '2910000013841', 'ANCHOR,CAP', '2910');
+            CREATE TABLE v_nsn_opportunity_summary (
+                niin VARCHAR, nsn VARCHAR, active_solicitation_count INTEGER,
+                next_response_deadline TIMESTAMP, next_solicitation_number VARCHAR,
+                next_quantity DOUBLE
+            );
+            INSERT INTO v_nsn_opportunity_summary VALUES
+            ('000013841', '2910000013841', 1, '2026-09-28', 'SPE7L526T5482', 603);
+        """)
+
+        stats = append_active_opportunity_nsn_candidates(
+            connection,
+            remaining_slots=10,
+            generated_date="2026-09-25",
+            release_id="corrected-public",
+            schema_version=3,
+            quality_gate_version="gate",
+        )
+
+        self.assertEqual(stats, {"added": 1, "quality_gate_matches": 2})
+        rows = connection.execute("""
+            SELECT entity_id, display_name, decision_reasons, release_id,
+                   quality_gate_matches
+            FROM public_nsn_manifest_candidates_next
+            ORDER BY entity_id
+        """).fetchall()
+        self.assertEqual(rows, [
+            ('2910000013841', 'ANCHOR,CAP', 'active-solicitation',
+             'corrected-public', 2),
+            ('5310001860967', 'WASHER,KEY', 'procurement-history', 'release', 2),
+        ])
+
     def test_content_fingerprint_is_stable_and_sensitive(self):
         self.assertEqual(
             public_content_fingerprint("CAGE1", 10, ["F-35"]),
