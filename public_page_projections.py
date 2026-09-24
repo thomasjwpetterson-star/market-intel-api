@@ -12,6 +12,30 @@ the same SQL and produce byte-compatible payloads.
 
 from __future__ import annotations
 
+from public_nsn_policy import (
+    PUBLIC_NSN_ACTIVE_SOLICITATION_LIMIT,
+    PUBLIC_NSN_CACHE_EPOCH,
+    PUBLIC_NSN_CONNECTED_PLATFORM_LIMIT,
+    PUBLIC_NSN_PART_NUMBER_LIMIT,
+    PUBLIC_NSN_RECENT_CONTRACT_LIMIT,
+    PUBLIC_NSN_SCHEMA_VERSION,
+    PUBLIC_NSN_SUPPLIER_SITE_LIMIT,
+    public_supplier_relationship_sql,
+)
+
+
+def _relation_exists(conn, relation_name: str) -> bool:
+    return bool(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE lower(table_name) = lower(?)
+            """,
+            [relation_name],
+        ).fetchone()[0]
+    )
+
 
 def build_public_company_profiles(conn) -> None:
     """Build one ready-to-serve public company payload per released CAGE."""
@@ -937,6 +961,15 @@ def build_public_nsn_profiles(conn) -> None:
     peak below the web service's memory ceiling.
     """
 
+    supplier_label_sql, supplier_rank_sql = public_supplier_relationship_sql(
+        active="is_active",
+        procurement="is_procurement",
+        rncc="rncc_codes",
+        rnvc="rnvc_codes",
+        rnsc="rnsc_codes",
+        source="relationship_source",
+    )
+
     conn.execute("DROP TABLE IF EXISTS public_nsn_profile_next")
     conn.execute("DROP TABLE IF EXISTS public_nsn_released_work")
     conn.execute("""
@@ -1006,13 +1039,38 @@ def build_public_nsn_profiles(conn) -> None:
                     observed_value DOUBLE
                 )[],
                 observed_contract_count := 0,
-                contracts_hidden := 0
+                contracts_hidden := 0,
+                logistics_summary := CAST(NULL AS JSON),
+                observed_price_summary := CAST(NULL AS JSON),
+                opportunity_summary := STRUCT_PACK(
+                    active_solicitation_count := 0,
+                    next_response_deadline := CAST(NULL AS VARCHAR),
+                    next_solicitation_number := CAST(NULL AS VARCHAR),
+                    next_quantity := CAST(NULL AS DOUBLE),
+                    next_unit_of_issue := CAST(NULL AS VARCHAR),
+                    next_solicitation_type_indicator := CAST(NULL AS VARCHAR),
+                    next_small_business_set_aside_indicator := CAST(NULL AS VARCHAR),
+                    active_solicitations := []::STRUCT(
+                        solicitation_number VARCHAR,
+                        response_deadline VARCHAR,
+                        quantity DOUBLE,
+                        unit_of_issue VARCHAR,
+                        small_business_set_aside_indicator VARCHAR
+                    )[],
+                    solicitations_hidden := 0
+                ),
+                demand_supply_teaser := CAST(NULL AS JSON),
+                public_schema_version := {PUBLIC_NSN_SCHEMA_VERSION},
+                cache_epoch := '{PUBLIC_NSN_CACHE_EPOCH}'
             )) AS payload_json
         FROM profile
-    """)
+    """.format(
+        PUBLIC_NSN_SCHEMA_VERSION=PUBLIC_NSN_SCHEMA_VERSION,
+        PUBLIC_NSN_CACHE_EPOCH=PUBLIC_NSN_CACHE_EPOCH,
+    ))
 
     conn.execute("DROP TABLE IF EXISTS public_nsn_reference_supplier_work")
-    conn.execute("""
+    conn.execute(f"""
         CREATE TABLE public_nsn_reference_supplier_work AS
         WITH grouped AS (
             SELECT
@@ -1022,7 +1080,10 @@ def build_public_nsn_profiles(conn) -> None:
                 MIN(NULLIF(TRIM(CAST(ref.part_number AS VARCHAR)), '')) AS part_number,
                 BOOL_OR(COALESCE(TRY_CAST(ref.is_active_authorized_source AS BOOLEAN), FALSE)) AS is_active,
                 BOOL_OR(COALESCE(TRY_CAST(ref.is_procurement_authorized AS BOOLEAN), FALSE)) AS is_procurement,
-                MAX(NULLIF(TRIM(CAST(ref.supplier_status AS VARCHAR)), '')) AS supplier_status
+                STRING_AGG(DISTINCT NULLIF(TRIM(CAST(ref.rncc_codes AS VARCHAR)), ''), ',') AS rncc_codes,
+                STRING_AGG(DISTINCT NULLIF(TRIM(CAST(ref.rnvc_codes AS VARCHAR)), ''), ',') AS rnvc_codes,
+                STRING_AGG(DISTINCT NULLIF(TRIM(CAST(ref.rnsc_codes AS VARCHAR)), ''), ',') AS rnsc_codes,
+                STRING_AGG(DISTINCT NULLIF(TRIM(CAST(ref.reference_source AS VARCHAR)), ''), ',') AS relationship_source
             FROM public_nsn_released_work r
             INNER JOIN v_nsn_cage_reference ref
                 ON LPAD(TRIM(CAST(ref.niin AS VARCHAR)), 9, '0') = r.niin
@@ -1033,7 +1094,7 @@ def build_public_nsn_profiles(conn) -> None:
                 *,
                 ROW_NUMBER() OVER (
                     PARTITION BY entity_id
-                    ORDER BY is_active DESC, is_procurement DESC,
+                    ORDER BY {supplier_rank_sql},
                              CASE WHEN vendor IS NULL THEN 1 ELSE 0 END, vendor, cage
                 ) AS supplier_rank,
                 ROW_NUMBER() OVER (
@@ -1062,20 +1123,16 @@ def build_public_nsn_profiles(conn) -> None:
                     cage := cage,
                     vendor := COALESCE(vendor, 'CAGE ' || cage),
                     part_number := part_number,
-                    status := CASE
-                        WHEN is_active THEN 'Active DLA-authorised source'
-                        WHEN is_procurement THEN 'DLA procurement-authorised; CAGE not active'
-                        ELSE COALESCE(supplier_status, 'Observed or reference-linked supplier')
-                    END,
+                    status := {supplier_label_sql},
                     is_active_authorized_source := is_active,
                     is_procurement_authorized := is_procurement
-                ) ORDER BY supplier_rank) FILTER (WHERE supplier_rank <= 2),
-                supplier_sites_hidden := GREATEST(MAX(supplier_count) - LEAST(MAX(supplier_count), 2), 0)
+                ) ORDER BY supplier_rank) FILTER (WHERE supplier_rank <= {PUBLIC_NSN_SUPPLIER_SITE_LIMIT}),
+                supplier_sites_hidden := GREATEST(MAX(supplier_count) - LEAST(MAX(supplier_count), {PUBLIC_NSN_SUPPLIER_SITE_LIMIT}), 0)
             )) AS component_json
         FROM ranked
         GROUP BY 1
     """)
-    conn.execute("""
+    conn.execute(f"""
         UPDATE public_nsn_profile_next AS target
         SET payload_json = CAST(JSON_MERGE_PATCH(target.payload_json, component.component_json) AS VARCHAR)
         FROM public_nsn_reference_supplier_work AS component
@@ -1084,7 +1141,7 @@ def build_public_nsn_profiles(conn) -> None:
     conn.execute("DROP TABLE public_nsn_reference_supplier_work")
 
     conn.execute("DROP TABLE IF EXISTS public_nsn_reference_part_work")
-    conn.execute("""
+    conn.execute(f"""
         CREATE TABLE public_nsn_reference_part_work AS
         WITH grouped AS (
             SELECT
@@ -1103,8 +1160,8 @@ def build_public_nsn_profiles(conn) -> None:
             entity_id,
             TO_JSON(STRUCT_PACK(
                 associated_part_number_count := part_count,
-                part_numbers := LIST_SLICE(part_numbers, 1, 8),
-                part_numbers_hidden := GREATEST(part_count - LEAST(part_count, 8), 0)
+                part_numbers := LIST_SLICE(part_numbers, 1, {PUBLIC_NSN_PART_NUMBER_LIMIT}),
+                part_numbers_hidden := GREATEST(part_count - LEAST(part_count, {PUBLIC_NSN_PART_NUMBER_LIMIT}), 0)
             )) AS component_json
         FROM grouped
         WHERE part_count > 0
@@ -1137,6 +1194,14 @@ def build_public_nsn_profiles(conn) -> None:
                 GREATEST(
                     COALESCE(TRY_CAST(JSON_EXTRACT(target.payload_json, '$.associated_supplier_site_count') AS BIGINT), 0),
                     component.supplier_count
+                ),
+                'supplier_sites_hidden',
+                GREATEST(
+                    GREATEST(
+                        COALESCE(TRY_CAST(JSON_EXTRACT(target.payload_json, '$.associated_supplier_site_count') AS BIGINT), 0),
+                        component.supplier_count
+                    ) - COALESCE(JSON_ARRAY_LENGTH(target.payload_json, '$.supplier_sites'), 0),
+                    0
                 )
             )
         ) AS VARCHAR)
@@ -1146,7 +1211,7 @@ def build_public_nsn_profiles(conn) -> None:
     conn.execute("DROP TABLE public_nsn_financial_supplier_work")
 
     conn.execute("DROP TABLE IF EXISTS public_nsn_platform_work")
-    conn.execute("""
+    conn.execute(f"""
         CREATE TABLE public_nsn_platform_work AS
         WITH grouped AS (
             SELECT
@@ -1173,14 +1238,14 @@ def build_public_nsn_profiles(conn) -> None:
         SELECT
             entity_id,
             TO_JSON(STRUCT_PACK(
-                platforms := LIST_SLICE(platforms, 1, 2),
-                platforms_hidden := GREATEST(platform_count - LEAST(platform_count, 2), 0),
+                platforms := LIST_SLICE(platforms, 1, {PUBLIC_NSN_CONNECTED_PLATFORM_LIMIT}),
+                platforms_hidden := GREATEST(platform_count - LEAST(platform_count, {PUBLIC_NSN_CONNECTED_PLATFORM_LIMIT}), 0),
                 is_multi_platform := platform_count > 1
             )) AS component_json
         FROM normalized
         WHERE platform_count > 0
     """)
-    conn.execute("""
+    conn.execute(f"""
         UPDATE public_nsn_profile_next AS target
         SET payload_json = CAST(JSON_MERGE_PATCH(target.payload_json, component.component_json) AS VARCHAR)
         FROM public_nsn_platform_work AS component
@@ -1189,7 +1254,7 @@ def build_public_nsn_profiles(conn) -> None:
     conn.execute("DROP TABLE public_nsn_platform_work")
 
     conn.execute("DROP TABLE IF EXISTS public_nsn_contract_work")
-    conn.execute("""
+    conn.execute(f"""
         CREATE TABLE public_nsn_contract_work AS
         WITH grouped AS (
             SELECT
@@ -1228,9 +1293,9 @@ def build_public_nsn_profiles(conn) -> None:
                     vendor_name := vendor_name,
                     vendor_cage := vendor_cage,
                     observed_value := observed_value
-                ) ORDER BY item_rank) FILTER (WHERE item_rank <= 3),
+                ) ORDER BY item_rank) FILTER (WHERE item_rank <= {PUBLIC_NSN_RECENT_CONTRACT_LIMIT}),
                 observed_contract_count := MAX(item_count),
-                contracts_hidden := GREATEST(MAX(item_count) - LEAST(MAX(item_count), 3), 0)
+                contracts_hidden := GREATEST(MAX(item_count) - LEAST(MAX(item_count), {PUBLIC_NSN_RECENT_CONTRACT_LIMIT}), 0)
             )) AS component_json
         FROM ranked
         GROUP BY 1
@@ -1242,6 +1307,159 @@ def build_public_nsn_profiles(conn) -> None:
         WHERE target.entity_id = component.entity_id
     """)
     conn.execute("DROP TABLE public_nsn_contract_work")
+
+    if _relation_exists(conn, "v_nsn_profile_lookup"):
+        conn.execute("DROP TABLE IF EXISTS public_nsn_logistics_work")
+        conn.execute("""
+            CREATE TABLE public_nsn_logistics_work AS
+            SELECT
+                r.entity_id,
+                TO_JSON(STRUCT_PACK(
+                    logistics_summary := STRUCT_PACK(
+                        unit_of_issue := MAX(NULLIF(TRIM(CAST(p.unit_of_issue AS VARCHAR)), '')),
+                        managing_supply_activity := MAX(NULLIF(TRIM(CAST(p.source_of_supply AS VARCHAR)), '')),
+                        source_of_supply := MAX(NULLIF(TRIM(CAST(p.source_of_supply AS VARCHAR)), '')),
+                        acquisition_advice_code := MAX(NULLIF(TRIM(CAST(p.acquisition_advice_code AS VARCHAR)), '')),
+                        shelf_life_code := MAX(NULLIF(TRIM(CAST(p.shelf_life_code AS VARCHAR)), ''))
+                    )
+                )) AS component_json
+            FROM public_nsn_released_work r
+            INNER JOIN v_nsn_profile_lookup p
+                ON LPAD(TRIM(CAST(p.niin AS VARCHAR)), 9, '0') = r.niin
+            GROUP BY 1
+        """)
+        conn.execute("""
+            UPDATE public_nsn_profile_next AS target
+            SET payload_json = CAST(JSON_MERGE_PATCH(target.payload_json, component.component_json) AS VARCHAR)
+            FROM public_nsn_logistics_work AS component
+            WHERE target.entity_id = component.entity_id
+        """)
+        conn.execute("DROP TABLE public_nsn_logistics_work")
+
+    if _relation_exists(conn, "v_nsn_supply_state"):
+        conn.execute("DROP TABLE IF EXISTS public_nsn_supply_work")
+        conn.execute("""
+            CREATE TABLE public_nsn_supply_work AS
+            SELECT
+                r.entity_id,
+                TO_JSON(STRUCT_PACK(
+                    demand_supply_teaser := STRUCT_PACK(
+                        supply_signal := CAST(s.supply_signal AS VARCHAR),
+                        total_stock := TRY_CAST(s.total_stock AS DOUBLE),
+                        backorder_qty := TRY_CAST(s.backorder_qty AS DOUBLE),
+                        annual_demand_quantity := TRY_CAST(s.annual_demand_quantity AS DOUBLE),
+                        reorder_point := TRY_CAST(s.reorder_point AS DOUBLE),
+                        reorder_point_gap := TRY_CAST(s.reorder_point_gap AS DOUBLE),
+                        below_reorder_point := COALESCE(TRY_CAST(s.below_reorder_point AS BOOLEAN), FALSE),
+                        forecast_3m_qty := TRY_CAST(s.forecast_3m_qty AS BIGINT),
+                        forecast_12m_qty := TRY_CAST(s.forecast_12m_qty AS BIGINT),
+                        forecast_stock_cover_months := TRY_CAST(s.forecast_stock_cover_months AS DOUBLE)
+                    )
+                )) AS component_json
+            FROM public_nsn_released_work r
+            INNER JOIN v_nsn_supply_state s
+                ON LPAD(TRIM(CAST(s.niin AS VARCHAR)), 9, '0') = r.niin
+        """)
+        conn.execute("""
+            UPDATE public_nsn_profile_next AS target
+            SET payload_json = CAST(JSON_MERGE_PATCH(target.payload_json, component.component_json) AS VARCHAR)
+            FROM public_nsn_supply_work AS component
+            WHERE target.entity_id = component.entity_id
+        """)
+        conn.execute("DROP TABLE public_nsn_supply_work")
+
+    if _relation_exists(conn, "v_nsn_price_summary"):
+        conn.execute("DROP TABLE IF EXISTS public_nsn_price_work")
+        conn.execute("""
+            CREATE TABLE public_nsn_price_work AS
+            SELECT
+                r.entity_id,
+                TO_JSON(STRUCT_PACK(
+                    observed_price_summary := STRUCT_PACK(
+                        latest_net_price := TRY_CAST(p.latest_net_price AS DOUBLE),
+                        latest_price_date := CAST(p.latest_price_date AS VARCHAR),
+                        latest_unit_of_issue := CAST(p.latest_unit_of_issue AS VARCHAR),
+                        trailing_12m_min_price := TRY_CAST(p.trailing_12m_min_price AS DOUBLE),
+                        trailing_12m_median_price := TRY_CAST(p.trailing_12m_median_price AS DOUBLE),
+                        trailing_12m_max_price := TRY_CAST(p.trailing_12m_max_price AS DOUBLE),
+                        trailing_12m_observation_count := TRY_CAST(p.trailing_12m_observation_count AS BIGINT)
+                    )
+                )) AS component_json
+            FROM public_nsn_released_work r
+            INNER JOIN v_nsn_price_summary p
+                ON LPAD(TRIM(CAST(p.niin AS VARCHAR)), 9, '0') = r.niin
+        """)
+        conn.execute("""
+            UPDATE public_nsn_profile_next AS target
+            SET payload_json = CAST(JSON_MERGE_PATCH(target.payload_json, component.component_json) AS VARCHAR)
+            FROM public_nsn_price_work AS component
+            WHERE target.entity_id = component.entity_id
+        """)
+        conn.execute("DROP TABLE public_nsn_price_work")
+
+    if _relation_exists(conn, "v_nsn_opportunity_detail"):
+        conn.execute("DROP TABLE IF EXISTS public_nsn_opportunity_work")
+        conn.execute(f"""
+            CREATE TABLE public_nsn_opportunity_work AS
+            WITH distinct_rows AS (
+                SELECT
+                    r.entity_id,
+                    NULLIF(TRIM(CAST(o.solicitation_number AS VARCHAR)), '') AS solicitation_number,
+                    CAST(o.response_deadline AS VARCHAR) AS response_deadline,
+                    TRY_CAST(o.quantity AS DOUBLE) AS quantity,
+                    NULLIF(TRIM(CAST(o.unit_of_issue AS VARCHAR)), '') AS unit_of_issue,
+                    NULLIF(TRIM(CAST(o.small_business_set_aside_indicator AS VARCHAR)), '') AS small_business_set_aside_indicator,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY r.entity_id, NULLIF(TRIM(CAST(o.solicitation_number AS VARCHAR)), '')
+                        ORDER BY TRY_CAST(o.response_deadline AS DATE), CAST(o.solicitation_line_number AS VARCHAR)
+                    ) AS solicitation_row
+                FROM public_nsn_released_work r
+                INNER JOIN v_nsn_opportunity_detail o
+                    ON LPAD(TRIM(CAST(o.niin AS VARCHAR)), 9, '0') = r.niin
+                WHERE NULLIF(TRIM(CAST(o.solicitation_number AS VARCHAR)), '') IS NOT NULL
+            ), ranked AS (
+                SELECT
+                    *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY entity_id
+                        ORDER BY TRY_CAST(response_deadline AS DATE), solicitation_number
+                    ) AS item_rank,
+                    COUNT(*) OVER (PARTITION BY entity_id) AS item_count
+                FROM distinct_rows
+                WHERE solicitation_row = 1
+            )
+            SELECT
+                entity_id,
+                TO_JSON(STRUCT_PACK(
+                    opportunity_summary := STRUCT_PACK(
+                        active_solicitation_count := MAX(item_count),
+                        next_response_deadline := MAX(response_deadline) FILTER (WHERE item_rank = 1),
+                        next_solicitation_number := MAX(solicitation_number) FILTER (WHERE item_rank = 1),
+                        next_quantity := MAX(quantity) FILTER (WHERE item_rank = 1),
+                        next_unit_of_issue := MAX(unit_of_issue) FILTER (WHERE item_rank = 1),
+                        next_solicitation_type_indicator := CAST(NULL AS VARCHAR),
+                        next_small_business_set_aside_indicator := MAX(small_business_set_aside_indicator) FILTER (WHERE item_rank = 1),
+                        active_solicitations := LIST(STRUCT_PACK(
+                            solicitation_number := solicitation_number,
+                            response_deadline := response_deadline,
+                            quantity := quantity,
+                            unit_of_issue := unit_of_issue,
+                            small_business_set_aside_indicator := small_business_set_aside_indicator
+                        ) ORDER BY item_rank) FILTER (WHERE item_rank <= {PUBLIC_NSN_ACTIVE_SOLICITATION_LIMIT}),
+                        solicitations_hidden := GREATEST(MAX(item_count) - LEAST(MAX(item_count), {PUBLIC_NSN_ACTIVE_SOLICITATION_LIMIT}), 0)
+                    )
+                )) AS component_json
+            FROM ranked
+            GROUP BY 1
+        """)
+        conn.execute("""
+            UPDATE public_nsn_profile_next AS target
+            SET payload_json = CAST(JSON_MERGE_PATCH(target.payload_json, component.component_json) AS VARCHAR)
+            FROM public_nsn_opportunity_work AS component
+            WHERE target.entity_id = component.entity_id
+        """)
+        conn.execute("DROP TABLE public_nsn_opportunity_work")
+
     conn.execute("DROP TABLE public_nsn_released_work")
 
 

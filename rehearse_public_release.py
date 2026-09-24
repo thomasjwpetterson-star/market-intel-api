@@ -29,6 +29,8 @@ SOURCE_VIEWS = {
     "v_nsn_cage_reference": "nsn_cage_reference.parquet",
     "v_nsn_supply_state": "nsn_supply_state_lookup.parquet",
     "v_nsn_price_summary": "nsn_price_summary_lookup.parquet",
+    "v_nsn_opportunity_summary": "nsn_opportunity_summary_lookup.parquet",
+    "v_nsn_opportunity_detail": "nsn_opportunity_detail.parquet",
     "v_contract_award_metadata": "contract_award_metadata.parquet",
     "v_platform_bom": "platform_bom.parquet",
 }

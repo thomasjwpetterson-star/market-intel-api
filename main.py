@@ -69,6 +69,16 @@ from public_intelligence_release import (
     stage_public_intelligence_manifest,
 )
 from public_page_projections import build_public_page_projections
+from public_nsn_policy import (
+    PUBLIC_NSN_ACTIVE_SOLICITATION_LIMIT,
+    PUBLIC_NSN_CACHE_EPOCH,
+    PUBLIC_NSN_CONNECTED_PLATFORM_LIMIT,
+    PUBLIC_NSN_PART_NUMBER_LIMIT,
+    PUBLIC_NSN_RECENT_CONTRACT_LIMIT,
+    PUBLIC_NSN_SCHEMA_VERSION,
+    PUBLIC_NSN_SUPPLIER_SITE_LIMIT,
+    public_supplier_relationship,
+)
 
 load_dotenv()
 
@@ -1231,7 +1241,7 @@ def build_public_intelligence_release(conn):
     """
     generated_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
     release_id = "public-intelligence-" + datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    schema_version = 2
+    schema_version = PUBLIC_NSN_SCHEMA_VERSION
     quality_gate_version = PUBLIC_INTELLIGENCE_QUALITY_GATE_VERSION
     cohort_size = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_COHORT_SIZE", "1100000")))
     company_cap = max(0, int(os.getenv("PUBLIC_INTELLIGENCE_COMPANY_COHORT_SIZE", "100000")))
@@ -10526,36 +10536,6 @@ def build_public_nsn_snapshot(
     supplier_candidates = []
     part_numbers = []
 
-    def public_supplier_relationship(supplier: Dict[str, Any]) -> tuple[str, int]:
-        codes = lambda value: {
-            code.strip().upper()
-            for code in str(value or "").split(",")
-            if code.strip()
-        }
-        rncc = codes(supplier.get("rncc_codes"))
-        rnvc = codes(supplier.get("rnvc_codes"))
-        rnsc = codes(supplier.get("rnsc_codes"))
-        relationship_source = str(supplier.get("source") or "").upper()
-        if bool(supplier.get("is_active_authorized_source")):
-            return "DLA-authorised source", 0
-        if bool(supplier.get("is_procurement_authorized")):
-            return "DLA-authorised source · inactive CAGE", 1
-        if "3" in rncc and "2" in rnvc:
-            return "Item-identifying manufacturer", 2
-        if "1" in rncc:
-            return "Source-control reference", 3
-        if "7" in rncc:
-            return "Vendor item-control reference", 4
-        if "OBSERVED_DLA_SALE" in relationship_source:
-            return "DLA award recipient", 5
-        if "F" in rnsc:
-            return "Qualified-source requirement", 6
-        if "9" in rnvc:
-            return "Obsolete part reference", 8
-        if "5" in rncc:
-            return "Secondary part reference", 7
-        return "Part/CAGE reference", 7
-
     for cage, supplier in supplier_map.items():
         supplier_part_numbers = [
             value.strip()
@@ -10620,7 +10600,7 @@ def build_public_nsn_snapshot(
     observed_contract_count = 0
     try:
         activity_df = duck_fetch_df(
-            """
+            f"""
             WITH rolled AS (
                 SELECT
                     contract_id,
@@ -10645,7 +10625,7 @@ def build_public_nsn_snapshot(
                 COUNT(*) OVER () AS observed_contract_count
             FROM rolled
             ORDER BY action_date DESC NULLS LAST, contract_id
-            LIMIT 2
+            LIMIT {PUBLIC_NSN_RECENT_CONTRACT_LIMIT}
             """,
             [safe_niin],
         )
@@ -10666,51 +10646,28 @@ def build_public_nsn_snapshot(
     except Exception:
         logger.exception("Public NSN activity lookup failed for NIIN=%s", safe_niin)
 
-    # Keep the public payload useful and indexable without reproducing the
-    # complete paid operational dataset. Exact stock, longer forecast windows,
-    # reorder gaps, and observed-price history remain available in the
-    # authenticated profile, Ask Mimir, and Data Explorer.
+    # This is the governed public subset. Complete histories, longer lists,
+    # exports, raw evidence and cross-entity analysis remain authenticated.
     supply_state = profile.get("supply_state") or {}
     price_intelligence = profile.get("price_intelligence") or {}
     public_supply_teaser = None
     if supply_state:
-        cover = supply_state.get("forecast_stock_cover_months")
-        try:
-            cover_value = float(cover) if cover is not None else None
-        except (TypeError, ValueError):
-            cover_value = None
-        if cover_value is not None and not math.isfinite(cover_value):
-            cover_value = None
-        if cover_value is None:
-            cover_band = None
-        elif cover_value < 3:
-            cover_band = "UNDER_3_MONTHS"
-        elif cover_value < 6:
-            cover_band = "3_TO_6_MONTHS"
-        elif cover_value < 12:
-            cover_band = "6_TO_12_MONTHS"
-        else:
-            cover_band = "12_MONTHS_OR_MORE"
-
         public_supply_teaser = {
             "supply_signal": supply_state.get("supply_signal"),
-            "has_backorder": float(supply_state.get("backorder_qty") or 0) > 0,
+            "total_stock": supply_state.get("total_stock"),
+            "backorder_qty": supply_state.get("backorder_qty"),
+            "annual_demand_quantity": supply_state.get("annual_demand_quantity"),
+            "reorder_point": supply_state.get("reorder_point"),
+            "reorder_point_gap": supply_state.get("reorder_point_gap"),
             "below_reorder_point": bool(supply_state.get("below_reorder_point") or False),
             "forecast_3m_qty": supply_state.get("forecast_3m_qty"),
-            "forecast_stock_cover_band": cover_band,
-            "inventory_snapshot_date": supply_state.get("inventory_snapshot_date"),
-            "forecast_start_month": supply_state.get("forecast_start_month"),
-            "source_release": supply_state.get("source_release"),
-            "full_metrics_available": [
-                "current stock and backorder quantities",
-                "reorder-point gap",
-                "6, 12 and 24 month forecast demand",
-                "observed price history and 12-month price benchmarks",
-            ],
+            "forecast_12m_qty": supply_state.get("forecast_12m_qty"),
+            "forecast_stock_cover_months": supply_state.get("forecast_stock_cover_months"),
         }
 
     public_logistics_summary = {
         "unit_of_issue": profile.get("unit_of_issue"),
+        "managing_supply_activity": profile.get("source_of_supply"),
         "source_of_supply": profile.get("source_of_supply"),
         "acquisition_advice_code": profile.get("acquisition_advice_code"),
         "shelf_life_code": profile.get("shelf_life_code"),
@@ -10731,17 +10688,59 @@ def build_public_nsn_snapshot(
         }
 
     opportunity_summary = profile.get("opportunity_summary") or {}
-    public_opportunity_summary = None
-    if opportunity_summary:
-        public_opportunity_summary = {
-            "active_solicitation_count": opportunity_summary.get("active_solicitation_count"),
-            "next_response_deadline": opportunity_summary.get("next_response_deadline"),
-            "next_solicitation_number": opportunity_summary.get("next_solicitation_number"),
-            "next_quantity": opportunity_summary.get("next_quantity"),
-            "next_unit_of_issue": opportunity_summary.get("next_unit_of_issue"),
-            "next_solicitation_type_indicator": opportunity_summary.get("next_solicitation_type_indicator"),
-            "next_small_business_set_aside_indicator": opportunity_summary.get("next_small_business_set_aside_indicator"),
-        }
+    public_opportunity_summary = {
+        "active_solicitation_count": int(opportunity_summary.get("active_solicitation_count") or 0),
+        "next_response_deadline": opportunity_summary.get("next_response_deadline"),
+        "next_solicitation_number": opportunity_summary.get("next_solicitation_number"),
+        "next_quantity": opportunity_summary.get("next_quantity"),
+        "next_unit_of_issue": opportunity_summary.get("next_unit_of_issue"),
+        "next_solicitation_type_indicator": opportunity_summary.get("next_solicitation_type_indicator"),
+        "next_small_business_set_aside_indicator": opportunity_summary.get("next_small_business_set_aside_indicator"),
+    }
+
+    public_opportunities = []
+    active_solicitation_count = int(
+        (public_opportunity_summary or {}).get("active_solicitation_count") or 0
+    )
+    try:
+        opportunity_df = duck_fetch_df(
+            f"""
+            WITH distinct_solicitations AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY solicitation_number
+                    ORDER BY response_deadline, solicitation_line_number
+                ) AS solicitation_row
+                FROM {NSN_OPPORTUNITY_DETAIL_TABLE}
+                WHERE niin = ?
+            )
+            SELECT
+                solicitation_number, response_deadline, quantity,
+                unit_of_issue, small_business_set_aside_indicator,
+                COUNT(*) OVER () AS active_solicitation_count
+            FROM distinct_solicitations
+            WHERE solicitation_row = 1
+            ORDER BY response_deadline, solicitation_number
+            LIMIT {PUBLIC_NSN_ACTIVE_SOLICITATION_LIMIT}
+            """,
+            [safe_niin],
+        )
+        if not opportunity_df.empty:
+            active_solicitation_count = int(
+                opportunity_df.iloc[0].get("active_solicitation_count") or 0
+            )
+            public_opportunities = df_sanitize_for_json(opportunity_df.drop(
+                columns=["active_solicitation_count"]
+            )).to_dict(orient="records")
+    except Exception:
+        logger.exception("Public NSN opportunity lookup failed for NIIN=%s", safe_niin)
+
+    public_opportunity_summary.update({
+        "active_solicitation_count": active_solicitation_count,
+        "active_solicitations": public_opportunities,
+        "solicitations_hidden": max(
+            0, active_solicitation_count - len(public_opportunities)
+        ),
+    })
 
     return {
         "found": True,
@@ -10750,15 +10749,15 @@ def build_public_nsn_snapshot(
         "niin": safe_niin,
         "fsc_code": fsc_code or None,
         "associated_part_number_count": part_number_count,
-        "part_numbers": part_numbers[:2],
-        "part_numbers_hidden": max(0, part_number_count - min(2, len(part_numbers))),
+        "part_numbers": part_numbers[:PUBLIC_NSN_PART_NUMBER_LIMIT],
+        "part_numbers_hidden": max(0, part_number_count - min(PUBLIC_NSN_PART_NUMBER_LIMIT, len(part_numbers))),
         "associated_supplier_site_count": supplier_count,
         "approved_source": approved_source,
         "approved_sources_hidden": max(0, len(approved_candidates) - (1 if approved_source else 0)),
-        "supplier_sites": supplier_candidates[:2],
-        "supplier_sites_hidden": max(0, len(supplier_candidates) - min(2, len(supplier_candidates))),
-        "platforms": platform_names[:2],
-        "platforms_hidden": max(0, platform_count - min(2, len(platform_names))),
+        "supplier_sites": supplier_candidates[:PUBLIC_NSN_SUPPLIER_SITE_LIMIT],
+        "supplier_sites_hidden": max(0, supplier_count - min(PUBLIC_NSN_SUPPLIER_SITE_LIMIT, len(supplier_candidates))),
+        "platforms": platform_names[:PUBLIC_NSN_CONNECTED_PLATFORM_LIMIT],
+        "platforms_hidden": max(0, platform_count - min(PUBLIC_NSN_CONNECTED_PLATFORM_LIMIT, len(platform_names))),
         "is_multi_platform": platform_count > 1,
         "recent_contracts": recent_contracts,
         "observed_contract_count": observed_contract_count,
@@ -10767,6 +10766,8 @@ def build_public_nsn_snapshot(
         "observed_price_summary": public_price_summary,
         "opportunity_summary": public_opportunity_summary,
         "demand_supply_teaser": public_supply_teaser,
+        "public_schema_version": PUBLIC_NSN_SCHEMA_VERSION,
+        "cache_epoch": PUBLIC_NSN_CACHE_EPOCH,
         "remaining_lookups": remaining_lookups,
     }
 
@@ -10808,6 +10809,8 @@ def get_public_nsn_page_snapshot(nsn: str, response: Response):
     response.headers["Cache-Control"] = (
         "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800"
     )
+    response.headers["X-Mimir-Public-Schema"] = str(PUBLIC_NSN_SCHEMA_VERSION)
+    response.headers["X-Mimir-Cache-Epoch"] = PUBLIC_NSN_CACHE_EPOCH
     response.headers["X-Mimir-Public-Projection"] = projection_source
     return snapshot
 
