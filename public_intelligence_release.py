@@ -79,15 +79,15 @@ def append_active_opportunity_nsn_candidates(
         "quality_gate_matches",
     }
     if slots == 0 or not required_candidate_columns.issubset(
-        _table_columns(conn, "public_nsn_manifest_candidates_next")
+        public_release_table_columns(conn, "public_nsn_manifest_candidates_next")
     ):
         return {"added": 0, "quality_gate_matches": 0}
     if not {
         "niin", "active_solicitation_count", "nsn",
-    }.issubset(_table_columns(conn, "v_nsn_opportunity_summary")):
+    }.issubset(public_release_table_columns(conn, "v_nsn_opportunity_summary")):
         return {"added": 0, "quality_gate_matches": 0}
     if not {"niin", "nsn", "item_name", "fsc_code"}.issubset(
-        _table_columns(conn, "v_nsn_profile_lookup")
+        public_release_table_columns(conn, "v_nsn_profile_lookup")
     ):
         return {"added": 0, "quality_gate_matches": 0}
 
@@ -230,6 +230,11 @@ def _table_columns(conn, table_name: str) -> set[str]:
         }
     except Exception:
         return set()
+
+
+def public_release_table_columns(conn, table_name: str) -> set[str]:
+    """Return columns from the explicitly supplied release connection."""
+    return _table_columns(conn, table_name)
 
 
 def stage_public_intelligence_manifest(

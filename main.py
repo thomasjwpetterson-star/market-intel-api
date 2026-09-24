@@ -67,6 +67,7 @@ from public_intelligence_release import (
     preserve_projection_for_unrefreshed_entities,
     public_content_fingerprint,
     public_entity_slug,
+    public_release_table_columns,
     stage_public_intelligence_manifest,
 )
 from public_page_projections import build_public_page_projections
@@ -1673,7 +1674,7 @@ def build_public_intelligence_release(conn):
         operational_selects = []
         operational_joins = []
         operational_fingerprint_values = []
-        if get_duck_table_columns(NSN_SUPPLY_STATE_TABLE):
+        if public_release_table_columns(conn, NSN_SUPPLY_STATE_TABLE):
             operational_selects.append(
                 "HASH(supply.supply_signal, supply.total_stock, supply.backorder_qty, "
                 "supply.forecast_12m_qty, supply.reorder_point_gap) AS supply_fingerprint"
@@ -1682,7 +1683,7 @@ def build_public_intelligence_release(conn):
                 "LEFT JOIN v_nsn_supply_state supply ON base.niin = supply.niin"
             )
             operational_fingerprint_values.append("CAST(supply_fingerprint AS VARCHAR)")
-        if get_duck_table_columns(NSN_PRICE_SUMMARY_TABLE):
+        if public_release_table_columns(conn, NSN_PRICE_SUMMARY_TABLE):
             operational_selects.append(
                 "HASH(price.latest_price_date, price.latest_net_price, "
                 "price.trailing_12m_median_price, price.price_observation_count) "
@@ -1692,7 +1693,7 @@ def build_public_intelligence_release(conn):
                 "LEFT JOIN v_nsn_price_summary price ON base.niin = price.niin"
             )
             operational_fingerprint_values.append("CAST(price_fingerprint AS VARCHAR)")
-        if get_duck_table_columns(NSN_OPPORTUNITY_SUMMARY_TABLE):
+        if public_release_table_columns(conn, NSN_OPPORTUNITY_SUMMARY_TABLE):
             operational_selects.append(
                 "HASH(opportunity.active_solicitation_count, "
                 "opportunity.next_response_deadline, "
@@ -1859,7 +1860,7 @@ def build_public_intelligence_release(conn):
                 "SELECT COALESCE(MAX(quality_gate_matches), 0) FROM public_nsn_manifest_candidates_next"
             ).fetchone()[0]
         )
-        if get_duck_table_columns(NSN_OPPORTUNITY_SUMMARY_TABLE):
+        if public_release_table_columns(conn, NSN_OPPORTUNITY_SUMMARY_TABLE):
             selected_nsn_count = int(conn.execute(
                 "SELECT COUNT(*) FROM public_nsn_manifest_candidates_next"
             ).fetchone()[0])

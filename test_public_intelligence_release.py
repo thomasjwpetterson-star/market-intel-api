@@ -22,11 +22,25 @@ from public_intelligence_release import (
     previous_publication_entries,
     public_content_fingerprint,
     public_entity_slug,
+    public_release_table_columns,
     stage_public_intelligence_manifest,
 )
 
 
 class PublicIntelligenceReleaseTests(unittest.TestCase):
+    def test_release_table_columns_use_the_supplied_connection(self):
+        first = duckdb.connect()
+        second = duckdb.connect()
+        first.execute("CREATE TABLE isolated_release_view (niin VARCHAR, stock BIGINT)")
+        self.assertEqual(
+            public_release_table_columns(first, "isolated_release_view"),
+            {"niin", "stock"},
+        )
+        self.assertEqual(
+            public_release_table_columns(second, "isolated_release_view"),
+            set(),
+        )
+
     def test_active_opportunity_only_nsn_is_admitted_without_displacing_existing_pages(self):
         connection = duckdb.connect()
         connection.execute("""
