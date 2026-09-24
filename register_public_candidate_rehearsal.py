@@ -44,6 +44,18 @@ def main() -> None:
         {
             "image": arguments.image,
             "entryPoint": ["python", "/app/rehearse_public_release.py"],
+            # This task is deliberately sized at 16 GiB so it can build the
+            # million-row page projections away from the memory-constrained
+            # web service.  Do not inherit main.py's 650 MB web default here.
+            "environment": [
+                *[
+                    item
+                    for item in original.get("environment", [])
+                    if item.get("name") not in {"DUCKDB_MEM", "DUCKDB_THREADS"}
+                ],
+                {"name": "DUCKDB_MEM", "value": "12GB"},
+                {"name": "DUCKDB_THREADS", "value": "4"},
+            ],
             "command": [
                 "--bucket",
                 arguments.bucket,
