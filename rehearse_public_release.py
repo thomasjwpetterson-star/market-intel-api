@@ -35,6 +35,22 @@ PUBLIC_ARTIFACT_TABLES = {
     "public_award_profile": ("contract_id",),
     "public_solicitation_profile": ("opportunity_id",),
     "public_intelligence_search": ("entity_type", "entity_id"),
+    "public_company_profile": ("cage",),
+    "public_platform_profile": ("slug",),
+    "public_nsn_profile": ("entity_id",),
+}
+
+RETAINED_PUBLIC_ARTIFACT_TABLES = {
+    key: PUBLIC_ARTIFACT_TABLES[key]
+    for key in (
+        "public_intelligence_manifest",
+        "public_company_top_award",
+        "public_company_top_nsn",
+        "public_platform_award_scope",
+        "public_award_profile",
+        "public_solicitation_profile",
+        "public_intelligence_search",
+    )
 }
 
 
@@ -99,7 +115,7 @@ def download_previous_public_artifacts(
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
     normalized = prefix.strip().strip("/")
-    for table_name in PUBLIC_ARTIFACT_TABLES:
+    for table_name in RETAINED_PUBLIC_ARTIFACT_TABLES:
         filename = f"{table_name}.parquet"
         s3.download_file(bucket, f"{normalized}/{filename}", str(output_dir / filename))
 
@@ -193,6 +209,7 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     os.environ["LOCAL_CACHE_DIR"] = str(args.output_dir.resolve())
     os.environ["ETL_AUTOMATION_RUN_ID"] = run_id
+    os.environ["PUBLIC_INTELLIGENCE_BUILD_PAGE_PROFILES"] = "1"
     os.environ.setdefault("OPENAI_API_KEY", "release-rehearsal-not-used")
 
     import main as api
@@ -237,7 +254,7 @@ def main():
         connection.execute("LOAD httpfs")
     api._apply_duck_pragmas(connection)
 
-    for table_name in PUBLIC_ARTIFACT_TABLES:
+    for table_name in RETAINED_PUBLIC_ARTIFACT_TABLES:
         path = args.previous_public_dir / f"{table_name}.parquet"
         if not path.exists():
             raise RuntimeError(f"Previous public artifact is missing: {path}")

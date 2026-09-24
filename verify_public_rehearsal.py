@@ -29,6 +29,15 @@ KEY_COLUMNS = {
     "public_award_profile": ("contract_id",),
     "public_solicitation_profile": ("opportunity_id",),
     "public_intelligence_search": ("entity_type", "entity_id"),
+    "public_company_profile": ("cage",),
+    "public_platform_profile": ("slug",),
+    "public_nsn_profile": ("entity_id",),
+}
+
+PROFILE_TABLES = {
+    "public_company_profile",
+    "public_platform_profile",
+    "public_nsn_profile",
 }
 
 
@@ -59,6 +68,7 @@ def parse_args():
     parser.add_argument("--rehearsal-prefix", required=True)
     parser.add_argument("--public-manifest-key", required=True)
     parser.add_argument("--baseline-public-prefix", required=True)
+    parser.add_argument("--baseline-profile-prefix", required=True)
     parser.add_argument("--main-manifest-key", required=True)
     parser.add_argument("--ask-manifest-key", required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
@@ -98,9 +108,14 @@ def main():
 
     def download_baseline(entry):
         destination = baseline_dir / entry["filename"]
+        baseline_prefix = (
+            args.baseline_profile_prefix
+            if entry["table_name"] in PROFILE_TABLES
+            else args.baseline_public_prefix
+        )
         s3.download_file(
             args.bucket,
-            f"{args.baseline_public_prefix.strip().strip('/')}/{entry['filename']}",
+            f"{baseline_prefix.strip().strip('/')}/{entry['filename']}",
             str(destination),
         )
         return entry, destination

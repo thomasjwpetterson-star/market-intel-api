@@ -485,6 +485,38 @@ def optimize_and_upload():
             WHERE parent_rank = 1
         """)
 
+        print("   Fetching current SAM UEIs by CAGE...")
+        df_entity_identifiers = run_query("""
+            WITH ranked_entities AS (
+                SELECT
+                    LPAD(
+                        UPPER(REGEXP_REPLACE(TRIM(cage_code), '[^A-Za-z0-9]', '')),
+                        5,
+                        '0'
+                    ) AS cage_code,
+                    UPPER(TRIM(unique_entity_id)) AS uei,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY LPAD(
+                            UPPER(REGEXP_REPLACE(TRIM(cage_code), '[^A-Za-z0-9]', '')),
+                            5,
+                            '0'
+                        )
+                        ORDER BY
+                            COALESCE(last_update_date, '') DESC,
+                            COALESCE(activation_date, '') DESC,
+                            UPPER(TRIM(unique_entity_id))
+                    ) AS entity_rank
+                FROM "market_intel_silver"."ref_sam_entities"
+                WHERE cage_code IS NOT NULL
+                  AND TRIM(cage_code) <> ''
+                  AND unique_entity_id IS NOT NULL
+                  AND REGEXP_LIKE(UPPER(TRIM(unique_entity_id)), '^[A-Z0-9]{12}$')
+            )
+            SELECT cage_code, uei
+            FROM ranked_entities
+            WHERE entity_rank = 1
+        """)
+
         summary_source = os.path.join(TEMP_DIR, "profiles_summary_source.parquet")
         s3.download_file(BUCKET_NAME, f"{CACHE_PREFIX}summary.parquet", summary_source)
         profile_con = duckdb.connect()
@@ -709,6 +741,12 @@ def optimize_and_upload():
             how="left",
             validate="one_to_one",
         )
+        df_profiles = df_profiles.merge(
+            df_entity_identifiers,
+            on="cage_code",
+            how="left",
+            validate="one_to_one",
+        )
 
         award_present = df_profiles["award_present"].notna()
         network_present = df_profiles["network_present"].notna()
@@ -739,6 +777,7 @@ def optimize_and_upload():
             df_profiles[column] = df_profiles[column].fillna(0)
 
         df_profiles["top_naics_codes"] = df_profiles["top_naics_codes"].fillna("")
+        df_profiles["uei"] = df_profiles["uei"].fillna("")
         df_profiles["ultimate_parent_name"] = df_profiles[
             "ultimate_parent_name"
         ].fillna("")
@@ -749,6 +788,7 @@ def optimize_and_upload():
             [
                 "cage_code",
                 "vendor_name",
+                "uei",
                 "ultimate_parent_name",
                 "ultimate_parent_uei",
                 "total_lifetime_spend",

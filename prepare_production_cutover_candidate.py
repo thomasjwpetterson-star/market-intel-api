@@ -45,7 +45,7 @@ def copy_public_release(
     release_id = str(source_manifest.get("release_id") or "").strip()
     run_id = str(source_manifest.get("etl_run_id") or "").strip()
     artifacts = source_manifest.get("artifacts") or []
-    if not release_id or not run_id or len(artifacts) != 7:
+    if not release_id or not run_id or len(artifacts) != 10:
         raise RuntimeError("Public source manifest is incomplete")
 
     durable = copy.deepcopy(source_manifest)

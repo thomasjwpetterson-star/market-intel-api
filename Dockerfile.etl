@@ -20,6 +20,7 @@ RUN python -m pip install --upgrade pip \
 COPY run_etl.py /app/run_etl.py
 COPY main.py /app/main.py
 COPY public_intelligence_release.py /app/public_intelligence_release.py
+COPY public_page_projections.py /app/public_page_projections.py
 COPY dod_contract_enrichment.py /app/dod_contract_enrichment.py
 COPY rehearse_public_release.py /app/rehearse_public_release.py
 COPY verify_public_rehearsal.py /app/verify_public_rehearsal.py

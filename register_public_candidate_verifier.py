@@ -22,6 +22,11 @@ def main() -> None:
         required=True,
         help="Immutable directory for the exact last accepted public release.",
     )
+    parser.add_argument(
+        "--baseline-profile-prefix",
+        required=True,
+        help="Immutable directory for the last accepted prebuilt page profiles.",
+    )
     parser.add_argument("--bucket", default="a-and-d-intel-lake-newaccount")
     parser.add_argument("--region", default="us-east-1")
     parser.add_argument("--source-task", default="mimir-etl-refresh:6")
@@ -55,6 +60,8 @@ def main() -> None:
                 public_manifest_key,
                 "--baseline-public-prefix",
                 arguments.baseline_prefix,
+                "--baseline-profile-prefix",
+                arguments.baseline_profile_prefix,
                 "--main-manifest-key",
                 arguments.main_manifest_key,
                 "--ask-manifest-key",
