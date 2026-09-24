@@ -90,6 +90,10 @@ def append_active_opportunity_nsn_candidates(
         public_release_table_columns(conn, "v_nsn_profile_lookup")
     ):
         return {"added": 0, "quality_gate_matches": 0}
+    if not {"niin", "nsn", "description", "fsc_code"}.issubset(
+        public_release_table_columns(conn, "v_nsn_cage_reference")
+    ):
+        return {"added": 0, "quality_gate_matches": 0}
 
     escaped_date = str(generated_date).replace("'", "''")
     escaped_release = str(release_id).replace("'", "''")
@@ -102,16 +106,7 @@ def append_active_opportunity_nsn_candidates(
     conn.execute("DROP TABLE IF EXISTS public_nsn_opportunity_manifest_additions")
     conn.execute(f"""
         CREATE TABLE public_nsn_opportunity_manifest_additions AS
-        WITH profile AS (
-            SELECT
-                LPAD(TRIM(CAST(niin AS VARCHAR)), 9, '0') AS niin,
-                MAX(NULLIF(REGEXP_REPLACE(CAST(nsn AS VARCHAR), '[^0-9]', '', 'g'), '')) AS nsn,
-                MAX(NULLIF(TRIM(CAST(item_name AS VARCHAR)), '')) AS item_name,
-                MAX(NULLIF(TRIM(CAST(fsc_code AS VARCHAR)), '')) AS fsc_code
-            FROM v_nsn_profile_lookup
-            WHERE niin IS NOT NULL
-            GROUP BY 1
-        ), active AS (
+        WITH active AS (
             SELECT
                 LPAD(TRIM(CAST(opportunity.niin AS VARCHAR)), 9, '0') AS niin,
                 MAX(NULLIF(REGEXP_REPLACE(CAST(opportunity.nsn AS VARCHAR), '[^0-9]', '', 'g'), '')) AS opportunity_nsn,
@@ -123,23 +118,44 @@ def append_active_opportunity_nsn_candidates(
             WHERE COALESCE(TRY_CAST(active_solicitation_count AS INTEGER), 0) > 0
               AND opportunity.niin IS NOT NULL
             GROUP BY 1
+        ), profile AS (
+            SELECT
+                LPAD(TRIM(CAST(niin AS VARCHAR)), 9, '0') AS niin,
+                MAX(NULLIF(REGEXP_REPLACE(CAST(nsn AS VARCHAR), '[^0-9]', '', 'g'), '')) AS nsn,
+                MAX(NULLIF(TRIM(CAST(item_name AS VARCHAR)), '')) AS item_name,
+                MAX(NULLIF(TRIM(CAST(fsc_code AS VARCHAR)), '')) AS fsc_code
+            FROM v_nsn_profile_lookup
+            WHERE niin IS NOT NULL
+            GROUP BY 1
+        ), reference_profile AS (
+            SELECT
+                LPAD(TRIM(CAST(reference.niin AS VARCHAR)), 9, '0') AS niin,
+                MAX(NULLIF(REGEXP_REPLACE(CAST(reference.nsn AS VARCHAR), '[^0-9]', '', 'g'), '')) AS nsn,
+                MAX(NULLIF(TRIM(CAST(reference.description AS VARCHAR)), '')) AS item_name,
+                MAX(NULLIF(TRIM(CAST(reference.fsc_code AS VARCHAR)), '')) AS fsc_code
+            FROM v_nsn_cage_reference reference
+            INNER JOIN active
+              ON LPAD(TRIM(CAST(reference.niin AS VARCHAR)), 9, '0') = active.niin
+            GROUP BY 1
         ), canonical AS (
             SELECT
                 active.*,
-                profile.item_name,
-                profile.fsc_code,
+                COALESCE(profile.item_name, reference_profile.item_name) AS item_name,
+                COALESCE(profile.fsc_code, reference_profile.fsc_code) AS fsc_code,
                 CASE
                     WHEN LENGTH(active.opportunity_nsn) = 13 THEN active.opportunity_nsn
                     WHEN LENGTH(profile.nsn) = 13 THEN profile.nsn
-                    WHEN LENGTH(REGEXP_REPLACE(COALESCE(profile.fsc_code, ''), '[^0-9]', '', 'g')) = 4
-                    THEN REGEXP_REPLACE(profile.fsc_code, '[^0-9]', '', 'g') || active.niin
+                    WHEN LENGTH(reference_profile.nsn) = 13 THEN reference_profile.nsn
+                    WHEN LENGTH(REGEXP_REPLACE(COALESCE(profile.fsc_code, reference_profile.fsc_code, ''), '[^0-9]', '', 'g')) = 4
+                    THEN REGEXP_REPLACE(COALESCE(profile.fsc_code, reference_profile.fsc_code), '[^0-9]', '', 'g') || active.niin
                     ELSE active.niin
                 END AS canonical_entity_id
             FROM active
-            INNER JOIN profile USING (niin)
-            WHERE NULLIF(TRIM(CAST(profile.item_name AS VARCHAR)), '') IS NOT NULL
-              AND UPPER(TRIM(CAST(profile.item_name AS VARCHAR))) NOT IN ('NAN', 'NONE', 'NULL')
-              AND UPPER(TRIM(COALESCE(profile.fsc_code, ''))) NOT LIKE '65%'
+            LEFT JOIN profile USING (niin)
+            LEFT JOIN reference_profile USING (niin)
+            WHERE NULLIF(TRIM(CAST(COALESCE(profile.item_name, reference_profile.item_name) AS VARCHAR)), '') IS NOT NULL
+              AND UPPER(TRIM(CAST(COALESCE(profile.item_name, reference_profile.item_name) AS VARCHAR))) NOT IN ('NAN', 'NONE', 'NULL')
+              AND UPPER(TRIM(COALESCE(profile.fsc_code, reference_profile.fsc_code, ''))) NOT LIKE '65%'
         ), eligible AS (
             SELECT canonical.*
             FROM canonical

@@ -58,7 +58,10 @@ class PublicIntelligenceReleaseTests(unittest.TestCase):
             CREATE TABLE v_nsn_profile_lookup (
                 niin VARCHAR, nsn VARCHAR, item_name VARCHAR, fsc_code VARCHAR
             );
-            INSERT INTO v_nsn_profile_lookup VALUES
+            CREATE TABLE v_nsn_cage_reference (
+                niin VARCHAR, nsn VARCHAR, description VARCHAR, fsc_code VARCHAR
+            );
+            INSERT INTO v_nsn_cage_reference VALUES
             ('000013841', '2910000013841', 'ANCHOR,CAP', '2910');
             CREATE TABLE v_nsn_opportunity_summary (
                 niin VARCHAR, nsn VARCHAR, active_solicitation_count INTEGER,
