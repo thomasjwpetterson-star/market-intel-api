@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Dict
 
@@ -18,6 +19,7 @@ from platform_manifest import (
 
 DEFAULT_BUCKET = "a-and-d-intel-lake-newaccount"
 DEFAULT_CURRENT_MANIFEST_KEY = "ask_mimir/runtime/current_manifest.json"
+DEFAULT_DOWNLOAD_FREE_SPACE_RESERVE_BYTES = 256 * 1024 * 1024
 
 
 def platform_manifest_enabled() -> bool:
@@ -188,15 +190,55 @@ def _download_verified(
     extra_args = {}
     if entry.get("s3_version_id"):
         extra_args["VersionId"] = entry["s3_version_id"]
+
+    # A Render persistent disk can hold the complete runtime release but still
+    # lack room for both a multi-gigabyte old artifact and its replacement at
+    # once.  Preserve the atomic temp-file path whenever possible.  If that
+    # peak would exhaust the disk, first prove the exact version-pinned object
+    # is readable at the declared size, then reclaim only the managed file it
+    # replaces.  The prior release remains immutable in S3 for rollback.
+    reserve = int(
+        os.getenv(
+            "ASK_MIMIR_DOWNLOAD_FREE_SPACE_RESERVE_BYTES",
+            str(DEFAULT_DOWNLOAD_FREE_SPACE_RESERVE_BYTES),
+        )
+    )
+    free_bytes = shutil.disk_usage(destination.parent).free
+    if destination.exists() and free_bytes < expected_size + reserve:
+        reclaimable_bytes = destination.stat().st_size
+        head_kwargs = {
+            "Bucket": bucket,
+            "Key": entry["s3_key"],
+            **extra_args,
+        }
+        remote = s3.head_object(**head_kwargs)
+        if int(remote.get("ContentLength", -1)) != expected_size:
+            raise RuntimeError(f"Remote size mismatch for {entry['s3_key']}")
+        if free_bytes + reclaimable_bytes < expected_size + reserve:
+            raise RuntimeError(
+                f"Insufficient disk space for {entry['s3_key']}: "
+                f"need {expected_size + reserve} bytes, "
+                f"have {free_bytes + reclaimable_bytes} after reclaim"
+            )
+        destination.unlink()
+        free_bytes = shutil.disk_usage(destination.parent).free
+        if free_bytes < expected_size + reserve:
+            raise RuntimeError(
+                f"Insufficient disk space for {entry['s3_key']}: "
+                f"need {expected_size + reserve} bytes, have {free_bytes}"
+            )
+
     download_kwargs = {"ExtraArgs": extra_args} if extra_args else {}
-    s3.download_file(bucket, entry["s3_key"], str(temporary), **download_kwargs)
-    if temporary.stat().st_size != expected_size:
+    try:
+        s3.download_file(bucket, entry["s3_key"], str(temporary), **download_kwargs)
+        if temporary.stat().st_size != expected_size:
+            raise RuntimeError(f"Size mismatch for {entry['s3_key']}")
+        if expected_hash and file_sha256(temporary) != expected_hash:
+            raise RuntimeError(f"SHA-256 mismatch for {entry['s3_key']}")
+        temporary.replace(destination)
+    except Exception:
         temporary.unlink(missing_ok=True)
-        raise RuntimeError(f"Size mismatch for {entry['s3_key']}")
-    if expected_hash and file_sha256(temporary) != expected_hash:
-        temporary.unlink(missing_ok=True)
-        raise RuntimeError(f"SHA-256 mismatch for {entry['s3_key']}")
-    temporary.replace(destination)
+        raise
     return destination
 
 

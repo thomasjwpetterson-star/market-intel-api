@@ -1,8 +1,10 @@
+import hashlib
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import ANY, patch
 
 from bootstrap_data import (
@@ -30,6 +32,22 @@ class RecordingDownloadS3:
     def download_file(self, bucket, key, destination, **kwargs):
         self.calls.append((bucket, key, kwargs))
         Path(destination).write_bytes(self.payload)
+
+
+class SpaceConstrainedDownloadS3(RecordingDownloadS3):
+    def __init__(self, payload: bytes, destination: Path):
+        super().__init__(payload)
+        self.destination = destination
+        self.head_calls = []
+
+    def head_object(self, **kwargs):
+        self.head_calls.append(kwargs)
+        return {"ContentLength": len(self.payload)}
+
+    def download_file(self, bucket, key, destination, **kwargs):
+        if self.destination.exists():
+            raise AssertionError("managed old file must be reclaimed before download")
+        super().download_file(bucket, key, destination, **kwargs)
 
 
 class BootstrapReleaseMarkerTests(unittest.TestCase):
@@ -126,6 +144,41 @@ class BootstrapReleaseMarkerTests(unittest.TestCase):
                         "app_cache/sample.parquet",
                         {"ExtraArgs": {"VersionId": "version-2"}},
                     )
+                ],
+            )
+
+    def test_reclaims_replaced_managed_file_when_atomic_temp_would_fill_disk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data" / "large.parquet"
+            data.parent.mkdir(parents=True)
+            data.write_bytes(b"old-version")
+            payload = b"new-version-payload"
+            entry = {
+                "local_path": "data/large.parquet",
+                "s3_key": "releases/new/large.parquet",
+                "s3_version_id": "version-2",
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            s3 = SpaceConstrainedDownloadS3(payload, data)
+            disk_states = iter((SimpleNamespace(free=10), SimpleNamespace(free=10**9)))
+
+            with patch.dict(
+                os.environ,
+                {"ASK_MIMIR_DOWNLOAD_FREE_SPACE_RESERVE_BYTES": "0"},
+            ), patch("bootstrap_data.shutil.disk_usage", side_effect=disk_states):
+                _download_verified(s3, "bucket", entry, root)
+
+            self.assertEqual(data.read_bytes(), payload)
+            self.assertEqual(
+                s3.head_calls,
+                [
+                    {
+                        "Bucket": "bucket",
+                        "Key": "releases/new/large.parquet",
+                        "VersionId": "version-2",
+                    }
                 ],
             )
 
