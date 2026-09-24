@@ -58,6 +58,7 @@ def build_platform_manifest(
     ask_mimir_manifest: Mapping[str, Any],
     ask_mimir_manifest_key: str,
     previous_platform_release_id: str | None = None,
+    platform_release_id: str | None = None,
 ) -> dict[str, Any]:
     """Bind three immutable child manifests to one candidate release."""
     run_id = str(etl_run_id or "").strip()
@@ -74,9 +75,12 @@ def build_platform_manifest(
             "ask_mimir", ask_mimir_manifest, ask_mimir_manifest_key, run_id
         ),
     }
+    release_id = str(platform_release_id or f"mimir-platform-{run_id}").strip()
+    if not release_id.startswith("mimir-platform-"):
+        raise ValueError("platform_release_id must start with mimir-platform-")
     return {
         "schema_version": 1,
-        "release_id": f"mimir-platform-{run_id}",
+        "release_id": release_id,
         "status": "candidate",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "etl_run_id": run_id,

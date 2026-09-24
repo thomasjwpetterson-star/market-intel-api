@@ -149,6 +149,7 @@ def main() -> None:
     parser.add_argument("--source-platform-version-id", required=True)
     parser.add_argument("--durable-ask-manifest-key", required=True)
     parser.add_argument("--expected-run-id", required=True)
+    parser.add_argument("--platform-release-id", required=True)
     parser.add_argument("--change-control-prefix", required=True)
     arguments = parser.parse_args()
 
@@ -197,8 +198,23 @@ def main() -> None:
         public_manifest_key=public_key,
         ask_mimir_manifest=ask_manifest,
         ask_mimir_manifest_key=arguments.durable_ask_manifest_key,
+        platform_release_id=arguments.platform_release_id,
     )
     platform["status"] = "production-candidate"
+    immutable_platform_key = (
+        f"mimir/platform/releases/{platform['release_id']}/manifest.json"
+    )
+    try:
+        s3.head_object(Bucket=arguments.bucket, Key=immutable_platform_key)
+    except ClientError as error:
+        code = str(error.response.get("Error", {}).get("Code") or "")
+        if code not in {"404", "NoSuchKey", "NotFound"}:
+            raise
+    else:
+        raise RuntimeError(
+            "Refusing to overwrite existing immutable platform manifest: "
+            f"{immutable_platform_key}"
+        )
     platform_locations = publish_platform_candidate(
         s3,
         arguments.bucket,
