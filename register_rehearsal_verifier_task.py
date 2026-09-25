@@ -1,79 +1,63 @@
-"""Register a standalone ECS task for the isolated cold-start verifier."""
+"""Register a standalone ECS task for an isolated cold-start verifier."""
 
+import argparse
 import json
 
 import boto3
 
+from register_candidate_task import ALLOWED_CONTAINER_FIELDS, immutable_image
 
-IMAGE_TAG = "rehearsal-cold-start-20260924-129c489dbe-v5"
-REPOSITORY_URI = "868631722720.dkr.ecr.us-east-1.amazonaws.com/mimir-etl-refresh"
-REHEARSAL_PREFIX = "mimir/rehearsals/cold-start-20260924-129c489dbe"
-PUBLIC_RELEASE_ID = "public-intelligence-20260924T005335Z"
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--image", required=True, type=immutable_image)
+    parser.add_argument("--rehearsal-prefix", required=True)
+    parser.add_argument("--public-manifest-key", required=True)
+    parser.add_argument("--baseline-public-prefix", required=True)
+    parser.add_argument("--baseline-profile-prefix", required=True)
+    parser.add_argument("--main-manifest-key", required=True)
+    parser.add_argument("--ask-manifest-key", required=True)
+    parser.add_argument("--bucket", default="a-and-d-intel-lake-newaccount")
+    parser.add_argument("--region", default="us-east-1")
+    parser.add_argument("--source-task", default="mimir-etl-refresh:6")
+    parser.add_argument("--family", default="mimir-etl-public-rehearsal-verifier")
+    arguments = parser.parse_args()
 
-
-def main():
-    ecs = boto3.client("ecs", region_name="us-east-1")
-    ecr = boto3.client("ecr", region_name="us-east-1")
-    source = ecs.describe_task_definition(taskDefinition="mimir-etl-refresh:6")[
+    ecs = boto3.client("ecs", region_name=arguments.region)
+    source = ecs.describe_task_definition(taskDefinition=arguments.source_task)[
         "taskDefinition"
     ]
-    image = ecr.describe_images(
-        repositoryName="mimir-etl-refresh",
-        imageIds=[{"imageTag": IMAGE_TAG}],
-    )["imageDetails"][0]
-    image_uri = f"{REPOSITORY_URI}@{image['imageDigest']}"
     original = source["containerDefinitions"][0]
     container = {
         key: value
         for key, value in original.items()
-        if key
-        in {
-            "name",
-            "cpu",
-            "memory",
-            "memoryReservation",
-            "portMappings",
-            "essential",
-            "environment",
-            "mountPoints",
-            "volumesFrom",
-            "linuxParameters",
-            "secrets",
-            "dependsOn",
-            "startTimeout",
-            "stopTimeout",
-            "workingDirectory",
-            "readonlyRootFilesystem",
-            "logConfiguration",
-            "ulimits",
-            "systemControls",
-            "resourceRequirements",
-        }
+        if key in ALLOWED_CONTAINER_FIELDS
     }
     container.update(
         {
-            "image": image_uri,
+            "image": arguments.image,
             "entryPoint": ["python", "/app/verify_public_rehearsal.py"],
             "command": [
                 "--bucket",
-                "a-and-d-intel-lake-newaccount",
+                arguments.bucket,
                 "--rehearsal-prefix",
-                REHEARSAL_PREFIX,
+                arguments.rehearsal_prefix,
                 "--public-manifest-key",
-                f"{REHEARSAL_PREFIX}/public/releases/{PUBLIC_RELEASE_ID}/manifest.json",
+                arguments.public_manifest_key,
                 "--baseline-public-prefix",
-                f"{REHEARSAL_PREFIX}/baseline-public",
+                arguments.baseline_public_prefix,
+                "--baseline-profile-prefix",
+                arguments.baseline_profile_prefix,
                 "--main-manifest-key",
-                "mimir/releases/4aa34dd9-f060-4945-981c-8679769b0de1/manifest.json",
+                arguments.main_manifest_key,
                 "--ask-manifest-key",
-                "ask_mimir/releases/ask-mimir-beta-20260923T113507Z-5c57d5c878fc/runtime_manifest.json",
+                arguments.ask_manifest_key,
                 "--work-dir",
                 "/tmp/mimir-public-verification",
             ],
         }
     )
     response = ecs.register_task_definition(
-        family="mimir-etl-public-rehearsal-verifier",
+        family=arguments.family,
         taskRoleArn=source["taskRoleArn"],
         executionRoleArn=source["executionRoleArn"],
         networkMode=source["networkMode"],
@@ -95,7 +79,9 @@ def main():
         json.dumps(
             {
                 "task_definition_arn": task["taskDefinitionArn"],
-                "image": image_uri,
+                "image": arguments.image,
+                "rehearsal_prefix": arguments.rehearsal_prefix,
+                "public_manifest_key": arguments.public_manifest_key,
             }
         )
     )
