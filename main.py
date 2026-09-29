@@ -5515,31 +5515,28 @@ def explorer_taxonomy_search(type: str = Query(...), q: str = Query(..., min_len
 def explorer_export(payload: ExplorerRequest, background_tasks: BackgroundTasks, request: Request):
     expected_key = os.getenv("MIMIR_EXPORT_PROXY_SECRET", "").strip()
     supplied_key = request.headers.get("X-Mimir-Export-Key", "").strip()
-    require_proxy = os.getenv("REQUIRE_EXPORT_PROXY", "0").strip().lower() in {"1", "true", "yes"}
     proxy_verified = bool(expected_key and hmac.compare_digest(supplied_key, expected_key))
 
-    if require_proxy and not expected_key:
-        logger.error("REQUIRE_EXPORT_PROXY is enabled without MIMIR_EXPORT_PROXY_SECRET")
+    if not expected_key:
+        logger.error("MIMIR_EXPORT_PROXY_SECRET is not configured")
         raise HTTPException(status_code=503, detail="Export authorization is not configured.")
-    if require_proxy and not proxy_verified:
+    if not proxy_verified:
         raise HTTPException(status_code=403, detail="Export requires an authorized application session.")
 
-    if proxy_verified:
-        plan_tier = request.headers.get("X-Mimir-Plan-Tier", "free").strip().lower()
-        if plan_tier == "enterprise":
-            export_limit = safe_int(
-                os.getenv("EXPLORER_EXPORT_LIMIT_ENTERPRISE", 100000),
-                100000,
-                5000,
-                100000,
-            )
-        elif plan_tier == "professional":
-            export_limit = 5000
-        else:
-            raise HTTPException(status_code=403, detail="This plan does not include CSV exports.")
+    plan_tier = request.headers.get("X-Mimir-Plan-Tier", "free").strip().lower()
+    if plan_tier == "enterprise":
+        export_limit = safe_int(
+            os.getenv("EXPLORER_EXPORT_LIMIT_ENTERPRISE", 100000),
+            100000,
+            5000,
+            100000,
+        )
+    elif plan_tier == "professional":
+        export_limit = 5000
+    elif plan_tier == "lite":
+        export_limit = 100
     else:
-        # Transitional behavior only. Enable REQUIRE_EXPORT_PROXY after the UI proxy is deployed.
-        export_limit = 5000 if payload.subscription_status == "active" else 1000
+        raise HTTPException(status_code=403, detail="This plan does not include CSV exports.")
 
     if payload.table == SUBCONTRACT_EXPLORER_TABLE:
         requested_columns = payload.columns or EXPLORER_DEFAULT_COLUMNS[SUBCONTRACT_EXPLORER_TABLE]
