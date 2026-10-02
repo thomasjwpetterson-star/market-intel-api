@@ -1,6 +1,8 @@
 import asyncio
 from copy import deepcopy
 import unittest
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 from public_brief_runtime import (
@@ -52,7 +54,7 @@ class BriefCacheKeyTests(unittest.TestCase):
         self.assertNotIn("source composition", observed)
         self.assertNotIn("revenue", observed)
         self.assertIn("FY2024–FY2025", observed)
-        self.assertIn("separately, tracked subcontract value totals $100 from displayed partners", observed)
+        self.assertIn("Tracked subcontract value as a subcontractor totals $100 from displayed partners", observed)
         self.assertNotIn(PUBLIC_BRIEF_METHODOLOGY, observed)
 
     def test_fact_rich_fallbacks_have_distinct_style_and_preserve_site_and_roles(self):
@@ -63,7 +65,7 @@ class BriefCacheKeyTests(unittest.TestCase):
         self.assertNotIn("\n", dashboard)
         self.assertEqual(public.replace("\n\n", " "), dashboard)
         for text in (public, dashboard):
-            for fact in ("CAGE 6FH39", "Arlington, VA", "Engineering Services", "$500", "N001-TEST",
+            for fact in ("CAGE 6FH39", "Arlington, VA", "$500", "N001-TEST",
                          "Technical engineering support", "5310001860967", "Washers", "Prime Customer",
                          "Component Supplier", "Mimir platform mappings include F-35"):
                 self.assertIn(fact, text)
@@ -102,6 +104,22 @@ class BriefCacheKeyTests(unittest.TestCase):
         for style in ("public", "operational_profile"):
             with self.assertRaises(ValueError):
                 validate_brief_narrative("**Position:** Generic old format", brief_style=style)
+
+    def test_quality_gate_rejects_short_unsupported_claims_and_style_overflow(self):
+        for text in ("This site is a major player.", "The agency indicates a strong focus on naval aviation projects.",
+                     "The company is producing components.", "It supplies switch assemblies.",
+                     "Operations include manufacturing in hardware.", "It has a $14.1B contract.",
+                     "It has a $14.1B contract value.", "It has a contract worth $14.1B."):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                validate_brief_narrative(text, brief_style="public")
+        with self.assertRaises(ValueError):
+            validate_brief_narrative(" ".join(["Record facts"] * 100), brief_style="public")
+        five = "One record. Two records. Three records. Four records. Five records."
+        self.assertEqual(validate_brief_narrative(five, brief_style="public"), five)
+        with self.assertRaises(ValueError):
+            validate_brief_narrative(five, brief_style="operational_profile")
+        factual = 'A $14.1B contract record describes aircraft long lead items. Item records include switch assemblies.'
+        self.assertEqual(validate_brief_narrative(factual, brief_style="operational_profile"), factual)
 
     def test_currency_display_is_compact_with_signs_and_small_values_preserved(self):
         for amount, expected in ((175766233950.51, "$175.8B"), (7090483.20, "$7.1M"),
@@ -147,6 +165,27 @@ class BriefCacheKeyTests(unittest.TestCase):
 
 
 class PublicBriefRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_both_captured_live_responses_are_rejected_and_use_factual_fallback(self):
+        fixture = json.loads((Path(__file__).parent / "test_fixtures/site_brief_rejected_outputs.json").read_text())
+        for row in fixture["captured_outputs"]:
+            with self.subTest(style=row["style"]):
+                runtime = PublicBriefRuntime()
+                fallback = evidence_only_brief(fixture["evidence"], row["style"])
+                async def provider():
+                    return validate_brief_narrative(row["text"], brief_style=row["style"])
+                with self.assertLogs("mimir-api", level="WARNING"):
+                    actual = await runtime.get_or_generate(row["style"], provider, fallback)
+                self.assertEqual(actual, fallback)
+                self.assertLessEqual(len(actual.split()), 160)
+                self.assertNotIn("major player", actual)
+                self.assertNotIn("naval aviation", actual)
+                self.assertNotIn("producing", actual)
+                self.assertIn("contract record", actual)
+                self.assertIn("as a subcontractor totals $442.8M", actual)
+                self.assertIn("separately, reported downstream subcontractors", actual)
+                self.assertIn("Item records (FY2022–FY2026)", actual)
+                self.assertEqual(actual.count("\n\n"), 1 if row["style"] == "public" else 0)
+
     async def test_identical_concurrent_requests_share_one_nonblocking_generation(self):
         runtime = PublicBriefRuntime()
         entered = asyncio.Event()

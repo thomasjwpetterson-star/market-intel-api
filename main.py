@@ -7860,6 +7860,10 @@ async def generate_unlocked_brief(request: Request):
         Never say an agency's amount is primarily mapped to a platform, that an agency funds a listed capability, or that a partner serves a platform merely because both appear in separate lists.
         For example, a leading Navy amount plus a leading F-35 mapping does not establish Navy-to-F-35 attribution; describe the two rankings separately.
         Only fields within the SAME award-action record support its agency-description-amount-date relationship. No agency-platform cross-tab or partner-product join was supplied.
+        Award-record amounts are individual loaded observations, never a total contract ceiling or whole-contract value: say "$14.1B contract record", never "$14.1B contract".
+        Item records establish observed items associated with this CAGE, not that it manufactures, produces or supplies them itself. Say "item records include".
+        Classifications do not establish every actual manufacturing operation at this CAGE. Avoid evaluative descriptions such as major player, significant, substantial, pivotal, critical or strong focus.
+        Label the upstream financial total "tracked subcontract value as a subcontractor"; downstream partners are a separate direction, not part of that upstream total.
         Network roles are directional: upstream prime customers versus downstream subcontractors. Partner values are adjusted reported subcontract measures with no supplied period.
         Mimir platform mappings are associations, not independently confirmed government findings. Item observations have their own period and cannot be assigned the prime period.
         Largest award records are ranked by value, not recency. No distinct award or action count is supplied.

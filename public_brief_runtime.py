@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 logger = logging.getLogger("mimir-api")
 
-PUBLIC_BRIEF_SOURCE_POLICY = "site-operational-evidence-v3"
+PUBLIC_BRIEF_SOURCE_POLICY = "site-operational-evidence-v4-quality-gate"
 BRIEF_STYLES = frozenset({"public", "operational_profile"})
 PUBLIC_BRIEF_METHODOLOGY = (
     "Based on government contract and subcontract records. Values cover the periods shown and may overlap; "
@@ -53,6 +53,24 @@ def validate_brief_narrative(text: str, max_text_chars: int = 6000,
         raise ValueError("Brief exceeds text limit")
     if brief_style is not None and re.search(r"(?:^|\n)\s*\*{0,2}(?:Position|Dependency|Implication):", text, re.I):
         raise ValueError("Brief returned the retired generic template")
+    if brief_style is not None:
+        paragraphs = [part for part in re.split(r"\n\s*\n", text.strip()) if part.strip()]
+        sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", text.strip())
+        limit = 180 if brief_style == "public" else 160
+        if len(text.split()) > limit or len(sentences) > (6 if brief_style == "public" else 4) or (brief_style == "operational_profile" and len(paragraphs) != 1) or (brief_style == "public" and len(paragraphs) > 2):
+            raise ValueError("Brief exceeds its presentation limits")
+        # Conservative claim-family boundary, not complete semantic validation.
+        # Reject the whole response; deleting adjectives cannot repair an inference.
+        claim_text = unicodedata.normalize("NFKC", text).casefold()
+        unsupported = (
+            r"\b(?:major player|major defense contractor|significant presence|significant activity|substantial|pivotal role|critical role|strong focus|diverse manufacturing|broad manufacturing|network is extensive)\b",
+            r"\b(?:produces|producing|manufactures|supplies|supplying)\b|\bmanufacturing (?:in|of)\b",
+            r"\b(?:sole[- ]source|protective moat|switching costs|recurring revenue|naval aviation projects)\b",
+            r"\$[\d,.]+(?:[kmbt]|\s+(?:million|billion|trillion))?\s+contract\b(?!\s+(?:record|action))",
+            r"\bcontract\s+(?:worth|valued at|for)\s+\$",
+        )
+        if any(re.search(pattern, claim_text) for pattern in unsupported):
+            raise ValueError("Brief includes unsupported evaluative or operational claims")
     normalized = unicodedata.normalize("NFKC", text).casefold()
     compact = re.sub(r"[^a-z0-9]", "", normalized)
     reserved = ("usaspending", "federalactionobligation", "procurementlinevalue",
@@ -140,77 +158,78 @@ def brief_evidence_context(evidence: Dict[str, Any]) -> str:
 
 
 def evidence_only_brief(evidence: Dict[str, Any], brief_style: str = "public") -> str:
-    """Four fact-bearing sentences where coverage supports them; no generic advice."""
+    """At most four concise sentences assembled from explicit record fields."""
     identity = evidence["identity"]
     name = _brief_text(identity.get("name")) or "This company"
     cage = _brief_text(identity.get("cage"))
+    parent = identity.get("scope") == "corporate aggregate"
     location = ", ".join(filter(None, (_brief_text(identity.get("city")), _brief_text(identity.get("state")))))
-    if identity.get("scope") == "corporate aggregate":
-        opening = f"{name} is shown as a corporate aggregate"
-    else:
-        opening = f"{name} is recorded under CAGE {cage}" if cage else name
-        if location:
-            opening += f" in {location}"
-    capabilities = [_brief_text(row.get("name")) for row in evidence.get("capabilities", [])[:2]]
-    if not any(capabilities):
-        capabilities = [_brief_text(value) for value in evidence.get("profile_naics", [])[:2]]
-    capabilities = [value for value in capabilities if value]
-    if capabilities:
-        opening += "; its award classifications include " + " and ".join(capabilities)
-
+    opening = f"{name} is shown as a corporate aggregate" if parent else f"{name}'s CAGE {cage} record"
+    if not parent:
+        opening += f" lists {location}" if location else " identifies this company"
     prime = _brief_money(evidence.get("prime_value"))
     if prime is None:
-        scale = "Prime contract values are not available"
+        opening += "; prime contract values are not available"
     else:
         period = f" ({evidence['prime_period']})" if evidence.get("prime_period") else ""
-        scale = f"The record shows {prime} in observed prime contract value{period}"
+        opening += f", with {prime} in observed prime contract value{period}"
+    sentences = [opening]
+
+    def excerpt(value, words=22):
+        # Preserve an exact source excerpt, ending on a whole word.
+        original = _brief_text(value, 1000).rstrip(".")
+        pieces = original.split()
+        return " ".join(pieces[:words]) + ("…" if len(pieces) > words else "")
+
+    awards = evidence.get("contracts", [])
+    if awards and _brief_text(awards[0].get("desc")):
+        row = awards[0]
+        details = list(filter(None, (_brief_text(row.get("contract_id")), _brief_text(row.get("date")),
+                                     _brief_text(row.get("agency")), _brief_money(row.get("spend")))))
+        sentences.append("The largest displayed contract record" + (f" ({'; '.join(details)})" if details else "")
+                         + f' describes “{excerpt(row["desc"])}”')
+    else:
+        capabilities = [_brief_text(row.get("name")) for row in evidence.get("capabilities", [])[:2]]
+        if not any(capabilities):
+            capabilities = [_brief_text(value) for value in evidence.get("profile_naics", [])[:2]]
+        capabilities = [value for value in capabilities if value]
+        if capabilities:
+            sentences.append("Award classifications include " + " and ".join(capabilities))
+
+    network = []
+    prime_names = [_brief_text(row.get("name")) for row in evidence.get("prime_customers", [])[:1]]
     sub = _brief_money(evidence.get("sub_value"))
     if sub is not None:
         scope = " from displayed partners" if "displayed" in evidence["sub_basis"].casefold() else ""
-        scale += f"; separately, tracked subcontract value totals {sub}{scope}"
+        network.append(f"tracked subcontract value as a subcontractor totals {sub}{scope}"
+                       + (", with " + " and ".join(filter(None, prime_names)) + " among reported prime customers" if any(prime_names) else ""))
+    elif any(prime_names):
+        network.append("reported prime customers include " + " and ".join(filter(None, prime_names)))
+    sub_names = [_brief_text(row.get("name")) for row in evidence.get("subcontractors", [])[:1]]
+    if any(sub_names):
+        network.append("separately, reported downstream subcontractors include " + " and ".join(filter(None, sub_names)))
+    if network:
+        sentences.append("; ".join(network))
 
-    work = []
-    awards = []
-    for row in evidence.get("contracts", [])[:2]:
-        description = _brief_text(row.get("desc"), 170)
-        if not description:
-            continue
-        details = list(filter(None, (_brief_text(row.get("agency")), _brief_money(row.get("spend")),
-                                     _brief_text(row.get("date")), _brief_text(row.get("contract_id")))))
-        awards.append(f'“{description}”' + (f" ({'; '.join(details)})" if details else ""))
-    if awards:
-        work.append("largest observed award actions describe " + " and ".join(awards))
-    products = []
+    items = []
     for row in evidence.get("nsns", [])[:2]:
-        description = _brief_text(row.get("desc"), 90)
-        identifier = _brief_text(row.get("nsn"))
+        description, identifier = _brief_text(row.get("desc"), 65), _brief_text(row.get("nsn"))
         if description:
-            products.append(description + (f" ({identifier})" if identifier else ""))
-    if products:
+            items.append(description + (f" ({identifier})" if identifier else ""))
+    observations = []
+    if items:
         period = f" ({evidence['nsn_period']})" if evidence.get("nsn_period") else ""
-        work.append("item records" + period + " include " + " and ".join(products))
-
-    relationships = []
-    for key, label in (("prime_customers", "reported prime customers include"),
-                       ("subcontractors", "reported subcontractors include")):
-        names = [_brief_text(row.get("name")) for row in evidence.get(key, [])[:2]]
-        names = [value for value in names if value]
-        if names:
-            relationships.append(label + " " + " and ".join(names))
-    agencies = [_brief_text(row.get("name")) for row in evidence.get("agencies", [])[:2]]
-    agencies = [value for value in agencies if value]
-    if agencies:
-        relationships.append("leading awarding agencies include " + " and ".join(agencies))
-    platforms = [_brief_text(row.get("platform_family")) for row in evidence.get("platforms", [])[:2]]
-    platforms = [value for value in platforms if value]
-    if platforms:
-        relationships.append("separately, Mimir platform mappings include " + " and ".join(platforms))
-
-    def sentence(value):
-        return value[0].upper() + value[1:].rstrip(".") + "."
-    first = " ".join((sentence(opening), sentence(scale)))
-    detail = " ".join(sentence("; ".join(parts)) for parts in (work, relationships) if parts)
-    return first + ((" " if brief_style == "operational_profile" else "\n\n") + detail if detail else "")
+        observations.append("item records" + period + " include " + " and ".join(items))
+    platforms = [_brief_text(row.get("platform_family"), 65) for row in evidence.get("platforms", [])[:2]]
+    if any(platforms):
+        observations.append("independently, Mimir platform mappings include " + " and ".join(filter(None, platforms)))
+    if observations:
+        sentences.append("; ".join(observations))
+    rendered = [part[0].upper() + part[1:].rstrip(".") + "." for part in sentences[:4]]
+    if brief_style == "operational_profile" or len(rendered) < 2:
+        return " ".join(rendered)
+    split = min(2, len(rendered) - 1)
+    return " ".join(rendered[:split]) + "\n\n" + " ".join(rendered[split:])
 
 
 class PublicBriefRuntime:

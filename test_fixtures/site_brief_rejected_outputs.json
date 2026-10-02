@@ -1,0 +1,137 @@
+{
+  "provenance": "Captured approved live calls, 2026-10-02; no calls are made by this test. Capability rankings omitted because the saved payload does not carry them.",
+  "captured_outputs": [
+    {
+      "style": "public",
+      "text": "Lockheed Martin Corporation, identified by CAGE code 81755 and located in Fort Worth, Texas, is a major player in the defense industry, primarily engaged in \"Aircraft Manufacturing\" and related sectors. The company has a significant presence in the defense market, with a prime contract value of $175.8B observed from FY2019 to FY2026. The Department of the Navy is the largest customer, accounting for $146.8B of this spending, indicating a strong focus on naval aviation projects. The F-35 platform is a major component of Lockheed Martin's operations, with $146.8B mapped to it, highlighting its critical role in the company's portfolio. Other notable platforms include the F-22 and F-16, with respective spends of $9.8B and $824.7M. The company's activities also encompass \"Nonferrous Forging\" and \"Hardware Manufacturing,\" supporting its diverse manufacturing capabilities.\n\nLockheed Martin's subcontracting network is extensive, with a Mimir-adjusted reported subcontract value of $442.8M, though the observation period for this measure is not established. Key upstream prime customers include Raytheon Company, contributing $411.3M, while significant downstream subcontractors include Northrop Grumman Systems Corporation and BAE Systems, with subcontract values of $6.9B and $4.1B, respectively. The company's largest observed award actions include a $14.1B contract with the Department of the Navy for F-35 aircraft long lead items, underscoring its pivotal role in advanced military aviation projects. Additionally, Lockheed Martin supplies various components to the Defense Logistics Agency, such as switch assemblies and multiplexers, further demonstrating its broad manufacturing and supply capabilities within the defense sector."
+    },
+    {
+      "style": "operational_profile",
+      "text": "Lockheed Martin Corporation, identified by CAGE code 81755 and located in Fort Worth, TX, is a major defense contractor with significant activity in aircraft manufacturing and related sectors. The company has secured a substantial prime contract value of $175.8B from FY2019 to FY2026, with the Department of the Navy being the largest contributor at $146.8B. This includes major contracts for F-35 aircraft, such as a $14.1B contract for Lot 18/19 F-35 aircraft long lead items. Lockheed Martin's operations also encompass manufacturing in nonferrous metal forging and hardware, with notable NAICS classifications in aircraft manufacturing and auxiliary equipment. The company has reported subcontracting activities amounting to $442.8M, with key upstream prime customers like Raytheon Company and significant downstream subcontractors including Northrop Grumman Systems Corporation. Additionally, Lockheed Martin is involved in producing components like switch assemblies and multiplexers for the Defense Logistics Agency."
+    }
+  ],
+  "evidence": {
+    "identity": {
+      "name": "LOCKHEED MARTIN CORPORATION",
+      "cage": "81755",
+      "city": "FORT WORTH",
+      "state": "TX",
+      "scope": "CAGE site record"
+    },
+    "activity": {
+      "last_observed_fiscal_year": 2026
+    },
+    "profile_naics": [],
+    "prime_value": 175766233950.50998,
+    "prime_period": "FY2019\u2013FY2026",
+    "sub_value": 442844038.33000004,
+    "sub_basis": "Mimir-adjusted reported subcontract value across all tracked partners",
+    "agencies": [
+      {
+        "name": "Department Of The Navy",
+        "spend": 146807229119.56015
+      },
+      {
+        "name": "Department Of The Air Force",
+        "spend": 28921123139.74
+      },
+      {
+        "name": "Defense Advanced Research Projects Agency",
+        "spend": 57863151.58
+      }
+    ],
+    "platforms": [
+      {
+        "platform_family": "F-35",
+        "spend": 146768576068.31015
+      },
+      {
+        "platform_family": "F-22",
+        "spend": 9769738791.16
+      },
+      {
+        "platform_family": "F-16",
+        "spend": 824730659.8999999
+      }
+    ],
+    "capabilities": [],
+    "contracts": [
+      {
+        "contract_id": "N0001923C0003",
+        "date": "2025-09-29",
+        "agency": "Department Of The Navy",
+        "desc": "THE PURPOSE OF THIS CONTRACT IS TO PROCURE LOT 18/19 F-35 AIRCRAFT LONG LEAD ITEMS IN SUPPORT OF U.5 SERVICE, INTERNATIONAL PARTNER, AND FMS CUSTOMER JETS.",
+        "spend": 14145203547.0
+      },
+      {
+        "contract_id": "N0001920C0009",
+        "date": "2022-12-30",
+        "agency": "Department Of The Navy",
+        "desc": "THIS CONTRACT MODIFICATION EXERCISES THE LOT 17 OPTION AND UPDATES RELATED CLAUSES AND ATTACHMENTS.",
+        "spend": 10322900348.97
+      },
+      {
+        "contract_id": "N0001920C0009",
+        "date": "2023-04-28",
+        "agency": "Department Of The Navy",
+        "desc": "THIS CONTRACT MODIFICATION EXERCISES THE LOT 17 OPTION AND UPDATES RELATED CLAUSES AND ATTACHMENTS.",
+        "spend": 7795532764.0
+      }
+    ],
+    "nsns": [
+      {
+        "nsn": "012323287",
+        "desc": "Switch Assembly",
+        "spend": 3433790.06,
+        "unit_price": 33664.60843137255,
+        "platform": "F-16",
+        "market_share": 100.0,
+        "period_label": "FY2022\u2013FY2026"
+      },
+      {
+        "nsn": "014488598",
+        "desc": "Multiplexer",
+        "spend": 1217173.35,
+        "unit_price": 1289.3785487288137,
+        "platform": "F-16",
+        "market_share": 100.0,
+        "period_label": "FY2022\u2013FY2026"
+      }
+    ],
+    "nsn_period": "FY2022\u2013FY2026",
+    "prime_customers": [
+      {
+        "name": "RAYTHEON COMPANY",
+        "cage": "96214",
+        "total": 411271184.0
+      },
+      {
+        "name": "ADVANCED TECHNOLOGY INTERNATIONAL",
+        "cage": "1G3V8",
+        "total": 10076812.0
+      },
+      {
+        "name": "SYSTEMS & TECHNOLOGY RESEARCH LLC",
+        "cage": "65L89",
+        "total": 7367751.0
+      }
+    ],
+    "subcontractors": [
+      {
+        "name": "NORTHROP GRUMMAN SYSTEMS CORPORATION",
+        "cage": "76823",
+        "total": 6904118351.809992
+      },
+      {
+        "name": "BAE SYSTEMS (OPERATIONS) LIMITED",
+        "cage": "UNKNO",
+        "total": 4063681445.7000003
+      },
+      {
+        "name": "BAE SYSTEMS INFORMATION AND ELECTRONIC SYSTEMS INTEGRATION INC.",
+        "cage": "94117",
+        "total": 3883762456.430003
+      }
+    ]
+  }
+}

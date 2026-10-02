@@ -219,3 +219,38 @@ fallbacks. Those paths have deterministic local tests. After rollout, compare
 readiness, public GET success/latency, and content-free `public_brief` completion
 and fallback log counts with the release baseline. Revert the source patch if
 the normal preview or tables regress; there is no schema/data change to undo.
+
+
+## Captured production quality failure and conservative guard
+
+The two approved CAGE 81755 calls at 01:53 UTC on 2 October returned successful
+HTTP/generated responses but failed semantic acceptance. The public brief used
+242 words and inferred a naval-aviation focus from an awarding-agency ranking;
+the dashboard used six sentences and claimed production from item observations.
+Both also described a displayed record amount as a whole-contract value. Runtime
+availability and rich input coverage did not establish acceptable generated text.
+
+The new policy version invalidates those cache entries. A deterministic guard
+rejects public output over 180 words, six sentences or two paragraphs, and dashboard
+output over 160 words, four sentences or one paragraph. It also rejects captured
+families of marketing/inference, production/supply and whole-contract amount claims.
+Rejection selects the existing evidence fallback; it does not delete a problematic
+phrase and keep the remaining narrative. This narrow, deliberately conservative
+guard is not general semantic proof and can reject otherwise supportable phrasing.
+
+The fallback now uses at most four fact-bearing sentences, split into two public
+paragraphs or one dashboard paragraph, keeping the exact CAGE/location, observed
+prime scope, quoted contract description/identifier/date, upstream subcontract value,
+downstream relationship direction and item observation period. It omits ambiguous
+activity counts and makes no production or platform-to-agency attribution claim.
+
+Both captured responses are retained as local rejection fixtures. The offline replay
+in outputs/website-audit-2026-10-02/corrected-site-brief-replay.json is assembled from
+saved canonical profile/network and returned deep_data, without another API/model
+call. It is explicitly an offline evidence replay, not fresh live generation. The
+model, 400 output-token ceiling, provider/concurrency/cache safeguards and customer
+flow remain. This correction has not acquired additional live-generation approval.
+
+Local quality-guard validation: **38 runtime/API tests passed**, including both
+captured production responses selecting fallback, targeted short unsupported
+claims, style limits and the existing concurrency/cache safeguards.
