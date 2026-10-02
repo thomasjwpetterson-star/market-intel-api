@@ -105,6 +105,14 @@ class CompanySnapshotIsolationTests(unittest.TestCase):
 
 
 class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        runtime_patch = patch.object(main, "PUBLIC_BRIEF_RUNTIME", main.PublicBriefRuntime())
+        runtime_patch.start()
+        self.addCleanup(runtime_patch.stop)
+        client_patch = patch.object(main.aclient, "with_options", return_value=main.aclient)
+        self.provider_options = client_patch.start()
+        self.addCleanup(client_patch.stop)
+
     async def test_database_work_shares_the_service_thread_limit(self):
         entered = threading.Event()
         release = threading.Event()
@@ -175,13 +183,63 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
         evidence = messages[1]["content"]
         self.assertIn("CANONICAL COMPANY", evidence)
         self.assertIn("FY2024–FY2025", evidence)
-        self.assertIn("Net prime obligations: $500.00", evidence)
-        self.assertIn("All tracked subcontract awards received: $1,200.00", evidence)
+        self.assertIn("Observed prime contract value: $500.00", evidence)
+        self.assertIn("USAspending net obligations and DLA procurement-line values", evidence)
+        self.assertIn("Mimir-adjusted reported subcontract value across all tracked partners: $1,200.00", evidence)
         self.assertNotIn("FORGED NAME", evidence)
         self.assertNotIn("999999999999", evidence)
         self.assertNotIn("FY18", evidence)
         self.assertNotIn("Total Mapped Revenue", evidence)
         self.assertIn("Do not assert those conclusions", messages[0]["content"])
+        self.provider_options.assert_called_once_with(timeout=20, max_retries=0)
+
+    async def test_provider_failure_preserves_reference_only_preview_and_response_contract(self):
+        request = SimpleNamespace(json=AsyncMock(return_value={"cage": "6FH39"}))
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(main, "get_company_profile", return_value={"found": True, "name": "REFERENCE COMPANY", "cage": "6FH39", "total_obligations": 0.0, "profile_source": "CAGE_REFERENCE_ONLY"}))
+            stack.enter_context(patch.object(main, "query_summary_df", return_value=pd.DataFrame()))
+            stack.enter_context(patch.object(main, "get_company_parts", return_value=[]))
+            stack.enter_context(patch.object(main, "get_subset_from_disk", return_value=pd.DataFrame()))
+            stack.enter_context(patch.object(main, "get_company_network", return_value={"primes": [], "subs": []}))
+            completion = stack.enter_context(patch.object(main.aclient.chat.completions, "create", AsyncMock(side_effect=RuntimeError("private provider diagnostic"))))
+            with self.assertLogs("mimir-api", level="WARNING"):
+                result = await main.generate_unlocked_brief(request)
+        self.assertEqual(set(result), {"success", "ai_brief", "headline_metric", "deep_data"})
+        self.assertIs(result["success"], True)
+        self.assertEqual(set(result["deep_data"]), {"platforms", "agencies", "nsns", "nsn_period_label", "contracts", "network", "network_title"})
+        self.assertIn("coverage is unavailable", result["ai_brief"])
+        self.assertIn("subcontract-award breakdown is unavailable", result["ai_brief"])
+        self.assertNotIn("$0", result["ai_brief"])
+        self.assertNotIn("private provider diagnostic", result["ai_brief"])
+        evidence = completion.call_args.kwargs["messages"][1]["content"]
+        self.assertIn("Unavailable in the loaded financial records", evidence)
+        self.assertNotIn("$0", evidence)
+
+    async def test_repeated_evidence_reuses_inference_but_refreshes_deep_data(self):
+        request = SimpleNamespace(json=AsyncMock(return_value={"cage": "6FH39", "name": "IGNORED CLIENT LABEL"}))
+        profiles = [{"found": True, "name": "CANONICAL COMPANY", "cage": "6FH39", "total_obligations": value}
+                    for value in (500.0, 500.0, 1000.0)]
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(main, "get_company_profile", side_effect=profiles))
+            stack.enter_context(patch.object(main, "query_summary_df", return_value=pd.DataFrame()))
+            stack.enter_context(patch.object(main, "get_company_parts", side_effect=[
+                [{"nsn": "5310001860967", "description": "First part"}],
+                [{"nsn": "5310001860967", "description": "Fresh part"}],
+                [],
+            ]))
+            stack.enter_context(patch.object(main, "get_subset_from_disk", return_value=pd.DataFrame()))
+            stack.enter_context(patch.object(main, "get_company_network", return_value={"primes": [], "subs": []}))
+            completion = stack.enter_context(patch.object(main.aclient.chat.completions, "create", AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Generated brief"))]))))
+            first = await main.generate_unlocked_brief(request)
+            second = await main.generate_unlocked_brief(request)
+            self.assertTrue(first["success"] and second["success"])
+            self.assertEqual(second["deep_data"]["nsns"][0]["desc"], "Fresh Part")
+            self.assertEqual(first["deep_data"]["nsns"][0]["desc"], "First Part")
+            completion.assert_awaited_once()
+            third = await main.generate_unlocked_brief(request)
+            self.assertTrue(third["success"])
+            self.assertEqual(completion.await_count, 2)
+            self.assertIn("Observed prime contract value: $1,000.00", completion.call_args.kwargs["messages"][1]["content"])
 
     async def test_unknown_company_does_not_generate_a_brief(self):
         request = SimpleNamespace(json=AsyncMock(return_value={"cage": "XXXXX"}))
