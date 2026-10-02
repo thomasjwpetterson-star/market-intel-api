@@ -4,6 +4,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, date
+from decimal import Decimal, ROUND_HALF_UP
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
@@ -7645,6 +7646,40 @@ class UnlockRequest(BaseModel):
 
 import pandas as pd
 
+
+def _format_brief_money(value):
+    """Keep supplied brief amounts readable without rounding away their scale."""
+    value = float(value)
+    if not math.isfinite(value):
+        return "Not reported"
+    magnitude = Decimal(str(abs(value)))
+    sign = "-" if value < 0 else ""
+    units = ("", "K", "M", "B", "T")
+    unit = 0
+    while magnitude >= 1000 and unit < len(units) - 1:
+        magnitude /= 1000
+        unit += 1
+    # Match the UI's Intl.NumberFormat half-expand rounding, including ties.
+    rounded = magnitude.quantize(Decimal("0.1") if unit else Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if unit and rounded >= 1000 and unit < len(units) - 1:
+        magnitude /= 1000
+        unit += 1
+        rounded = magnitude.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    amount = f"{rounded:f}".rstrip("0").rstrip(".")
+    return f"{sign}${amount}{units[unit]}"
+
+
+def _format_brief_mix_share(spend, other_spend, total):
+    """Do not describe a nonzero component as an exact 0% or 100% mix."""
+    pct = (spend / total * 100) if total > 0 else 0
+    if spend > 0 and other_spend > 0:
+        if pct < 0.01:
+            return "<0.01%"
+        if pct > 99.99:
+            return ">99.99%"
+    return f"{pct:.2f}%"
+
+
 @app.post("/api/public/unlock-brief")
 async def generate_unlocked_brief(request: Request):
     try:
@@ -7747,7 +7782,10 @@ async def generate_unlocked_brief(request: Request):
         subs_list = net_data.get("subs", []) if isinstance(net_data, dict) else []
         
         prime_spend = float(data.get("prime_exposure", 0))
-        sub_spend = sum(float(p.get("total", 0) or 0) for p in primes_list)
+        # Match the public snapshot's full upstream total, not just the ten displayed partners.
+        sub_spend = float(primes_list[0].get("network_total") or 0.0) if primes_list else 0.0
+        if sub_spend <= 0:
+            sub_spend = sum(float(p.get("total", 0) or 0) for p in primes_list)
         total_mapped = prime_spend + sub_spend
         is_primarily_prime = prime_spend >= sub_spend
         
@@ -7755,13 +7793,13 @@ async def generate_unlocked_brief(request: Request):
         network_title = "Top Subcontractors" if is_primarily_prime and subs_list else "Top Prime Customers"
 
         # 7. FORMAT NUMBERS & SHARES FOR LLM
-        def fmt_m(val): return f"${val/1_000_000:.1f}M"
+        def fmt_m(val): return _format_brief_money(val)
         def fmt_share(spend): 
             pct = (spend / total_mapped * 100) if total_mapped > 0 else 0
             return f" ({min(pct, 100):.0f}%)" # Caps at 100% to prevent multi-platform overlap bugs
 
-        prime_pct = (prime_spend / total_mapped * 100) if total_mapped > 0 else 0
-        sub_pct = (sub_spend / total_mapped * 100) if total_mapped > 0 else 0
+        prime_share = _format_brief_mix_share(prime_spend, sub_spend, total_mapped)
+        sub_share = _format_brief_mix_share(sub_spend, prime_spend, total_mapped)
 
         formatted_agencies = [f"{a['name']}: {fmt_m(a['spend'])}{fmt_share(a['spend'])}" for a in deep_agencies]
         formatted_platforms = [f"{p['platform_family']}: {fmt_m(p['spend'])}{fmt_share(p['spend'])}" for p in deep_platforms[:5]]
@@ -7789,6 +7827,7 @@ async def generate_unlocked_brief(request: Request):
         You are an elite Aerospace & Defense (A&D) investment banking analyst writing a concise, hard-hitting intelligence brief on a defense contractor.
         
         Summarize ONLY what is supported by the mapped federal financial data provided. Do not speculate on their commercial business or total global revenue.
+        Copy the supplied monetary amounts and prime/subcontract percentages exactly, including decimal places and < or > signs. Do not round the prime/subcontract mix to whole percentages.
         
         MANDATORY FORMAT & RULES:
         You MUST structure your response exactly with these three bolded headings. No intro/outro text. Write 1-3 highly analytical, professional sentences per section.
@@ -7810,7 +7849,9 @@ async def generate_unlocked_brief(request: Request):
         Entity: {safe_name} (CAGE: {safe_cage})
         
         DATABASE SIGNALS (FY18 - Present):
-        - Total Mapped Revenue: {fmt_m(total_mapped)} ({prime_pct:.0f}% Prime / {sub_pct:.0f}% Sub)
+        - Total Mapped Revenue: {fmt_m(total_mapped)} ({prime_share} Prime / {sub_share} Sub)
+        - Prime Contract Value: {fmt_m(prime_spend)}
+        - Subcontract Value: {fmt_m(sub_spend)}
         - Agency Mix: {', '.join(formatted_agencies) if formatted_agencies else 'None mapped'}
         - Top Platforms: {', '.join(formatted_platforms) if formatted_platforms else 'None mapped'}
         - Core Federal Capabilities: {', '.join(formatted_caps) if formatted_caps else 'None mapped'}
