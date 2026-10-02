@@ -84,6 +84,32 @@ website, the database or existing materialized public pages. It does not
 establish transaction-level completeness or reconcile adjusted amounts back
 to individual government reports.
 
+### Follow-up finding from the approved two-request production smoke
+
+The first generated DOMMES brief incorrectly said its value was derived from
+both datasets despite an unavailable company source split. The repeated request
+returned the same cached text; caching correctly reduced duplicate work but did
+not validate that claim. No additional production generations were used to
+develop this correction.
+
+The model now receives an explicit UNKNOWN company-specific source composition,
+without the general pipeline recipe in its evidence. Source datasets and
+valuation formulas are reserved for a deterministic general-methodology note
+appended exactly once after both generated text and evidence-only fallbacks.
+That note states that neither dataset's contribution to this company total has
+been established. Policy and note text participate in the cache key.
+
+A validator rejects generated dataset/formula terminology, including formatting
+variants of USAspending, procurement/contract-line values, net price, ordered
+quantity and federal action obligation. It permits DLA/Defense Logistics Agency
+as an awarding-agency mention and permits unknown-composition caveats. This
+deliberately narrow output boundary avoids trying to infer claim grammar from
+phrases such as “derived from”; it also rejects otherwise accurate generated
+methodology descriptions because that content belongs in the verified note.
+Rejected output uses the existing fallback and short failure cooldown. It is
+not a claim of complete semantic verification or protection against every
+possible paraphrase. The final text budget includes the deterministic note.
+
 Reference-only company identity and an unavailable subcontract breakdown now
 produce “unavailable” evidence rather than a fabricated `$0`. Actual observed
 zero remains zero. The fiscal window and separate-measure semantics from the
@@ -99,11 +125,11 @@ configuration, stable response keys, and fresh deep data despite cached text.
 Existing company module isolation, reload, award serving, platform, public
 projection/release and automation tests are included in the combined run.
 
-Final local validation passed **86 combined API tests** and **3 existing Ask
+Final local validation passed **90 combined API tests** and **3 existing Ask
 context/logging regression tests**. Python compilation and `git diff --check`
-also passed. The 86 include all 75 previously verified API tests plus nine
-runtime-helper tests and two endpoint regression tests for provider failure
-and text reuse with refreshed data.
+also passed. The 90 include all 75 previously verified API tests plus twelve
+runtime-helper tests and three endpoint regression tests for provider failure,
+text reuse with refreshed data, and rejection of the captured unsupported claim.
 
 These tests use dummy credentials and mocked inference/local data; no customer
 email, production provider request or production database mutation is needed.

@@ -8,12 +8,42 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
+import unicodedata
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 
 logger = logging.getLogger("mimir-api")
+
+PUBLIC_BRIEF_SOURCE_POLICY = "company-source-composition-unknown-v1"
+PUBLIC_BRIEF_SOURCE_NOTE = (
+    "General data methodology, not company-specific attribution: the prime contract-value measure can include "
+    "USAspending net obligations and DLA procurement-line values calculated as net price times ordered quantity. "
+    "This company's source composition is UNKNOWN: no source-specific breakdown was supplied, "
+    "so neither dataset's contribution to this total is established."
+)
+
+
+def validate_brief_narrative(text: str, max_text_chars: int = 6000) -> str:
+    """Reserve dataset/formula explanations for the deterministic source note.
+
+    This is a narrow claim-class boundary, not general semantic verification.
+    DLA may still be named as an awarding agency. Removing spacing/punctuation
+    prevents formatting variants of reserved source terms from bypassing it.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Invalid brief result")
+    if len(text) + len(PUBLIC_BRIEF_SOURCE_NOTE) + 2 > max_text_chars:
+        raise ValueError("Brief and source note exceed text limit")
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    compact = re.sub(r"[^a-z0-9]", "", normalized)
+    reserved = ("usaspending", "federalactionobligation", "procurementlinevalue",
+                "contractlinevalue", "netprice", "orderedquantity")
+    if any(term in compact for term in reserved):
+        raise ValueError("Generated brief includes reserved source methodology")
+    return text
 
 
 def brief_cache_key(completion_parameters: Dict[str, Any]) -> str:
@@ -32,7 +62,7 @@ def evidence_only_brief(*, name: str, prime_value: Optional[float],
     else:
         period = f" over {prime_period}" if prime_period else "; the fiscal-year range is unavailable"
         position = f"Loaded records report ${prime_value:,.2f} in observed prime contract value for {name}{period}."
-        position += " Depending on the available records, this measure can include USAspending net obligations and DLA procurement-line values (net price times ordered quantity)."
+        position += " Company-specific source composition is UNKNOWN."
     if sub_value is None:
         position += " A subcontract-award breakdown is unavailable in the loaded records."
     else:

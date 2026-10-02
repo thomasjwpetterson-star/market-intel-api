@@ -3,7 +3,22 @@ from copy import deepcopy
 import unittest
 from unittest.mock import AsyncMock
 
-from public_brief_runtime import PublicBriefRuntime, brief_cache_key, evidence_only_brief
+from public_brief_runtime import (
+    PUBLIC_BRIEF_SOURCE_NOTE, PublicBriefRuntime, brief_cache_key,
+    evidence_only_brief, validate_brief_narrative,
+)
+
+
+CAPTURED_UNSUPPORTED_BRIEF = (
+    "**Position:** DOMMES CONSULTING INC has an observed prime contract value of $500.00 during the fiscal years 2025 to 2026. "
+    "This value is derived from USAspending net obligations and DLA procurement-line values, though the specific source split is not provided. "
+    "The Mimir-adjusted reported subcontract value is $7,090,483.20, but the observation period for this measure is not established.\n\n"
+    "**Dependency:** The awarding agency for the observed prime contract is the Department of the Navy, with a contract classification in engineering services valued at $500.00. "
+    "There are no Mimir platform mappings associated with the observed prime contract value.\n\n"
+    "**Implication:** The data provided is limited to specific observations and does not imply comprehensive coverage or current activity. "
+    "Before making any commercial decisions, it is crucial to verify the information through direct source confirmation. "
+    "The concentration of agency awards does not inherently indicate sole-source status or predict future demand."
+)
 
 
 class BriefCacheKeyTests(unittest.TestCase):
@@ -34,10 +49,35 @@ class BriefCacheKeyTests(unittest.TestCase):
                                        sub_value=100.0, sub_basis="Displayed partners only",
                                        agency_summary="Agency information is unavailable.")
         self.assertIn("$0.00 in observed prime contract value", observed)
-        self.assertIn("USAspending net obligations and DLA procurement-line values", observed)
+        self.assertIn("Company-specific source composition is UNKNOWN", observed)
         self.assertIn("can overlap and should not be added together", observed)
         self.assertIn("FY2024–FY2025", observed)
         self.assertIn("Displayed partners only: $100.00, reported separately", observed)
+
+    def test_source_guard_rejects_captured_claim_and_format_variants(self):
+        for narrative in (CAPTURED_UNSUPPORTED_BRIEF,
+                          "Its value includes USA-spending records.",
+                          "This is based on U.S.A. Spending data.",
+                          "DLA procurement\u2011line values contributed to this amount.",
+                          "The amount equals net_price times ordered_quantity."):
+            with self.subTest(narrative=narrative), self.assertRaises(ValueError):
+                validate_brief_narrative(narrative)
+
+    def test_source_guard_allows_agencies_and_uncertainty_rules(self):
+        for narrative in (
+            "**Dependency:** Defense Logistics Agency is the largest observed awarding agency ($100.00).",
+            "**Dependency:** DLA appears in the supplied agency mix. This does not establish sole-source status.",
+            "**Implication:** Company source composition is unknown. An agency name does not establish a data source.",
+            "**Position:** The observed prime contract value is $0.00. The source-specific split is unavailable.",
+        ):
+            self.assertEqual(validate_brief_narrative(narrative), narrative)
+
+    def test_note_budget_and_policy_change_are_part_of_safeguards(self):
+        with self.assertRaises(ValueError):
+            validate_brief_narrative("x" * 6000)
+        key = brief_cache_key({"completion": {}, "source_policy": "v1", "source_note": PUBLIC_BRIEF_SOURCE_NOTE})
+        self.assertNotEqual(key, brief_cache_key({"completion": {}, "source_policy": "v2", "source_note": PUBLIC_BRIEF_SOURCE_NOTE}))
+        self.assertNotEqual(key, brief_cache_key({"completion": {}, "source_policy": "v1", "source_note": "Updated note"}))
 
 
 class PublicBriefRuntimeTests(unittest.IsolatedAsyncioTestCase):

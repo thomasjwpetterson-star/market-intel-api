@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 import main
+from test_public_brief_runtime import CAPTURED_UNSUPPORTED_BRIEF
 
 
 class ReloadAuthorizationTests(unittest.IsolatedAsyncioTestCase):
@@ -175,7 +176,7 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
             result = await main.generate_unlocked_brief(request)
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["ai_brief"], "Observed brief")
+        self.assertEqual(result["ai_brief"], "Observed brief\n\n" + main.PUBLIC_BRIEF_SOURCE_NOTE)
         self.assertIn("unavailable", result["headline_metric"])
         self.assertEqual(result["deep_data"]["nsn_period_label"], "FY2022–FY2026")
         self.assertEqual(parts.call_args.kwargs["years"], [2022, 2023, 2024, 2025, 2026])
@@ -184,7 +185,8 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CANONICAL COMPANY", evidence)
         self.assertIn("FY2024–FY2025", evidence)
         self.assertIn("Observed prime contract value: $500.00", evidence)
-        self.assertIn("USAspending net obligations and DLA procurement-line values", evidence)
+        self.assertIn("Company-specific source composition: UNKNOWN", evidence)
+        self.assertNotIn("USAspending", evidence)
         self.assertIn("Mimir-adjusted reported subcontract value across all tracked partners: $1,200.00", evidence)
         self.assertNotIn("FORGED NAME", evidence)
         self.assertNotIn("999999999999", evidence)
@@ -211,9 +213,31 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("subcontract-award breakdown is unavailable", result["ai_brief"])
         self.assertNotIn("$0", result["ai_brief"])
         self.assertNotIn("private provider diagnostic", result["ai_brief"])
+        self.assertEqual(result["ai_brief"].count(main.PUBLIC_BRIEF_SOURCE_NOTE), 1)
         evidence = completion.call_args.kwargs["messages"][1]["content"]
         self.assertIn("Unavailable in the loaded financial records", evidence)
         self.assertNotIn("$0", evidence)
+
+    async def test_captured_unsupported_source_claim_returns_evidence_fallback(self):
+        request = SimpleNamespace(json=AsyncMock(return_value={"cage": "6FH39"}))
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(main, "get_company_profile", return_value={"found": True, "name": "DOMMES CONSULTING INC", "cage": "6FH39", "total_obligations": 500.0}))
+            stack.enter_context(patch.object(main, "query_summary_df", return_value=pd.DataFrame()))
+            stack.enter_context(patch.object(main, "get_company_parts", return_value=[]))
+            stack.enter_context(patch.object(main, "get_subset_from_disk", return_value=pd.DataFrame()))
+            stack.enter_context(patch.object(main, "get_company_network", return_value={"primes": [], "subs": []}))
+            completion = stack.enter_context(patch.object(main.aclient.chat.completions, "create", AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=CAPTURED_UNSUPPORTED_BRIEF))]))))
+            with self.assertLogs("mimir-api", level="WARNING"):
+                first = await main.generate_unlocked_brief(request)
+            second = await main.generate_unlocked_brief(request)
+        for result in (first, second):
+            self.assertIs(result["success"], True)
+            self.assertIn("evidence-only summary", result["ai_brief"])
+            self.assertIn("source composition is UNKNOWN", result["ai_brief"])
+            self.assertNotIn("This value is derived from", result["ai_brief"])
+            self.assertEqual(result["ai_brief"].count(main.PUBLIC_BRIEF_SOURCE_NOTE), 1)
+            self.assertIn("deep_data", result)
+        completion.assert_awaited_once()
 
     async def test_repeated_evidence_reuses_inference_but_refreshes_deep_data(self):
         request = SimpleNamespace(json=AsyncMock(return_value={"cage": "6FH39", "name": "IGNORED CLIENT LABEL"}))
