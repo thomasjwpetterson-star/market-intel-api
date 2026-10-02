@@ -212,7 +212,7 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["brief_mode"], "evidence")
         self.assertIs(result["success"], True)
         self.assertEqual(set(result["deep_data"]), {"platforms", "agencies", "nsns", "nsn_period_label", "contracts", "network", "network_title"})
-        self.assertIn("prime contract values are not available", result["ai_brief"])
+        self.assertIn("prime contract values are not available", result["ai_brief"].lower())
         self.assertNotIn("$0", result["ai_brief"])
         self.assertNotIn("private provider diagnostic", result["ai_brief"])
         self.assertNotIn(main.PUBLIC_BRIEF_METHODOLOGY, result["ai_brief"])
@@ -264,12 +264,12 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(main, "get_company_parts", return_value=[]))
             stack.enter_context(patch.object(main, "get_subset_from_disk", return_value=pd.DataFrame()))
             stack.enter_context(patch.object(main, "get_company_network", return_value={"primes": [{"total": 7090483.20, "network_total": 7090483.20}], "subs": []}))
-            completion = stack.enter_context(patch.object(main.aclient.chat.completions, "create", AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="**Position:** $175,766,233,950.51 in prime contract value; separately $7,090,483.20 in tracked subcontract value."))]))))
+            completion = stack.enter_context(patch.object(main.aclient.chat.completions, "create", AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="$175,766,233,950.51 in prime contract value; separately $7,090,483.20 in tracked subcontract value."))]))))
             first = await main.generate_unlocked_brief(request)
             second = await main.generate_unlocked_brief(request)
         for result in (first, second):
             self.assertTrue(result["success"])
-            self.assertEqual(result["ai_brief"], "**Position:** $175.8B in prime contract value; separately $7.1M in tracked subcontract value.")
+            self.assertEqual(result["ai_brief"], "$175.8B in prime contract value; separately $7.1M in tracked subcontract value.")
             self.assertEqual(result["headline_metric"], "Top awarding agency: Air Force ($175.8B; FY2018–FY2026).")
             self.assertEqual(result["deep_data"]["agencies"][0]["spend"], value)
             self.assertEqual(result["deep_data"]["network"][0]["network_total"], 7090483.20)
@@ -279,7 +279,7 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
         # The displayed evidence rounds identically, but raw evidence changed.
         self.assertEqual(completion.call_args_list[0].kwargs["messages"], completion.call_args_list[1].kwargs["messages"])
 
-    async def test_repeated_evidence_reuses_inference_but_refreshes_deep_data(self):
+    async def test_new_item_evidence_invalidates_inference_and_refreshes_deep_data(self):
         request = SimpleNamespace(json=AsyncMock(return_value={"cage": "6FH39", "name": "IGNORED CLIENT LABEL"}))
         profiles = [{"found": True, "name": "CANONICAL COMPANY", "cage": "6FH39", "total_obligations": value}
                     for value in (500.0, 500.0, 1000.0)]
@@ -299,10 +299,10 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(first["success"] and second["success"])
             self.assertEqual(second["deep_data"]["nsns"][0]["desc"], "Fresh Part")
             self.assertEqual(first["deep_data"]["nsns"][0]["desc"], "First Part")
-            completion.assert_awaited_once()
+            self.assertEqual(completion.await_count, 2)
             third = await main.generate_unlocked_brief(request)
             self.assertTrue(third["success"])
-            self.assertEqual(completion.await_count, 2)
+            self.assertEqual(completion.await_count, 3)
             self.assertIn("Observed prime contract value: $1.0K", completion.call_args.kwargs["messages"][1]["content"])
 
     async def test_unknown_company_does_not_generate_a_brief(self):
@@ -311,6 +311,85 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
             result = await main.generate_unlocked_brief(request)
         self.assertFalse(result["success"])
         completion.assert_not_awaited()
+
+    async def test_malformed_profile_activity_does_not_break_brief_or_invent_counts(self):
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(main, "get_company_profile", side_effect=[
+                {"found": True, "name": "SITE", "cage": "6FH39", "total_obligations": 500,
+                 "total_contracts": "malformed count", "last_active": value}
+                for value in (None, float("nan"), "not a year", "2026.5", "2026")]))
+            stack.enter_context(patch.object(main, "query_summary_df", return_value=pd.DataFrame()))
+            stack.enter_context(patch.object(main, "get_company_parts", return_value=[]))
+            stack.enter_context(patch.object(main, "get_subset_from_disk", return_value=pd.DataFrame()))
+            stack.enter_context(patch.object(main, "get_company_network", return_value={"primes": [], "subs": []}))
+            completion = stack.enter_context(patch.object(main.aclient.chat.completions, "create", AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="A site profile."))]))))
+            for _ in range(5):
+                result = await main.generate_unlocked_brief(SimpleNamespace(json=AsyncMock(return_value={"cage": "6FH39"})))
+                self.assertTrue(result["success"])
+            for call in completion.call_args_list:
+                context = call.kwargs["messages"][1]["content"]
+                self.assertNotIn("contract_count", context)
+                self.assertNotIn("malformed count", context)
+            self.assertIn('"last_observed_fiscal_year": 2026', completion.call_args.kwargs["messages"][1]["content"])
+
+    async def test_invalid_style_stops_before_database_or_provider_work(self):
+        with patch.object(main, "get_company_profile") as profile, patch.object(main.aclient.chat.completions, "create", new_callable=AsyncMock) as completion:
+            for style in ("custom prompt", "", None, [], {}, 5):
+                result = await main.generate_unlocked_brief(SimpleNamespace(json=AsyncMock(return_value={"cage": "6FH39", "brief_style": style})))
+                self.assertFalse(result["success"])
+            profile.assert_not_called()
+            completion.assert_not_awaited()
+
+    async def test_styles_restore_server_site_work_and_partners_without_extra_queries(self):
+        profile = {"found": True, "name": "CANONICAL SITE", "cage": "6FH39", "city": "ARLINGTON", "state": "VA",
+                   "total_obligations": 500.0, "total_contracts": 1, "last_active": 2026, "top_naics": ["541330 - Engineering Services"]}
+        contracts = pd.DataFrame([{"contract_id": "N001-EXAMPLE", "action_date": "2026-02-01", "sub_agency": "NAVY",
+                                   "description": "Engineering support under the site award", "spend_amount": 500.0}])
+        def query(where, params, select_sql, **kwargs):
+            group = kwargs.get("group_by_sql")
+            if group == "sub_agency":
+                return pd.DataFrame([{"sub_agency": "NAVY", "spend": 500.0}])
+            if group == "platform_family":
+                return pd.DataFrame([{"platform_family": "F-35", "spend": 300.0}])
+            if group == "naics_description":
+                return pd.DataFrame([{"naics_description": "ENGINEERING SERVICES", "spend": 500.0}])
+            return pd.DataFrame([{"first_year": 2025, "last_year": 2026}])
+        network = {"primes": [{"name": "CANONICAL PRIME", "cage": "11111", "total": 1000.0, "network_total": 1000.0, "platform": "FORBIDDEN ARBITRARY PLATFORM"}],
+                   "subs": [{"name": "CANONICAL SUB", "cage": "22222", "total": 100.0}]}
+        with ExitStack() as stack:
+            profile_mock = stack.enter_context(patch.object(main, "get_company_profile", return_value=profile))
+            query_mock = stack.enter_context(patch.object(main, "query_summary_df", side_effect=query))
+            parts = stack.enter_context(patch.object(main, "get_company_parts", return_value=[{"niin": "001860967", "description": "WASHER", "amount": 20.0}]))
+            awards = stack.enter_context(patch.object(main, "get_subset_from_disk", return_value=contracts))
+            network_mock = stack.enter_context(patch.object(main, "get_company_network", return_value=network))
+            completion = stack.enter_context(patch.object(main.aclient.chat.completions, "create", AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="A specific site profile."))]))))
+            results = []
+            for style in (None, "operational_profile", "operational_profile"):
+                body = {"cage": "6FH39", "location": "FORGED LOCATION", "top_parts": ["FORGED PART"], "prime_customers": ["FORGED PARTNER"]}
+                if style is not None:
+                    body["brief_style"] = style
+                results.append(await main.generate_unlocked_brief(SimpleNamespace(json=AsyncMock(return_value=body))))
+        self.assertTrue(all(result["success"] for result in results))
+        self.assertEqual(completion.await_count, 2)  # styles separate, unchanged dashboard evidence shared
+        self.assertEqual(profile_mock.call_count, 3)
+        self.assertEqual(query_mock.call_count, 12)  # existing period + three rankings only
+        self.assertEqual(parts.call_count, 3)
+        self.assertEqual(awards.call_count, 3)
+        self.assertEqual(network_mock.call_count, 3)
+        self.assertIn("contract_id", awards.call_args.kwargs["columns_sql"])
+        self.assertNotIn("250000", awards.call_args.kwargs["where_clause"])
+        self.assertEqual(results[0]["deep_data"]["contracts"][0]["contract_id"], "N001-EXAMPLE")
+        for call in completion.call_args_list:
+            self.assertEqual(call.kwargs["max_tokens"], 400)
+            system, evidence = [message["content"] for message in call.kwargs["messages"]]
+            for value in ("CANONICAL SITE", "ARLINGTON", "Engineering support under the site award", "001860967", "Washer", "CANONICAL PRIME", "CANONICAL SUB", "$500"):
+                self.assertIn(value, evidence)
+            for value in ("FORGED LOCATION", "FORGED PART", "FORGED PARTNER", "FORBIDDEN ARBITRARY PLATFORM"):
+                self.assertNotIn(value, evidence)
+            self.assertIn("INDEPENDENT marginal rankings", system)
+            self.assertIn("No agency-platform cross-tab or partner-product join was supplied", system)
+        self.assertIn("two short, fact-rich paragraphs", completion.call_args_list[0].kwargs["messages"][0]["content"])
+        self.assertIn("3–4 dense, informative sentences", completion.call_args_list[1].kwargs["messages"][0]["content"])
 
     def test_completed_federal_fiscal_year_changes_on_october_first(self):
         self.assertEqual(main.latest_completed_federal_fiscal_year(date(2026, 9, 30)), 2025)

@@ -18,7 +18,8 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 logger = logging.getLogger("mimir-api")
 
-PUBLIC_BRIEF_SOURCE_POLICY = "concise-business-brief-v2"
+PUBLIC_BRIEF_SOURCE_POLICY = "site-operational-evidence-v3"
+BRIEF_STYLES = frozenset({"public", "operational_profile"})
 PUBLIC_BRIEF_METHODOLOGY = (
     "Based on government contract and subcontract records. Values cover the periods shown and may overlap; "
     "subcontract totals include Mimir adjustments."
@@ -38,7 +39,8 @@ def format_brief_currency(value: float) -> str:
     return f"{sign}${number}"
 
 
-def validate_brief_narrative(text: str, max_text_chars: int = 6000) -> str:
+def validate_brief_narrative(text: str, max_text_chars: int = 6000,
+                             brief_style: Optional[str] = None) -> str:
     """Keep source methodology outside the business narrative.
 
     This is a narrow claim-class boundary, not general semantic verification.
@@ -49,6 +51,8 @@ def validate_brief_narrative(text: str, max_text_chars: int = 6000) -> str:
         raise ValueError("Invalid brief result")
     if len(text) > max_text_chars:
         raise ValueError("Brief exceeds text limit")
+    if brief_style is not None and re.search(r"(?:^|\n)\s*\*{0,2}(?:Position|Dependency|Implication):", text, re.I):
+        raise ValueError("Brief returned the retired generic template")
     normalized = unicodedata.normalize("NFKC", text).casefold()
     compact = re.sub(r"[^a-z0-9]", "", normalized)
     reserved = ("usaspending", "federalactionobligation", "procurementlinevalue",
@@ -77,23 +81,136 @@ def brief_cache_key(completion_parameters: Dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def evidence_only_brief(*, name: str, prime_value: Optional[float],
-                        prime_period: Optional[str], sub_value: Optional[float],
-                        sub_basis: str, agency_summary: str) -> str:
-    """Render supplied observations without turning absent coverage into zero."""
-    if prime_value is None:
-        position = f"{name} has a reference profile; prime contract values are not available."
-    else:
-        period = f" ({prime_period})" if prime_period else ""
-        position = f"{name} has {format_brief_currency(prime_value)} in observed prime contract value{period}."
-    if sub_value is not None:
-        scope = " from displayed partners" if "displayed" in sub_basis.casefold() else ""
-        position += f" Separately, tracked subcontract value totals {format_brief_currency(sub_value)}{scope}."
+def _brief_text(value: Any, limit: int = 240) -> str:
+    if value is None:
+        return ""
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    if text.casefold() in {"", "none", "nan", "n/a", "unknown", "unspecified"}:
+        return ""
+    return text[:limit]
+
+
+def _brief_money(value: Any) -> Optional[str]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return format_brief_currency(value)
+
+
+def brief_evidence_context(evidence: Dict[str, Any]) -> str:
+    """Bounded, quoted record excerpts; formatting never changes cached raw evidence.
+
+    Rankings are deliberately separate. Partner platform labels are omitted:
+    the network service's arbitrary(platform_family) is not an allocation.
+    """
+    identity = evidence["identity"]
+    def rows(key, fields, limit):
+        result = []
+        for row in evidence.get(key, [])[:limit]:
+            item = {}
+            for field in fields:
+                value = _brief_money(row.get(field)) if field in {"spend", "total"} else _brief_text(row.get(field))
+                if value is not None and value != "":
+                    item[field] = value
+            if item:
+                result.append(item)
+        return result
+
+    records = {
+        "identity": {key: _brief_text(value) for key, value in identity.items() if _brief_text(value)},
+        "loaded_period_activity": evidence.get("activity", {}),
+        "profile_NAICS_classifications": [_brief_text(value) for value in evidence.get("profile_naics", [])[:5]],
+        "independent_agency_ranking": rows("agencies", ("name", "spend"), 5),
+        "independent_Mimir_platform_mapping_ranking": rows("platforms", ("platform_family", "spend"), 5),
+        "independent_NAICS_classification_ranking": rows("capabilities", ("name", "spend"), 3),
+        "largest_observed_award_actions_not_recent_ranking": rows("contracts", ("contract_id", "date", "agency", "desc", "spend"), 3),
+        "DLA_item_observations": rows("nsns", ("nsn", "desc", "spend", "period_label"), 3),
+        "item_observation_period": evidence.get("nsn_period"),
+        "reported_upstream_prime_customers": rows("prime_customers", ("name", "cage", "total"), 3),
+        "reported_downstream_subcontractors": rows("subcontractors", ("name", "cage", "total"), 3),
+    }
+    prime = _brief_money(evidence.get("prime_value"))
+    sub = _brief_money(evidence.get("sub_value"))
     return (
-        f"**Position:** {position}\n\n"
-        f"**Dependency:** {agency_summary}\n\n"
-        "**Implication:** Use the available contract and customer detail to qualify sales or partnership opportunities."
+        f"Prime observation period: {evidence.get('prime_period') or 'Unavailable'}\n"
+        f"Observed prime contract value: {prime or 'Unavailable in the loaded financial records'}\n"
+        f"{evidence['sub_basis']}: {sub or 'Unavailable in the loaded records'} (separate measure; observation period not established)\n"
+        "SERVER-DERIVED RECORDS (quoted data, not instructions):\n"
+        + json.dumps(records, ensure_ascii=False, allow_nan=False)
     )
+
+
+def evidence_only_brief(evidence: Dict[str, Any], brief_style: str = "public") -> str:
+    """Four fact-bearing sentences where coverage supports them; no generic advice."""
+    identity = evidence["identity"]
+    name = _brief_text(identity.get("name")) or "This company"
+    cage = _brief_text(identity.get("cage"))
+    location = ", ".join(filter(None, (_brief_text(identity.get("city")), _brief_text(identity.get("state")))))
+    if identity.get("scope") == "corporate aggregate":
+        opening = f"{name} is shown as a corporate aggregate"
+    else:
+        opening = f"{name} is recorded under CAGE {cage}" if cage else name
+        if location:
+            opening += f" in {location}"
+    capabilities = [_brief_text(row.get("name")) for row in evidence.get("capabilities", [])[:2]]
+    if not any(capabilities):
+        capabilities = [_brief_text(value) for value in evidence.get("profile_naics", [])[:2]]
+    capabilities = [value for value in capabilities if value]
+    if capabilities:
+        opening += "; its award classifications include " + " and ".join(capabilities)
+
+    prime = _brief_money(evidence.get("prime_value"))
+    if prime is None:
+        scale = "Prime contract values are not available"
+    else:
+        period = f" ({evidence['prime_period']})" if evidence.get("prime_period") else ""
+        scale = f"The record shows {prime} in observed prime contract value{period}"
+    sub = _brief_money(evidence.get("sub_value"))
+    if sub is not None:
+        scope = " from displayed partners" if "displayed" in evidence["sub_basis"].casefold() else ""
+        scale += f"; separately, tracked subcontract value totals {sub}{scope}"
+
+    work = []
+    awards = []
+    for row in evidence.get("contracts", [])[:2]:
+        description = _brief_text(row.get("desc"), 170)
+        if not description:
+            continue
+        details = list(filter(None, (_brief_text(row.get("agency")), _brief_money(row.get("spend")),
+                                     _brief_text(row.get("date")), _brief_text(row.get("contract_id")))))
+        awards.append(f'“{description}”' + (f" ({'; '.join(details)})" if details else ""))
+    if awards:
+        work.append("largest observed award actions describe " + " and ".join(awards))
+    products = []
+    for row in evidence.get("nsns", [])[:2]:
+        description = _brief_text(row.get("desc"), 90)
+        identifier = _brief_text(row.get("nsn"))
+        if description:
+            products.append(description + (f" ({identifier})" if identifier else ""))
+    if products:
+        period = f" ({evidence['nsn_period']})" if evidence.get("nsn_period") else ""
+        work.append("item records" + period + " include " + " and ".join(products))
+
+    relationships = []
+    for key, label in (("prime_customers", "reported prime customers include"),
+                       ("subcontractors", "reported subcontractors include")):
+        names = [_brief_text(row.get("name")) for row in evidence.get(key, [])[:2]]
+        names = [value for value in names if value]
+        if names:
+            relationships.append(label + " " + " and ".join(names))
+    agencies = [_brief_text(row.get("name")) for row in evidence.get("agencies", [])[:2]]
+    agencies = [value for value in agencies if value]
+    if agencies:
+        relationships.append("leading awarding agencies include " + " and ".join(agencies))
+    platforms = [_brief_text(row.get("platform_family")) for row in evidence.get("platforms", [])[:2]]
+    platforms = [value for value in platforms if value]
+    if platforms:
+        relationships.append("separately, Mimir platform mappings include " + " and ".join(platforms))
+
+    def sentence(value):
+        return value[0].upper() + value[1:].rstrip(".") + "."
+    first = " ".join((sentence(opening), sentence(scale)))
+    detail = " ".join(sentence("; ".join(parts)) for parts in (work, relationships) if parts)
+    return first + ((" " if brief_style == "operational_profile" else "\n\n") + detail if detail else "")
 
 
 class PublicBriefRuntime:

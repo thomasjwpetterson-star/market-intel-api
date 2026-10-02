@@ -1,9 +1,9 @@
 # Public brief reliability and inference cost safeguards
 
-Current presentation correction is based on released API commit
-`c240fd2976b7f5c801d2e33c4751b5fcb375f0aa`. No production action or new
-environment setting is required by this patch. Integration and rollout remain
-with the parent task.
+Current operational-detail restoration is based on released API commit
+`28296e5`. No new environment setting or data migration is required. These
+changes are local until the reviewed deployment; integration and rollout
+remain with the parent task.
 
 ## Existing customer flow and risk
 
@@ -25,7 +25,11 @@ the existing preview component to hide its company result and tables.
 
 ## Exact behavior of this candidate
 
-The request and existing successful response fields are unchanged. Two optional
+The successful response fields remain compatible. An optional request field
+`brief_style` accepts only `public` (default) or `operational_profile`; other
+values fail before evidence retrieval or inference. This selects presentation,
+not authorization. The protected dashboard proxy selects `operational_profile`
+while retaining its sign-in and subscription checks. Two optional
 response fields are added: `methodology`, a short fixed note for the frontend's
 collapsed data notes, and `brief_mode` (`generated` or `evidence`). The latter
 identifies whether the returned text is the deterministic fallback. Customers still
@@ -59,7 +63,7 @@ email addresses or user financial payloads.
 The commercial tradeoff is deliberate: a busy, slow or failing provider yields
 a shorter, deterministic summary of the same loaded evidence while the data
 tables remain usable. Fallback status is available in `brief_mode`; the brief's
-three concise business sections do not carry a methodology paragraph or an
+factual paragraphs do not carry a methodology paragraph or an
 “evidence-only” disclaimer. It does not invent analysis or treat missing records as no
 activity. A failed call is not cached for the full success TTL.
 
@@ -68,6 +72,44 @@ still spend money, and process restarts or additional workers have independent
 caches and bounds. Database evidence work occurs before the inference guard
 and remains subject to the existing AnyIO/DuckDB limits. Server-verified lead
 access, durable quotas and a spending circuit breaker remain separate work.
+
+## Restored operational detail
+
+The public brief now uses two short factual paragraphs, normally 120–180 words
+when records support that detail. The dashboard regains its original 3–4 sentence
+operational profile without headings. Sparse records produce a shorter response.
+Both deterministic fallbacks carry the actual site, scale, award/item descriptions
+and partner names available, instead of generic research advice.
+
+Evidence comes from the already-fetched profile, capabilities, largest award
+actions, item observations, agencies, platform mappings and both directions of
+the reported subcontract network. Site location is a CAGE record address, not
+proof of a plant mission. A corporate aggregate has no invented single site.
+Agency/platform/classification rankings remain independent; co-occurring rankings
+do not establish Navy-to-F-35 attribution. Network arbitrary(platform_family)
+values are excluded from narrative evidence. Only fields in the same award row
+support a joined agency/description/amount claim. Profile total_contracts sums
+mixed contract-action/procurement-line counts; it is omitted from narrative
+evidence rather than described as distinct awards or actions. Invalid activity
+years are unavailable rather than breaking the brief. These are explicit prompt
+constraints, not a general semantic-proof mechanism.
+
+The same top-ten award query now includes actions below $250k, allowing a small
+site's $500 action and description to appear. It adds contract_id, already
+supported by the existing awards query/schema, to each deep_data.contracts item.
+Ordering remains amount descending, then date descending: these are largest
+observed actions, not a recent-award feed. No additional database query, schema
+change, ETL run or backfill is introduced.
+
+Exact raw evidence and style participate in the cache key, including locations,
+awards, items and both partner lists. Changing a detail invalidates generated
+text even if rounded figures remain unchanged. Public and dashboard styles
+intentionally have separate cache entries and can require two initial provider
+calls for the same company. The ceiling stays at 400 output tokens per call;
+inputs contain more bounded excerpts, so input-token cost can increase. Process
+concurrency, timeout, retry and cache limits are unchanged. Removing the dollar
+floor may change the existing query's selectivity; no numerical cost or latency
+saving is claimed.
 
 ## Monetary basis correction
 
@@ -145,8 +187,13 @@ safeguards, provider failure, fresh data with cached text, rejection of the
 captured unsupported claim, compact display, optional metadata, unchanged exact
 table values, and cache invalidation when precise amounts round identically.
 Existing Ask context/logging regressions and Python compilation are also checked.
-Local validation for this presentation correction passed **92 API tests** and
+The previous presentation correction passed **92 API tests** and
 **3 Ask regression tests**, plus Python compilation and `git diff --check`.
+
+The restoration focused suite passes **36 runtime/API tests**, covering style
+validation, site/work/partner evidence, small award inclusion, preserved query
+counts, separate style caching, changed item evidence and factual fallback formats.
+Mocked tests do not establish the quality of live generated output.
 
 These tests use dummy credentials and mocked inference/local data; no customer
 email, production provider request or production database mutation is needed.
@@ -155,10 +202,11 @@ After an approved deployment, a human acceptance check is:
 
 1. On `/tools/cage-code-lookup`, search a known company such as CAGE `81755`.
    Confirm identity, customers and available company data still appear.
-2. Using an existing signed-in account, unlock the brief. Confirm the three
-   headings and tables remain visible, and the text labels the two monetary
+2. Using an existing signed-in account, unlock the brief. Confirm two factual
+   paragraphs and existing tables remain visible, and the text labels the two monetary
    measures separately. A guest should still see the existing name/work-email
-   form; use a real test inbox if checking its email link.
+   form; use a real test inbox if checking its email link. In the paid dashboard,
+   confirm a 3–4 sentence site-specific operational profile without headings.
 3. Repeat the same company without changing data. Confirm the response has the
    same text and current tables. Provider-call reuse is established by local
    instrumentation tests, not by text similarity alone.

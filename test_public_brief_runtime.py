@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 from public_brief_runtime import (
     PUBLIC_BRIEF_METHODOLOGY, PublicBriefRuntime, brief_cache_key,
-    evidence_only_brief, format_brief_currency, validate_brief_narrative,
+    brief_evidence_context, evidence_only_brief, format_brief_currency, validate_brief_narrative,
 )
 
 
@@ -38,22 +38,70 @@ class BriefCacheKeyTests(unittest.TestCase):
             self.assertNotEqual(key, brief_cache_key(changed))
 
     def test_fallback_preserves_unknown_coverage_and_separate_measures(self):
-        unknown = evidence_only_brief(name="Reference Company", prime_value=None,
-                                      prime_period=None, sub_value=None, sub_basis="Tracked awards",
-                                      agency_summary="Agency information is unavailable.")
+        evidence = {"identity": {"name": "Reference Company", "cage": "6FH39"},
+                    "prime_value": None, "prime_period": None, "sub_value": None,
+                    "sub_basis": "Tracked awards"}
+        unknown = evidence_only_brief(evidence)
         self.assertNotIn("$0", unknown)
-        self.assertIn("prime contract values are not available", unknown)
+        self.assertIn("prime contract values are not available", unknown.lower())
         self.assertNotIn("UNKNOWN", unknown)
         self.assertNotIn("methodology", unknown)
-        observed = evidence_only_brief(name="Company", prime_value=0.0, prime_period="FY2024–FY2025",
-                                       sub_value=100.0, sub_basis="Displayed partners only",
-                                       agency_summary="Agency information is unavailable.")
+        observed = evidence_only_brief({**evidence, "prime_value": 0.0, "prime_period": "FY2024–FY2025",
+                                       "sub_value": 100.0, "sub_basis": "Displayed partners only"})
         self.assertIn("$0 in observed prime contract value", observed)
         self.assertNotIn("source composition", observed)
         self.assertNotIn("revenue", observed)
         self.assertIn("FY2024–FY2025", observed)
-        self.assertIn("Separately, tracked subcontract value totals $100 from displayed partners", observed)
+        self.assertIn("separately, tracked subcontract value totals $100 from displayed partners", observed)
         self.assertNotIn(PUBLIC_BRIEF_METHODOLOGY, observed)
+
+    def test_fact_rich_fallbacks_have_distinct_style_and_preserve_site_and_roles(self):
+        evidence = self.rich_evidence()
+        public = evidence_only_brief(evidence)
+        dashboard = evidence_only_brief(evidence, "operational_profile")
+        self.assertEqual(len(public.split("\n\n")), 2)
+        self.assertNotIn("\n", dashboard)
+        self.assertEqual(public.replace("\n\n", " "), dashboard)
+        for text in (public, dashboard):
+            for fact in ("CAGE 6FH39", "Arlington, VA", "Engineering Services", "$500", "N001-TEST",
+                         "Technical engineering support", "5310001860967", "Washers", "Prime Customer",
+                         "Component Supplier", "Mimir platform mappings include F-35"):
+                self.assertIn(fact, text)
+            for absent in ("**Position:", "**Dependency:", "**Implication:", "qualify sales", "sole-source", "SHIP-ARBITRARY"):
+                self.assertNotIn(absent, text)
+        parent = {**evidence, "identity": {"name": "Parent", "scope": "corporate aggregate", "city": "Wrong child city", "cage": "AGGREGATE"}}
+        parent_text = evidence_only_brief(parent)
+        self.assertIn("Parent is shown as a corporate aggregate", parent_text)
+        self.assertNotIn("Wrong child city", parent_text)
+        self.assertNotIn("CAGE AGGREGATE", parent_text)
+
+    @staticmethod
+    def rich_evidence():
+        return {
+            "identity": {"name": "Site Company", "cage": "6FH39", "city": "Arlington", "state": "VA", "scope": "CAGE site record"},
+            "activity": {"contract_count": 1}, "prime_value": 500.0, "prime_period": "FY2025–FY2026",
+            "sub_value": 7090483.2, "sub_basis": "Mimir-adjusted reported subcontract value",
+            "capabilities": [{"name": "Engineering Services", "spend": 500.0}],
+            "agencies": [{"name": "Department Of The Navy", "spend": 500.0}],
+            "platforms": [{"platform_family": "F-35", "spend": 300.0}],
+            "contracts": [{"contract_id": "N001-TEST", "agency": "Department Of The Navy", "desc": "Technical engineering support", "spend": 500.0, "date": "2026-02-01"}],
+            "nsns": [{"nsn": "5310001860967", "desc": "Washers", "spend": 200.0}], "nsn_period": "FY2022–FY2026",
+            "prime_customers": [{"name": "Prime Customer", "total": 7090483.2, "platform": "SHIP-ARBITRARY"}],
+            "subcontractors": [{"name": "Component Supplier", "total": 50.0}],
+        }
+
+    def test_context_keeps_rankings_independent_and_omits_arbitrary_partner_platform(self):
+        evidence = self.rich_evidence()
+        before = deepcopy(evidence)
+        text = brief_evidence_context(evidence)
+        self.assertEqual(evidence, before)
+        for fact in ("independent_agency_ranking", "independent_Mimir_platform_mapping_ranking", "largest_observed_award_actions_not_recent_ranking",
+                     "reported_upstream_prime_customers", "reported_downstream_subcontractors", "Technical engineering support", "$7.1M"):
+            self.assertIn(fact, text)
+        self.assertNotIn("SHIP-ARBITRARY", text)
+        for style in ("public", "operational_profile"):
+            with self.assertRaises(ValueError):
+                validate_brief_narrative("**Position:** Generic old format", brief_style=style)
 
     def test_currency_display_is_compact_with_signs_and_small_values_preserved(self):
         for amount, expected in ((175766233950.51, "$175.8B"), (7090483.20, "$7.1M"),
