@@ -1,5 +1,11 @@
 # API audit safeguards — local review candidate
 
+**Current brief status:** the brief changes documented below have been reverted
+at the user's request to the exact pre-audit implementation, retaining only
+bounded worker dispatch. The company module isolation and public NSN fallback
+repairs remain. See [PUBLIC_BRIEF_RESTORATION.md](PUBLIC_BRIEF_RESTORATION.md) for
+current brief behavior; the original audit notes below are historical.
+
 This is the local runtime candidate integrated on production/main commit
 `de56e371cffafcc95338c8470428038043338da1`. Production settings have not been
 changed by this integration. That base already contains the reload gate below;

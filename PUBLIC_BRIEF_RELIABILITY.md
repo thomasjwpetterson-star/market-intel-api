@@ -1,3 +1,11 @@
+# Historical implementation — superseded by requested rollback
+
+The user requested an exact restoration of the pre-audit briefs. The runtime,
+cache, prompt rewrites, output validator and fallback described below have been
+removed. See [PUBLIC_BRIEF_RESTORATION.md](PUBLIC_BRIEF_RESTORATION.md) for the
+restored behavior, exact baseline checksum and verification. The remainder is
+retained as a historical record, not current implementation guidance.
+
 # Public brief reliability and inference cost safeguards
 
 Current operational-detail restoration is based on released API commit
