@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 import unicodedata
@@ -17,17 +18,28 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 logger = logging.getLogger("mimir-api")
 
-PUBLIC_BRIEF_SOURCE_POLICY = "company-source-composition-unknown-v1"
-PUBLIC_BRIEF_SOURCE_NOTE = (
-    "General data methodology, not company-specific attribution: the prime contract-value measure can include "
-    "USAspending net obligations and DLA procurement-line values calculated as net price times ordered quantity. "
-    "This company's source composition is UNKNOWN: no source-specific breakdown was supplied, "
-    "so neither dataset's contribution to this total is established."
+PUBLIC_BRIEF_SOURCE_POLICY = "concise-business-brief-v2"
+PUBLIC_BRIEF_METHODOLOGY = (
+    "Based on government contract and subcontract records. Values cover the periods shown and may overlap; "
+    "subcontract totals include Mimir adjustments."
 )
 
 
+def format_brief_currency(value: float) -> str:
+    """Compact display only; precise monetary evidence remains in the cache key."""
+    if not math.isfinite(value):
+        raise ValueError("Brief currency must be finite")
+    amount = abs(value)
+    sign = "-" if value < 0 else ""
+    for divisor, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if amount >= divisor or (divisor > 1e3 and round(amount / (divisor / 1000), 1) >= 1000):
+            return f"{sign}${amount / divisor:.1f}{suffix}"
+    number = f"{amount:.2f}".rstrip("0").rstrip(".")
+    return f"{sign}${number}"
+
+
 def validate_brief_narrative(text: str, max_text_chars: int = 6000) -> str:
-    """Reserve dataset/formula explanations for the deterministic source note.
+    """Keep source methodology outside the business narrative.
 
     This is a narrow claim-class boundary, not general semantic verification.
     DLA may still be named as an awarding agency. Removing spacing/punctuation
@@ -35,15 +47,27 @@ def validate_brief_narrative(text: str, max_text_chars: int = 6000) -> str:
     """
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Invalid brief result")
-    if len(text) + len(PUBLIC_BRIEF_SOURCE_NOTE) + 2 > max_text_chars:
-        raise ValueError("Brief and source note exceed text limit")
+    if len(text) > max_text_chars:
+        raise ValueError("Brief exceeds text limit")
     normalized = unicodedata.normalize("NFKC", text).casefold()
     compact = re.sub(r"[^a-z0-9]", "", normalized)
     reserved = ("usaspending", "federalactionobligation", "procurementlinevalue",
-                "contractlinevalue", "netprice", "orderedquantity")
+                "contractlinevalue", "netprice", "orderedquantity",
+                "sourcecomposition", "sourcespecificsplit", "generaldatamethodology")
     if any(term in compact for term in reserved):
         raise ValueError("Generated brief includes reserved source methodology")
-    return text
+    # Apply the same readable formatting even if a model expands a supplied
+    # amount. This changes presentation only, not the value's evidential basis.
+    def compact_amount(match):
+        amount = float(match.group("amount").replace(",", ""))
+        multiplier = {"": 1, "k": 1e3, "thousand": 1e3, "m": 1e6, "million": 1e6,
+                      "b": 1e9, "billion": 1e9, "t": 1e12, "trillion": 1e12}[(match.group("unit") or "").lower()]
+        sign = -1 if match.group("before") or match.group("after") else 1
+        return format_brief_currency(sign * amount * multiplier)
+
+    return re.sub(r"(?P<before>-?)\$\s*(?P<after>-?)\s*(?P<amount>\d+(?:,\d{3})*(?:\.\d+)?)"
+                  r"(?:\s*(?P<unit>trillion|billion|million|thousand|[KMBT]))?(?!\w)",
+                  compact_amount, text, flags=re.IGNORECASE)
 
 
 def brief_cache_key(completion_parameters: Dict[str, Any]) -> str:
@@ -58,22 +82,17 @@ def evidence_only_brief(*, name: str, prime_value: Optional[float],
                         sub_basis: str, agency_summary: str) -> str:
     """Render supplied observations without turning absent coverage into zero."""
     if prime_value is None:
-        position = f"The loaded reference identifies {name}; prime contract-value coverage is unavailable."
+        position = f"{name} has a reference profile; prime contract values are not available."
     else:
-        period = f" over {prime_period}" if prime_period else "; the fiscal-year range is unavailable"
-        position = f"Loaded records report ${prime_value:,.2f} in observed prime contract value for {name}{period}."
-        position += " Company-specific source composition is UNKNOWN."
-    if sub_value is None:
-        position += " A subcontract-award breakdown is unavailable in the loaded records."
-    else:
-        position += f" {sub_basis}: ${sub_value:,.2f}, reported separately; its observation period is not established here."
+        period = f" ({prime_period})" if prime_period else ""
+        position = f"{name} has {format_brief_currency(prime_value)} in observed prime contract value{period}."
+    if sub_value is not None:
+        scope = " from displayed partners" if "displayed" in sub_basis.casefold() else ""
+        position += f" Separately, tracked subcontract value totals {format_brief_currency(sub_value)}{scope}."
     return (
         f"**Position:** {position}\n\n"
         f"**Dependency:** {agency_summary}\n\n"
-        "**Implication:** This is an evidence-only summary of loaded records, not a complete view of company revenue. "
-        "Prime and subcontract measures can overlap and should not be added together. "
-        "Verify the underlying government records and reporting dates before a commercial decision; "
-        "platform associations remain Mimir mappings."
+        "**Implication:** Use the available contract and customer detail to qualify sales or partnership opportunities."
     )
 
 

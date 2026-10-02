@@ -1,19 +1,22 @@
 # Public brief reliability and inference cost safeguards
 
-Local candidate on `codex/public-brief-cost-controls`, based on released API
-commit `24e196403a94fc57bc42e094cb16737e1cb64a83`. No production action or new
+Current presentation correction is based on released API commit
+`c240fd2976b7f5c801d2e33c4751b5fcb375f0aa`. No production action or new
 environment setting is required by this patch. Integration and rollout remain
 with the parent task.
 
 ## Existing customer flow and risk
 
-The sole browser caller found in the current frontend is
-`components/PublicTeaserSearch.tsx:147`. It posts directly to the API after a
+The public lookup browser caller is `components/PublicTeaserSearch.tsx`.
+It posts directly to the API after a
 Supabase session is found, or after the lead-capture OTP request succeeds.
 The browser also remembers `mimir_lead_captured` in localStorage. The API has
 no server-side verified-lead gate on this endpoint; the optional bearer header
 does not establish authorization. The preceding teaser lookup has a separate
 IP limit with a header-presence bypass; it does not bound direct brief calls.
+The dashboard's protected summary route also forwards to this API, with its
+own existing sign-in and entitlement checks. That does not authenticate the
+direct public API endpoint.
 
 Previously, each valid request rebuilt the evidence and started a new provider
 call. The installed provider client defaults to two automatic retries and a
@@ -22,12 +25,17 @@ the existing preview component to hide its company result and tables.
 
 ## Exact behavior of this candidate
 
-The request and successful response shapes are unchanged. Customers still
+The request and existing successful response fields are unchanged. Two optional
+response fields are added: `methodology`, a short fixed note for the frontend's
+collapsed data notes, and `brief_mode` (`generated` or `evidence`). The latter
+identifies whether the returned text is the deterministic fallback. Customers still
 receive an immediate preview after the existing lead flow. No new sign-in,
 email confirmation, plan gate, customer quota or durable budget is introduced.
 
 Only generated text is cached. The cache key hashes the exact system prompt,
-server-derived evidence, model, and generation settings. Identity aliases and
+server-derived evidence, exact monetary values, model, and generation settings.
+Compact currency display does not merge different underlying amounts in the cache.
+Identity aliases and
 forged browser financial values cannot select a different financial narrative:
 the API first resolves its existing server profile. Every request still builds
 fresh `deep_data`; changed evidence immediately produces a different text key.
@@ -50,8 +58,9 @@ email addresses or user financial payloads.
 
 The commercial tradeoff is deliberate: a busy, slow or failing provider yields
 a shorter, deterministic summary of the same loaded evidence while the data
-tables remain usable. The summary explicitly describes itself as
-“evidence-only.” It does not invent analysis or treat missing records as no
+tables remain usable. Fallback status is available in `brief_mode`; the brief's
+three concise business sections do not carry a methodology paragraph or an
+“evidence-only” disclaimer. It does not invent analysis or treat missing records as no
 activity. A failed call is not cached for the full success TTL.
 
 This is not a complete abuse-prevention system. Distinct-company requests can
@@ -70,11 +79,11 @@ uses USAspending `federal_action_obligation` at line 101 and DLA
 to the DLA rows. A particular company need not contain both sources, and the
 brief does not receive a source-specific split.
 
-The brief now says **observed prime contract value**, explaining that the
-measure can include USAspending net obligations and DLA procurement-line values
-depending on the available records. Network ETL maps `flow_amount_capped` to
+The brief says **observed prime contract value**, without attributing a
+particular company's total to an unverified source combination. Network ETL maps `flow_amount_capped` to
 `subaward_value` (`run_etl.py:1026`), so the second figure is labelled
-**Mimir-adjusted reported subcontract value**. These measures have potentially
+**tracked subcontract value**, with adjustments explained in the separate
+methodology field. These measures have potentially
 different observation periods and overlapping coverage; they must not be
 added together or presented as company revenue.
 
@@ -92,26 +101,32 @@ returned the same cached text; caching correctly reduced duplicate work but did
 not validate that claim. No additional production generations were used to
 develop this correction.
 
-The model now receives an explicit UNKNOWN company-specific source composition,
-without the general pipeline recipe in its evidence. Source datasets and
-valuation formulas are reserved for a deterministic general-methodology note
-appended exactly once after both generated text and evidence-only fallbacks.
-That note states that neither dataset's contribution to this company total has
-been established. Policy and note text participate in the cache key.
+The company evidence does not include the general pipeline recipe. Source
+datasets and valuation formulas remain excluded from the generated narrative.
+Following user feedback, no UNKNOWN/source-composition language or general
+methodology paragraph is appended to `ai_brief`. Instead `methodology` contains:
+“Based on government contract and subcontract records. Values cover the periods
+shown and may overlap; subcontract totals include Mimir adjustments.” Policy
+and methodology text participate in the cache key.
 
 A validator rejects generated dataset/formula terminology, including formatting
 variants of USAspending, procurement/contract-line values, net price, ordered
 quantity and federal action obligation. It permits DLA/Defense Logistics Agency
-as an awarding-agency mention and permits unknown-composition caveats. This
+as an awarding-agency mention. Source-composition prose is also excluded from
+the narrative. This
 deliberately narrow output boundary avoids trying to infer claim grammar from
 phrases such as “derived from”; it also rejects otherwise accurate generated
-methodology descriptions because that content belongs in the verified note.
+methodology descriptions because that content belongs outside the business brief.
 Rejected output uses the existing fallback and short failure cooldown. It is
 not a claim of complete semantic verification or protection against every
-possible paraphrase. The final text budget includes the deterministic note.
+possible paraphrase. The 6,000-character narrative limit remains; methodology
+is a separate short constant. A deterministic currency formatter converts
+large values to readable units (for example `$175.8B`), including expanded
+model output, word/spaced units and signed amounts. It does not change numbers
+in `deep_data` or establish the truth of arbitrary generated claims.
 
 Reference-only company identity and an unavailable subcontract breakdown now
-produce “unavailable” evidence rather than a fabricated `$0`. Actual observed
+produce unavailable evidence rather than a fabricated `$0`. Actual observed
 zero remains zero. The fiscal window and separate-measure semantics from the
 previous release remain covered by tests.
 
@@ -125,11 +140,13 @@ configuration, stable response keys, and fresh deep data despite cached text.
 Existing company module isolation, reload, award serving, platform, public
 projection/release and automation tests are included in the combined run.
 
-Final local validation passed **90 combined API tests** and **3 existing Ask
-context/logging regression tests**. Python compilation and `git diff --check`
-also passed. The 90 include all 75 previously verified API tests plus twelve
-runtime-helper tests and three endpoint regression tests for provider failure,
-text reuse with refreshed data, and rejection of the captured unsupported claim.
+The combined local suite includes the previously verified API tests, runtime
+safeguards, provider failure, fresh data with cached text, rejection of the
+captured unsupported claim, compact display, optional metadata, unchanged exact
+table values, and cache invalidation when precise amounts round identically.
+Existing Ask context/logging regressions and Python compilation are also checked.
+Local validation for this presentation correction passed **92 API tests** and
+**3 Ask regression tests**, plus Python compilation and `git diff --check`.
 
 These tests use dummy credentials and mocked inference/local data; no customer
 email, production provider request or production database mutation is needed.

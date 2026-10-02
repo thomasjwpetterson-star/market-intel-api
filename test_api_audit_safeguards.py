@@ -176,18 +176,20 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
             result = await main.generate_unlocked_brief(request)
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["ai_brief"], "Observed brief\n\n" + main.PUBLIC_BRIEF_SOURCE_NOTE)
-        self.assertIn("unavailable", result["headline_metric"])
+        self.assertEqual(result["ai_brief"], "Observed brief")
+        self.assertEqual(result["brief_mode"], "generated")
+        self.assertEqual(result["methodology"], main.PUBLIC_BRIEF_METHODOLOGY)
+        self.assertIn("not available", result["headline_metric"])
         self.assertEqual(result["deep_data"]["nsn_period_label"], "FY2022–FY2026")
         self.assertEqual(parts.call_args.kwargs["years"], [2022, 2023, 2024, 2025, 2026])
         messages = completion.call_args.kwargs["messages"]
         evidence = messages[1]["content"]
         self.assertIn("CANONICAL COMPANY", evidence)
         self.assertIn("FY2024–FY2025", evidence)
-        self.assertIn("Observed prime contract value: $500.00", evidence)
-        self.assertIn("Company-specific source composition: UNKNOWN", evidence)
+        self.assertIn("Observed prime contract value: $500", evidence)
+        self.assertNotIn("UNKNOWN", evidence)
         self.assertNotIn("USAspending", evidence)
-        self.assertIn("Mimir-adjusted reported subcontract value across all tracked partners: $1,200.00", evidence)
+        self.assertIn("Mimir-adjusted reported subcontract value across all tracked partners: $1.2K", evidence)
         self.assertNotIn("FORGED NAME", evidence)
         self.assertNotIn("999999999999", evidence)
         self.assertNotIn("FY18", evidence)
@@ -206,14 +208,15 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
             completion = stack.enter_context(patch.object(main.aclient.chat.completions, "create", AsyncMock(side_effect=RuntimeError("private provider diagnostic"))))
             with self.assertLogs("mimir-api", level="WARNING"):
                 result = await main.generate_unlocked_brief(request)
-        self.assertEqual(set(result), {"success", "ai_brief", "headline_metric", "deep_data"})
+        self.assertEqual(set(result), {"success", "ai_brief", "brief_mode", "methodology", "headline_metric", "deep_data"})
+        self.assertEqual(result["brief_mode"], "evidence")
         self.assertIs(result["success"], True)
         self.assertEqual(set(result["deep_data"]), {"platforms", "agencies", "nsns", "nsn_period_label", "contracts", "network", "network_title"})
-        self.assertIn("coverage is unavailable", result["ai_brief"])
-        self.assertIn("subcontract-award breakdown is unavailable", result["ai_brief"])
+        self.assertIn("prime contract values are not available", result["ai_brief"])
         self.assertNotIn("$0", result["ai_brief"])
         self.assertNotIn("private provider diagnostic", result["ai_brief"])
-        self.assertEqual(result["ai_brief"].count(main.PUBLIC_BRIEF_SOURCE_NOTE), 1)
+        self.assertNotIn(main.PUBLIC_BRIEF_METHODOLOGY, result["ai_brief"])
+        self.assertEqual(result["methodology"], main.PUBLIC_BRIEF_METHODOLOGY)
         evidence = completion.call_args.kwargs["messages"][1]["content"]
         self.assertIn("Unavailable in the loaded financial records", evidence)
         self.assertNotIn("$0", evidence)
@@ -232,12 +235,49 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
             second = await main.generate_unlocked_brief(request)
         for result in (first, second):
             self.assertIs(result["success"], True)
-            self.assertIn("evidence-only summary", result["ai_brief"])
-            self.assertIn("source composition is UNKNOWN", result["ai_brief"])
+            self.assertEqual(result["brief_mode"], "evidence")
+            self.assertIn("$500 in observed prime contract value", result["ai_brief"])
+            self.assertNotIn("UNKNOWN", result["ai_brief"])
+            self.assertNotIn("source composition", result["ai_brief"])
             self.assertNotIn("This value is derived from", result["ai_brief"])
-            self.assertEqual(result["ai_brief"].count(main.PUBLIC_BRIEF_SOURCE_NOTE), 1)
+            self.assertNotIn(main.PUBLIC_BRIEF_METHODOLOGY, result["ai_brief"])
+            self.assertEqual(result["methodology"], main.PUBLIC_BRIEF_METHODOLOGY)
             self.assertIn("deep_data", result)
         completion.assert_awaited_once()
+
+    async def test_compact_presentation_preserves_precise_data_and_cache_identity(self):
+        request = SimpleNamespace(json=AsyncMock(return_value={"cage": "81755"}))
+        value = 175766233950.51
+
+        def query(where, params, select_sql, **kwargs):
+            if kwargs.get("group_by_sql") == "sub_agency":
+                return pd.DataFrame([{"sub_agency": "AIR FORCE", "spend": value}])
+            if not kwargs.get("group_by_sql"):
+                return pd.DataFrame([{"first_year": 2018, "last_year": 2026}])
+            return pd.DataFrame()
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(main, "get_company_profile", side_effect=[
+                {"found": True, "name": "TEST COMPANY", "cage": "81755", "total_obligations": amount}
+                for amount in (value, value + 0.01)]))
+            stack.enter_context(patch.object(main, "query_summary_df", side_effect=query))
+            stack.enter_context(patch.object(main, "get_company_parts", return_value=[]))
+            stack.enter_context(patch.object(main, "get_subset_from_disk", return_value=pd.DataFrame()))
+            stack.enter_context(patch.object(main, "get_company_network", return_value={"primes": [{"total": 7090483.20, "network_total": 7090483.20}], "subs": []}))
+            completion = stack.enter_context(patch.object(main.aclient.chat.completions, "create", AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="**Position:** $175,766,233,950.51 in prime contract value; separately $7,090,483.20 in tracked subcontract value."))]))))
+            first = await main.generate_unlocked_brief(request)
+            second = await main.generate_unlocked_brief(request)
+        for result in (first, second):
+            self.assertTrue(result["success"])
+            self.assertEqual(result["ai_brief"], "**Position:** $175.8B in prime contract value; separately $7.1M in tracked subcontract value.")
+            self.assertEqual(result["headline_metric"], "Top awarding agency: Air Force ($175.8B; FY2018–FY2026).")
+            self.assertEqual(result["deep_data"]["agencies"][0]["spend"], value)
+            self.assertEqual(result["deep_data"]["network"][0]["network_total"], 7090483.20)
+            self.assertNotIn("methodology", result["ai_brief"])
+            self.assertNotIn("UNKNOWN", result["ai_brief"])
+        self.assertEqual(completion.await_count, 2)
+        # The displayed evidence rounds identically, but raw evidence changed.
+        self.assertEqual(completion.call_args_list[0].kwargs["messages"], completion.call_args_list[1].kwargs["messages"])
 
     async def test_repeated_evidence_reuses_inference_but_refreshes_deep_data(self):
         request = SimpleNamespace(json=AsyncMock(return_value={"cage": "6FH39", "name": "IGNORED CLIENT LABEL"}))
@@ -263,7 +303,7 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
             third = await main.generate_unlocked_brief(request)
             self.assertTrue(third["success"])
             self.assertEqual(completion.await_count, 2)
-            self.assertIn("Observed prime contract value: $1,000.00", completion.call_args.kwargs["messages"][1]["content"])
+            self.assertIn("Observed prime contract value: $1.0K", completion.call_args.kwargs["messages"][1]["content"])
 
     async def test_unknown_company_does_not_generate_a_brief(self):
         request = SimpleNamespace(json=AsyncMock(return_value={"cage": "XXXXX"}))

@@ -4,8 +4,8 @@ import unittest
 from unittest.mock import AsyncMock
 
 from public_brief_runtime import (
-    PUBLIC_BRIEF_SOURCE_NOTE, PublicBriefRuntime, brief_cache_key,
-    evidence_only_brief, validate_brief_narrative,
+    PUBLIC_BRIEF_METHODOLOGY, PublicBriefRuntime, brief_cache_key,
+    evidence_only_brief, format_brief_currency, validate_brief_narrative,
 )
 
 
@@ -42,42 +42,60 @@ class BriefCacheKeyTests(unittest.TestCase):
                                       prime_period=None, sub_value=None, sub_basis="Tracked awards",
                                       agency_summary="Agency information is unavailable.")
         self.assertNotIn("$0", unknown)
-        self.assertIn("prime contract-value coverage is unavailable", unknown)
-        self.assertIn("subcontract-award breakdown is unavailable", unknown)
-        self.assertIn("evidence-only", unknown)
+        self.assertIn("prime contract values are not available", unknown)
+        self.assertNotIn("UNKNOWN", unknown)
+        self.assertNotIn("methodology", unknown)
         observed = evidence_only_brief(name="Company", prime_value=0.0, prime_period="FY2024–FY2025",
                                        sub_value=100.0, sub_basis="Displayed partners only",
                                        agency_summary="Agency information is unavailable.")
-        self.assertIn("$0.00 in observed prime contract value", observed)
-        self.assertIn("Company-specific source composition is UNKNOWN", observed)
-        self.assertIn("can overlap and should not be added together", observed)
+        self.assertIn("$0 in observed prime contract value", observed)
+        self.assertNotIn("source composition", observed)
+        self.assertNotIn("revenue", observed)
         self.assertIn("FY2024–FY2025", observed)
-        self.assertIn("Displayed partners only: $100.00, reported separately", observed)
+        self.assertIn("Separately, tracked subcontract value totals $100 from displayed partners", observed)
+        self.assertNotIn(PUBLIC_BRIEF_METHODOLOGY, observed)
+
+    def test_currency_display_is_compact_with_signs_and_small_values_preserved(self):
+        for amount, expected in ((175766233950.51, "$175.8B"), (7090483.20, "$7.1M"),
+                                 (500, "$500"), (0, "$0"), (12.34, "$12.34"),
+                                 (-1234567, "-$1.2M"), (999999, "$1.0M")):
+            with self.subTest(amount=amount):
+                self.assertEqual(format_brief_currency(amount), expected)
+        for invalid in (float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                format_brief_currency(invalid)
+        self.assertEqual(validate_brief_narrative("Value: $175,766,233,950.51; separately $7,090,483.20. Net change: -$1,200.00."),
+                         "Value: $175.8B; separately $7.1M. Net change: -$1.2K.")
+        self.assertEqual(validate_brief_narrative("$500, alongside $7.1M."), "$500, alongside $7.1M.")
+        self.assertEqual(validate_brief_narrative("$7.1 million; $1000 million; $175.8 B; $-7,000; -$7,000."),
+                         "$7.1M; $1.0B; $175.8B; -$7.0K; -$7.0K.")
 
     def test_source_guard_rejects_captured_claim_and_format_variants(self):
         for narrative in (CAPTURED_UNSUPPORTED_BRIEF,
                           "Its value includes USA-spending records.",
                           "This is based on U.S.A. Spending data.",
                           "DLA procurement\u2011line values contributed to this amount.",
-                          "The amount equals net_price times ordered_quantity."):
+                          "The amount equals net_price times ordered_quantity.",
+                          "Company source composition is UNKNOWN.",
+                          "The source-specific split is unavailable."):
             with self.subTest(narrative=narrative), self.assertRaises(ValueError):
                 validate_brief_narrative(narrative)
 
-    def test_source_guard_allows_agencies_and_uncertainty_rules(self):
+    def test_source_guard_allows_agencies_without_methodology_prose(self):
         for narrative in (
-            "**Dependency:** Defense Logistics Agency is the largest observed awarding agency ($100.00).",
+            "**Dependency:** Defense Logistics Agency is the largest observed awarding agency ($100).",
             "**Dependency:** DLA appears in the supplied agency mix. This does not establish sole-source status.",
-            "**Implication:** Company source composition is unknown. An agency name does not establish a data source.",
-            "**Position:** The observed prime contract value is $0.00. The source-specific split is unavailable.",
+            "**Position:** The observed prime contract value is $0. Subcontract values are not available.",
         ):
             self.assertEqual(validate_brief_narrative(narrative), narrative)
 
-    def test_note_budget_and_policy_change_are_part_of_safeguards(self):
+    def test_narrative_budget_and_policy_change_are_part_of_safeguards(self):
+        self.assertEqual(validate_brief_narrative("x" * 6000), "x" * 6000)
         with self.assertRaises(ValueError):
-            validate_brief_narrative("x" * 6000)
-        key = brief_cache_key({"completion": {}, "source_policy": "v1", "source_note": PUBLIC_BRIEF_SOURCE_NOTE})
-        self.assertNotEqual(key, brief_cache_key({"completion": {}, "source_policy": "v2", "source_note": PUBLIC_BRIEF_SOURCE_NOTE}))
-        self.assertNotEqual(key, brief_cache_key({"completion": {}, "source_policy": "v1", "source_note": "Updated note"}))
+            validate_brief_narrative("x" * 6001)
+        key = brief_cache_key({"completion": {}, "source_policy": "v1", "methodology": PUBLIC_BRIEF_METHODOLOGY})
+        self.assertNotEqual(key, brief_cache_key({"completion": {}, "source_policy": "v2", "methodology": PUBLIC_BRIEF_METHODOLOGY}))
+        self.assertNotEqual(key, brief_cache_key({"completion": {}, "source_policy": "v1", "methodology": "Updated note"}))
 
 
 class PublicBriefRuntimeTests(unittest.IsolatedAsyncioTestCase):
