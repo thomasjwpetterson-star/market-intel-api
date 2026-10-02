@@ -1,4 +1,6 @@
+import asyncio
 import os
+import threading
 import unittest
 from contextlib import ExitStack
 from datetime import date
@@ -103,6 +105,47 @@ class CompanySnapshotIsolationTests(unittest.TestCase):
 
 
 class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_database_work_shares_the_service_thread_limit(self):
+        entered = threading.Event()
+        release = threading.Event()
+        thread_ids = []
+        event_loop_thread = threading.get_ident()
+
+        def blocked_profile(**kwargs):
+            thread_ids.append(threading.get_ident())
+            entered.set()
+            release.wait(timeout=2)
+            return {"found": False}
+
+        async def wait_until_entered():
+            while not entered.is_set():
+                await asyncio.sleep(0.001)
+
+        limiter = main.anyio.to_thread.current_default_thread_limiter()
+        previous_tokens = limiter.total_tokens
+        limiter.total_tokens = 1
+        tasks = []
+        try:
+            with patch.object(main, "get_company_profile", side_effect=blocked_profile):
+                for index in range(2):
+                    request = SimpleNamespace(json=AsyncMock(return_value={"cage": "XXXXX"}))
+                    tasks.append(asyncio.create_task(main.generate_unlocked_brief(request)))
+                    if index == 0:
+                        await asyncio.wait_for(wait_until_entered(), timeout=1)
+                # The loop stays responsive while one query occupies the single
+                # service worker; the second query must wait for that worker.
+                await asyncio.sleep(0.03)
+                self.assertEqual(len(thread_ids), 1)
+                self.assertNotEqual(thread_ids[0], event_loop_thread)
+                release.set()
+                results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
+                self.assertEqual(len(thread_ids), 2)
+                self.assertTrue(all(result["success"] is False for result in results))
+        finally:
+            release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            limiter.total_tokens = previous_tokens
+
     async def test_client_financials_cannot_override_server_evidence(self):
         request = SimpleNamespace(json=AsyncMock(return_value={"cage": "6FH39", "name": "FORGED NAME", "prime_exposure": 999999999999, "sub_exposure": 888888888888}))
         completion = AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Observed brief"))]))
@@ -151,6 +194,37 @@ class LegacyBriefEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.latest_completed_federal_fiscal_year(date(2026, 9, 30)), 2025)
         self.assertEqual(main.latest_completed_federal_fiscal_year(date(2026, 10, 1)), 2026)
         self.assertEqual(main.latest_completed_federal_fiscal_year(date(2027, 1, 1)), 2026)
+
+
+class CompanyProfileContractTests(unittest.TestCase):
+    def test_existing_award_backed_child_paths_supply_brief_identity(self):
+        cache = {"profiles_df": pd.DataFrame([{
+            "cage_code": "6FH39", "vendor_name": "CANONICAL COMPANY",
+            "total_lifetime_spend": 500.0,
+        }])}
+        with patch.object(main, "GLOBAL_CACHE", cache), patch.object(main, "_calc_child_kpis_from_kpis_disk", return_value={"has_kpis": False}), patch.object(main, "get_parent_aggregate_stats", return_value=None):
+            for lookup in ({"cage": "6fh39"}, {"name": "Canonical Company"}):
+                with self.subTest(lookup=lookup):
+                    result = main.get_company_profile(**lookup, years=None)
+                    self.assertIs(result["found"], True)
+                    self.assertEqual(result["cage"], "6FH39")
+                    self.assertEqual(result["name"], "CANONICAL COMPANY")
+                    self.assertEqual(result["total_obligations"], 500.0)
+
+    def test_reference_only_and_parent_profiles_are_accepted_without_fake_financials(self):
+        reference = pd.DataFrame([{"cage_code": "6FH39", "vendor_name": "REFERENCE COMPANY"}])
+        with patch.object(main, "GLOBAL_CACHE", {}), patch.object(main, "duck_fetch_df", return_value=reference):
+            result = main.get_company_profile(cage="6FH39", years=None)
+            self.assertIs(result["found"], True)
+            self.assertEqual(result["profile_source"], "CAGE_REFERENCE_ONLY")
+            self.assertEqual(result["total_obligations"], 0.0)
+        stats = {"total_obligations": 700.0, "total_contracts": 2,
+                 "last_active": 2026, "top_naics": [], "top_platforms": []}
+        with patch.object(main, "GLOBAL_CACHE", {}), patch.object(main, "get_parent_aggregate_stats", return_value=stats):
+            result = main.get_company_profile(name="Parent Company", years=None)
+            self.assertIs(result["found"], True)
+            self.assertEqual(result["cage"], "AGGREGATE")
+            self.assertEqual(result["total_obligations"], 700.0)
 
 
 class PublicNsnFallbackTests(unittest.TestCase):

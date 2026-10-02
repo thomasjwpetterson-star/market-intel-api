@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, date
 import boto3
@@ -7656,7 +7657,7 @@ async def generate_unlocked_brief(request: Request):
         # Browser-supplied financials and labels are not evidence. Resolve the
         # identity and prime obligations from the same server-side profile
         # used by the public company view.
-        profile = await asyncio.to_thread(
+        profile = await run_in_threadpool(
             get_company_profile,
             cage=None if data.get("is_parent") else data.get("cage"),
             name=data.get("name"),
@@ -7672,7 +7673,7 @@ async def generate_unlocked_brief(request: Request):
         filters = {"cage": safe_cage} if not is_parent else {"parent": safe_name}
         where_sql, params = build_summary_where(years=None, filters=filters)
 
-        period_df = await asyncio.to_thread(
+        period_df = await run_in_threadpool(
             query_summary_df, where_sql, params,
             select_sql="MIN(TRY_CAST(year AS INTEGER)) AS first_year, MAX(TRY_CAST(year AS INTEGER)) AS last_year",
             limit=0,
@@ -7684,14 +7685,14 @@ async def generate_unlocked_brief(request: Request):
                 prime_period = f"FY{int(first_year)}" if int(first_year) == int(last_year) else f"FY{int(first_year)}–FY{int(last_year)}"
 
         # 1. Top Platforms
-        plats_df = await asyncio.to_thread(query_summary_df,
+        plats_df = await run_in_threadpool(query_summary_df,
             where_sql, params, select_sql="platform_family, sum(total_spend) as spend",
             group_by_sql="platform_family", order_by_sql="spend DESC", limit=10
         )
         deep_platforms = plats_df.dropna(subset=['platform_family']).to_dict(orient="records") if not plats_df.empty else []
 
         # 2. Top Funding Agencies
-        agency_df = await asyncio.to_thread(query_summary_df,
+        agency_df = await run_in_threadpool(query_summary_df,
             where_sql, params, select_sql="sub_agency, sum(total_spend) as spend",
             group_by_sql="sub_agency", order_by_sql="spend DESC", limit=5
         )
@@ -7701,7 +7702,7 @@ async def generate_unlocked_brief(request: Request):
                 deep_agencies.append({"name": str(row['sub_agency']).title(), "spend": float(row['spend'])})
 
         # 3. Top Capabilities (NAICS by Revenue)
-        cap_df = await asyncio.to_thread(query_summary_df,
+        cap_df = await run_in_threadpool(query_summary_df,
             where_sql, params, select_sql="naics_description, sum(total_spend) as spend",
             group_by_sql="naics_description", order_by_sql="spend DESC", limit=3
         )
@@ -7718,7 +7719,7 @@ async def generate_unlocked_brief(request: Request):
         nsn_period_label = f"FY{nsn_years[0]}–FY{nsn_years[-1]}"
 
         try:
-            nsn_rows = [] if is_parent or not safe_cage else await asyncio.to_thread(get_company_parts,
+            nsn_rows = [] if is_parent or not safe_cage else await run_in_threadpool(get_company_parts,
                 cage=safe_cage,
                 limit=10,
                 offset=0,
@@ -7750,7 +7751,7 @@ async def generate_unlocked_brief(request: Request):
         txn_where = "(vendor_cage = ?) AND spend_amount >= 250000" if not is_parent else "(upper(vendor_name) LIKE ?) AND spend_amount >= 250000"
         txn_params = [safe_cage] if not is_parent else [f"%{safe_name.upper()}%"]
         
-        contracts_df = await asyncio.to_thread(get_subset_from_disk,
+        contracts_df = await run_in_threadpool(get_subset_from_disk,
             "transactions.parquet",
             where_clause=txn_where, params=tuple(txn_params),
             columns_sql="action_date, sub_agency, description, spend_amount", 
@@ -7769,7 +7770,7 @@ async def generate_unlocked_brief(request: Request):
                 })
 
         # 6. Network (Primes vs Subs)
-        net_data = await asyncio.to_thread(get_company_network, name=safe_name, cage=safe_cage if not is_parent else None, years=None, limit=10)
+        net_data = await run_in_threadpool(get_company_network, name=safe_name, cage=safe_cage if not is_parent else None, years=None, limit=10)
         primes_list = net_data.get("primes", []) if isinstance(net_data, dict) else []
         subs_list = net_data.get("subs", []) if isinstance(net_data, dict) else []
         

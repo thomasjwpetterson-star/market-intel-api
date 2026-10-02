@@ -1,6 +1,9 @@
 # API audit safeguards — local review candidate
 
-These changes have not been deployed. Production settings have not been changed.
+This is the local runtime candidate integrated on production/main commit
+`de56e371cffafcc95338c8470428038043338da1`. Production settings have not been
+changed by this integration. That base already contains the reload gate below;
+the integration preserves it and the newer public-award/Ask fixes.
 
 ## Reload authorization and rollout
 
@@ -64,11 +67,17 @@ add the new header to Render's deploy hooks.
 - The NSN requested five-year window advances at the federal October fiscal-year
   boundary. A requested window is not a guarantee that all records are available;
   pipeline completeness remains a separate release requirement.
-- Legacy brief database work runs off the asynchronous HTTP event loop. This
-  does not establish a per-user rate limit or a bounded inference-cost budget.
+- Legacy brief database work runs off the asynchronous HTTP event loop through
+  Starlette's existing AnyIO thread pool. It shares the `ANYIO_THREADS` service
+  limit (default 12), instead of opening a separate asyncio executor. Queries
+  still run sequentially within a brief; pooled reads and the existing locked
+  connection paths retain their synchronization. This does not establish a
+  per-user rate limit or a bounded inference-cost budget.
 - The public NSN runtime fallback preserves an unknown reorder assessment as
   `null` and forwards source/snapshot dates, release/product identifiers and
-  the stock used for the reorder comparison, matching the updated projection.
+  the stock used for the reorder comparison when supplied upstream. These are
+  additive runtime fields; this release does not modify the public projection,
+  DLA materializer, warehouse, or existing data releases.
 
 ## Outstanding commercial and security decisions
 
@@ -86,12 +95,15 @@ lookup quotas also remain outstanding.
 
 ## Local validation
 
-`test_api_audit_safeguards.py` adds 11 focused tests covering reload denial and
+`test_api_audit_safeguards.py` adds 14 focused tests covering reload denial and
 authorized scheduling, empty/invalid platform data and independent modules,
 server-derived brief evidence, unknown-company inference suppression, federal
 fiscal-year rollover, and the NSN fallback's `null`/`false`/`true` assessment plus
-provenance fields. All pass. The combined run with platform consumer, public
-projection/release, ETL automation and source automation tests passed 70 tests.
+provenance fields. The integration checks the real child, parent, and
+reference-only profile response contracts and confirms concurrent briefs share
+the service thread limit without blocking the event loop. All pass. The combined
+run with the existing reload/public-award, platform consumer, public
+projection/release, ETL automation and source automation tests passed 75 tests.
 
 The tests mock inference, data access and reload scheduling; they do not contact
 production, send email, bill an account, or mutate a live release. Run with the
