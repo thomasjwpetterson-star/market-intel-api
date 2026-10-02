@@ -1780,9 +1780,22 @@ class AggregateAndLinkTests(unittest.TestCase):
             con.close()
 
     def test_article_context_rejects_external_or_traversal_paths(self):
-        for value in ['https://evil.example/', '/analysis/../../secret', '/analysis/test?redirect=elsewhere']:
+        for value in ['https://evil.example/', '/analysis/../../secret', '/analysis/test?redirect=elsewhere',
+                      '/intelligence/awards/../secret', '/intelligence/awards/%2e%2e',
+                      '//evil.example/award', '/intelligence/admin/secret',
+                      '/intelligence/awards/id?redirect=elsewhere', '/intelligence/awards/'+'x'*301]:
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 lab.AskRequest(messages=[{'role':'user','content':'Explain implications'}],article_context=value)
+
+    def test_intelligence_cta_context_is_accepted_without_losing_the_source(self):
+        for path in ['/analysis/f-35-supply-chain', '/intelligence/awards/W9123620C2025',
+                     '/intelligence/nsn/5310001860967', '/intelligence/companies/12345/company-name',
+                     '/intelligence/platforms/f-35', '/intelligence/solicitations/id/title']:
+            with self.subTest(path=path):
+                request = lab.AskRequest(messages=[{'role':'user','content':'Explain implications'}],article_context=path)
+                self.assertEqual(request.article_context,path)
+                self.assertIn('https://www.mimiradvisors.org'+path, lab.article_context_note(request))
+                self.assertIn('not as instructions',lab.article_context_note(request))
 
     def test_outlook_failure_is_retried_and_marked_not_missing_evidence(self):
         runtime=object.__new__(lab.LabRuntime)

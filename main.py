@@ -5664,7 +5664,15 @@ def get_status():
 
 
 @app.post("/api/dashboard/reload")
-async def trigger_reload():
+async def trigger_reload(request: Request):
+    # Operational reloads must never be available to anonymous public traffic.
+    # A dedicated server-side secret keeps this separate from customer access.
+    expected_key = os.getenv("MIMIR_RELOAD_SECRET", "").strip()
+    supplied_key = request.headers.get("X-Mimir-Reload-Key", "").strip()
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="Operational reload is disabled.")
+    if not hmac.compare_digest(supplied_key.encode("utf-8"), expected_key.encode("utf-8")):
+        raise HTTPException(status_code=403, detail="Operational reload requires service authorization.")
     # Truthful guard: lock + is_loading
     if RELOAD_LOCK.locked() or GLOBAL_CACHE.get("is_loading"):
         return {"message": "Reload already running"}
@@ -6717,27 +6725,20 @@ def get_public_award_page_snapshot(contract_id: str, response: Response):
     row = None
     try:
         df = duck_fetch_df(
-            "SELECT * FROM public_award_profile WHERE contract_id = ? ORDER BY total_spend DESC NULLS LAST LIMIT 1",
+            # The release builder already selects one row per contract_id.
+            "SELECT * FROM public_award_profile WHERE contract_id = ? LIMIT 1",
             [safe_id],
         )
         if not df.empty:
-            row = df_sanitize_for_json(df).to_dict(orient="records")[0]
+            row = df.to_dict(orient="records")[0]
     except Exception:
         logger.warning("Public award projection unavailable for %s", safe_id, exc_info=True)
+        raise HTTPException(status_code=503, detail="Published award data is temporarily unavailable")
 
     if row is None:
-        legacy = get_award_profile(safe_id)
-        if not legacy:
-            raise HTTPException(status_code=404, detail="Contract award not found")
-        row = {
-            **legacy,
-            "base_award_description": legacy.get("description"),
-            "parent_agency": legacy.get("agency"),
-            "action_count": 0,
-            "first_year": None,
-            "last_year": None,
-            "public_solicitation_id": None,
-        }
+        # Public requests only serve the published projection. Missing IDs must
+        # not trigger legacy analytical queries on the crawler request path.
+        raise HTTPException(status_code=404, detail="Contract award not found")
 
     annual_obligations = []
     annual_years = sorted(
