@@ -55,11 +55,23 @@ class PublicAwardServingTests(unittest.TestCase):
         self.assertIn('s-maxage=86400', response.headers['Cache-Control'])
         self.ns['get_award_profile'].assert_not_called()
 
-    def test_missing_projection_is_404_without_legacy_expansion(self):
+    def test_missing_award_is_404_after_existing_profile_lookup(self):
+        self.ns['get_award_profile'] = Mock(return_value=None)
         with self.assertRaises(HTTPException) as error:
             self.ns['get_public_award_page_snapshot']('MISSING', Response())
         self.assertEqual(error.exception.status_code, 404)
-        self.ns['get_award_profile'].assert_not_called()
+        self.ns['get_award_profile'].assert_called_once_with('MISSING')
+
+    def test_existing_public_award_outside_indexable_cohort_remains_available(self):
+        self.ns['get_award_profile'] = Mock(return_value={
+            'contract_id': 'SPE4A623PH722', 'vendor_name': 'EXAMPLE',
+            'total_spend': 25.0, 'description': 'Existing public profile',
+            'agency': 'Department of Defense',
+        })
+        result = self.ns['get_public_award_page_snapshot']('SPE4A623PH722', Response())
+        self.assertEqual(result['contract_id'], 'SPE4A623PH722')
+        self.assertEqual(result['total_obligations'], 25.0)
+        self.ns['get_award_profile'].assert_called_once_with('SPE4A623PH722')
 
     def test_projection_failure_is_retryable_not_a_false_not_found(self):
         self.ns['duck_fetch_df'] = Mock(side_effect=RuntimeError('Database temporarily unavailable'))

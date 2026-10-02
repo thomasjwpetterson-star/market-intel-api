@@ -6736,9 +6736,20 @@ def get_public_award_page_snapshot(contract_id: str, response: Response):
         raise HTTPException(status_code=503, detail="Published award data is temporarily unavailable")
 
     if row is None:
-        # Public requests only serve the published projection. Missing IDs must
-        # not trigger legacy analytical queries on the crawler request path.
-        raise HTTPException(status_code=404, detail="Contract award not found")
+        # The release projection is the indexable cohort, not every public URL.
+        # Preserve existing profiles until projection coverage is expanded.
+        legacy = get_award_profile(safe_id)
+        if not legacy:
+            raise HTTPException(status_code=404, detail="Contract award not found")
+        row = {
+            **legacy,
+            "base_award_description": legacy.get("description"),
+            "parent_agency": legacy.get("agency"),
+            "action_count": 0,
+            "first_year": None,
+            "last_year": None,
+            "public_solicitation_id": None,
+        }
 
     annual_obligations = []
     annual_years = sorted(
