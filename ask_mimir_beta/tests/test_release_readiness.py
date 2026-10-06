@@ -828,6 +828,26 @@ class ConcurrentEvidenceTests(unittest.TestCase):
 
 
 class DurableJobTests(unittest.TestCase):
+    def test_progressive_model_text_requires_explicit_server_flag(self):
+        answer = {"answer": "AMRAAM report", "response_id": "test-answer",
+                  "answer_artifacts": {}, "tool_trace": [], "model": "test"}
+        for flag, subjects, enabled in (
+            ("0", "alice", False), ("1", "bob", False), ("1", "alice", True),
+        ):
+            with self.subTest(flag=flag, subjects=subjects):
+                request = self.request.model_copy(update={
+                    "client_request_id": str(uuid.uuid4())
+                })
+                job, _ = self.manager.create(request, self.access, self.route)
+                with patch.dict("os.environ", {
+                    "ASK_MIMIR_PROGRESSIVE_TEXT": flag,
+                    "ASK_MIMIR_PROGRESSIVE_TEXT_SUBJECTS": subjects,
+                }), \
+                     patch.object(lab, "generate_answer", return_value=answer) as generate, \
+                     patch.object(lab, "finalize_customer_result", side_effect=lambda result, *args: dict(result)):
+                    self.manager._run(job["request_id"], request, self.access, self.route)
+                self.assertEqual(callable(generate.call_args.kwargs["draft_text"]), enabled)
+
     def test_concurrent_duplicate_admission_schedules_one_job(self):
         with ThreadPoolExecutor(max_workers=20) as pool:
             results = list(pool.map(lambda _: self.manager.create(self.request, self.access, self.route)[0], range(20)))

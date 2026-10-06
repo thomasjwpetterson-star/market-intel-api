@@ -108,6 +108,28 @@ ETL cache should be published with `serving-data` plus every derived domain
 that depends on the changed files; ordinary code and prompt changes require a
 normal application deployment and no artifact release.
 
+## Progressive answer text
+
+`ASK_MIMIR_PROGRESSIVE_TEXT` defaults to `0`. Set it to `1` only after the
+private speed and answer-quality comparison passes. For a private test on the
+beta service, also set `ASK_MIMIR_PROGRESSIVE_TEXT_SUBJECTS` to a comma-separated
+list of the exact subject IDs allowed to see drafts; an empty list means all
+subjects. When enabled, source-ready
+model calls publish provisional text into the authenticated, in-memory job
+poll; the browser labels it as a draft and replaces it with the checked final
+answer. Tool-selection calls remain hidden. This changes delivery timing, not
+the final model instructions, reasoning effort, evidence scope or citation
+validation. The provisional text is not persisted, so a restart or move to
+multiple service instances requires shared interim state if drafts must
+survive that transition. The completed answer remains durable.
+
+Run `evaluate_job_speed.py` against an isolated real-model candidate with the
+flag off and on. Compare first model draft, final completion, answer accuracy,
+citations, costs and failures for platform, company, item, contract,
+opportunity and general research questions. Confirm in a browser that a draft
+is visible, gets replaced by the final answer, and disappears on a failed
+job. The 30-second first-useful-text target is not established by unit tests.
+
 To roll back, set `ASK_MIMIR_FOLLOW_CURRENT_RELEASE=0` and set
 `ASK_MIMIR_PINNED_MANIFEST_KEY` to a previously published immutable manifest.
 

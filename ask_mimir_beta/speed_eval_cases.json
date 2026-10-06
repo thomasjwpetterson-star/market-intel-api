@@ -1,0 +1,40 @@
+[
+  {
+    "case_id": "platform_amraam",
+    "question": "Who supplies AMRAAM, what do they provide, and what evidence supports those positions?",
+    "expected_workflow": "platform_intelligence",
+    "required_answer_terms": ["AMRAAM", "supplier"],
+    "require_financial_period": true
+  },
+  {
+    "case_id": "company_curtiss_wright",
+    "question": "Give me an overview of Curtiss-Wright's US defence business.",
+    "expected_workflow": "company_site_intelligence",
+    "required_answer_terms": ["Curtiss-Wright", "CAGE"],
+    "require_financial_period": true
+  },
+  {
+    "case_id": "item_nsn",
+    "question": "Tell me everything about NSN 1560-00-817-5790.",
+    "expected_workflow": "item_intelligence",
+    "required_answer_terms": ["1560-00-817-5790", "NIIN"]
+  },
+  {
+    "case_id": "contract_exact",
+    "question": "Tell me everything important about contract N0001923F2616, including its action history.",
+    "expected_workflow": "contract_or_opportunity",
+    "required_answer_terms": ["N0001923F2616"]
+  },
+  {
+    "case_id": "opportunities_avionics",
+    "question": "Find currently open Sources Sought notices related to military aircraft avionics.",
+    "expected_workflow": "market_record_search",
+    "required_answer_terms": ["Sources Sought"]
+  },
+  {
+    "case_id": "program_momentum",
+    "question": "Which missile programs are accelerating, and what evidence supports the ranking?",
+    "expected_workflow": "program_momentum",
+    "required_answer_terms": ["missile", "FY"]
+  }
+]

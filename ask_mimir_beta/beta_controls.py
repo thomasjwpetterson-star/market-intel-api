@@ -160,7 +160,8 @@ def request_timing_summary(performance: Dict[str, Any] | None) -> Dict[str, floa
     """Only bounded numeric timings may leave the internal performance record."""
     keys = ("routing_ms", "queue_wait_ms", "answer_generation_ms", "evidence_retrieval_ms",
             "model_ms", "validation_and_formatting_ms", "total_request_ms",
-            "evidence_call_count", "model_call_count", "evidence_cache_hit_count")
+            "evidence_call_count", "model_call_count", "evidence_cache_hit_count",
+            "first_model_text_ms")
     return {key: value for key in keys
             if isinstance((value := (performance or {}).get(key)), (int, float))
             and not isinstance(value, bool) and math.isfinite(value) and value >= 0}
