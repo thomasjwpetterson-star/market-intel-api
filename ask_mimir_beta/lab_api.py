@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import base64
 import binascii
 import hashlib
@@ -14,6 +15,7 @@ import contextvars
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
@@ -2581,6 +2583,29 @@ class AnswerReportRequest(BaseModel):
     response_id: str = Field(min_length=1, max_length=200)
 
 
+class RoutingCompanySearchCache:
+    """Bound repeat name lookups in the immutable routing directory."""
+
+    def __init__(self, directory: Any, max_entries: int = 64) -> None:
+        self.directory = directory
+        self.max_entries = max_entries
+        self.lock = threading.Lock()
+        self.cache: OrderedDict[tuple[str, str | None, int], Dict[str, Any]] = OrderedDict()
+
+    def search(self, query: str, scope_type: str | None = None, limit: int = 10) -> Dict[str, Any]:
+        key = (" ".join(str(query).upper().split()), scope_type, int(limit))
+        with self.lock:
+            cached = self.cache.get(key)
+            if cached is not None:
+                self.cache.move_to_end(key)
+                return copy.deepcopy(cached)
+            result = self.directory.search(query, scope_type=scope_type, limit=limit)
+            self.cache[key] = copy.deepcopy(result)
+            if len(self.cache) > self.max_entries:
+                self.cache.popitem(last=False)
+            return result
+
+
 class LabRuntime:
     def __init__(self) -> None:
         release_root = os.getenv("ASK_MIMIR_RELEASE_ROOT")
@@ -2773,8 +2798,8 @@ class LabRuntime:
         self.lock = threading.RLock()
         # Admission uses a separate lightweight company directory. It must not
         # wait behind a full dossier scan before returning a recoverable job ID.
-        self.routing_company_contexts = SynchronizedStore(
-            CompanyContextStore(company_context_dir), threading.RLock(),
+        self.routing_company_contexts = RoutingCompanySearchCache(
+            SynchronizedStore(CompanyContextStore(company_context_dir), threading.RLock()),
         )
         # All entry points (including routing and downloads) share this boundary.
         # Locking only call_tool would leave direct store calls unprotected.
@@ -3387,7 +3412,9 @@ def _validated_company_query(request: AskRequest) -> str | None:
     search_query = " ".join(query_token_list)
     try:
         directory = getattr(runtime, "routing_company_contexts", runtime.company_contexts)
-        matches = directory.search(search_query, limit=10).get("matches", [])
+        # Admission validates the extracted name again below. Use the same
+        # lookup key so the expensive directory scan is performed once.
+        matches = directory.search(company_query, limit=10).get("matches", [])
     except Exception:
         # Evidence retrieval will report the underlying problem. A temporary
         # directory-search failure should not silently change a known route.
@@ -3892,7 +3919,7 @@ def validate_routing_decision(
         })
     try:
         directory = getattr(runtime, "routing_company_contexts", runtime.company_contexts)
-        matches = directory.search(company_query, limit=8).get("matches", [])
+        matches = directory.search(company_query, limit=10).get("matches", [])
     except Exception:
         # A transient directory problem belongs to the research error path rather
         # than being presented as an entity mismatch.
@@ -5199,10 +5226,25 @@ class AskJobManager:
                 return
             if not text.strip():
                 return
+            text = text[:20_000]
+            # The final answer passes the full citation and customer-safety
+            # checks later. A provisional answer must not expose an internal
+            # marker or a non-public URL while those checks are pending.
+            citation_check = validate_answer_citations(text, [])
+            if (
+                citation_check["forbidden_markers"]
+                or citation_check["unsafe_links"]
+                or re.search(
+                    r"(?:file://|https?://(?:localhost|127\.0\.0\.1)(?:[:/]|$))",
+                    text,
+                    re.IGNORECASE,
+                )
+            ):
+                job.pop("provisional_answer", None)
+                return
             first_text = not job.get("_first_model_text_at")
             job["provisional_answer"] = {
-                "text": text[:20_000],
-                "source_release_id": runtime.store.manifest["release_id"],
+                "text": text,
             }
             if first_text:
                 job["_first_model_text_at"] = datetime.now(timezone.utc).isoformat()
@@ -8495,7 +8537,10 @@ def generate_answer(
         input=input_items,
         tools=general_tools,
         tool_choice="auto",
-        parallel_tool_calls=False,
+        # Independent evidence requests can be selected in one model turn.
+        # Each returned call still goes through the same bounded tool and
+        # final-answer validation path below.
+        parallel_tool_calls=True,
         reasoning={"effort": runtime.reasoning_effort},
         max_output_tokens=runtime.max_output_tokens,
         store=False,
@@ -8551,7 +8596,7 @@ def generate_answer(
             input=input_items,
             tools=general_tools,
             tool_choice="auto",
-            parallel_tool_calls=False,
+            parallel_tool_calls=True,
             reasoning={"effort": runtime.reasoning_effort},
             max_output_tokens=runtime.max_output_tokens,
             store=False,

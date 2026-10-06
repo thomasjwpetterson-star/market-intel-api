@@ -136,8 +136,12 @@ class ResponseStreamingTests(unittest.TestCase):
                 manager.set_provisional_answer(request_id, "Working from evidence", time.perf_counter() - 1)
                 public = manager.public_job(manager.jobs[request_id])
                 self.assertEqual(public["provisional_answer"]["text"], "Working from evidence")
-                self.assertEqual(public["provisional_answer"]["source_release_id"], "pinned-release")
+                self.assertNotIn("source_release_id", public["provisional_answer"])
                 self.assertNotIn("_first_model_text_ms", public)
+                manager.set_provisional_answer(request_id, "See file:///private/internal", time.perf_counter() - 1)
+                self.assertNotIn("provisional_answer", manager.public_job(manager.jobs[request_id]))
+                manager.set_provisional_answer(request_id, "source_report_id: private", time.perf_counter() - 1)
+                self.assertNotIn("provisional_answer", manager.public_job(manager.jobs[request_id]))
                 manager.set_provisional_answer(request_id, None, time.perf_counter() - 1)
                 self.assertNotIn("provisional_answer", manager.jobs[request_id])
                 manager.jobs[request_id]["status"] = "completed"
@@ -145,6 +149,47 @@ class ResponseStreamingTests(unittest.TestCase):
                 self.assertNotIn("provisional_answer", manager.jobs[request_id])
         finally:
             manager.executor.shutdown(wait=False, cancel_futures=True)
+
+    def test_general_research_can_request_independent_evidence_in_one_model_turn(self):
+        first = SimpleNamespace(
+            id="planning", status="completed", usage=None,
+            output=[
+                SimpleNamespace(type="function_call", name="get_program_outlook",
+                                arguments=json.dumps({"program_id": "A"}), call_id="call-a"),
+                SimpleNamespace(type="function_call", name="get_platform_context",
+                                arguments=json.dumps({"platform_id": "B"}), call_id="call-b"),
+            ],
+        )
+        final = SimpleNamespace(
+            id="answered", status="completed", usage=None,
+            output=[SimpleNamespace(type="message")],
+            output_text="The checked answer uses both evidence packs.",
+        )
+        provider = Mock()
+        provider.responses.create.side_effect = [first, final]
+        runtime = SimpleNamespace(
+            mock_mode=False, external_evidence_allowed=True,
+            platform_contexts=Mock(mentions=Mock(return_value=[])),
+            model="test-model", reasoning_effort="high", max_output_tokens=4000,
+            max_evidence_records=20,
+            store=SimpleNamespace(manifest={"release_id": "test-release"}),
+            call_tool=Mock(side_effect=lambda name, arguments: {"source": name}),
+            write_audit_record=Mock(),
+        )
+        request = lab.AskRequest(messages=[{"role": "user", "content": "Compare these two research areas."}])
+        routing = lab.RoutingDecision(workflow="general_research", reason="test", confidence=1)
+        with patch.object(lab, "runtime", runtime, create=True), \
+             patch.object(lab, "OpenAI", return_value=provider), \
+             patch.dict("os.environ", {"OPENAI_API_KEY": "test-placeholder"}):
+            result = lab.generate_answer(request, routing=routing)
+        self.assertEqual(result["answer"], final.output_text)
+        self.assertEqual(result["response_calls"], 2)
+        self.assertEqual(runtime.call_tool.call_count, 2)
+        self.assertTrue(provider.responses.create.call_args_list[0].kwargs["parallel_tool_calls"])
+        second_input = provider.responses.create.call_args_list[1].kwargs["input"]
+        outputs = [item for item in second_input if isinstance(item, dict)
+                   and item.get("type") == "function_call_output"]
+        self.assertEqual({item["call_id"] for item in outputs}, {"call-a", "call-b"})
 
 
 if __name__ == "__main__":
