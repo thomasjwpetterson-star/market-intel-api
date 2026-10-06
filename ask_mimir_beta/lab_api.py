@@ -85,6 +85,7 @@ from platform_context_export import (
     build_platform_context_zip,
     platform_context_filename,
 )
+from platform_model_evidence import compact_platform_model_evidence
 from answer_artifacts import platform_answer_artifacts
 from answer_report_pdf import answer_report_filename, build_branded_answer_pdf
 from beta_controls import (
@@ -8148,10 +8149,21 @@ def generate_answer(
             ]
             if request.article_context:
                 platform_input_items.append({"role":"user", "content":article_context_note(request)})
+            compact_model_evidence = (
+                os.getenv("ASK_MIMIR_COMPACT_PLATFORM_EVIDENCE", "0") == "1"
+            )
+            model_pack = (
+                compact_platform_model_evidence(pack)
+                if compact_model_evidence else pack
+            )
             platform_input_items.append(
                 {
                     "role": "user",
-                    "content": "MIMIR UNIVERSAL PLATFORM OR PROGRAM DOSSIER\n" + json.dumps(pack, default=str),
+                    "content": "MIMIR UNIVERSAL PLATFORM OR PROGRAM DOSSIER\n" + json.dumps(
+                        model_pack,
+                        default=str,
+                        separators=(",", ":") if compact_model_evidence else None,
+                    ),
                 }
             )
             emit_progress(progress, "Preparing the answer", "Checking current sources and synthesizing the platform brief", 66)

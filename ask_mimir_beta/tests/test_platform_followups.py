@@ -28,6 +28,7 @@ class PlatformFollowupTests(unittest.TestCase):
             company_contexts=Mock(search=Mock(return_value={"matches": []})),
             mock_mode=False, external_evidence_allowed=True,
             call_tool=tool, optional_program_outlook=Mock(return_value=None),
+            write_audit_record=Mock(),
             model="test", reasoning_effort="high", max_output_tokens=10000,
         )
         self.scope = {"scope_type": "platform", "scope_id": "B-52", "scope_name": "B-52"}
@@ -95,6 +96,55 @@ class PlatformFollowupTests(unittest.TestCase):
                 lab.generate_answer(request, routing=route)
         self.assertEqual(self.pack["requested_answer_mode"], "platform_awards")
         self.assertEqual(client.responses.create.call_args.kwargs["input"][:3], messages)
+
+    def test_compact_supplier_years_change_only_model_input(self):
+        annual = {
+            "cage": "12345", "fiscal_year": 2026,
+            "mimir_modelled_reported_subcontract_value_usd": 125.0,
+            "source_reported_value_usd": 120.0,
+            "selected_report_count": 2,
+            "prime_award_count": 1,
+        }
+        self.pack["reported_supplier_sites"] = [{
+            "cage": "12345", "supplier_name": "Example supplier",
+            "annual_reported_subcontract_activity": [annual],
+        }]
+        client = Mock()
+        client.responses.create.side_effect = StopBeforeModel
+        request = lab.AskRequest(messages=[{
+            "role": "user", "content": "Which companies supply B-52?",
+        }])
+        route = lab.RoutingDecision(
+            workflow="platform_intelligence", reason="explicit_platform", confidence=1,
+        )
+        with patch.object(lab, "runtime", self.runtime, create=True), \
+             patch.object(lab, "OpenAI", return_value=client), \
+             patch.dict("os.environ", {
+                 "OPENAI_API_KEY": "test-placeholder",
+                 "ASK_MIMIR_COMPACT_PLATFORM_EVIDENCE": "1",
+             }):
+            with self.assertRaises(StopBeforeModel):
+                lab.generate_answer(request, routing=route)
+        model_text = client.responses.create.call_args.kwargs["input"][-1]["content"]
+        self.assertIn('"supplier_annual_activity_table":', model_text)
+        self.assertIn('[2026,125.0,120.0,2,1,null]', model_text)
+        self.assertEqual(
+            self.pack["reported_supplier_sites"][0]["annual_reported_subcontract_activity"],
+            [annual],
+        )
+        client.reset_mock()
+        client.responses.create.side_effect = StopBeforeModel
+        with patch.object(lab, "runtime", self.runtime, create=True), \
+             patch.object(lab, "OpenAI", return_value=client), \
+             patch.dict("os.environ", {
+                 "OPENAI_API_KEY": "test-placeholder",
+                 "ASK_MIMIR_COMPACT_PLATFORM_EVIDENCE": "0",
+             }):
+            with self.assertRaises(StopBeforeModel):
+                lab.generate_answer(request, routing=route)
+        original_model_text = client.responses.create.call_args.kwargs["input"][-1]["content"]
+        self.assertNotIn('"supplier_annual_activity_table"', original_model_text)
+        self.assertIn('"fiscal_year": 2026', original_model_text)
 
 
 if __name__ == "__main__":
