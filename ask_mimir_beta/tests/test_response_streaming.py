@@ -116,6 +116,20 @@ class ResponseStreamingTests(unittest.TestCase):
             self.timed.create(model="test")
         self.assertEqual(self.drafts[-1], None)
 
+    def test_actual_web_search_calls_are_counted_without_search_content(self):
+        response = SimpleNamespace(
+            id="web-response",
+            output=[SimpleNamespace(type="web_search_call"), SimpleNamespace(type="message")],
+        )
+        self.responses.create.return_value = iter([
+            event("response.completed", response=response),
+        ])
+        with patch.object(lab, "record_request_timing") as timing:
+            self.assertIs(self.timed.create(model="test", tools=[{"type": "web_search"}]), response)
+        categories = [call.args[0] for call in timing.call_args_list]
+        self.assertEqual(categories.count("model_web_search_call"), 1)
+        self.assertEqual(categories.count("model"), 1)
+
     def test_interrupted_stream_clears_visible_draft(self):
         def interrupted():
             yield event("response.output_text.delta", delta="Partial")

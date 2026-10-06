@@ -359,9 +359,25 @@ class RequestPerformanceTests(unittest.TestCase):
         self.assertEqual(snapshot["queue_wait_ms"], 3.5)
         self.assertEqual(snapshot["evidence_retrieval_ms"], 40.0)
         self.assertEqual(snapshot["model_ms"], 800.0)
+        self.assertEqual(snapshot["model_first_call_ms"], 800.0)
+        self.assertEqual(snapshot["model_last_call_ms"], 800.0)
+        self.assertEqual(snapshot["model_max_call_ms"], 800.0)
         self.assertEqual(snapshot["evidence_call_count"], 1)
         self.assertEqual(snapshot["model_call_count"], 1)
         self.assertEqual(snapshot["evidence_cache_hit_count"], 1)
+
+    def test_model_round_timings_distinguish_a_slow_first_call_from_followup(self):
+        performance = RequestPerformance()
+        with request_performance_scope(performance):
+            record_request_timing("model", "model", 1250)
+            record_request_timing("model", "model", 370)
+        snapshot = performance.snapshot(
+            answer_generation_ms=1620, validation_ms=0, total_request_ms=1620,
+        )
+        self.assertEqual(snapshot["model_call_count"], 2)
+        self.assertEqual(snapshot["model_first_call_ms"], 1250)
+        self.assertEqual(snapshot["model_last_call_ms"], 370)
+        self.assertEqual(snapshot["model_max_call_ms"], 1250)
 
 
 class ClarificationDetectionTests(unittest.TestCase):

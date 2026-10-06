@@ -6460,6 +6460,11 @@ class TimedResponses:
                 self._streamed_create(kwargs)
                 if can_stream else self._responses.create(**kwargs)
             )
+            output = getattr(response, "output", None)
+            if isinstance(output, (list, tuple)):
+                for item in output:
+                    if getattr(item, "type", None) == "web_search_call":
+                        record_request_timing("model_web_search_call", "web_search", 0)
             lifecycle("ask_model_completed", response_id=getattr(response, "id", None),
                       latency_ms=round((time.perf_counter() - started) * 1000))
             return response

@@ -55,6 +55,31 @@ def first_visible_text(job: dict[str, Any]) -> str | None:
     return None
 
 
+def safe_model_usage(result: dict[str, Any]) -> dict[str, float | int]:
+    """Retain numeric model/cost counters without answer or evidence content."""
+    usage = result.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    input_details = usage.get("input_tokens_details")
+    input_details = input_details if isinstance(input_details, dict) else {}
+    output_details = usage.get("output_tokens_details")
+    output_details = output_details if isinstance(output_details, dict) else {}
+    estimated_cost = result.get("estimated_cost")
+    estimated_cost = estimated_cost if isinstance(estimated_cost, dict) else {}
+    candidates = {
+        "response_calls": result.get("response_calls"),
+        "input_tokens": usage.get("input_tokens"),
+        "cached_input_tokens": input_details.get("cached_tokens"),
+        "output_tokens": usage.get("output_tokens"),
+        "reasoning_tokens": output_details.get("reasoning_tokens"),
+        "estimated_cost_usd": estimated_cost.get("estimated_total_usd"),
+    }
+    return {
+        key: value for key, value in candidates.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+        and math.isfinite(value) and value >= 0
+    }
+
+
 def evaluate_job_case(base_url: str, case: dict, *, tier: str, subject: str,
                       proxy_secret: str | None = None, poll_seconds: float = 0.5,
                       deadline_seconds: float = 360,
@@ -117,8 +142,10 @@ def evaluate_job_case(base_url: str, case: dict, *, tier: str, subject: str,
     safe_timings = {
         key: value for key, value in timings.items()
         if key in {"routing_ms", "queue_wait_ms", "evidence_retrieval_ms", "model_ms",
+                   "model_first_call_ms", "model_last_call_ms", "model_max_call_ms",
                    "validation_and_formatting_ms", "total_request_ms", "model_call_count",
-                   "evidence_call_count", "evidence_cache_hit_count"}
+                   "evidence_call_count", "evidence_cache_hit_count",
+                   "model_web_search_call_count"}
         and isinstance(value, (int, float)) and not isinstance(value, bool)
         and math.isfinite(value) and value >= 0
     }
@@ -135,6 +162,7 @@ def evaluate_job_case(base_url: str, case: dict, *, tier: str, subject: str,
         "first_evidence_preview_ms": first_evidence_preview_ms,
         "server_first_model_text_ms": (job.get("timings") or {}).get("first_model_text_ms"),
         "server_timings": safe_timings,
+        "model_usage": safe_model_usage(result),
         "completed_ms": completed_ms,
         "first_text_within_30s": first_text_ms is not None and first_text_ms <= 30_000,
         "workflow_correct": (

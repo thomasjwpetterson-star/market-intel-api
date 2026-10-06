@@ -9,11 +9,32 @@ import tempfile
 
 from ask_mimir_beta import evaluate_job_speed
 from ask_mimir_beta.evaluate_job_speed import (
-    evaluate_job_case, first_visible_text, prepare_case, timing_summary,
+    evaluate_job_case, first_visible_text, prepare_case, safe_model_usage,
+    timing_summary,
 )
 
 
 class JobSpeedEvaluatorTests(unittest.TestCase):
+    def test_model_usage_omits_answer_text_and_invalid_numbers(self):
+        summary = safe_model_usage({
+            "answer": "Do not retain this",
+            "response_calls": 2,
+            "usage": {
+                "input_tokens": 900,
+                "input_tokens_details": {"cached_tokens": 200},
+                "output_tokens": 300,
+                "output_tokens_details": {"reasoning_tokens": 100},
+            },
+            "estimated_cost": {"estimated_total_usd": 0.01},
+        })
+        self.assertEqual(summary, {
+            "response_calls": 2, "input_tokens": 900,
+            "cached_input_tokens": 200, "output_tokens": 300,
+            "reasoning_tokens": 100, "estimated_cost_usd": 0.01,
+        })
+        self.assertNotIn("answer", summary)
+        self.assertNotIn("input_tokens", safe_model_usage({"usage": {"input_tokens": float("inf")}}))
+
     def test_sample_spans_common_workflows(self):
         cases = json.loads((Path(__file__).resolve().parents[1] / "speed_eval_cases.json").read_text())
         self.assertEqual(
