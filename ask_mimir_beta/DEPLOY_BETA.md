@@ -124,11 +124,15 @@ multiple service instances requires shared interim state if drafts must
 survive that transition. The completed answer remains durable.
 
 Run `evaluate_job_speed.py` against an isolated real-model candidate with the
-flag off and on. Compare first model draft, final completion, answer accuracy,
-citations, costs and failures for platform, company, item, contract,
-opportunity and general research questions. Confirm in a browser that a draft
-is visible, gets replaced by the final answer, and disappears on a failed
-job. The 30-second first-useful-text target is not established by unit tests.
+flag off and on, using the same release, model, reasoning effort and subject.
+`--shared-subject --subject <exact-test-subject>` makes the evaluator match one
+private allowlist entry. The sample covers six workflows plus two follow-ups
+constructed from the preceding real answers; it saves timings and basic checks,
+not answer text. Compare first model draft, final completion, factual accuracy,
+citations, costs and failures. Its small-sample p90 is diagnostic, not a release
+claim. Confirm in a real browser that a draft is visible, gets replaced by the
+checked answer, and disappears on a failed job or reconnect. The 30-second
+first-useful-text target is not established by unit tests.
 
 To roll back, set `ASK_MIMIR_FOLLOW_CURRENT_RELEASE=0` and set
 `ASK_MIMIR_PINNED_MANIFEST_KEY` to a previously published immutable manifest.

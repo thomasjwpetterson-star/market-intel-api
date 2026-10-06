@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import statistics
 import time
 import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     from .evaluate_lab import score_result
@@ -55,7 +57,8 @@ def first_visible_text(job: dict[str, Any]) -> str | None:
 
 def evaluate_job_case(base_url: str, case: dict, *, tier: str, subject: str,
                       proxy_secret: str | None = None, poll_seconds: float = 0.5,
-                      deadline_seconds: float = 360) -> dict:
+                      deadline_seconds: float = 360,
+                      on_completed: Callable[[dict], None] | None = None) -> dict:
     request_id = str(uuid.uuid4())
     headers = {
         "Content-Type": "application/json",
@@ -106,8 +109,22 @@ def evaluate_job_case(base_url: str, case: dict, *, tier: str, subject: str,
     completed_ms = round((time.perf_counter() - started) * 1000)
     result = job.get("result") or {}
     quality = score_result(case, result) if job.get("status") == "completed" else None
+    if quality and on_completed:
+        # The answer is needed in memory for a realistic follow-up, but must
+        # never be written to the benchmark report.
+        on_completed(result)
+    timings = job.get("timings") or {}
+    safe_timings = {
+        key: value for key, value in timings.items()
+        if key in {"routing_ms", "queue_wait_ms", "evidence_retrieval_ms", "model_ms",
+                   "validation_and_formatting_ms", "total_request_ms", "model_call_count",
+                   "evidence_call_count", "evidence_cache_hit_count"}
+        and isinstance(value, (int, float)) and not isinstance(value, bool)
+        and math.isfinite(value) and value >= 0
+    }
     return {
         "case_id": case["case_id"],
+        "phase": "follow_up" if case.get("follows") else "initial",
         "workflow": job.get("workflow"),
         "expected_workflow": case.get("expected_workflow"),
         "status": job.get("status"),
@@ -117,6 +134,7 @@ def evaluate_job_case(base_url: str, case: dict, *, tier: str, subject: str,
         "first_model_draft_ms": first_model_draft_ms,
         "first_evidence_preview_ms": first_evidence_preview_ms,
         "server_first_model_text_ms": (job.get("timings") or {}).get("first_model_text_ms"),
+        "server_timings": safe_timings,
         "completed_ms": completed_ms,
         "first_text_within_30s": first_text_ms is not None and first_text_ms <= 30_000,
         "workflow_correct": (
@@ -129,6 +147,43 @@ def evaluate_job_case(base_url: str, case: dict, *, tier: str, subject: str,
     }
 
 
+def timing_summary(rows: list[dict]) -> dict:
+    """Exploratory percentiles, without answer text or hidden job fields."""
+    summary = {}
+    for key in ("accepted_ms", "first_visible_text_ms", "first_model_draft_ms", "completed_ms"):
+        values = sorted(float(row[key]) for row in rows
+                        if row.get("status") == "completed"
+                        and isinstance(row.get(key), (int, float)))
+        if values:
+            summary[key] = {
+                "n": len(values),
+                "p50": round(statistics.median(values)),
+                "p90": round(values[math.ceil(0.9 * len(values)) - 1]),
+            }
+    return summary
+
+
+def prepare_case(case: dict, private_context: dict[str, dict]) -> dict | None:
+    """Construct a follow-up from the previous real answer held only in memory."""
+    parent_id = case.get("follows")
+    prepared = dict(case)
+    if not parent_id:
+        prepared["conversation_id"] = str(uuid.uuid4())
+        return prepared
+    parent = private_context.get(parent_id)
+    if not parent:
+        return None
+    prepared["messages"] = [
+        *parent["messages"],
+        {"role": "assistant", "content": parent["answer"]},
+        {"role": "user", "content": case["question"]},
+    ]
+    prepared["conversation_id"] = parent["conversation_id"]
+    if parent.get("active_scope"):
+        prepared["active_scope"] = parent["active_scope"]
+    return prepared
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:10100")
@@ -136,21 +191,57 @@ def main() -> None:
     parser.add_argument("--case-id", action="append")
     parser.add_argument("--tier", default="enterprise")
     parser.add_argument("--subject", default="ask-speed-evaluation")
+    parser.add_argument("--shared-subject", action="store_true",
+                        help="Use one exact test subject for a private progressive-text allowlist")
     parser.add_argument("--proxy-secret", default=os.getenv("ASK_MIMIR_TRUSTED_PROXY_SECRET"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--enforce-target", action="store_true")
     args = parser.parse_args()
-    cases = json.loads(args.cases_file.read_text())
-    cases = [case for case in cases if not args.case_id or case["case_id"] in args.case_id]
+    all_cases = json.loads(args.cases_file.read_text())
+    known = {case["case_id"]: case for case in all_cases}
+    selected = set(args.case_id or known)
+    if selected - set(known):
+        raise SystemExit(f"Unknown case IDs: {', '.join(sorted(selected - set(known)))}")
+    for case_id in list(selected):
+        parent_id = known[case_id].get("follows")
+        if parent_id:
+            if parent_id not in known:
+                raise SystemExit(f"Unknown parent case ID: {parent_id}")
+            selected.add(parent_id)
+    cases = [case for case in all_cases if case["case_id"] in selected]
     if not cases:
         raise SystemExit("No speed-evaluation cases matched")
     results = []
+    private_context = {}
     for case in cases:
+        parent_id = case.get("follows")
+        prepared = prepare_case(case, private_context)
+        if prepared is None:
+            results.append({
+                "case_id": case["case_id"], "phase": "follow_up",
+                "expected_workflow": case.get("expected_workflow"),
+                "status": "skipped_parent_failed", "first_text_within_30s": False,
+                "workflow_correct": False, "basic_answer_checks_passed": False,
+            })
+            continue
+        captured = {}
         try:
             result = evaluate_job_case(
-                args.base_url, case, tier=args.tier,
-                subject=f"{args.subject}:{case['case_id']}", proxy_secret=args.proxy_secret,
+                args.base_url, prepared, tier=args.tier,
+                subject=(args.subject if args.shared_subject else
+                         f"{args.subject}:{parent_id or case['case_id']}"),
+                proxy_secret=args.proxy_secret,
+                on_completed=lambda value: captured.update(value),
             )
+            if captured and result["basic_answer_checks_passed"]:
+                private_context[case["case_id"]] = {
+                    "messages": prepared.get("messages") or [
+                        {"role": "user", "content": case["question"]}
+                    ],
+                    "answer": str(captured.get("answer") or ""),
+                    "active_scope": captured.get("active_scope"),
+                    "conversation_id": prepared["conversation_id"],
+                }
         except Exception as error:
             result = {
                 "case_id": case["case_id"], "expected_workflow": case.get("expected_workflow"),
@@ -166,6 +257,8 @@ def main() -> None:
         "target": "first useful text by 30 seconds for each sample, with basic answer checks",
         "quality_review_note": "Term and route checks are a smoke test; factual and citation quality still require reviewed answers against the incumbent release.",
         "cases": results,
+        "timing_summary_ms": timing_summary(results),
+        "sample_limit": "Small cross-workflow sample; p90 is exploratory until repeated with cold starts and browser visibility.",
     }
     report["all_cases_passed"] = all(
         row["status"] == "completed"

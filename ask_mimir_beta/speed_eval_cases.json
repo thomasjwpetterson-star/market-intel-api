@@ -7,10 +7,26 @@
     "require_financial_period": true
   },
   {
+    "case_id": "platform_amraam_followup",
+    "follows": "platform_amraam",
+    "question": "Of those suppliers, which have observed FY2026 obligations, and how does that compare with FY2025?",
+    "expected_workflow": "platform_intelligence",
+    "required_answer_terms": ["2026", "2025"],
+    "require_financial_period": true
+  },
+  {
     "case_id": "company_curtiss_wright",
     "question": "Give me an overview of Curtiss-Wright's US defence business.",
     "expected_workflow": "company_site_intelligence",
     "required_answer_terms": ["Curtiss-Wright", "CAGE"],
+    "require_financial_period": true
+  },
+  {
+    "case_id": "company_curtiss_wright_followup",
+    "follows": "company_curtiss_wright",
+    "question": "Which recent awards support that assessment, and which CAGE sites do they belong to?",
+    "expected_workflow": "company_site_intelligence",
+    "required_answer_terms": ["CAGE"],
     "require_financial_period": true
   },
   {
