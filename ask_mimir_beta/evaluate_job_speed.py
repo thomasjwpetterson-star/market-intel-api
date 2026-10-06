@@ -134,6 +134,13 @@ def evaluate_job_case(base_url: str, case: dict, *, tier: str, subject: str,
     completed_ms = round((time.perf_counter() - started) * 1000)
     result = job.get("result") or {}
     quality = score_result(case, result) if job.get("status") == "completed" else None
+    citation_validation = result.get("citation_validation") or {}
+    if not isinstance(citation_validation, dict):
+        citation_validation = {}
+    citation_status = citation_validation.get("status")
+    if citation_status not in {"pass", "warn", "fail"}:
+        citation_status = None
+    citation_warnings = citation_validation.get("warnings")
     if quality and on_completed:
         # The answer is needed in memory for a realistic follow-up, but must
         # never be written to the benchmark report.
@@ -163,6 +170,8 @@ def evaluate_job_case(base_url: str, case: dict, *, tier: str, subject: str,
         "server_first_model_text_ms": (job.get("timings") or {}).get("first_model_text_ms"),
         "server_timings": safe_timings,
         "model_usage": safe_model_usage(result),
+        "citation_status": citation_status,
+        "citation_warning_count": len(citation_warnings) if isinstance(citation_warnings, list) else 0,
         "completed_ms": completed_ms,
         "first_text_within_30s": first_text_ms is not None and first_text_ms <= 30_000,
         "workflow_correct": (
@@ -242,6 +251,7 @@ def main() -> None:
     results = []
     private_context = {}
     for case in cases:
+        print(f"Starting {case['case_id']}", flush=True)
         parent_id = case.get("follows")
         prepared = prepare_case(case, private_context)
         if prepared is None:
@@ -278,6 +288,12 @@ def main() -> None:
                 "basic_answer_checks_passed": False,
             }
         results.append(result)
+        print(
+            f"Finished {case['case_id']}: {result['status']}, "
+            f"first text {result.get('first_visible_text_ms')} ms, "
+            f"complete {result.get('completed_ms')} ms",
+            flush=True,
+        )
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "base_url": args.base_url,

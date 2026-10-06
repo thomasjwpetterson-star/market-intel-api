@@ -121,7 +121,8 @@ class JobSpeedEvaluatorTests(unittest.TestCase):
                 return {"request_id": payload["client_request_id"], "status": "queued", "workflow": "contract_or_opportunity"}
             return {
                 "status": "completed", "workflow": "contract_or_opportunity",
-                "result": {"answer": "Contract N0001923F2616 has an action history.", "tool_trace": []},
+                "result": {"answer": "Contract N0001923F2616 has an action history.", "tool_trace": [],
+                           "citation_validation": {"status": "pass", "warnings": []}},
             }
         request_json.side_effect = response
         result = evaluate_job_case(
@@ -133,6 +134,8 @@ class JobSpeedEvaluatorTests(unittest.TestCase):
         self.assertEqual(result["first_text_mode"], "completed_answer")
         self.assertTrue(result["workflow_correct"])
         self.assertTrue(result["basic_answer_checks_passed"])
+        self.assertEqual(result["citation_status"], "pass")
+        self.assertEqual(result["citation_warning_count"], 0)
         self.assertNotIn("answer", result)
 
     @patch("ask_mimir_beta.evaluate_job_speed.time.sleep")
