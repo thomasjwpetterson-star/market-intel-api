@@ -159,8 +159,11 @@ def next_utc_month_iso() -> str:
 def request_timing_summary(performance: Dict[str, Any] | None) -> Dict[str, float]:
     """Only bounded numeric timings may leave the internal performance record."""
     keys = ("routing_ms", "queue_wait_ms", "answer_generation_ms", "evidence_retrieval_ms",
-            "model_ms", "validation_and_formatting_ms", "total_request_ms",
-            "evidence_call_count", "model_call_count", "evidence_cache_hit_count")
+            "model_ms", "model_first_call_ms", "model_last_call_ms", "model_max_call_ms",
+            "validation_and_formatting_ms", "total_request_ms",
+            "evidence_call_count", "model_call_count", "model_web_search_call_count",
+            "evidence_cache_hit_count",
+            "first_model_text_ms")
     return {key: value for key in keys
             if isinstance((value := (performance or {}).get(key)), (int, float))
             and not isinstance(value, bool) and math.isfinite(value) and value >= 0}
@@ -203,6 +206,8 @@ class RequestPerformance:
         validation_ms: float,
         total_request_ms: float,
     ) -> Dict[str, Any]:
+        model_calls = [operation["elapsed_ms"] for operation in self.operations
+                       if operation["category"] == "model"]
         return {
             "routing_ms": round(self.routing_ms, 1),
             "queue_wait_ms": round(max(queue_wait_ms, 0.0), 1),
@@ -211,10 +216,14 @@ class RequestPerformance:
                 self.totals.get("evidence_retrieval", 0.0), 1
             ),
             "model_ms": round(self.totals.get("model", 0.0), 1),
+            "model_first_call_ms": model_calls[0] if model_calls else 0.0,
+            "model_last_call_ms": model_calls[-1] if model_calls else 0.0,
+            "model_max_call_ms": max(model_calls, default=0.0),
             "validation_and_formatting_ms": round(max(validation_ms, 0.0), 1),
             "total_request_ms": round(max(total_request_ms, 0.0), 1),
             "evidence_call_count": self.counts.get("evidence_retrieval", 0),
             "model_call_count": self.counts.get("model", 0),
+            "model_web_search_call_count": self.counts.get("model_web_search_call", 0),
             "evidence_cache_hit_count": self.counts.get("evidence_cache_hit", 0),
             "operations": list(self.operations),
         }

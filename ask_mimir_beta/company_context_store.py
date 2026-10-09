@@ -1753,84 +1753,81 @@ class CompanyContextStore:
             if compatible_name_rows:
                 parent_rows = compatible_name_rows
 
-            results: List[Dict[str, Any]] = []
-            for parent_rank, (parent_name, _observed_value) in enumerate(parent_rows):
-                parent_filter = (
-                    "UPPER(TRIM(COALESCE(p.ultimate_parent_name, ''))) = UPPER(TRIM(?))"
-                )
-                parent_value = str(parent_name)
-
-                location_join = ""
-                location_select = "CAST(NULL AS VARCHAR) AS city, CAST(NULL AS VARCHAR) AS state"
-                parameters: List[Any] = [str(profiles_path)]
-                if self.directory_paths["locations"].exists():
-                    location_join = """
-                        LEFT JOIN read_parquet(?) l
-                          ON UPPER(REGEXP_REPLACE(COALESCE(p.cage_code, ''), '[^A-Za-z0-9]', '', 'g'))
-                           = UPPER(REGEXP_REPLACE(COALESCE(l.cage_code, ''), '[^A-Za-z0-9]', '', 'g'))
-                    """
-                    location_select = "l.city, l.state"
-                    parameters.append(str(self.directory_paths["locations"]))
-                parameters.append(parent_value)
-                site_rows = connection.execute(
+            # Fetch sites for all matching parents in one scan. The former
+            # per-parent queries repeated a Parquet scan and location join up
+            # to ten times during company routing.
+            parent_names = [str(name) for name, _value in parent_rows]
+            sites_by_parent: Dict[str, List[tuple]] = {name: [] for name in parent_names}
+            normalized_parents: Dict[str, List[str]] = {}
+            for name in parent_names:
+                normalized_parents.setdefault(name.strip().upper(), []).append(name)
+            location_join = ""
+            location_select = "CAST(NULL AS VARCHAR) AS city, CAST(NULL AS VARCHAR) AS state"
+            base_parameters: List[Any] = [str(profiles_path)]
+            if self.directory_paths["locations"].exists():
+                location_join = """
+                    LEFT JOIN read_parquet(?) l
+                      ON UPPER(REGEXP_REPLACE(COALESCE(p.cage_code, ''), '[^A-Za-z0-9]', '', 'g'))
+                       = UPPER(REGEXP_REPLACE(COALESCE(l.cage_code, ''), '[^A-Za-z0-9]', '', 'g'))
+                """
+                location_select = "l.city, l.state"
+                base_parameters.append(str(self.directory_paths["locations"]))
+            if parent_names:
+                placeholders = ",".join("?" for _ in normalized_parents)
+                direct_rows = connection.execute(
                     f"""
-                    SELECT
-                        UPPER(REGEXP_REPLACE(COALESCE(p.cage_code, ''), '[^A-Za-z0-9]', '', 'g')) AS cage,
-                        p.vendor_name,
-                        {location_select},
-                        COALESCE(p.total_lifetime_spend, 0) AS prime_value,
-                        COALESCE(p.network_flow_total, 0) AS subcontract_value
+                    SELECT UPPER(TRIM(p.ultimate_parent_name)) AS parent_key,
+                           UPPER(REGEXP_REPLACE(COALESCE(p.cage_code, ''), '[^A-Za-z0-9]', '', 'g')) AS cage,
+                           p.vendor_name, {location_select},
+                           COALESCE(p.total_lifetime_spend, 0) AS prime_value,
+                           COALESCE(p.network_flow_total, 0) AS subcontract_value
                     FROM read_parquet(?) p
                     {location_join}
-                    WHERE {parent_filter}
+                    WHERE UPPER(TRIM(COALESCE(p.ultimate_parent_name, ''))) IN ({placeholders})
                     ORDER BY ABS(COALESCE(p.total_lifetime_spend, 0))
                            + ABS(COALESCE(p.network_flow_total, 0)) DESC,
-                             p.vendor_name,
-                             p.cage_code
+                             p.vendor_name, p.cage_code
                     """,
-                    parameters,
+                    [*base_parameters, *normalized_parents],
                 ).fetchall()
+                for parent_key, *site in direct_rows:
+                    for name in normalized_parents.get(parent_key, []):
+                        sites_by_parent[name].append(tuple(site))
 
-                inferred_name_keys = sorted(
-                    name_key
-                    for name_key, (inferred_parent_name, _parent_uei) in parent_bridge.items()
-                    if _company_name_core(_parent_display_name(inferred_parent_name))
-                    == _company_name_core(_parent_display_name(parent_name))
-                )
-                if inferred_name_keys:
-                    placeholders = ",".join("?" for _ in inferred_name_keys)
-                    inferred_location_join = ""
-                    inferred_location_select = (
-                        "CAST(NULL AS VARCHAR) AS city, CAST(NULL AS VARCHAR) AS state"
-                    )
-                    inferred_parameters: List[Any] = [str(profiles_path)]
-                    if self.directory_paths["locations"].exists():
-                        inferred_location_join = """
-                            LEFT JOIN read_parquet(?) l
-                              ON UPPER(REGEXP_REPLACE(COALESCE(p.cage_code, ''), '[^A-Za-z0-9]', '', 'g'))
-                               = UPPER(REGEXP_REPLACE(COALESCE(l.cage_code, ''), '[^A-Za-z0-9]', '', 'g'))
-                        """
-                        inferred_location_select = "l.city, l.state"
-                        inferred_parameters.append(str(self.directory_paths["locations"]))
-                    inferred_parameters.extend(inferred_name_keys)
-                    site_rows.extend(
-                        connection.execute(
-                            f"""
-                            SELECT
-                                UPPER(REGEXP_REPLACE(COALESCE(p.cage_code, ''), '[^A-Za-z0-9]', '', 'g')) AS cage,
-                                p.vendor_name,
-                                {inferred_location_select},
-                                COALESCE(p.total_lifetime_spend, 0) AS prime_value,
-                                COALESCE(p.network_flow_total, 0) AS subcontract_value
-                            FROM read_parquet(?) p
-                            {inferred_location_join}
-                            WHERE NULLIF(TRIM(p.ultimate_parent_name), '') IS NULL
-                              AND UPPER(REGEXP_REPLACE(TRIM(COALESCE(p.vendor_name, '')), '[^A-Za-z0-9]', '', 'g'))
-                                  IN ({placeholders})
-                            """,
-                            inferred_parameters,
-                        ).fetchall()
-                    )
+            parent_names_by_legal_key: Dict[str, List[str]] = {}
+            parent_core_names = {
+                name: _company_name_core(_parent_display_name(name))
+                for name in parent_names
+            }
+            for legal_key, (bridge_parent, _parent_uei) in parent_bridge.items():
+                bridge_core = _company_name_core(_parent_display_name(bridge_parent))
+                for name, parent_core in parent_core_names.items():
+                    if bridge_core == parent_core:
+                        parent_names_by_legal_key.setdefault(legal_key, []).append(name)
+            if parent_names_by_legal_key:
+                placeholders = ",".join("?" for _ in parent_names_by_legal_key)
+                inferred_rows = connection.execute(
+                    f"""
+                    SELECT UPPER(REGEXP_REPLACE(TRIM(COALESCE(p.vendor_name, '')), '[^A-Za-z0-9]', '', 'g')) AS legal_key,
+                           UPPER(REGEXP_REPLACE(COALESCE(p.cage_code, ''), '[^A-Za-z0-9]', '', 'g')) AS cage,
+                           p.vendor_name, {location_select},
+                           COALESCE(p.total_lifetime_spend, 0) AS prime_value,
+                           COALESCE(p.network_flow_total, 0) AS subcontract_value
+                    FROM read_parquet(?) p
+                    {location_join}
+                    WHERE NULLIF(TRIM(p.ultimate_parent_name), '') IS NULL
+                      AND UPPER(REGEXP_REPLACE(TRIM(COALESCE(p.vendor_name, '')), '[^A-Za-z0-9]', '', 'g'))
+                          IN ({placeholders})
+                    """,
+                    [*base_parameters, *parent_names_by_legal_key],
+                ).fetchall()
+                for legal_key, *site in inferred_rows:
+                    for name in parent_names_by_legal_key.get(legal_key, []):
+                        sites_by_parent[name].append(tuple(site))
+
+            results: List[Dict[str, Any]] = []
+            for parent_rank, (parent_name, _observed_value) in enumerate(parent_rows):
+                site_rows = sites_by_parent[str(parent_name)]
 
                 sites_by_cage: Dict[str, Dict[str, Any]] = {}
                 for cage, vendor_name, city, state, prime_value, subcontract_value in site_rows:

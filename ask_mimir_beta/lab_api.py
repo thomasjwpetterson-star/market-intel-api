@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import base64
 import binascii
 import hashlib
@@ -14,6 +15,7 @@ import contextvars
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
@@ -83,6 +85,7 @@ from platform_context_export import (
     build_platform_context_zip,
     platform_context_filename,
 )
+from platform_model_evidence import compact_platform_model_evidence
 from answer_artifacts import platform_answer_artifacts
 from answer_report_pdf import answer_report_filename, build_branded_answer_pdf
 from beta_controls import (
@@ -2581,6 +2584,29 @@ class AnswerReportRequest(BaseModel):
     response_id: str = Field(min_length=1, max_length=200)
 
 
+class RoutingCompanySearchCache:
+    """Bound repeat name lookups in the immutable routing directory."""
+
+    def __init__(self, directory: Any, max_entries: int = 64) -> None:
+        self.directory = directory
+        self.max_entries = max_entries
+        self.lock = threading.Lock()
+        self.cache: OrderedDict[tuple[str, str | None, int], Dict[str, Any]] = OrderedDict()
+
+    def search(self, query: str, scope_type: str | None = None, limit: int = 10) -> Dict[str, Any]:
+        key = (" ".join(str(query).upper().split()), scope_type, int(limit))
+        with self.lock:
+            cached = self.cache.get(key)
+            if cached is not None:
+                self.cache.move_to_end(key)
+                return copy.deepcopy(cached)
+            result = self.directory.search(query, scope_type=scope_type, limit=limit)
+            self.cache[key] = copy.deepcopy(result)
+            if len(self.cache) > self.max_entries:
+                self.cache.popitem(last=False)
+            return result
+
+
 class LabRuntime:
     def __init__(self) -> None:
         release_root = os.getenv("ASK_MIMIR_RELEASE_ROOT")
@@ -2773,8 +2799,8 @@ class LabRuntime:
         self.lock = threading.RLock()
         # Admission uses a separate lightweight company directory. It must not
         # wait behind a full dossier scan before returning a recoverable job ID.
-        self.routing_company_contexts = SynchronizedStore(
-            CompanyContextStore(company_context_dir), threading.RLock(),
+        self.routing_company_contexts = RoutingCompanySearchCache(
+            SynchronizedStore(CompanyContextStore(company_context_dir), threading.RLock()),
         )
         # All entry points (including routing and downloads) share this boundary.
         # Locking only call_tool would leave direct store calls unprotected.
@@ -3387,7 +3413,9 @@ def _validated_company_query(request: AskRequest) -> str | None:
     search_query = " ".join(query_token_list)
     try:
         directory = getattr(runtime, "routing_company_contexts", runtime.company_contexts)
-        matches = directory.search(search_query, limit=10).get("matches", [])
+        # Admission validates the extracted name again below. Use the same
+        # lookup key so the expensive directory scan is performed once.
+        matches = directory.search(company_query, limit=10).get("matches", [])
     except Exception:
         # Evidence retrieval will report the underlying problem. A temporary
         # directory-search failure should not silently change a known route.
@@ -3892,7 +3920,7 @@ def validate_routing_decision(
         })
     try:
         directory = getattr(runtime, "routing_company_contexts", runtime.company_contexts)
-        matches = directory.search(company_query, limit=8).get("matches", [])
+        matches = directory.search(company_query, limit=10).get("matches", [])
     except Exception:
         # A transient directory problem belongs to the research error path rather
         # than being presented as an entity mismatch.
@@ -5186,6 +5214,51 @@ class AskJobManager:
                 }
             )
 
+    def set_provisional_answer(
+        self, request_id: str, text: str | None, request_started_perf: float
+    ) -> None:
+        first_text = False
+        with self.lock:
+            job = self.jobs.get(request_id)
+            if not job or job.get("status") not in {"queued", "running"}:
+                return
+            if not text:
+                job.pop("provisional_answer", None)
+                return
+            if not text.strip():
+                return
+            text = text[:20_000]
+            # The final answer passes the full citation and customer-safety
+            # checks later. A provisional answer must not expose an internal
+            # marker or a non-public URL while those checks are pending.
+            citation_check = validate_answer_citations(text, [])
+            if (
+                citation_check["forbidden_markers"]
+                or citation_check["unsafe_links"]
+                or re.search(
+                    r"(?:file://|https?://(?:localhost|127\.0\.0\.1)(?:[:/]|$))",
+                    text,
+                    re.IGNORECASE,
+                )
+            ):
+                job.pop("provisional_answer", None)
+                return
+            first_text = not job.get("_first_model_text_at")
+            job["provisional_answer"] = {
+                "text": text,
+            }
+            if first_text:
+                job["_first_model_text_at"] = datetime.now(timezone.utc).isoformat()
+                job["_first_model_text_ms"] = round(
+                    (time.perf_counter() - request_started_perf) * 1000, 1
+                )
+        if first_text:
+            lifecycle(
+                "ask_first_model_text_ready",
+                request_id=request_id,
+                elapsed_ms=round((time.perf_counter() - request_started_perf) * 1000),
+            )
+
     def _run(
         self,
         request_id: str,
@@ -5249,6 +5322,19 @@ class AskJobManager:
             with request_performance_scope(performance):
                 runtime.release_guard.assert_unchanged()
                 answer_started = time.perf_counter()
+                draft_text_callback = None
+                allowed_subjects = {
+                    subject.strip()
+                    for subject in os.getenv("ASK_MIMIR_PROGRESSIVE_TEXT_SUBJECTS", "").split(",")
+                    if subject.strip()
+                }
+                if (
+                    os.getenv("ASK_MIMIR_PROGRESSIVE_TEXT", "0") == "1"
+                    and (not allowed_subjects or access.subject_id in allowed_subjects)
+                ):
+                    draft_text_callback = lambda text: self.set_provisional_answer(
+                        request_id, text, request_started_perf
+                    )
                 try:
                     result = (
                         routing_clarification_result(routing)
@@ -5258,6 +5344,7 @@ class AskJobManager:
                             progress=lambda stage, detail, percent: self.update(
                                 request_id, stage, detail, percent
                             ),
+                            draft_text=draft_text_callback,
                             routing=routing,
                         )
                     )
@@ -5305,6 +5392,8 @@ class AskJobManager:
                 validation_ms=validation_ms,
                 total_request_ms=(time.perf_counter() - request_started_perf) * 1000,
             )
+            if isinstance(self.jobs[request_id].get("_first_model_text_ms"), (int, float)):
+                performance_snapshot["first_model_text_ms"] = self.jobs[request_id]["_first_model_text_ms"]
             cost = (result.get("estimated_cost") or {}).get("estimated_total_usd")
             best_effort(
                 "completed performance telemetry",
@@ -5379,6 +5468,7 @@ class AskJobManager:
                         "detail": "The evidence and citations have been checked",
                         "percent": 100,
                         "result": customer_result,
+                        "provisional_answer": None,
                         "access": customer_result["access"],
                         "completed_at": datetime.now(timezone.utc).isoformat(),
                         "timings": request_timing_summary(performance_snapshot),
@@ -5450,6 +5540,8 @@ class AskJobManager:
                 validation_ms=validation_ms,
                 total_request_ms=(time.perf_counter() - request_started_perf) * 1000,
             )
+            if isinstance(self.jobs[request_id].get("_first_model_text_ms"), (int, float)):
+                performance_snapshot["first_model_text_ms"] = self.jobs[request_id]["_first_model_text_ms"]
             failure = request_failure_details(exc)
             quota_rejected = failure.get("failure_stage") == "quota"
             lifecycle("ask_request_rejected" if quota_rejected else "ask_server_failed",
@@ -5523,6 +5615,7 @@ class AskJobManager:
                         "stage": "Request could not be completed",
                         "detail": detail,
                         "percent": 100,
+                        "provisional_answer": None,
                         "error": detail,
                         "error_code": failure["error_code"],
                         "failure_stage": failure["failure_stage"],
@@ -6271,8 +6364,75 @@ def emit_progress(
 
 
 class TimedResponses:
-    def __init__(self, responses: Any) -> None:
+    def __init__(
+        self, responses: Any,
+        draft_text: Callable[[str | None], None] | None = None,
+    ) -> None:
         self._responses = responses
+        self._draft_text = draft_text
+        self.allow_function_streaming = False
+
+    def clear_draft(self) -> None:
+        if self._draft_text:
+            try:
+                self._draft_text(None)
+            except Exception:
+                LOGGER.warning("Ask Mimir could not clear provisional model text", exc_info=True)
+
+    def _publish_draft(self, text: str) -> None:
+        if self._draft_text:
+            try:
+                self._draft_text(text)
+            except Exception:
+                # Display is best effort; it must never break a final answer.
+                LOGGER.warning("Ask Mimir could not publish provisional model text", exc_info=True)
+
+    def _streamed_create(self, kwargs: Dict[str, Any]) -> Any:
+        stream = self._responses.create(**kwargs, stream=True)
+        response = None
+        fragments: list[str] = []
+        length = 0
+        last_published_at = 0.0
+        last_published_length = 0
+        try:
+            for event in stream:
+                event_type = getattr(event, "type", "")
+                if event_type == "response.output_text.delta":
+                    fragment = str(getattr(event, "delta", "") or "")
+                    if not fragment:
+                        continue
+                    fragments.append(fragment)
+                    length += len(fragment)
+                    now = time.monotonic()
+                    if (last_published_length == 0 or now - last_published_at >= 0.4
+                            or length - last_published_length >= 100):
+                        self._publish_draft("".join(fragments))
+                        last_published_at = now
+                        last_published_length = length
+                elif event_type in {"response.completed", "response.incomplete"}:
+                    response = getattr(event, "response", None)
+                elif event_type == "response.failed":
+                    self.clear_draft()
+                    detail = getattr(getattr(event, "response", None), "error", None)
+                    raise RuntimeError(f"Ask Mimir model stream failed: {detail or 'unknown error'}")
+        except Exception:
+            self.clear_draft()
+            raise
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+        if response is None:
+            self.clear_draft()
+            raise RuntimeError("Ask Mimir model stream ended without a final response")
+        if any(getattr(item, "type", None) == "function_call"
+               for item in getattr(response, "output", []) or []):
+            # Tool planning is not customer-facing answer text. A later model
+            # turn may replace this draft after the evidence call completes.
+            self.clear_draft()
+        elif fragments:
+            self._publish_draft("".join(fragments))
+        return response
 
     def create(self, **kwargs: Any) -> Any:
         remaining = remaining_job_seconds()
@@ -6290,7 +6450,22 @@ class TimedResponses:
         started = time.perf_counter()
         lifecycle("ask_model_started", model=str(kwargs.get("model") or "unknown"))
         try:
-            response = self._responses.create(**kwargs)
+            has_function_tools = any(
+                isinstance(tool, dict) and tool.get("type") == "function"
+                for tool in (kwargs.get("tools") or [])
+            )
+            can_stream = bool(self._draft_text) and (
+                not has_function_tools or self.allow_function_streaming
+            )
+            response = (
+                self._streamed_create(kwargs)
+                if can_stream else self._responses.create(**kwargs)
+            )
+            output = getattr(response, "output", None)
+            if isinstance(output, (list, tuple)):
+                for item in output:
+                    if getattr(item, "type", None) == "web_search_call":
+                        record_request_timing("model_web_search_call", "web_search", 0)
             lifecycle("ask_model_completed", response_id=getattr(response, "id", None),
                       latency_ms=round((time.perf_counter() - started) * 1000))
             return response
@@ -6308,9 +6483,12 @@ class TimedResponses:
 class TimedOpenAIClient:
     """Preserve the OpenAI client interface while measuring response calls."""
 
-    def __init__(self, client: OpenAI) -> None:
+    def __init__(
+        self, client: OpenAI,
+        draft_text: Callable[[str | None], None] | None = None,
+    ) -> None:
         self._client = client
-        self.responses = TimedResponses(client.responses)
+        self.responses = TimedResponses(client.responses, draft_text)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._client, name)
@@ -6367,6 +6545,9 @@ def finalize_response(
             retry_reason = "response limit"
         else:
             raise
+
+    if isinstance(client, TimedOpenAIClient):
+        client.responses.clear_draft()
 
     emit_progress(
         progress,
@@ -6447,6 +6628,7 @@ def generate_answer(
     request: AskRequest,
     progress: Callable[[str, str, int], None] | None = None,
     routing: RoutingDecision | None = None,
+    draft_text: Callable[[str | None], None] | None = None,
 ) -> Dict[str, Any]:
     emit_progress(
         progress,
@@ -6850,7 +7032,8 @@ def generate_answer(
         1_200.0,
     )
     client = TimedOpenAIClient(
-        OpenAI(timeout=provider_timeout_seconds, max_retries=1)
+        OpenAI(timeout=provider_timeout_seconds, max_retries=1),
+        draft_text=draft_text,
     )
     if selected_workflow == "news_article_implications":
         emit_progress(progress, "Reading the article", "Verifying the report and resolving the entities it names", 24)
@@ -6919,6 +7102,9 @@ def generate_answer(
                 outputs.append({"type": "function_call_output", "call_id": call.call_id, "output": output})
             input_items.extend(outputs)
             emit_progress(progress, "Assessing the implications", "Reconciling the article with Mimir's records", 80)
+            client.responses.allow_function_streaming = any(
+                "result" in entry for entry in trace
+            )
             response = client.responses.create(
                 model=runtime.model,
                 instructions=ARTICLE_ANALYSIS_PROMPT,
@@ -7963,10 +8149,21 @@ def generate_answer(
             ]
             if request.article_context:
                 platform_input_items.append({"role":"user", "content":article_context_note(request)})
+            compact_model_evidence = (
+                os.getenv("ASK_MIMIR_COMPACT_PLATFORM_EVIDENCE", "0") == "1"
+            )
+            model_pack = (
+                compact_platform_model_evidence(pack)
+                if compact_model_evidence else pack
+            )
             platform_input_items.append(
                 {
                     "role": "user",
-                    "content": "MIMIR UNIVERSAL PLATFORM OR PROGRAM DOSSIER\n" + json.dumps(pack, default=str),
+                    "content": "MIMIR UNIVERSAL PLATFORM OR PROGRAM DOSSIER\n" + json.dumps(
+                        model_pack,
+                        default=str,
+                        separators=(",", ":") if compact_model_evidence else None,
+                    ),
                 }
             )
             emit_progress(progress, "Preparing the answer", "Checking current sources and synthesizing the platform brief", 66)
@@ -8357,7 +8554,10 @@ def generate_answer(
         input=input_items,
         tools=general_tools,
         tool_choice="auto",
-        parallel_tool_calls=False,
+        # Independent evidence requests can be selected in one model turn.
+        # Each returned call still goes through the same bounded tool and
+        # final-answer validation path below.
+        parallel_tool_calls=True,
         reasoning={"effort": runtime.reasoning_effort},
         max_output_tokens=runtime.max_output_tokens,
         store=False,
@@ -8404,13 +8604,16 @@ def generate_answer(
             )
         input_items.extend(outputs)
         emit_progress(progress, "Testing the answer", "Reconciling the retrieved evidence before synthesis", 78)
+        client.responses.allow_function_streaming = any(
+            "result" in entry for entry in trace
+        )
         response = client.responses.create(
             model=runtime.model,
             instructions=SYSTEM_PROMPT,
             input=input_items,
             tools=general_tools,
             tool_choice="auto",
-            parallel_tool_calls=False,
+            parallel_tool_calls=True,
             reasoning={"effort": runtime.reasoning_effort},
             max_output_tokens=runtime.max_output_tokens,
             store=False,
