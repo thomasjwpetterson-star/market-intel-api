@@ -435,7 +435,7 @@ class MarketRecordSearchStore:
     def get(self, spec: Dict[str, Any], limit: int = 50) -> Dict[str, Any]:
         utc_day = datetime.now(timezone.utc).date()
         if utc_day != self._cache_utc_day:
-            # Opportunity rows are filtered by CURRENT_DATE in DuckDB. Cached
+            # Opportunity rows are filtered by the same UTC day. Cached
             # future-deadline results must not survive a UTC-day rollover.
             self._cache.clear()
             self._cache_utc_day = utc_day
@@ -477,14 +477,15 @@ class MarketRecordSearchStore:
                     FROM read_parquet(?) o
                     LEFT JOIN read_parquet(?) c
                       ON c.classification_type = 'PSC' AND c.code = o.psc
-                    WHERE SUBSTR(COALESCE(o.deadline, ''), 1, 10) >= CAST(CURRENT_DATE AS VARCHAR)
+                    WHERE SUBSTR(COALESCE(o.deadline, ''), 1, 10) >= ?
                       AND {notice_clause}
                       AND REGEXP_MATCHES(UPPER(COALESCE(o.search_text, o.title, '')), ?)
                     ORDER BY relevance_score DESC, response_deadline, title
                     LIMIT 250
                     """,
                     [pattern, pattern, str(self.paths["opportunities"]),
-                    str(self.paths["classifications"]), pattern],
+                    str(self.paths["classifications"]),
+                    datetime.now(timezone.utc).date().isoformat(), pattern],
                 )
             )
             self._add_notice_source_context(records)
