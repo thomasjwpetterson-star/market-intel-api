@@ -134,8 +134,25 @@ class AwardOpportunityContextStore:
         self._cache[cache_key] = context
         return context
 
-    def answer_projection(self, record_type: str, record_id: str) -> Dict[str, Any]:
-        context = self.get(record_type, record_id)
+    def get_brief(self, record_type: str, record_id: str) -> Dict[str, Any]:
+        """A bounded contract overview that marks expensive supplier lanes as omitted."""
+        if str(record_type).strip().lower() != "contract":
+            return self.get(record_type, record_id)
+        cache_key = ("contract_brief", str(record_id).upper())
+        if cache_key not in self._cache:
+            self._cache[cache_key] = self._contract_context(
+                record_id, include_supplier_lanes=False
+            )
+        return self._cache[cache_key]
+
+    def answer_projection(self, record_type: str, record_id: str,
+                          depth: str = "full") -> Dict[str, Any]:
+        if depth not in {"full", "brief"}:
+            raise ValueError("depth must be full or brief")
+        context = (
+            self.get_brief(record_type, record_id)
+            if depth == "brief" else self.get(record_type, record_id)
+        )
         projected = dict(context)
         if record_type == "contract":
             projected["action_history"] = context["action_history"][:20]
@@ -297,7 +314,8 @@ class AwardOpportunityContextStore:
             raise ValueError(f"opportunity identifier is ambiguous: {record_id}")
         return rows[0]
 
-    def _contract_context(self, record_id: str) -> Dict[str, Any]:
+    def _contract_context(self, record_id: str,
+                          include_supplier_lanes: bool = True) -> Dict[str, Any]:
         row = self._contract_row(record_id)
         award_key = row.get("award_key")
         annual = [
@@ -312,7 +330,10 @@ class AwardOpportunityContextStore:
             for year in range(2019, 2027)
         ]
         actions = self._contract_actions(row["contract_id"], award_key)
-        subawards = self._contract_subawards(row["contract_id"], award_key)
+        subawards = (
+            self._contract_subawards(row["contract_id"], award_key)
+            if include_supplier_lanes else []
+        )
         related_opportunities = self._related_opportunities(
             row.get("psc"), row.get("naics_code"), row.get("solicitation_id"), limit=10
         )
@@ -323,7 +344,7 @@ class AwardOpportunityContextStore:
             sub_agency=row.get("sub_agency"),
             exclude_cage=row.get("vendor_cage"),
             limit=15,
-        )
+        ) if include_supplier_lanes else []
         identity = {
             "record_type": "contract",
             "contract_id": row.get("contract_id"),
@@ -377,6 +398,19 @@ class AwardOpportunityContextStore:
                 "comparables": "Comparable suppliers are ranked from completed-year awards using shared PSC, NAICS and buying-organization evidence; they are not identified bidders.",
             },
         }
+        if not include_supplier_lanes:
+            context["evidence_scope"] = {
+                "depth": "brief",
+                "included_lanes": ["contract_identity", "annual_prime_obligations",
+                                   "recent_action_history", "related_opportunities"],
+                "omitted_lanes": ["reported_subaward_suppliers",
+                                  "comparable_suppliers"],
+                "interpretation": (
+                    "Supplier and comparable-supplier lanes were not retrieved "
+                    "for this conversational overview. Empty lists here do not "
+                    "mean no suppliers were observed."
+                ),
+            }
         context["evidence_fingerprint"] = self._fingerprint(context)
         return context
 

@@ -16,11 +16,11 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 from urllib.parse import quote, unquote, urlsplit, parse_qs
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -86,6 +86,10 @@ from platform_context_export import (
     platform_context_filename,
 )
 from platform_model_evidence import compact_platform_model_evidence
+from platform_conversation_segments import (
+    conversation_platform_topic,
+    platform_topic_options,
+)
 from answer_artifacts import platform_answer_artifacts
 from answer_report_pdf import answer_report_filename, build_branded_answer_pdf
 from beta_controls import (
@@ -145,6 +149,76 @@ JOB_DEADLINE = contextvars.ContextVar(
     "ask_mimir_job_deadline", default=None
 )
 REQUEST_CONTEXT = contextvars.ContextVar("ask_mimir_request_context", default=None)
+ANSWER_MODE = contextvars.ContextVar("ask_mimir_answer_mode", default="deep_research")
+CONVERSATION_INSTRUCTIONS = (
+    "\n\nCONVERSATION MODE OUTPUT CONTRACT: Answer the user's actual question in "
+    "roughly 200–400 words. Start with the answer and the key time period; then give "
+    "at most five material findings or six table rows. Detailed catalogue and long "
+    "table formatting requests elsewhere in these instructions apply to Deep research, "
+    "not this mode. Preserve any major counterexample, fiscal-period distinction, "
+    "source uncertainty or freshness warning even if this makes the response longer. "
+    "Label a selected supplier, award or opportunity list as selected examples and "
+    "state the total observed count when available; never imply it is exhaustive. "
+    "For supplier questions, choose examples spanning distinct material roles, "
+    "place every named supplier in the selected table, and avoid adding more "
+    "supplier names in prose outside it. This keeps 'those suppliers' follow-ups "
+    "unambiguous. In a follow-up, cover every previously named supplier or "
+    "explicitly say which named suppliers are outside the comparison. "
+    "For a broad exploratory question, give a useful answer across the main "
+    "dimensions supported by the evidence before asking at most one specific "
+    "follow-up question. For a narrow question, answer it directly; do not "
+    "replace the answer with a topic menu. "
+    "Cite or identify the source basis as the normal workflow requires. If the "
+    "question requires complete enumeration or evidence beyond the supplied pack, "
+    "say so and offer Deep research. If evidence_scope lists omitted lanes, "
+    "do not call them absent or zero; disclose the limit if relevant. Never "
+    "mention downloads or evidence drawers in this mode. Never invent a "
+    "source, link, figure, or identity. A fiscal year ending September 30 may "
+    "have incomplete agency reporting after it closes. If an older evidence "
+    "pack calls a now-ended fiscal year 'partial', describe its source coverage "
+    "as partial or preliminary rather than calling the fiscal year unfinished."
+)
+
+
+def conversation_fiscal_status_note(today: date | None = None) -> str:
+    """Give Conversation the current federal fiscal boundary without a hardcoded FY."""
+    today = today or datetime.now(timezone.utc).date()
+    current_fy = today.year + 1 if today.month >= 10 else today.year
+    return (
+        f" Current UTC date: {today.isoformat()}. The latest ended U.S. federal "
+        f"fiscal year is FY{current_fy - 1}; FY{current_fy} is underway. "
+        "A source snapshot can remain incomplete after fiscal close."
+    )
+PLATFORM_CONVERSATION_PROMPT = """
+You are Ask Mimir. Answer the user's question using the source-bound facts in
+MIMIR PLATFORM TOPIC EVIDENCE. For an overview, cover the prime, observed
+obligations, supplier relationships and related parts at a useful high level;
+do not imply that selected examples exhaust any lane. For a focused topic,
+answer that topic directly. Aim for a useful, compact conversational answer.
+Give the fiscal-year observation window for financial figures and keep
+completed years distinct from the partial year shown in scope. Distinguish direct
+government award recipients, reported first-tier supplier sites, and wider DLA
+item suppliers. Reported subcontract values are Mimir-modelled from reported
+records; they are not prime obligations or sales. A selected row list is not
+exhaustive: give the observed total from coverage when available. Describe what
+each selected supplier or part is supported to provide, and say when that role
+is only a reported relationship or a broader capability. Never infer a complete
+bill of materials or a sole source from the selected examples. Keep award values,
+obligations and budgets separate. Evidence_scope omitted lanes were not checked:
+do not call them absent or zero. Use only supplied source-backed facts and record
+links for historical questions; do not invent recent changes or live status.
+If the user requests exhaustive detail, explain the selected scope briefly and
+offer Deep research. End with a short Evidence used line. Do not expose internal
+pack names, versions, hashes or file paths. Annual prime obligations belong to
+direct recipients and annual reported subcontract values belong to first-tier
+supplier sites; compare them separately when a follow-up asks about both.
+Never attribute a platform-wide annual obligation total to a named prime
+recipient; if recipient-level annual values are absent, say so.
+Fiscal-year close does not imply complete reporting: a low latest-year value
+may reflect reporting lag, so do not call it a market decline without corroboration.
+When an overview reports a value for the latest ended fiscal year, explicitly
+note that its source reporting can still be preliminary.
+""".strip()
 
 
 def lifecycle(event: str, **fields: Any) -> None:
@@ -560,8 +634,10 @@ show every CAGE at that location as separate evidence beneath one facility headi
 scope, combine the financial view but keep the material CAGE sites distinct. Do not discuss whether parent
 resolution is assigned, reviewed or complete.
 
-For a company-wide scope, describe the identity count naturally, for example "U.S. defense activity is
-identified across 46 registered supplier sites." Never say "resolved CAGE sites", "current company scope"
+For a company-wide scope, describe the identity count naturally, for example "The observed U.S. defense
+records link 46 registered supplier sites." The site count may include foreign-located sites: do not call
+all of them U.S. sites, and state a U.S.-located count only if the evidence explicitly supplies it.
+Never say "resolved CAGE sites", "current company scope"
 or "current Mimir scope" to the customer. Do not call that count the company's complete registration footprint.
 
 Start with a concise identity and commercial-position summary. Follow it with a compact table of material
@@ -1264,12 +1340,25 @@ opportunities, show the notice identifier, notice type, customer, response deadl
 PSC description and public notice link. Rank relevance from the actual requirement language and
 classification evidence. Do not imply win probability. Distinguish Sources Sought and RFIs from
 solicitations.
+If a specific notice type is requested, do not pad the answer with records of another type merely
+because their text mentions it. Exclude clearly different applications (for example shipboard radar
+for an aircraft-installed avionics request) rather than presenting them as leading matches. A short
+list of strong matches is better than a longer list of weak ones.
 For Sources Sought notices, include incumbent_source_context when supplied. Identify current
 procurement-authorized sources and active manufacturer references for an NSN, NIIN or part number named in
 the notice, with CAGE and location where available. Present this as useful incumbent/source context, not as
 proof that a company is qualified for the new requirement. Use the word "qualified" only when the notice or
 another authoritative source expressly establishes qualification. If the notice has no exact catalogued item
 identifier, omit this subsection rather than inferring incumbents from a broad PSC or capability match.
+The opportunity file is a release snapshot. A future response deadline does not prove that a notice
+is currently open, and notice type inferred from text may be wrong. When scope.status_verification is
+"snapshot_unverified", describe the rows as candidate notices with future deadlines in Mimir's
+release, give scope.release_generated_at as the *release-build* date (not a SAM update time), and
+say current status, notice type, amendments and deadlines have not been checked live. Provide the
+official notice links so the user can confirm them. Never call these rows verified open notices.
+When scope.status_verification is "live_sam_required", use the supplied web tool to check the
+strongest candidates against their current official SAM.gov notices before stating that one is open.
+If a current official check fails, fall back to the snapshot-candidate wording.
 
 For awards, show the recipient and site, award identifier, date, supported program where identified,
 and what was purchased. Lead with the award results, not an as-of date, ranking explanation or
@@ -1931,6 +2020,20 @@ def estimate_usage_cost(model: str, usage: Dict[str, Any]) -> Dict[str, Any] | N
     }
 
 
+def estimate_request_cost(result: Dict[str, Any], performance: Dict[str, Any]) -> float | None:
+    """Estimate token plus web-search spend for the internal mode ledger."""
+    model_cost = (result.get("estimated_cost") or {}).get("estimated_total_usd")
+    if not isinstance(model_cost, (int, float)) or isinstance(model_cost, bool):
+        return None
+    web_calls = max(int(performance.get("model_web_search_call_count") or 0), 0)
+    web_cost = round(web_calls * 0.01, 8)
+    total = round(float(model_cost) + web_cost, 8)
+    performance["estimated_model_token_cost_usd"] = round(float(model_cost), 8)
+    performance["estimated_web_search_cost_usd"] = web_cost
+    performance["estimated_total_cost_usd"] = total
+    return total
+
+
 def is_supported_platform_supply_chain_request(messages: List[ChatMessage]) -> bool:
     text = " ".join(message.content for message in messages).lower()
     has_platform = "ch-53k" in text or "ch53k" in text
@@ -2023,8 +2126,9 @@ def explicit_platform_query(
         return mentions[0]
     has_direct_platform_language = bool(
         re.match(
-            r"^(?:tell\s+me\s+about|give\s+me\s+an?\s+overview\s+of|"
-            r"overview\s+of|explain|map)\b",
+            r"^(?:tell\s+me\s+(?:everything\s+)?about|give\s+me\s+an?\s+overview\s+of|"
+            r"overview\s+of|show\s+(?:me\s+)?(?:topic\s+)?options\s+for|"
+            r"(?:and\s+)?what\s+about|explain|map)\b",
             intent,
         )
     )
@@ -2034,6 +2138,8 @@ def explicit_platform_query(
             "platform", "program", "programme", "who supplies", "supply chain",
             "supplier", "component", "procurement trajectory", "commercial overview",
             "procurement", "production", "outlook", "industrial base", "benefit", "map",
+            "prime contractor", "awards", "contracts", "obligations", "spending",
+            "nsn", "niin", "parts", "spent", "what is", "what's",
         )
     ):
         return None
@@ -2239,6 +2345,7 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     ):
         return None
     patterns = (
+        r"(?:i['’]?m|i\s+am|we['’]?re|we\s+are)\s+(?:assessing|researching|evaluating|looking\s+at)\s+(.+?)\s+as\s+(?:an?\s+)?(?:defense|defence|military)\s+supplier\b",
         r"what\s+does\s+(.+?)\s+(?:actually\s+)?do\s+(?:in|for)\s+(?:the\s+)?(?:us\s+)?(?:defense|defence|military)(?:\s+market)?(?:\?|\.|$)",
         r"(?:build|give|show)\s+me\s+(?:an?\s+)?(?:defense|defence|military)\s+(?:profile|view|footprint)\s+(?:of|for)\s+(.+?)(?:\?|\.|$)",
         r"(?:can\s+u|can\s+you|please)\s+map\s+(.+?)(?:['’]s|s)\s+(?:defense|defence|military)\s+(?:business|footprint|activity)(?:\?|\.|$)",
@@ -2502,6 +2609,7 @@ class ActiveScope(BaseModel):
 
 class AskRequest(BaseModel):
     messages: List[ChatMessage] = Field(min_length=1, max_length=20)
+    answer_mode: Literal["conversation", "deep_research"] = "deep_research"
     active_scope: Optional[ActiveScope] = None
     article_context: Optional[str] = Field(
         default=None,
@@ -2832,6 +2940,9 @@ class LabRuntime:
         if self.audit_log is None:
             return
         try:
+            request_mode = (REQUEST_CONTEXT.get() or {}).get("answer_mode")
+            if request_mode and "answer_mode" not in record:
+                record = {**record, "answer_mode": request_mode}
             with self.audit_lock:
                 write_bounded_audit_record(self.audit_log, record)
         except Exception:
@@ -2987,7 +3098,10 @@ class LabRuntime:
         elif name == "search_platform_contexts":
             return self.platform_contexts.search(**arguments)
         elif name == "get_platform_context":
-            result = self.platform_contexts.answer_projection(**arguments)
+            if arguments.get("segment"):
+                result = self.platform_contexts.answer_segment_projection(**arguments)
+            else:
+                result = self.platform_contexts.answer_projection(**arguments)
         elif name == "compare_platform_contexts":
             result = build_platform_comparison(
                 self.platform_contexts, arguments["platform_ids"]
@@ -3459,7 +3573,10 @@ def _conversational_scope_workflow(request: AskRequest) -> str | None:
             r"previous|former|latter)\b",
             text,
         )
-    ) or any(
+    ) or bool(re.match(
+        r"^(?:okay|ok|and|then|also)(?:,)?(?:\s+and)?\s+(?:fy\d{4}|what|how|the|its|their)\b",
+        text,
+    )) or any(
         phrase in text
         for phrase in (
             "tell me more",
@@ -3723,6 +3840,10 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
     capability_id = resolve_capability(latest)
     if capability_id and not segment_id and not record_search and not (
         platform_id and is_platform_centered_request(latest, has_platform_mention=True)
+    ) and not (
+        request.active_scope
+        and request.active_scope.scope_type == "record_search"
+        and record_search_follow_up_intent(latest)
     ):
         add(_routing_candidate(
             "capability_discovery",
@@ -3738,6 +3859,26 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
         else None
     )
     company_phrase = explicit_company_name_query(request.messages)
+    if (request.active_scope and _scope_follow_up_workflow(request)
+            and not re.search(r"\b(?:[A-Z]{3,}|[A-Z][a-z]{2,})\b",
+                              latest.split(" ", 1)[-1])):
+        # Scoped continuations should not turn phrases such as "its parts",
+        # "which deadline" or "Okay, and FY2026" into a new company subject.
+        company_phrase = None
+    bare_platform_topic_reply = bool(
+        request.answer_mode == "conversation"
+        and request.active_scope
+        and request.active_scope.scope_type == "platform"
+        and re.sub(r"\s+", " ", latest.lower()).strip(" .?!") in {
+            "prime contractor", "the prime contractor",
+            "awards and spending", "awards and obligations", "historical awards",
+            "nsns and parts", "nsns", "parts",
+            "supply chain", "the supply chain",
+            "all of the above", "all of above", "all",
+        }
+    )
+    if bare_platform_topic_reply:
+        company_phrase = None
     company_phrase_is_platform = bool(
         company_phrase and runtime.platform_contexts.mentions(company_phrase)
     )
@@ -4668,6 +4809,7 @@ def write_credit_event(
                 "conversation_id": request.conversation_id,
                 "tier": access.policy.tier,
                 "workflow": workflow,
+                "answer_mode": request.answer_mode,
                 "reason": reason,
                 "answer_type": answer_type,
             }
@@ -4684,6 +4826,93 @@ def is_lightweight_scope_follow_up(request: AskRequest) -> bool:
         and request.active_scope.scope_type == "item"
         and item_lightweight_follow_up_kind(request.messages[-1].content)
     )
+
+
+def contract_supplier_detail_requested(question: str) -> bool:
+    """Keep full contract evidence when the user asks about its supplier network."""
+    return bool(re.search(
+        r"\b(?:sub[- ]?awards?|sub[- ]?contracts?|suppliers?|vendors?|"
+        r"competitors?|bidders?|teaming|supply chain|tier[- ]?\d|"
+        r"components?|materials?|manufacturers?|contractors?|"
+        r"which (?:firms|companies)|companies involved|"
+        r"who (?:else )?(?:makes|provides|supplies))\b",
+        str(question or ""), re.IGNORECASE,
+    ))
+
+
+def company_detail_requested(question: str) -> bool:
+    """Retain the full company dossier for site, product and forward-detail asks."""
+    question = str(question or "")
+    explicit_detail = bool(re.search(
+        r"\b(?:which\s+(?:specific\s+)?(?:CAGE\s+)?(?:sites?|facilities|awards?|"
+        r"parts?|NSNs?|NIINs?)|specific\s+(?:CAGE\s+)?(?:sites?|facilities|"
+        r"awards?|parts?|NSNs?|NIINs?)|(?:every|all)\s+(?:sites?|facilities|"
+        r"CAGEs?|parts?|NSNs?|NIINs?)|site.by.site|"
+        r"CAGE\s*[:#-]?\s*[A-Z0-9]{5}|"
+        r"(?:NSN|NIIN)\s*[:#-]?\s*[A-Z0-9][A-Z0-9-]{4,})\b",
+        question, re.IGNORECASE,
+    ))
+    if re.search(r"\b(?:quick picture|high.level|overview)\b", question, re.IGNORECASE) \
+            and not explicit_detail:
+        return False
+    return bool(re.search(
+        r"\b(?:CAGE\s*[:#-]?\s*[A-Z0-9]{5}|every\s+site|all\s+sites|"
+        r"part\s+numbers?|NIINs?|NSNs?|product\s+lines?|third.party\s+DLA|"
+        r"supply\s+chain|suppliers?|sub[- ]?contracts?|sub[- ]?contractors?|"
+        r"site.by.site|FYDP|future\s+demand|"
+        r"budget\s+line|solicitations?)\b",
+        question, re.IGNORECASE,
+    ))
+
+
+def company_award_site_requested(question: str) -> bool:
+    """Use award and site facts for a specifically scoped conversational follow-up."""
+    text = str(question or "")
+    return bool(
+        re.search(r"\b(?:awards?|contracts?)\b", text, re.IGNORECASE)
+        and re.search(r"\b(?:CAGE|sites?|facilities|locations?)\b", text, re.IGNORECASE)
+        and re.search(r"\b(?:which|specific|recent|show|list|received)\b", text, re.IGNORECASE)
+        and not re.search(r"\b(?:suppliers?|subcontracts?|supply chain|parts?|NSNs?|"
+                          r"products?|platforms?|future demand|outlook)\b", text, re.IGNORECASE)
+    )
+
+
+def current_opportunity_status_requested(question: str, record_type: str) -> bool:
+    return record_type == "opportunity" and bool(re.search(
+        r"\b(?:current(?:ly)?|open|active|still open|deadline)\b",
+        str(question or ""), re.IGNORECASE,
+    ))
+
+
+def explicit_sam_verification_requested(question: str, record_type: str) -> bool:
+    """Reserve live checks in Conversation for a clear present-status request."""
+    return record_type == "opportunity" and bool(re.search(
+        r"\b(?:verify|confirm|check\s+(?:on\s+)?sam(?:\.gov)?|right\s+now|"
+        r"live\s+status|still\s+open|as\s+of\s+today)\b",
+        str(question or ""), re.IGNORECASE,
+    ))
+
+
+def is_fast_conversation_topic_menu(request: AskRequest, routing: RoutingDecision) -> bool:
+    """Keep a mapped-topic menu out of the model worker queue."""
+    if (request.answer_mode != "conversation" or routing.workflow != "platform_intelligence"
+            or routing.clarification_needed):
+        return False
+    latest = request.messages[-1].content
+    if conversation_platform_topic(latest, has_active_scope=bool(request.active_scope)) != "menu":
+        return False
+    store = getattr(runtime, "platform_contexts", None)
+    if store is None:
+        return False
+    if (request.active_scope and request.active_scope.scope_type == "platform"
+            and not routing.subject_changed):
+        candidate = request.active_scope.scope_id
+    else:
+        mentions = store.mentions(latest)
+        if len(mentions) != 1:
+            return False
+        candidate = mentions[0]
+    return bool(store.search(candidate).get("resolved_platform_id"))
 
 
 def active_scope_from_result(
@@ -5076,12 +5305,14 @@ class AskJobManager:
                     "conversation_id": request.conversation_id,
                     "intent_hint": request.intent_hint,
                     "article_context": request.article_context,
+                    "answer_mode": request.answer_mode,
                 },
                 sort_keys=True,
             ).encode()
         ).hexdigest()
         routing = routing or routing_decision_for_request(request)
         workflow = routing.workflow
+        fast_topic_menu = is_fast_conversation_topic_menu(request, routing)
         allowance_exempt = (
             routing.clarification_needed
             or is_lightweight_scope_follow_up(request)
@@ -5107,7 +5338,8 @@ class AskJobManager:
                 duplicate["deduplicated"] = True
                 return duplicate, routing
 
-            if sum(job.get("status") in {"queued", "running"} for job in self.jobs.values()) >= self.capacity:
+            if (not fast_topic_menu and
+                    sum(job.get("status") in {"queued", "running"} for job in self.jobs.values()) >= self.capacity):
                 raise HTTPException(
                     status_code=503,
                     detail="Ask Mimir is busy completing other research. Please try again shortly; no query has been used.",
@@ -5167,6 +5399,7 @@ class AskJobManager:
                 "subject_id": access.subject_id,
                 "status": "queued",
                 "workflow": workflow,
+                "answer_mode": request.answer_mode,
                 "stage": "Queued",
                 "detail": "Preparing the evidence workspace",
                 "percent": 2,
@@ -5195,7 +5428,10 @@ class AskJobManager:
                       client_request_id=request.client_request_id, conversation_id=request.conversation_id,
                       workflow=workflow, tier=access.tier, actor_type="authenticated" if access.authenticated else "guest")
         try:
-            self.executor.submit(self._run, request_id, request, access, routing)
+            if fast_topic_menu:
+                self._run(request_id, request, access, routing)
+            else:
+                self.executor.submit(self._run, request_id, request, access, routing)
         except Exception:
             with self.lock:
                 self.jobs.pop(request_id, None)
@@ -5276,6 +5512,7 @@ class AskJobManager:
         context_token = REQUEST_CONTEXT.set({
             "request_id": request_id, "client_request_id": request.client_request_id,
             "conversation_id": request.conversation_id, "workflow": routing.workflow,
+            "answer_mode": request.answer_mode,
             "tier": access.tier, "actor_type": "authenticated" if access.authenticated else "guest",
         })
         request_started_perf = float(
@@ -5303,6 +5540,7 @@ class AskJobManager:
                     routing.workflow,
                     self.jobs[request_id].get("_request_fingerprint"),
                     allow_over_limit=clarification_continuation,
+                    answer_mode=request.answer_mode,
                 )
                 credit_reserved = True
                 write_credit_event(
@@ -5329,8 +5567,11 @@ class AskJobManager:
                     if subject.strip()
                 }
                 if (
-                    os.getenv("ASK_MIMIR_PROGRESSIVE_TEXT", "0") == "1"
-                    and (not allowed_subjects or access.subject_id in allowed_subjects)
+                    request.answer_mode == "conversation"
+                    or (
+                        os.getenv("ASK_MIMIR_PROGRESSIVE_TEXT", "0") == "1"
+                        and (not allowed_subjects or access.subject_id in allowed_subjects)
+                    )
                 ):
                     draft_text_callback = lambda text: self.set_provisional_answer(
                         request_id, text, request_started_perf
@@ -5394,7 +5635,9 @@ class AskJobManager:
             )
             if isinstance(self.jobs[request_id].get("_first_model_text_ms"), (int, float)):
                 performance_snapshot["first_model_text_ms"] = self.jobs[request_id]["_first_model_text_ms"]
-            cost = (result.get("estimated_cost") or {}).get("estimated_total_usd")
+            if result.get("conversation_segment"):
+                performance_snapshot["conversation_segment"] = result["conversation_segment"]
+            cost = estimate_request_cost(result, performance_snapshot)
             best_effort(
                 "completed performance telemetry",
                 lambda: runtime.write_audit_record({
@@ -5415,6 +5658,7 @@ class AskJobManager:
             customer_result["active_scope"] = (
                 next_scope.model_dump() if next_scope else None
             )
+            customer_result["answer_mode"] = request.answer_mode
             best_effort(
                 "conversation scope update",
                 lambda: runtime.beta_state.save_conversation_scope(
@@ -5834,6 +6078,9 @@ def health() -> Dict[str, Any]:
 def beta_policy(request: Request) -> Dict[str, Any]:
     access = access_from_request(request)
     return {
+        "answer_modes": (["conversation", "deep_research"]
+                         if os.getenv("ASK_MIMIR_CONVERSATION_ENABLED", "0") == "1"
+                         else ["deep_research"]),
         "tiers": {
             tier: {
                 "display_name": policy.display_name,
@@ -5895,6 +6142,9 @@ def create_ask_job(
 
 def accept_ask_job(payload: AskRequest, request: Request, response: Response) -> Dict[str, Any]:
     request_started_perf = time.perf_counter()
+    if (payload.answer_mode == "conversation"
+            and os.getenv("ASK_MIMIR_CONVERSATION_ENABLED", "0") != "1"):
+        raise HTTPException(status_code=422, detail="Conversation mode is not available yet.")
     access = access_from_request(request)
     fingerprint = hashlib.sha256(payload.model_dump_json().encode()).hexdigest()
     try:
@@ -6435,6 +6685,18 @@ class TimedResponses:
         return response
 
     def create(self, **kwargs: Any) -> Any:
+        if ANSWER_MODE.get() == "conversation":
+            # The concise mode is an isolated, measurable experiment. Deep
+            # research keeps its current model, prompt and reasoning settings.
+            kwargs = dict(kwargs)
+            kwargs["instructions"] = (
+                str(kwargs.get("instructions") or "")
+                + CONVERSATION_INSTRUCTIONS
+                + conversation_fiscal_status_note()
+            )
+            kwargs["reasoning"] = {"effort": "medium"}
+            if isinstance(kwargs.get("max_output_tokens"), int) and kwargs["max_output_tokens"] <= 10000:
+                kwargs["max_output_tokens"] = min(kwargs["max_output_tokens"], 7500)
         remaining = remaining_job_seconds()
         if remaining is not None:
             if remaining <= 1:
@@ -6625,6 +6887,19 @@ def article_context_note(request: AskRequest) -> str:
 
 
 def generate_answer(
+    request: AskRequest,
+    progress: Callable[[str, str, int], None] | None = None,
+    routing: RoutingDecision | None = None,
+    draft_text: Callable[[str | None], None] | None = None,
+) -> Dict[str, Any]:
+    token = ANSWER_MODE.set(request.answer_mode)
+    try:
+        return _generate_answer_impl(request, progress, routing, draft_text)
+    finally:
+        ANSWER_MODE.reset(token)
+
+
+def _generate_answer_impl(
     request: AskRequest,
     progress: Callable[[str, str, int], None] | None = None,
     routing: RoutingDecision | None = None,
@@ -7220,6 +7495,14 @@ def generate_answer(
 
     if record_search_spec:
         arguments = {**record_search_spec, "limit": 75}
+        opportunity_search = record_search_spec["record_type"] == "opportunity"
+        live_notice_check = (
+            explicit_sam_verification_requested(latest_question, record_search_spec["record_type"])
+            if request.answer_mode == "conversation"
+            else current_opportunity_status_requested(
+                latest_question, record_search_spec["record_type"]
+            )
+        )
         emit_progress(
             progress,
             "Searching public records",
@@ -7227,6 +7510,18 @@ def generate_answer(
             42,
         )
         pack = runtime.call_tool("get_market_record_search", arguments)
+        if opportunity_search:
+            manifest = getattr(getattr(runtime, "store", None), "manifest", {}) or {}
+            pack = {
+                **pack,
+                "scope": {
+                    **pack.get("scope", {}),
+                    "release_generated_at": manifest.get("generated_at") or "unknown",
+                    "status_verification": (
+                        "live_sam_required" if live_notice_check else "snapshot_unverified"
+                    ),
+                },
+            }
         trace = [
             {"tool": "get_market_record_search", "arguments": arguments, "result": pack}
         ]
@@ -7239,15 +7534,19 @@ def generate_answer(
         ]
         emit_progress(
             progress,
-            "Ranking the results",
-            "Comparing requirement language, dates, customers and classifications",
+            "Checking official notices" if live_notice_check else "Ranking the results",
+            "Verifying SAM.gov notice types, amendments and deadlines"
+            if live_notice_check else
+            "Comparing snapshot notices, dates and requirement language",
             68,
         )
         response = client.responses.create(
             model=runtime.model,
             instructions=MARKET_RECORD_SEARCH_PROMPT,
             input=search_input,
-            tools=[{"type": "web_search", "search_context_size": "low"}],
+            tools=([{"type": "web_search", "search_context_size": "low"}]
+                   if request.answer_mode != "conversation" or live_notice_check else []),
+            tool_choice="required" if live_notice_check else "auto",
             reasoning={"effort": runtime.reasoning_effort},
             max_output_tokens=min(runtime.max_output_tokens, 9000),
             store=False,
@@ -7730,6 +8029,10 @@ def generate_answer(
                 "record_type": resolved["record_type"],
                 "record_id": resolved["record_id"],
             }
+            if (request.answer_mode == "conversation"
+                    and resolved["record_type"] == "contract"
+                    and not contract_supplier_detail_requested(latest_question)):
+                arguments["depth"] = "brief"
             pack = runtime.call_tool("get_award_opportunity_context", arguments)
             emit_progress(progress, "Assembling contract evidence", "Loading actions, suppliers and comparable public records", 48)
             trace = [search_trace, {"tool": "get_award_opportunity_context", "arguments": arguments, "result": pack}]
@@ -8087,15 +8390,55 @@ def generate_answer(
                 prior_question = next((message.content for message in reversed(request.messages[:-1]) if message.role == "user"), None)
                 if prior_question:
                     latest_platform_question = prior_question
+            conversation_topic = (
+                conversation_platform_topic(
+                    latest_platform_question,
+                    has_active_scope=bool(request.active_scope),
+                ) if request.answer_mode == "conversation" else "all"
+            )
+            if request.answer_mode == "conversation" and conversation_topic == "menu":
+                display_name = (resolution.get("matches") or [{}])[0].get("display_name") or resolved_platform
+                return {
+                    "answer": f"What would you like to explore about {display_name}?",
+                    "response_id": "conversation-topic-menu",
+                    "model": "deterministic-topic-selection",
+                    "release_id": runtime.store.manifest["release_id"],
+                    "requires_clarification": True,
+                    "answer_type": "clarification",
+                    "conversation_segment": "menu",
+                    "answer_artifacts": {
+                        "conversation_topics": {"options": platform_topic_options(resolved_platform)},
+                        "platform_dossier": {"scope": {
+                            "platform_id": resolved_platform,
+                            "display_name": display_name,
+                        }},
+                    },
+                    "tool_trace": [search_trace],
+                    "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "response_calls": 0,
+                    "usage": None,
+                    "usage_by_response": [],
+                    "estimated_cost": None,
+                }
             answer_mode = (
                 "program_outlook" if is_program_outlook_language(latest_platform_question)
                 else platform_answer_mode(latest_platform_question)
             )
-            supplier_limit = 180 if answer_mode.startswith("supplier_") else 50
+            focused_conversation = (
+                request.answer_mode == "conversation"
+                and conversation_topic in {"prime", "awards", "parts", "supply_chain", "overview"}
+            )
+            supplier_limit = (
+                14 if focused_conversation
+                else 180 if answer_mode.startswith("supplier_") else 50
+            )
             arguments = {
                 "platform_id": resolved_platform,
-                "supplier_limit": supplier_limit,
             }
+            if focused_conversation:
+                arguments["segment"] = conversation_topic
+            else:
+                arguments["supplier_limit"] = supplier_limit
             if platform_focus:
                 arguments["focus_id"] = platform_focus
             pack = runtime.call_tool("get_platform_context", arguments)
@@ -8110,7 +8453,10 @@ def generate_answer(
             # not a separate user-facing workflow. Supplying it for every supported
             # platform lets the answer mode decide whether a concise overview, a full
             # trajectory, or no forward discussion is pertinent to the question.
-            outlook = runtime.optional_program_outlook(resolved_platform)
+            outlook = (
+                runtime.optional_program_outlook(resolved_platform)
+                if not focused_conversation else None
+            )
             if outlook is not None:
                 outlook_arguments = {"platform_id": resolved_platform}
                 pack["structured_program_outlook"] = outlook
@@ -8122,6 +8468,8 @@ def generate_answer(
                     }
                 )
             if (
+                not focused_conversation
+                and
                 resolved_platform.upper() == "CH-53K"
                 and answer_mode.startswith("supplier_")
             ):
@@ -8150,7 +8498,11 @@ def generate_answer(
             if request.article_context:
                 platform_input_items.append({"role":"user", "content":article_context_note(request)})
             compact_model_evidence = (
-                os.getenv("ASK_MIMIR_COMPACT_PLATFORM_EVIDENCE", "0") == "1"
+                not focused_conversation
+                and (
+                request.answer_mode == "conversation"
+                or os.getenv("ASK_MIMIR_COMPACT_PLATFORM_EVIDENCE", "0") == "1"
+                )
             )
             model_pack = (
                 compact_platform_model_evidence(pack)
@@ -8159,19 +8511,27 @@ def generate_answer(
             platform_input_items.append(
                 {
                     "role": "user",
-                    "content": "MIMIR UNIVERSAL PLATFORM OR PROGRAM DOSSIER\n" + json.dumps(
+                    "content": ("MIMIR PLATFORM TOPIC EVIDENCE\n" if focused_conversation
+                                else "MIMIR UNIVERSAL PLATFORM OR PROGRAM DOSSIER\n") + json.dumps(
                         model_pack,
                         default=str,
-                        separators=(",", ":") if compact_model_evidence else None,
+                        separators=(",", ":") if compact_model_evidence or focused_conversation else None,
                     ),
                 }
             )
             emit_progress(progress, "Preparing the answer", "Checking current sources and synthesizing the platform brief", 66)
+            platform_prompt = (
+                PLATFORM_CONVERSATION_PROMPT if focused_conversation
+                else UNIVERSAL_PLATFORM_PROMPT
+            )
             response = client.responses.create(
                 model=runtime.model,
-                instructions=UNIVERSAL_PLATFORM_PROMPT,
+                instructions=platform_prompt,
                 input=platform_input_items,
-                tools=[{"type": "web_search", "search_context_size": "low"}],
+                tools=([] if focused_conversation and not re.search(
+                    r"\b(?:current|latest|today|now|upcoming|future|open)\b",
+                    latest_platform_question, re.IGNORECASE,
+                ) else [{"type": "web_search", "search_context_size": "low"}]),
                 reasoning={"effort": runtime.reasoning_effort},
                 max_output_tokens=min(runtime.max_output_tokens, 10000),
                 store=False,
@@ -8180,7 +8540,7 @@ def generate_answer(
             response, answer_text = finalize_response(
                 client,
                 response,
-                UNIVERSAL_PLATFORM_PROMPT,
+                platform_prompt,
                 platform_input_items,
                 call_usages,
                 progress,
@@ -8192,6 +8552,7 @@ def generate_answer(
                 "response_id": response.id,
                 "model": runtime.model,
                 "release_id": runtime.store.manifest["release_id"],
+                "conversation_segment": conversation_topic if focused_conversation else None,
                 "answer_artifacts": {
                     "platform_dossier": pack,
                     **(
@@ -8304,10 +8665,16 @@ def generate_answer(
         else dossier_cage
     )
     if dossier_scope_id:
+        company_focus = "full_dossier"
+        if request.answer_mode == "conversation":
+            if company_award_site_requested(latest_question):
+                company_focus = "conversation_award_sites"
+            elif not company_detail_requested(latest_question):
+                company_focus = "conversation_overview"
         arguments = {
             "scope_type": dossier_scope_type,
             "scope_id": dossier_scope_id,
-            "focus": "full_dossier",
+            "focus": company_focus,
         }
         try:
             pack = runtime.call_tool("get_company_context", arguments)
@@ -8326,7 +8693,9 @@ def generate_answer(
                 {
                     "role": "user",
                     "content": (
-                        "MIMIR FULL CAGE-SITE DOSSIER\n"
+                        ({"conversation_overview": "MIMIR COMPANY OVERVIEW EVIDENCE\n",
+                          "conversation_award_sites": "MIMIR COMPANY AWARD AND SITE EVIDENCE\n"}
+                         .get(arguments["focus"], "MIMIR FULL CAGE-SITE DOSSIER\n"))
                         + json.dumps(pack, default=str)
                     ),
                 }
@@ -8658,6 +9027,9 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
     # Synchronous evaluation must not bypass production admission control.
     if os.getenv("ASK_MIMIR_ENABLE_SYNC_EVALUATION", "0") != "1":
         raise HTTPException(status_code=410, detail="Use /api/ask/jobs to submit and recover research requests.")
+    if (payload.answer_mode == "conversation"
+            and os.getenv("ASK_MIMIR_CONVERSATION_ENABLED", "0") != "1"):
+        raise HTTPException(status_code=422, detail="Conversation mode is not available yet.")
     request_started_perf = time.perf_counter()
     access = access_from_request(request)
     payload = request_with_server_conversation_scope(payload, access)
@@ -8704,6 +9076,7 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 runtime.release_guard.release_binding_id,
                 routing.workflow,
                 allow_over_limit=clarification_continuation,
+                answer_mode=payload.answer_mode,
             )
             write_credit_event(
                 "ask_credit_reserved",
@@ -8777,13 +9150,14 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
             validation_ms=validation_ms,
             total_request_ms=(time.perf_counter() - request_started_perf) * 1000,
         )
+        if result.get("conversation_segment"):
+            performance_snapshot["conversation_segment"] = result["conversation_segment"]
+        estimated_total_cost = estimate_request_cost(result, performance_snapshot)
         if not allowance_exempt:
             runtime.beta_state.complete(
                 request_id,
                 latency_ms=result.get("latency_ms"),
-                estimated_cost_usd=(result.get("estimated_cost") or {}).get(
-                    "estimated_total_usd"
-                ),
+                estimated_cost_usd=estimated_total_cost,
                 billable=answer_type == "substantive",
                 performance=performance_snapshot,
             )

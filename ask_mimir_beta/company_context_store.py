@@ -101,6 +101,27 @@ REVIEWED_COMPANY_ALIASES = {
 
 
 FOCUS_SECTIONS = {
+    "conversation_award_sites": [
+        "identity",
+        "observed_financials",
+        "annual_activity",
+        "site_financials",
+        "top_awards",
+        "evidence_index",
+        "quality",
+    ],
+    "conversation_overview": [
+        "identity",
+        "observed_financials",
+        "annual_activity",
+        "capability_evidence",
+        "platform_exposure",
+        "customer_context",
+        "reported_subcontract_relationships",
+        "top_awards",
+        "evidence_index",
+        "quality",
+    ],
     "article_implications": [
         "identity",
         "observed_financials",
@@ -2142,7 +2163,7 @@ class CompanyContextStore:
             result[section] = self._compact_section(
                 section, customer_context.get(section)
             )
-        if focus in {"profile", "full_dossier"}:
+        if focus in {"conversation_award_sites", "conversation_overview", "profile", "full_dossier"}:
             result["annual_financial_summary"] = _company_annual_financial_summary(
                 context
             )
@@ -2150,6 +2171,19 @@ class CompanyContextStore:
             result["platform_exposure_summary"] = (
                 _company_platform_exposure_summary(context)
             )
+        if focus in {"conversation_award_sites", "conversation_overview"}:
+            result["evidence_scope"] = {
+                "depth": "award_sites" if focus == "conversation_award_sites" else "overview",
+                "omitted_lanes": [
+                    section for section in FOCUS_SECTIONS["full_dossier"]
+                    if section not in FOCUS_SECTIONS[focus]
+                ],
+                "interpretation": (
+                    "The omitted detailed sections were not included in this "
+                    "conversational answer; absence here is not evidence of "
+                    "no activity in those sections."
+                ),
+            }
         result["evidence_chain"] = {
             "identity_definition_version": context.get("source_manifest", {})
             .get("identity_definition", {})

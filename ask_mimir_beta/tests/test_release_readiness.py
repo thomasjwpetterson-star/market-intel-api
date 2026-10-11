@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 import duckdb
 from pydantic import ValidationError
 from beta_controls import AccessContext, BetaStateStore, EvidencePackCache, sanitize_customer_payload, validate_answer_citations, link_evidenced_award_identifiers
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from platform_context import PlatformContextStore, _rows
 from research_safety import SynchronizedStore, write_bounded_audit_record, configure_duckdb_scratch
@@ -139,6 +139,14 @@ class HttpBoundaryTests(unittest.TestCase):
 
 
 class AnswerTypeTests(unittest.TestCase):
+    def test_internal_cost_includes_web_calls_without_changing_token_estimate(self):
+        result = {"estimated_cost": {"estimated_total_usd": 0.45}}
+        performance = {"model_web_search_call_count": 3}
+        self.assertEqual(lab.estimate_request_cost(result, performance), 0.48)
+        self.assertEqual(result["estimated_cost"]["estimated_total_usd"], 0.45)
+        self.assertEqual(performance["estimated_web_search_cost_usd"], 0.03)
+        self.assertIsNone(lab.estimate_request_cost({}, performance))
+
     def test_expired_overall_deadline_stops_before_another_provider_call(self):
         responses = Mock()
         token = lab.JOB_DEADLINE.set(time.monotonic() - 1)
@@ -828,6 +836,56 @@ class ConcurrentEvidenceTests(unittest.TestCase):
 
 
 class DurableJobTests(unittest.TestCase):
+    def test_topic_menu_runs_inline_without_waiting_for_a_research_worker(self):
+        request = self.request.model_copy(update={
+            "client_request_id": str(uuid.uuid4()),
+            "answer_mode": "conversation",
+        })
+        with patch.object(lab, "is_fast_conversation_topic_menu", return_value=True), \
+             patch.object(self.manager, "_run") as run:
+            job, _ = self.manager.create(request, self.access, self.route)
+        run.assert_called_once()
+        self.manager.executor.submit.assert_not_called()
+        self.assertEqual(job["answer_mode"], "conversation")
+
+    def test_inline_topic_menu_refunds_its_reservation(self):
+        request = self.request.model_copy(update={
+            "client_request_id": str(uuid.uuid4()),
+            "answer_mode": "conversation",
+        })
+        menu = {
+            "answer": "What would you like to explore about AMRAAM?",
+            "response_id": "conversation-topic-menu",
+            "answer_type": "clarification",
+            "requires_clarification": True,
+            "answer_artifacts": {"platform_dossier": {"scope": {"platform_id": "AMRAAM"}}},
+            "tool_trace": [], "model": "deterministic-topic-selection",
+            "response_calls": 0, "usage": None, "estimated_cost": None,
+        }
+        with patch.object(lab, "is_fast_conversation_topic_menu", return_value=True), \
+             patch.object(lab, "generate_answer", return_value=menu), \
+             patch.object(lab, "finalize_customer_result", side_effect=lambda result, *_args: dict(result)):
+            job, _ = self.manager.create(request, self.access, self.route)
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["result"]["answer_type"], "clarification")
+        self.assertEqual(self.ledger.used_today("alice"), 0)
+        self.manager.executor.submit.assert_not_called()
+
+    def test_answer_mode_survives_restart_and_is_part_of_request_identity(self):
+        quick = self.request.model_copy(update={"answer_mode": "conversation"})
+        job, _ = self.manager.create(quick, self.access, self.route)
+        self.assertEqual(job["answer_mode"], "conversation")
+        self.manager.jobs.clear()
+        self.manager.executor.submit.reset_mock()
+        restored = self.manager.get(quick.client_request_id, self.access)
+        self.assertEqual(restored["answer_mode"], "conversation")
+        self.assertEqual(self.ledger.load_job(quick.client_request_id)["_request_body"]["answer_mode"], "conversation")
+        with self.assertRaises(lab.HTTPException) as conflict:
+            self.manager.create(self.request, self.access, self.route)
+        self.assertEqual(conflict.exception.status_code, 409)
+        self.manager.executor.submit.assert_called_once()
+        self.assertEqual(self.ledger.used_today("alice"), 0)
+
     def test_progressive_model_text_requires_explicit_server_flag(self):
         answer = {"answer": "AMRAAM report", "response_id": "test-answer",
                   "answer_artifacts": {}, "tool_trace": [], "model": "test"}
@@ -847,6 +905,22 @@ class DurableJobTests(unittest.TestCase):
                      patch.object(lab, "finalize_customer_result", side_effect=lambda result, *args: dict(result)):
                     self.manager._run(job["request_id"], request, self.access, self.route)
                 self.assertEqual(callable(generate.call_args.kwargs["draft_text"]), enabled)
+
+    def test_conversation_mode_prepares_provisional_writing(self):
+        request = self.request.model_copy(update={
+            "client_request_id": str(uuid.uuid4()),
+            "answer_mode": "conversation",
+        })
+        answer = {"answer": "A concise answer", "response_id": "quick-answer",
+                  "answer_artifacts": {}, "tool_trace": [], "model": "test"}
+        job, _ = self.manager.create(request, self.access, self.route)
+        with patch.dict("os.environ", {"ASK_MIMIR_PROGRESSIVE_TEXT": "0",
+                                        "ASK_MIMIR_PROGRESSIVE_TEXT_SUBJECTS": "bob"}), \
+             patch.object(lab, "generate_answer", return_value=answer) as generate, \
+             patch.object(lab, "finalize_customer_result", side_effect=lambda result, *args: dict(result)):
+            self.manager._run(job["request_id"], request, self.access, self.route)
+        self.assertTrue(callable(generate.call_args.kwargs["draft_text"]))
+        self.assertEqual(self.ledger.load_job(job["request_id"])["result"]["answer_mode"], "conversation")
 
     def test_concurrent_duplicate_admission_schedules_one_job(self):
         with ThreadPoolExecutor(max_workers=20) as pool:
@@ -1017,9 +1091,22 @@ class DurableJobTests(unittest.TestCase):
             for identity in ["guest:scanner", "guest:scanner", "guest:human"]:
                 response = client.get("/api/beta/policy", headers={"X-Ask-Mimir-Proxy-Secret": "test-secret", "X-Ask-Mimir-Subject": identity, "X-Ask-Mimir-Tier": "public"})
                 self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["answer_modes"], ["deep_research"])
+            with patch.dict(os.environ, {"ASK_MIMIR_CONVERSATION_ENABLED": "1"}):
+                response = client.get("/api/beta/policy", headers={"X-Ask-Mimir-Proxy-Secret": "test-secret", "X-Ask-Mimir-Subject": "guest:human", "X-Ask-Mimir-Tier": "public"})
+                self.assertEqual(response.json()["answer_modes"], ["conversation", "deep_research"])
         self.assertEqual(self.ledger.connection.execute("SELECT count(*) FROM query_events").fetchone()[0], 0)
         self.assertEqual(self.ledger.connection.execute("SELECT count(*) FROM research_results").fetchone()[0], 0)
         self.assertEqual(self.ledger.connection.execute("SELECT count(*) FROM ask_conversations").fetchone()[0], 0)
+        self.manager.executor.submit.assert_not_called()
+
+    def test_conversation_request_is_rejected_before_job_creation_when_disabled(self):
+        request = self.request.model_copy(update={"answer_mode": "conversation"})
+        with patch.dict(os.environ, {"ASK_MIMIR_CONVERSATION_ENABLED": "0"}):
+            with self.assertRaises(HTTPException) as failure:
+                lab.accept_ask_job(request, None, None)
+        self.assertEqual(failure.exception.status_code, 422)
+        self.assertEqual(self.ledger.used_today("alice"), 0)
         self.manager.executor.submit.assert_not_called()
 
     def test_routing_analytics_failure_does_not_block_job_admission(self):

@@ -21,7 +21,7 @@ from geographic_market import (
 )
 from platform_intent import platform_follow_up_intent
 from market_segment import market_segment_follow_up_intent, resolve_market_segment
-from market_record_search import resolve_market_record_search
+from market_record_search import record_search_follow_up_intent, resolve_market_record_search
 
 
 class MarketWorkflowResolutionTests(unittest.TestCase):
@@ -381,12 +381,20 @@ class MarketWorkflowResolutionTests(unittest.TestCase):
                 "Find open oportunities for avionics suppliers.",
                 "opportunity",
             ),
+            (
+                "Are there currently open US Sources Sought notices for military aircraft avionics? Give me the strongest matches.",
+                "opportunity",
+            ),
         )
         for question, record_type in cases:
             with self.subTest(question=question):
                 result = resolve_market_record_search(question)
                 self.assertIsNotNone(result)
                 self.assertEqual(result["record_type"], record_type)
+
+    def test_opportunity_deadline_follow_up_stays_in_record_search(self):
+        self.assertTrue(record_search_follow_up_intent("Which deadline is soonest?"))
+        self.assertTrue(record_search_follow_up_intent("Which notice is best aligned?"))
 
     def test_internal_identifier_is_removed_without_discarding_answer(self):
         answer = (

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +22,43 @@ from beta_controls import (
 
 
 class BetaStateStoreTests(unittest.TestCase):
+    def test_mode_is_recorded_with_cost_and_legacy_rows_default_to_deep(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "beta-state.sqlite3"
+            connection = sqlite3.connect(path)
+            connection.execute("""
+                CREATE TABLE query_events (
+                    request_id TEXT PRIMARY KEY, request_fingerprint TEXT,
+                    subject_id TEXT NOT NULL, tier TEXT NOT NULL,
+                    utc_day TEXT NOT NULL, status TEXT NOT NULL,
+                    created_at TEXT NOT NULL, completed_at TEXT,
+                    release_binding_id TEXT, workflow TEXT,
+                    latency_ms REAL, estimated_cost_usd REAL,
+                    performance_json TEXT
+                )
+            """)
+            connection.execute("""
+                INSERT INTO query_events
+                (request_id, subject_id, tier, utc_day, status, created_at, workflow)
+                VALUES ('old', 'another-user', 'free', '2026-10-01',
+                        'completed', '2026-10-01', 'item_intelligence')
+            """)
+            connection.commit()
+            connection.close()
+
+            store = BetaStateStore(path)
+            access = AccessContext("test-user", "professional", True)
+            store.reserve("quick", access, "release-1", "company",
+                          answer_mode="conversation")
+            store.complete("quick", latency_ms=500, estimated_cost_usd=0.08)
+            rows = store.connection.execute(
+                "SELECT request_id, answer_mode, estimated_cost_usd FROM query_events ORDER BY request_id"
+            ).fetchall()
+            self.assertEqual(rows, [("old", "deep_research", None),
+                                    ("quick", "conversation", 0.08)])
+            self.assertEqual(store.used_today(access.subject_id), 1)
+            store.connection.close()
+
     def test_branded_pdf_is_available_to_signed_in_tiers_not_guests(self):
         self.assertFalse(TIER_POLICIES["public"].can_download_report)
         for tier in ("free", "trial", "lite", "professional", "enterprise"):
@@ -464,6 +502,22 @@ class CustomerProvenanceTests(unittest.TestCase):
         )
         self.assertEqual(validation["external_source_link_count"], 1)
         self.assertEqual(validation["external_links_in_deterministic_pack"], 1)
+
+    def test_dossier_cage_and_nsn_links_accept_source_fields_and_formatting(self):
+        answer = (
+            "[Prime](https://www.mimiradvisors.org/dashboard?view=COMPANY&cage=15090) "
+            "[Supplier](https://www.mimiradvisors.org/dashboard?view=COMPANY&cage=8LDY5) "
+            "[Item](https://www.mimiradvisors.org/dashboard?view=PARTS&nsn=1560-00-817-5790)"
+        )
+        trace = [{"result": {"identity": {"recipient_cage": "15090", "nsn": "1560008175790"},
+                             "reported_subaward_suppliers": [{"supplier_cage": "8LDY5"}]}}]
+        validation = validate_answer_citations(answer, trace)
+        self.assertEqual(validation["status"], "pass")
+        self.assertEqual(validation["unsupported_mimir_links"], [])
+        unsupported = validate_answer_citations(
+            "[Wrong site](https://www.mimiradvisors.org/dashboard?view=COMPANY&cage=XXXXX)", trace
+        )
+        self.assertEqual(unsupported["status"], "fail")
 
 
 if __name__ == "__main__":

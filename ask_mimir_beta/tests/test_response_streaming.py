@@ -5,6 +5,7 @@ import unittest
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from pydantic import ValidationError
 
 import httpx
 from openai import OpenAI
@@ -46,6 +47,39 @@ class ResponseStreamingTests(unittest.TestCase):
         self.assertIs(self.timed.create(model="test", input="evidence"), final)
         self.assertEqual(self.drafts[-1], "The source shows FY2026.")
         self.assertTrue(self.responses.create.call_args.kwargs["stream"])
+
+    def test_conversation_mode_is_explicit_and_deep_remains_legacy_default(self):
+        messages = [{"role": "user", "content": "Tell me about AMRAAM"}]
+        self.assertEqual(lab.AskRequest(messages=messages).answer_mode, "deep_research")
+        self.assertEqual(
+            lab.AskRequest(messages=messages, answer_mode="conversation").answer_mode,
+            "conversation",
+        )
+        with self.assertRaises(ValidationError):
+            lab.AskRequest(messages=messages, answer_mode="quickest")
+
+    def test_conversation_model_settings_do_not_leak_into_deep_research(self):
+        response = SimpleNamespace(id="resp-1", output=[SimpleNamespace(type="message")])
+        self.responses.create.return_value = iter([event("response.completed", response=response)])
+        token = lab.ANSWER_MODE.set("conversation")
+        try:
+            self.timed.create(model="test", input="evidence", instructions="Sources first.",
+                              reasoning={"effort": "high"}, max_output_tokens=10000)
+        finally:
+            lab.ANSWER_MODE.reset(token)
+        conversation = self.responses.create.call_args.kwargs
+        self.assertEqual(conversation["reasoning"], {"effort": "medium"})
+        self.assertEqual(conversation["max_output_tokens"], 7500)
+        self.assertIn("Sources first.", conversation["instructions"])
+        self.assertIn("CONVERSATION MODE OUTPUT CONTRACT", conversation["instructions"])
+
+        self.responses.create.return_value = iter([event("response.completed", response=response)])
+        self.timed.create(model="test", input="evidence", instructions="Sources first.",
+                          reasoning={"effort": "high"}, max_output_tokens=10000)
+        deep = self.responses.create.call_args.kwargs
+        self.assertEqual(deep["reasoning"], {"effort": "high"})
+        self.assertEqual(deep["max_output_tokens"], 10000)
+        self.assertEqual(deep["instructions"], "Sources first.")
 
     def test_installed_sdk_decodes_delta_and_completed_response(self):
         final = {

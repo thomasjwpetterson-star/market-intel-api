@@ -1,6 +1,8 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import Mock
 
 import duckdb
 
@@ -8,6 +10,20 @@ from market_record_search import MarketRecordSearchStore
 
 
 class MarketRecordSearchTests(unittest.TestCase):
+    def test_snapshot_opportunity_cache_expires_at_utc_day_boundary(self):
+        store = object.__new__(MarketRecordSearchStore)
+        store._cache = {}
+        store._cache_utc_day = datetime.now(timezone.utc).date()
+        store._build = Mock(return_value={"records": [{"notice_id": "N1"}], "coverage": {}})
+        spec = {"record_type": "opportunity", "notice_type": "ANY",
+                "subject": "radar", "terms": ["RADAR"]}
+        self.assertEqual(store.get(spec)["records"][0]["notice_id"], "N1")
+        store.get(spec)
+        self.assertEqual(store._build.call_count, 1)
+        store._cache_utc_day -= timedelta(days=1)
+        store.get(spec)
+        self.assertEqual(store._build.call_count, 2)
+
     def test_sources_sought_adds_exact_item_source_context(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -81,6 +97,8 @@ class MarketRecordSearchTests(unittest.TestCase):
                 }
             )
             context = result["records"][0]["incumbent_source_context"][0]
+            self.assertEqual(result["records"][0]["notice_id"], "OPP-1")
+            self.assertIn("current SAM status", result["scope"]["observation_window"])
             self.assertEqual(context["nsn"], "2840012345678")
             self.assertEqual(
                 context["procurement_authorized_sources"][0]["cage"], "11111"

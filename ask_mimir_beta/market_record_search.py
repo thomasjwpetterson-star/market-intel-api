@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import quote, unquote
@@ -192,7 +193,8 @@ def resolve_market_record_search(text: str) -> Dict[str, Any] | None:
         term in lowered for term in ("find", "show", "which", "search", "any")
     ) or bool(
         re.search(
-            r"\bwhat\s+(?:open\s+)?(?:defen[sc]e\s+)?opportunities(?:\s+are\s+open)?\b",
+            r"\bwhat\s+(?:open\s+)?(?:defen[sc]e\s+)?opportunities(?:\s+are\s+open)?\b|"
+            r"\bare\s+there\b.{0,60}\b(?:open|active|current)\b",
             lowered,
         )
     )
@@ -254,6 +256,9 @@ def record_search_follow_up_intent(text: str) -> bool:
             "supporting that conclusion", "directly evidenced", "which are inferred",
             "which of these", "which of those", "actual industry capability",
             "broad market research", "most relevant notices",
+            "which deadline", "deadline is soonest", "which notice", "best aligned",
+            "still open", "confirm on sam", "verify on sam", "check on sam",
+            "live status", "current status", "amendments to these",
         )
     )
 
@@ -293,6 +298,7 @@ class MarketRecordSearchStore:
                 ).fetchall()
             }
         self._cache: Dict[str, Dict[str, Any]] = {}
+        self._cache_utc_day = datetime.now(timezone.utc).date()
 
     def _add_notice_source_context(self, records: List[Dict[str, Any]]) -> None:
         source_path = self.paths["item_sources"]
@@ -427,6 +433,12 @@ class MarketRecordSearchStore:
         return "|".join(patterns) or r"a^"
 
     def get(self, spec: Dict[str, Any], limit: int = 50) -> Dict[str, Any]:
+        utc_day = datetime.now(timezone.utc).date()
+        if utc_day != self._cache_utc_day:
+            # Opportunity rows are filtered by CURRENT_DATE in DuckDB. Cached
+            # future-deadline results must not survive a UTC-day rollover.
+            self._cache.clear()
+            self._cache_utc_day = utc_day
         scope_id = record_search_scope_id(spec)
         if scope_id not in self._cache:
             self._cache[scope_id] = self._build(spec, scope_id)
@@ -453,7 +465,7 @@ class MarketRecordSearchStore:
                 self.connection.execute(
                     f"""
                     SELECT COALESCE(NULLIF(o.sol_num, ''), o.id) AS record_id,
-                           o.title, o.agency AS customer, o.sub_agency,
+                           o.id AS notice_id, o.title, o.agency AS customer, o.sub_agency,
                            SUBSTR(o.deadline, 1, 10) AS response_deadline,
                            o.psc, c.description AS psc_description,
                            CAST(o.naics AS VARCHAR) AS naics, o.set_aside_type,
@@ -476,7 +488,10 @@ class MarketRecordSearchStore:
                 )
             )
             self._add_notice_source_context(records)
-            window = "Open notices with response deadlines on or after the search date"
+            window = (
+                "Snapshot notice candidates with response deadlines on or after "
+                "the search date; current SAM status and amendments unverified"
+            )
         else:
             award_source = (
                 self.paths["recent_awards"]

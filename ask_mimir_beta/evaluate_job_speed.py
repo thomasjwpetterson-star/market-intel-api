@@ -69,6 +69,7 @@ def safe_model_usage(result: dict[str, Any]) -> dict[str, float | int]:
         "response_calls": result.get("response_calls"),
         "input_tokens": usage.get("input_tokens"),
         "cached_input_tokens": input_details.get("cached_tokens"),
+        "cache_write_tokens": input_details.get("cache_write_tokens"),
         "output_tokens": usage.get("output_tokens"),
         "reasoning_tokens": output_details.get("reasoning_tokens"),
         "estimated_cost_usd": estimated_cost.get("estimated_total_usd"),
@@ -81,6 +82,7 @@ def safe_model_usage(result: dict[str, Any]) -> dict[str, float | int]:
 
 
 def evaluate_job_case(base_url: str, case: dict, *, tier: str, subject: str,
+                      answer_mode: str = "deep_research",
                       proxy_secret: str | None = None, poll_seconds: float = 0.5,
                       deadline_seconds: float = 360,
                       on_completed: Callable[[dict], None] | None = None) -> dict:
@@ -95,6 +97,7 @@ def evaluate_job_case(base_url: str, case: dict, *, tier: str, subject: str,
     payload = {
         "messages": case.get("messages") or [{"role": "user", "content": case["question"]}],
         "client_request_id": request_id,
+        "answer_mode": answer_mode,
     }
     if case.get("active_scope"):
         payload["active_scope"] = case["active_scope"]
@@ -156,8 +159,22 @@ def evaluate_job_case(base_url: str, case: dict, *, tier: str, subject: str,
         and isinstance(value, (int, float)) and not isinstance(value, bool)
         and math.isfinite(value) and value >= 0
     }
+    model_usage = safe_model_usage(result)
+    if "estimated_cost_usd" in model_usage:
+        web_calls = int(safe_timings.get("model_web_search_call_count") or 0)
+        model_usage["estimated_web_search_cost_usd"] = round(web_calls * 0.01, 8)
+        model_usage["estimated_request_cost_usd"] = round(
+            float(model_usage["estimated_cost_usd"]) + web_calls * 0.01, 8
+        )
     return {
         "case_id": case["case_id"],
+        "answer_mode": answer_mode,
+        "conversation_segment": (
+            result.get("conversation_segment")
+            if result.get("conversation_segment") in
+            {"menu", "prime", "awards", "parts", "supply_chain", "overview"}
+            else None
+        ),
         "phase": "follow_up" if case.get("follows") else "initial",
         "workflow": job.get("workflow"),
         "expected_workflow": case.get("expected_workflow"),
@@ -169,7 +186,7 @@ def evaluate_job_case(base_url: str, case: dict, *, tier: str, subject: str,
         "first_evidence_preview_ms": first_evidence_preview_ms,
         "server_first_model_text_ms": (job.get("timings") or {}).get("first_model_text_ms"),
         "server_timings": safe_timings,
-        "model_usage": safe_model_usage(result),
+        "model_usage": model_usage,
         "citation_status": citation_status,
         "citation_warning_count": len(citation_warnings) if isinstance(citation_warnings, list) else 0,
         "completed_ms": completed_ms,
@@ -227,6 +244,8 @@ def main() -> None:
     parser.add_argument("--cases-file", type=Path, default=ROOT / "speed_eval_cases.json")
     parser.add_argument("--case-id", action="append")
     parser.add_argument("--tier", default="enterprise")
+    parser.add_argument("--answer-mode", choices=("conversation", "deep_research"),
+                        default="deep_research")
     parser.add_argument("--subject", default="ask-speed-evaluation")
     parser.add_argument("--shared-subject", action="store_true",
                         help="Use one exact test subject for a private progressive-text allowlist")
@@ -266,6 +285,7 @@ def main() -> None:
         try:
             result = evaluate_job_case(
                 args.base_url, prepared, tier=args.tier,
+                answer_mode=args.answer_mode,
                 subject=(args.subject if args.shared_subject else
                          f"{args.subject}:{parent_id or case['case_id']}"),
                 proxy_secret=args.proxy_secret,
@@ -296,6 +316,7 @@ def main() -> None:
         )
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "answer_mode": args.answer_mode,
         "base_url": args.base_url,
         "method": "asynchronous Ask job API; first visible poll containing provisional or completed text",
         "target": "first useful text by 30 seconds for each sample, with basic answer checks",

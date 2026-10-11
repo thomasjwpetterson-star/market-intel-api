@@ -96,8 +96,9 @@ def is_platform_centered_request(text: str, *, has_platform_mention: bool) -> bo
     )
     direct_platform_request = bool(
         re.search(
-            r"^(?:tell\s+me\s+about|give\s+me\s+an?\s+overview\s+of|"
-            r"overview\s+of|explain|map)\b",
+            r"^(?:tell\s+me\s+(?:everything\s+)?about|give\s+me\s+an?\s+overview\s+of|"
+            r"overview\s+of|show\s+(?:me\s+)?(?:topic\s+)?options\s+for|"
+            r"(?:and\s+)?what\s+about|explain|map)\b",
             lowered,
         )
     )

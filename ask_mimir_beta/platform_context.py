@@ -281,6 +281,7 @@ class PlatformContextStore:
             else None
         )
         self._precomputed_paths: Dict[str, Path] = {}
+        self._precomputed_segment_paths: Dict[tuple[str, str], Path] = {}
         if load_precomputed and self.precomputed_dir is not None:
             manifest_path = self.precomputed_dir / "manifest.json"
             if manifest_path.exists():
@@ -290,6 +291,13 @@ class PlatformContextStore:
                     / str(entry["path"])
                     for entry in manifest.get("platforms", [])
                 }
+                for entry in manifest.get("platforms", []):
+                    for topic, filename in (entry.get("segments") or {}).items():
+                        path = (self.precomputed_dir / str(filename)).resolve()
+                        if path.parent == self.precomputed_dir:
+                            self._precomputed_segment_paths[(
+                                str(entry["platform_id"]).upper(), str(topic)
+                            )] = path
 
     def _load_platform_catalog(self) -> List[str]:
         rows = self.connection.execute(
@@ -875,6 +883,32 @@ class PlatformContextStore:
                 ),
             }
         return projected
+
+    def answer_segment_projection(
+        self, platform_id: str, segment: str, focus_id: str | None = None,
+    ) -> Dict[str, Any]:
+        """Read a release-built topic view directly, with a safe dynamic fallback."""
+        from platform_conversation_segments import platform_segment_projection
+
+        resolution = self.search(platform_id)
+        resolved = resolution.get("resolved_platform_id")
+        if not resolved:
+            raise KeyError(f"platform was not found uniquely: {platform_id}")
+        path = self._precomputed_segment_paths.get((resolved.upper(), segment))
+        if not focus_id and path is not None and path.exists():
+            candidate = json.loads(path.read_text())
+            scope = candidate.get("scope") or {}
+            if (
+                scope.get("platform_id") == resolved
+                and set(scope.get("included_platform_records") or [resolved])
+                    == set(self._platform_members(resolved))
+                and candidate.get("requested_segment") == segment
+            ):
+                return candidate
+        return platform_segment_projection(
+            self.answer_projection(resolved, supplier_limit=14, focus_id=focus_id),
+            segment,
+        )
 
     def _focused_program_projection(
         self, platform_id: str, focus_id: str, supplier_limit: int, *, export: bool = False
@@ -1787,6 +1821,8 @@ def build_precomputed_platform_contexts(
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     entries = []
+    from platform_conversation_segments import platform_segment_projection
+
     for requested_id in platform_ids:
         store = PlatformContextStore(data_root, load_precomputed=False)
         resolution = store.search(requested_id)
@@ -1803,17 +1839,33 @@ def build_precomputed_platform_contexts(
         temporary = destination.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(context, default=str))
         temporary.replace(destination)
+        answer_view = store.answer_projection(resolved, supplier_limit=14)
+        segments = {}
+        for topic in ("prime", "awards", "parts", "supply_chain", "overview"):
+            filename_segment = (
+                hashlib.sha256(resolved.encode()).hexdigest()[:16]
+                + f"-{topic}-conversation.json"
+            )
+            destination_segment = output_dir / filename_segment
+            temporary_segment = destination_segment.with_suffix(".json.tmp")
+            temporary_segment.write_text(json.dumps(
+                platform_segment_projection(answer_view, topic),
+                default=str, separators=(",", ":"),
+            ))
+            temporary_segment.replace(destination_segment)
+            segments[topic] = filename_segment
         entries.append(
             {
                 "platform_id": resolved,
                 "display_name": context["scope"]["display_name"],
                 "path": filename,
                 "evidence_fingerprint": context["evidence_fingerprint"],
+                "segments": segments,
             }
         )
         store.connection.close()
     manifest = {
-        "schema_version": "platform-context-precompute-v1",
+        "schema_version": "platform-context-precompute-v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "runtime_release_id": release_id,
         "platform_count": len(entries),

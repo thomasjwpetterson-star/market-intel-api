@@ -299,6 +299,7 @@ class BetaStateStore:
                 completed_at TEXT,
                 release_binding_id TEXT,
                 workflow TEXT,
+                answer_mode TEXT NOT NULL DEFAULT 'deep_research',
                 latency_ms REAL,
                 estimated_cost_usd REAL,
                 performance_json TEXT
@@ -374,6 +375,10 @@ class BetaStateStore:
         if "request_fingerprint" not in query_columns:
             self.connection.execute(
                 "ALTER TABLE query_events ADD COLUMN request_fingerprint TEXT"
+            )
+        if "answer_mode" not in query_columns:
+            self.connection.execute(
+                "ALTER TABLE query_events ADD COLUMN answer_mode TEXT NOT NULL DEFAULT 'deep_research'"
             )
         routing_columns = {
             str(row[1])
@@ -748,6 +753,7 @@ class BetaStateStore:
         workflow: str,
         request_fingerprint: str | None = None,
         allow_over_limit: bool = False,
+        answer_mode: str = "deep_research",
     ) -> int:
         policy = access.policy
         now = datetime.now(timezone.utc).isoformat()
@@ -811,13 +817,13 @@ class BetaStateStore:
                         UPDATE query_events
                         SET request_fingerprint = ?, tier = ?, utc_day = ?,
                             status = 'reserved', created_at = ?, completed_at = NULL,
-                            release_binding_id = ?, workflow = ?, latency_ms = NULL,
+                            release_binding_id = ?, workflow = ?, answer_mode = ?, latency_ms = NULL,
                             estimated_cost_usd = NULL, performance_json = NULL
                         WHERE request_id = ?
                         """,
                         [
                             request_fingerprint, policy.tier, utc_day(), now,
-                            release_binding_id, workflow, request_id,
+                            release_binding_id, workflow, answer_mode, request_id,
                         ],
                     )
                 else:
@@ -825,12 +831,14 @@ class BetaStateStore:
                         """
                         INSERT INTO query_events (
                             request_id, request_fingerprint, subject_id, tier,
-                            utc_day, status, created_at, release_binding_id, workflow
-                        ) VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?, ?)
+                            utc_day, status, created_at, release_binding_id, workflow,
+                            answer_mode
+                        ) VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?)
                         """,
                         [
                             request_id, request_fingerprint, access.subject_id,
-                            policy.tier, utc_day(), now, release_binding_id, workflow,
+                            policy.tier, utc_day(), now, release_binding_id,
+                            workflow, answer_mode,
                         ],
                     )
                 self.connection.commit()
@@ -1355,6 +1363,9 @@ IDENTIFIER_KEYS = {
     "vendor_cage": "cage",
     "sub_cage": "cage",
     "prime_cage": "cage",
+    "recipient_cage": "cage",
+    "supplier_cage": "cage",
+    "subcontractor_cage": "cage",
     "target_cages": "cage",
     "contract_id": "award",
     "award_id": "award",
@@ -1468,7 +1479,15 @@ def validate_answer_citations(answer: str, tool_trace: list[Dict[str, Any]]) -> 
             ):
                 linked_values = query.get(parameter, [])
                 if linked_values and not any(
-                    value.strip().upper() in supplied_identifiers[kind]
+                    (
+                        re.fullmatch(r"(?:\d{9}|\d{13})", re.sub(r"[^0-9]", "", value))
+                        and re.sub(r"[^0-9]", "", value) in {
+                            re.sub(r"[^0-9]", "", supplied)
+                            for supplied in supplied_identifiers[kind]
+                        }
+                        if kind == "nsn"
+                        else value.strip().upper() in supplied_identifiers[kind]
+                    )
                     for value in linked_values
                 ):
                     unsupported_mimir_links.append(raw_url)

@@ -21,7 +21,7 @@ class JobSpeedEvaluatorTests(unittest.TestCase):
             "response_calls": 2,
             "usage": {
                 "input_tokens": 900,
-                "input_tokens_details": {"cached_tokens": 200},
+                "input_tokens_details": {"cached_tokens": 200, "cache_write_tokens": 50},
                 "output_tokens": 300,
                 "output_tokens_details": {"reasoning_tokens": 100},
             },
@@ -29,7 +29,8 @@ class JobSpeedEvaluatorTests(unittest.TestCase):
         })
         self.assertEqual(summary, {
             "response_calls": 2, "input_tokens": 900,
-            "cached_input_tokens": 200, "output_tokens": 300,
+            "cached_input_tokens": 200, "cache_write_tokens": 50,
+            "output_tokens": 300,
             "reasoning_tokens": 100, "estimated_cost_usd": 0.01,
         })
         self.assertNotIn("answer", summary)
@@ -94,6 +95,7 @@ class JobSpeedEvaluatorTests(unittest.TestCase):
             ]))
             argv = ["evaluate_job_speed", "--cases-file", str(cases),
                     "--case-id", "second", "--shared-subject", "--subject", "private-test",
+                    "--answer-mode", "conversation",
                     "--output", str(output)]
             with patch.object(sys, "argv", argv):
                 evaluate_job_speed.main()
@@ -102,10 +104,13 @@ class JobSpeedEvaluatorTests(unittest.TestCase):
         self.assertEqual(posts[0][1]["X-Ask-Mimir-Subject"], "private-test")
         self.assertEqual(posts[1][1]["X-Ask-Mimir-Subject"], "private-test")
         self.assertEqual(posts[0][0]["conversation_id"], posts[1][0]["conversation_id"])
+        self.assertEqual(posts[0][0]["answer_mode"], "conversation")
+        self.assertEqual(posts[1][0]["answer_mode"], "conversation")
         self.assertEqual(posts[1][0]["messages"][-2]["content"], "Sensitive first answer")
         self.assertNotIn("Sensitive first answer", report)
         self.assertNotIn("Follow-up answer", report)
         self.assertEqual(json.loads(report)["timing_summary_ms"]["completed_ms"]["n"], 2)
+        self.assertEqual(json.loads(report)["answer_mode"], "conversation")
 
     def test_first_text_distinguishes_preview_from_final(self):
         self.assertIsNone(first_visible_text({"status": "running"}))
@@ -121,8 +126,10 @@ class JobSpeedEvaluatorTests(unittest.TestCase):
                 return {"request_id": payload["client_request_id"], "status": "queued", "workflow": "contract_or_opportunity"}
             return {
                 "status": "completed", "workflow": "contract_or_opportunity",
+                "timings": {"model_web_search_call_count": 2},
                 "result": {"answer": "Contract N0001923F2616 has an action history.", "tool_trace": [],
-                           "citation_validation": {"status": "pass", "warnings": []}},
+                           "citation_validation": {"status": "pass", "warnings": []},
+                           "estimated_cost": {"estimated_total_usd": 0.12}},
             }
         request_json.side_effect = response
         result = evaluate_job_case(
@@ -136,6 +143,7 @@ class JobSpeedEvaluatorTests(unittest.TestCase):
         self.assertTrue(result["basic_answer_checks_passed"])
         self.assertEqual(result["citation_status"], "pass")
         self.assertEqual(result["citation_warning_count"], 0)
+        self.assertEqual(result["model_usage"]["estimated_request_cost_usd"], 0.14)
         self.assertNotIn("answer", result)
 
     @patch("ask_mimir_beta.evaluate_job_speed.time.sleep")
