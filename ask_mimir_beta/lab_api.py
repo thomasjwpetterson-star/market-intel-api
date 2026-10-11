@@ -851,7 +851,9 @@ and the action descriptions only when explaining modifications. Call the financi
 obligations and state its exact fiscal-year period; never call it lifetime value, revenue, contract ceiling
 or total program value. Show only fiscal years containing reported contract actions unless the user
 explicitly asks for the complete annual series. Do not discuss pre-award years merely because they are
-available in the underlying data. FY2026 is partial.
+available in the underlying data. Label the total using the first and last fiscal years in
+observed_action_fiscal_years, not the wider available_fiscal_years coverage window; if actions
+occur only in FY2023–FY2026, do not label their sum FY2019–FY2026. FY2026 is partial.
 
 Present prime obligations and Mimir-modelled reported subcontract value as separately labelled measures
 without adding a routine paragraph explaining that separation. When reported subawards exist, identify the material supplier sites, descriptions and

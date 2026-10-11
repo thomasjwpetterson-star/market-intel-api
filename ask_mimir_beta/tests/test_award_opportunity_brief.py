@@ -27,6 +27,9 @@ class AwardOpportunityBriefTests(unittest.TestCase):
 
         self.assertEqual(brief["identity"]["base_award_description"], "Radar support")
         self.assertEqual(brief["financial_summary"]["annual_obligations"][0]["net_prime_obligations_usd"], 125.0)
+        self.assertEqual(brief["financial_summary"]["observed_action_fiscal_years"], [2025])
+        self.assertEqual(brief["financial_summary"]["net_prime_obligations_observed_actions_usd"], 125.0)
+        self.assertNotIn("net_prime_obligations_fy2019_fy2026_usd", brief["financial_summary"])
         self.assertEqual(len(brief["action_history"]), 1)
         self.assertEqual(brief["evidence_scope"]["depth"], "brief")
         self.assertIn("reported_subaward_suppliers", brief["evidence_scope"]["omitted_lanes"])

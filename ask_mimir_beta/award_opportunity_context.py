@@ -164,6 +164,13 @@ class AwardOpportunityContextStore:
                 for row in financial.get("annual_obligations", [])
                 if int(row.get("action_count") or 0) > 0
             ]
+            observed_years = [
+                int(row["fiscal_year"]) for row in financial["annual_obligations"]
+            ]
+            financial["observed_action_fiscal_years"] = observed_years
+            financial["net_prime_obligations_observed_actions_usd"] = financial.pop(
+                "net_prime_obligations_fy2019_fy2026_usd", None
+            )
             projected["financial_summary"] = financial
         else:
             projected["likely_competitors"] = context["likely_competitors"][:12]
