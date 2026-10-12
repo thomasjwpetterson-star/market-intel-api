@@ -300,6 +300,8 @@ class BetaStateStore:
                 release_binding_id TEXT,
                 workflow TEXT,
                 answer_mode TEXT NOT NULL DEFAULT 'deep_research',
+                proposed_work_class TEXT NOT NULL DEFAULT 'deep_standard',
+                proposed_credit_units INTEGER NOT NULL DEFAULT 3,
                 latency_ms REAL,
                 estimated_cost_usd REAL,
                 performance_json TEXT
@@ -379,6 +381,14 @@ class BetaStateStore:
         if "answer_mode" not in query_columns:
             self.connection.execute(
                 "ALTER TABLE query_events ADD COLUMN answer_mode TEXT NOT NULL DEFAULT 'deep_research'"
+            )
+        if "proposed_work_class" not in query_columns:
+            self.connection.execute(
+                "ALTER TABLE query_events ADD COLUMN proposed_work_class TEXT NOT NULL DEFAULT 'deep_standard'"
+            )
+        if "proposed_credit_units" not in query_columns:
+            self.connection.execute(
+                "ALTER TABLE query_events ADD COLUMN proposed_credit_units INTEGER NOT NULL DEFAULT 3"
             )
         routing_columns = {
             str(row[1])
@@ -754,7 +764,11 @@ class BetaStateStore:
         request_fingerprint: str | None = None,
         allow_over_limit: bool = False,
         answer_mode: str = "deep_research",
+        proposed_work_class: str = "deep_standard",
+        proposed_credit_units: int = 3,
     ) -> int:
+        if not 0 <= proposed_credit_units <= 10:
+            raise ValueError("Invalid proposed Ask credit units")
         policy = access.policy
         now = datetime.now(timezone.utc).isoformat()
         with self.lock:
@@ -817,13 +831,15 @@ class BetaStateStore:
                         UPDATE query_events
                         SET request_fingerprint = ?, tier = ?, utc_day = ?,
                             status = 'reserved', created_at = ?, completed_at = NULL,
-                            release_binding_id = ?, workflow = ?, answer_mode = ?, latency_ms = NULL,
+                            release_binding_id = ?, workflow = ?, answer_mode = ?,
+                            proposed_work_class = ?, proposed_credit_units = ?, latency_ms = NULL,
                             estimated_cost_usd = NULL, performance_json = NULL
                         WHERE request_id = ?
                         """,
                         [
                             request_fingerprint, policy.tier, utc_day(), now,
-                            release_binding_id, workflow, answer_mode, request_id,
+                            release_binding_id, workflow, answer_mode,
+                            proposed_work_class, proposed_credit_units, request_id,
                         ],
                     )
                 else:
@@ -832,13 +848,14 @@ class BetaStateStore:
                         INSERT INTO query_events (
                             request_id, request_fingerprint, subject_id, tier,
                             utc_day, status, created_at, release_binding_id, workflow,
-                            answer_mode
-                        ) VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?)
+                            answer_mode, proposed_work_class, proposed_credit_units
+                        ) VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, ?)
                         """,
                         [
                             request_id, request_fingerprint, access.subject_id,
                             policy.tier, utc_day(), now, release_binding_id,
                             workflow, answer_mode,
+                            proposed_work_class, proposed_credit_units,
                         ],
                     )
                 self.connection.commit()

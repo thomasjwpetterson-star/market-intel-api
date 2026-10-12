@@ -112,6 +112,7 @@ from beta_controls import (
     remove_unsupported_mimir_links,
     validate_answer_citations,
 )
+from credit_policy import CreditQuote, quote_ask_work
 from platform_supply_chain_store import PlatformSupplyChainStore
 from program_momentum_store import ProgramMomentumStore, is_program_momentum_language
 from program_outlook_store import ProgramOutlookStore, is_program_outlook_language
@@ -803,8 +804,16 @@ variant assignment. Item Name Codes may support classification but are not custo
 Keep three concepts distinct:
 - a source authorized by DLA for procurement;
 - an observed DLA procurement recipient for this NIIN during the stated fiscal-year window; and
-- any other part-number or CAGE reference relationship.
-Use the customer labels "Authorized source (DLA)", "Observed DLA recipient" and "Other reference".
+- an item-identifying manufacturer design-control reference, or another part-number/CAGE relationship.
+Use the customer labels "Authorized source (DLA)", "Observed DLA recipient",
+"Manufacturer design-control" and "Other reference" as applicable. Do not bury an active
+manufacturer design-control record under the generic "Other reference" label.
+When an active design-control reference identifies a manufacturer, lead the source discussion with
+that named manufacturer as a recognised item-identifying source. Do not describe the item as
+having no available source solely because a separate DLA procurement-authorization field is
+empty. State that current DLA procurement authorization is unverified when that distinction
+matters to the user's competition or qualification question. Do not turn a design-control
+reference into a claim of current delivery capacity or DLA procurement authorization.
 Do not add a paragraph defining snapshot or active-CAGE mechanics unless the user asks about the
 methodology. Do not call every reference manufacturer a qualified or current supply source. Explain
 technical codes only when they materially affect the interpretation.
@@ -4917,6 +4926,32 @@ def is_fast_conversation_topic_menu(request: AskRequest, routing: RoutingDecisio
     return bool(store.search(candidate).get("resolved_platform_id"))
 
 
+def proposed_credit_quote(
+    request: AskRequest, routing: RoutingDecision, *, menu_only: bool = False
+) -> CreditQuote:
+    """Shadow-price the server-resolved work before the research job starts."""
+    return quote_ask_work(
+        answer_mode=request.answer_mode,
+        workflow=routing.workflow,
+        conversation_segment=(
+            conversation_platform_topic(
+                request.messages[-1].content,
+                has_active_scope=bool(request.active_scope),
+            ) if routing.workflow == "platform_intelligence" else None
+        ),
+        live_check=(
+            routing.workflow in {
+                "opportunity_discovery", "opportunity_dossier",
+                "contract_opportunity", "award_or_opportunity_search",
+            }
+            and explicit_sam_verification_requested(
+                request.messages[-1].content, "opportunity"
+            )
+        ),
+        menu_only=menu_only,
+    )
+
+
 def active_scope_from_result(
     result: Dict[str, Any],
     previous_scope: ActiveScope | None = None,
@@ -5315,9 +5350,13 @@ class AskJobManager:
         routing = routing or routing_decision_for_request(request)
         workflow = routing.workflow
         fast_topic_menu = is_fast_conversation_topic_menu(request, routing)
+        credit_quote = proposed_credit_quote(
+            request, routing, menu_only=fast_topic_menu
+        )
         allowance_exempt = (
             routing.clarification_needed
             or is_lightweight_scope_follow_up(request)
+            or fast_topic_menu
         )
         with self.lock:
             existing = self.jobs.get(request_id) or runtime.beta_state.load_job(request_id)
@@ -5417,6 +5456,8 @@ class AskJobManager:
                 "continuation_eligible": continuation_eligible,
                 "routing": routing.model_dump(),
                 "_request_fingerprint": request_fingerprint,
+                "_proposed_credit_work_class": credit_quote.work_class,
+                "_proposed_credit_units": credit_quote.units,
                 "_question": request.messages[-1].content,
                 "_request_body": request.model_dump(),
                 "_routing_ms": max(float(routing_ms), 0.0),
@@ -5543,6 +5584,12 @@ class AskJobManager:
                     self.jobs[request_id].get("_request_fingerprint"),
                     allow_over_limit=clarification_continuation,
                     answer_mode=request.answer_mode,
+                    proposed_work_class=self.jobs[request_id].get(
+                        "_proposed_credit_work_class", "deep_standard"
+                    ),
+                    proposed_credit_units=self.jobs[request_id].get(
+                        "_proposed_credit_units", 3
+                    ),
                 )
                 credit_reserved = True
                 write_credit_event(
@@ -9070,6 +9117,7 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
             decision=routing.model_dump(),
         ),
     )
+    direct_credit_quote = proposed_credit_quote(payload, routing)
     try:
         if not allowance_exempt:
             runtime.beta_state.reserve(
@@ -9079,6 +9127,8 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 routing.workflow,
                 allow_over_limit=clarification_continuation,
                 answer_mode=payload.answer_mode,
+                proposed_work_class=direct_credit_quote.work_class,
+                proposed_credit_units=direct_credit_quote.units,
             )
             write_credit_event(
                 "ask_credit_reserved",

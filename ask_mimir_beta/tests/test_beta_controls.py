@@ -52,11 +52,33 @@ class BetaStateStoreTests(unittest.TestCase):
                           answer_mode="conversation")
             store.complete("quick", latency_ms=500, estimated_cost_usd=0.08)
             rows = store.connection.execute(
-                "SELECT request_id, answer_mode, estimated_cost_usd FROM query_events ORDER BY request_id"
+                """SELECT request_id, answer_mode, estimated_cost_usd,
+                          proposed_work_class, proposed_credit_units
+                   FROM query_events ORDER BY request_id"""
             ).fetchall()
-            self.assertEqual(rows, [("old", "deep_research", None),
-                                    ("quick", "conversation", 0.08)])
+            self.assertEqual(rows, [("old", "deep_research", None, "deep_standard", 3),
+                                    ("quick", "conversation", 0.08, "deep_standard", 3)])
             self.assertEqual(store.used_today(access.subject_id), 1)
+            store.connection.close()
+
+    def test_shadow_credit_quote_does_not_change_current_allowance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = BetaStateStore(Path(directory) / "beta-state.sqlite3")
+            access = AccessContext("free-user", "free", True)
+            store.reserve("quick-1", access, "release-1", "platform",
+                          answer_mode="conversation",
+                          proposed_work_class="conversation_focused",
+                          proposed_credit_units=1)
+            store.reserve("quick-2", access, "release-1", "platform",
+                          answer_mode="conversation",
+                          proposed_work_class="conversation_overview",
+                          proposed_credit_units=2)
+            with self.assertRaises(DailyQuotaExceeded):
+                store.reserve("third", access, "release-1", "platform")
+            self.assertEqual(store.used_today(access.subject_id), 2)
+            self.assertEqual(store.connection.execute(
+                "SELECT SUM(proposed_credit_units) FROM query_events"
+            ).fetchone()[0], 3)
             store.connection.close()
 
     def test_branded_pdf_is_available_to_signed_in_tiers_not_guests(self):
