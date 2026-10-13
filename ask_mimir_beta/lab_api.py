@@ -4280,7 +4280,7 @@ def sanitize_answer_text(answer: str) -> str:
     cleaned = "\n".join(lines)
     cleaned = cleaned.replace(r"\*", "*")
     cleaned = re.sub(
-        r"^\s*(?:\*\*)?As of [A-Z][A-Za-z]+ \d{1,2}, \d{4}[.:]?(?:\*\*)?\s*",
+        r"^[ \t]*(?:\*\*)?As of [A-Z][A-Za-z]+ \d{1,2}, \d{4}[.:]?(?:\*\*)?[ \t]*(?:\r?\n|$)",
         "",
         cleaned,
         count=1,

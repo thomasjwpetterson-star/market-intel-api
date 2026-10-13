@@ -1757,6 +1757,17 @@ class DurableJobTests(unittest.TestCase):
 
 
 class EvidenceCacheTests(unittest.TestCase):
+    def test_date_cleanup_keeps_the_opening_sentence_and_markdown_balanced(self):
+        answer = (
+            "**As of October 14, 2026, four sources-sought notices are open.** "
+            "They remain market research, not funded awards."
+        )
+        self.assertEqual(lab.sanitize_answer_text(answer), answer)
+        self.assertEqual(
+            lab.sanitize_answer_text("**As of October 14, 2026.**\n\nUseful finding."),
+            "Useful finding.",
+        )
+
     def test_customer_links_use_real_mimir_routes(self):
         answer = '[Parker](https://askmimir.com/cage/59211) [Part](https://askmimir.com/niin/016506030) [Site](https://www.mimiradvisors.org/tools/cage-code-lookup?query=8MQW5) [Sentinel](https://www.mimiradvisors.org/ask-mimir?query=Sentinel)'
         clean = lab.sanitize_answer_text(answer)
