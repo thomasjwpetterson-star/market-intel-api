@@ -108,6 +108,26 @@ ETL cache should be published with `serving-data` plus every derived domain
 that depends on the changed files; ordinary code and prompt changes require a
 normal application deployment and no artifact release.
 
+## Private Conversation pilot on the existing Beta service
+
+Conversation uses the same pinned Ask release as Deep research. No new Render
+service or data publication is needed to compare the two modes. Deploy the
+tested API code first, then set `ASK_MIMIR_CONVERSATION_ENABLED=1` and
+`ASK_MIMIR_CONVERSATION_SUBJECT_ALLOWLIST=user:<account-id>` on Beta. The
+allowlist contains exact, comma-separated API subject IDs from the trusted
+website proxy. An empty allowlist leaves Conversation closed. Both
+`/api/beta/policy` and job submission apply the gate; a hidden UI control alone
+does not restrict API access. Keep `ASK_MIMIR_ALLOW_TEST_IDENTITIES=0` on Beta.
+
+Use the existing two-mode website preview for the pilot account, pointed at
+the existing Beta API. Run broad, focused, follow-up and current-status
+questions, then switch to Deep within the same thread. Record first readable
+text, checked final, source quality, recovery after navigation, server cost and
+the shadow work-class quote. The current ledger still charges one query per
+job; enforce mode-aware units before offering Conversation to customers.
+Both modes share Beta capacity, so a separate preview remains useful only for
+isolated load or failure testing. This pilot does not change the data pointer.
+
 ## Progressive answer text
 
 `ASK_MIMIR_PROGRESSIVE_TEXT` defaults to `0`. Set it to `1` only after the

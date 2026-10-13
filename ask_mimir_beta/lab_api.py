@@ -4152,6 +4152,23 @@ def access_from_request(request: Request) -> AccessContext:
     )
 
 
+def conversation_available_for_access(access: AccessContext) -> bool:
+    """Admit a private Conversation pilot only for explicitly named accounts.
+
+    A UI preview is not an access boundary: both policy discovery and job
+    submission must use the same verified subject from the website proxy.
+    An enabled switch without an allowlist remains closed.
+    """
+    if os.getenv("ASK_MIMIR_CONVERSATION_ENABLED", "0") != "1" or not access.authenticated:
+        return False
+    allowed_subjects = {
+        subject.strip()
+        for subject in os.getenv("ASK_MIMIR_CONVERSATION_SUBJECT_ALLOWLIST", "").split(",")
+        if subject.strip()
+    }
+    return access.subject_id in allowed_subjects
+
+
 def _decode_base64url(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
@@ -6128,7 +6145,7 @@ def beta_policy(request: Request) -> Dict[str, Any]:
     access = access_from_request(request)
     return {
         "answer_modes": (["conversation", "deep_research"]
-                         if os.getenv("ASK_MIMIR_CONVERSATION_ENABLED", "0") == "1"
+                         if conversation_available_for_access(access)
                          else ["deep_research"]),
         "tiers": {
             tier: {
@@ -6195,6 +6212,8 @@ def accept_ask_job(payload: AskRequest, request: Request, response: Response) ->
             and os.getenv("ASK_MIMIR_CONVERSATION_ENABLED", "0") != "1"):
         raise HTTPException(status_code=422, detail="Conversation mode is not available yet.")
     access = access_from_request(request)
+    if payload.answer_mode == "conversation" and not conversation_available_for_access(access):
+        raise HTTPException(status_code=403, detail="Conversation mode is not available for this account.")
     fingerprint = hashlib.sha256(payload.model_dump_json().encode()).hexdigest()
     try:
         payload = request_with_server_conversation_scope(payload, access)
@@ -9081,6 +9100,8 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=422, detail="Conversation mode is not available yet.")
     request_started_perf = time.perf_counter()
     access = access_from_request(request)
+    if payload.answer_mode == "conversation" and not conversation_available_for_access(access):
+        raise HTTPException(status_code=403, detail="Conversation mode is not available for this account.")
     payload = request_with_server_conversation_scope(payload, access)
     request_id = str(uuid.uuid4())
     routing = validate_routing_decision(payload, routing_decision_for_request(payload))
