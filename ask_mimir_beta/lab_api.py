@@ -7342,7 +7342,7 @@ def _generate_answer_impl(
                 )
             if not resolved_company_scope and len(location_parent_matches) == 1:
                 resolved_company_scope = location_parent_matches[0]
-        elif company_wide_intent(latest_question) and len(parent_matches) == 1:
+        elif company_wide_intent(latest_question) and not site_specific and len(parent_matches) == 1:
             resolved_company_scope = parent_matches[0]
         elif len(matches) == 1:
             resolved_company_scope = matches[0]

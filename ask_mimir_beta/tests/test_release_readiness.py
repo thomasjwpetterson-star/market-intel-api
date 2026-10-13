@@ -352,6 +352,43 @@ class AnswerTypeTests(unittest.TestCase):
         self.assertEqual(result["response_id"], "company-site-disambiguation")
         self.assertFalse(lab.result_counts_toward_quota(result))
 
+    def test_supplier_quick_picture_chooses_unique_parent_over_its_sites(self):
+        parent = {
+            "scope_type": "company_parent", "scope_id": "CURTISS-WRIGHT",
+            "scope_name": "CURTISS-WRIGHT CORPORATION",
+            "resolved_cages": ["04808", "0UBG9"],
+        }
+        sites = [
+            {"scope_type": "company_site", "scope_id": cage,
+             "scope_name": "CURTISS-WRIGHT", "city": city, "state": "PA"}
+            for cage, city in (("04808", "CHESWICK"), ("0UBG9", "BETHLEHEM"))
+        ]
+        resolution = {"matches": sites + [parent], "requires_disambiguation": True}
+        calls = []
+        def tool(name, arguments):
+            calls.append((name, arguments))
+            if name == "search_company_contexts":
+                return resolution
+            raise StopAtEvidence()
+        runtime = SimpleNamespace(
+            mock_mode=False, external_evidence_allowed=True,
+            platform_contexts=Mock(mentions=Mock(return_value=[])),
+            company_contexts=Mock(search=Mock(return_value=resolution)), call_tool=tool,
+        )
+        request = lab.AskRequest(messages=[{
+            "role": "user",
+            "content": "Give me the quick picture on Curtiss-Wright as a defence supplier.",
+        }])
+        route = lab.RoutingDecision(workflow="company_site_intelligence", reason="company", confidence=0.9)
+        with patch.object(lab, "runtime", runtime, create=True), patch.dict(
+            os.environ, {"OPENAI_API_KEY": "test-placeholder"}
+        ):
+            with self.assertRaises(StopAtEvidence):
+                lab.generate_answer(request, routing=route)
+        self.assertEqual(calls[0][0], "search_company_contexts")
+        self.assertEqual(calls[1][0], "get_company_context")
+        self.assertEqual(calls[1][1]["scope_id"], "CURTISS-WRIGHT")
+
     def test_unknown_exact_cage_is_returned_as_clarification(self):
         runtime = SimpleNamespace(
             mock_mode=False,
