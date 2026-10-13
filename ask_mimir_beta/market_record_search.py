@@ -165,11 +165,13 @@ def _search_terms(phrase: str) -> List[str]:
 
 def _subject(text: str) -> str:
     patterns = (
+        r"(?:find|show|search)\s+(?:(?:current|open|active|recent)\s+)?(.+?)\s+(?:sources?\s+sought|rfis?|requests?\s+for\s+information|solicitation)\s+notices?(?:\?|\.|$)",
         r"awards?\s+to\s+companies\s+supplying\s+(.+?)(?:,\s*(?:and\s+)?tell\s+me|\?|\.|$)",
         r"relevant\s+to\s*:?\s*(?:companies\s+supplying\s+)?(.+?)(?:\?|\.|$)",
         r"related\s+to\s+(.+?)(?:\?|\.|$)",
         r"awards?\s+(?:involving|covering)\s+(.+?)(?:\?|\.|$)",
         r"(?:opportunities|notices|sources?\s+sought|rfis?|requests?\s+for\s+information|solicitations)\s+(?:for|about|cover(?:ing)?|concern(?:ing)?)\s+(.+?)(?:\?|\.|$)",
+        r"(?:opportunities|notices)\s+that\s+an?\s+(.+?)\s+suppliers?\s+(?:may|might|could|can)\s+(?:be\s+able\s+to\s+)?respond\s+to(?:\?|\.|$)",
         r"opportunities\s+(?:are\s+)?open\s+for\s+(.+?)(?:\?|\.|$)",
         r"(?:search|show|find)\s+(?:current|open|active|recent)?\s*(.+?)\s+(?:contracting\s+)?opportunities(?:\?|\.|$)",
         r"awards?\s+for\s+(.+?)(?:\?|\.|$)",

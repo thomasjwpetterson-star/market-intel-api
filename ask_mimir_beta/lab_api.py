@@ -169,6 +169,18 @@ CONVERSATION_INSTRUCTIONS = (
     "dimensions supported by the evidence before asking at most one specific "
     "follow-up question. For a narrow question, answer it directly; do not "
     "replace the answer with a topic menu. "
+    "For a broad company overview, lead with the three observed financial lanes "
+    "before any site ranking. Show reported subcontract value alongside the "
+    "separately labelled net prime obligations when the evidence provides them. "
+    "Give two or three leading prime-contractor routes with their reported "
+    "values or supported roles, then at most three representative direct-award "
+    "sites. Do not let a prime-only site table dominate the quick picture. "
+    "Distinguish the company's position as a subcontractor from any reported "
+    "subcontractors beneath its own prime awards. Do not add these measures or "
+    "treat reported subawards as a complete measure of company revenue. "
+    "For company totals, label the range of fiscal years that have numeric "
+    "observations in annual_financial_summary; do not extend a total through "
+    "an empty future fiscal-year row in the scope metadata. "
     "Cite or identify the source basis as the normal workflow requires. If the "
     "question requires complete enumeration or evidence beyond the supplied pack, "
     "say so and offer Deep research. If evidence_scope lists omitted lanes, "
@@ -2137,7 +2149,7 @@ def explicit_platform_query(
         return mentions[0]
     has_direct_platform_language = bool(
         re.match(
-            r"^(?:tell\s+me\s+(?:everything\s+)?about|give\s+me\s+an?\s+overview\s+of|"
+            r"^(?:(?:now|next|instead|actually)[,\s]+)?(?:tell\s+me\s+(?:everything\s+)?about|give\s+me\s+an?\s+overview\s+of|"
             r"overview\s+of|show\s+(?:me\s+)?(?:topic\s+)?options\s+for|"
             r"(?:and\s+)?what\s+about|explain|map)\b",
             intent,
@@ -2355,8 +2367,16 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
         character.isdigit() for character in text
     ):
         return None
+    # A follow-up about the current company is not a newly named company.
+    if re.match(
+        r"^(?:what|how)\s+about\s+(?:their|them|they|its|it|this\s+company|that\s+company)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return None
     patterns = (
         r"(?:i['’]?m|i\s+am|we['’]?re|we\s+are)\s+(?:assessing|researching|evaluating|looking\s+at)\s+(.+?)\s+as\s+(?:an?\s+)?(?:defense|defence|military)\s+supplier\b",
+        r"(?:give|show)\s+me\s+(?:the\s+)?quick\s+picture\s+(?:on|of)\s+(.+?)\s+as\s+(?:an?\s+)?(?:defense|defence|military)\s+supplier\b",
         r"what\s+does\s+(.+?)\s+(?:actually\s+)?do\s+(?:in|for)\s+(?:the\s+)?(?:us\s+)?(?:defense|defence|military)(?:\s+market)?(?:\?|\.|$)",
         r"(?:build|give|show)\s+me\s+(?:an?\s+)?(?:defense|defence|military)\s+(?:profile|view|footprint)\s+(?:of|for)\s+(.+?)(?:\?|\.|$)",
         r"(?:can\s+u|can\s+you|please)\s+map\s+(.+?)(?:['’]s|s)\s+(?:defense|defence|military)\s+(?:business|footprint|activity)(?:\?|\.|$)",
@@ -3900,8 +3920,10 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
         latest,
         re.IGNORECASE,
     ))
+    competitor_request = is_eaton_competitor_request(request.messages)
     conflicting_entity_route = bool(
         award_id or item_id or product_id or record_search or compared_platforms
+        or competitor_request
         or (platform_id and (not explicit_company_language or company_phrase_is_platform))
         or (state_code and not explicit_company_language)
         or (segment_id and not explicit_company_language)
@@ -3918,7 +3940,7 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
                 "state_market", state_code, source="state_parser", confidence=0.98
             )],
         ))
-    if not record_search and is_eaton_competitor_request(request.messages):
+    if not record_search and competitor_request:
         add(_routing_candidate("competitor_discovery", "recognized_competitor_request", 0.96))
     if not record_search and is_program_momentum_request(request.messages):
         add(_routing_candidate("program_momentum", "program_momentum_language", 0.985))
@@ -5085,6 +5107,34 @@ def active_scope_from_result(
             scope_name=" and ".join(platform_ids),
             group_kind="platform_comparison",
             compared_platform_ids=platform_ids,
+        )
+    # The general research tool path can return a single company dossier
+    # without placing it in answer_artifacts. Preserve that resolved subject
+    # for natural follow-ups, but never pick one side of a company comparison.
+    company_packs = {
+        (str(scope.get("scope_type")), str(scope.get("scope_id"))): pack
+        for entry in result.get("tool_trace") or []
+        if entry.get("tool") == "get_company_context"
+        for pack in [entry.get("result") or {}]
+        for scope in [pack.get("scope") or {}]
+        if scope.get("scope_type") in {"company_parent", "company_site"}
+        and scope.get("scope_id")
+    }
+    if len(company_packs) == 1:
+        pack = next(iter(company_packs.values()))
+        scope = pack["scope"]
+        identity = pack.get("identity") or {}
+        is_parent = scope["scope_type"] == "company_parent"
+        return ActiveScope(
+            scope_type=scope["scope_type"],
+            scope_id=str(scope["scope_id"]),
+            scope_name=scope.get("scope_name"),
+            resolved_cages=identity.get("resolved_cages") or [],
+            group_kind=identity.get("scope_kind"),
+            parent_scope_id=(str(scope["scope_id"]) if is_parent else None),
+            parent_scope_name=(scope.get("scope_name") if is_parent else None),
+            parent_resolved_cages=(identity.get("resolved_cages") or [] if is_parent else []),
+            parent_group_kind=(identity.get("scope_kind") if is_parent else None),
         )
     return previous_scope
 

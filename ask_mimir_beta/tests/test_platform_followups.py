@@ -111,12 +111,82 @@ class PlatformFollowupTests(unittest.TestCase):
             "Curtiss-Wright",
         )
         self.assertFalse(lab.company_detail_requested(question))
+        self.assertEqual(
+            lab.explicit_company_name_query([
+                lab.ChatMessage(role="user", content="Give me the quick picture on Curtiss-Wright as a defence supplier.")
+            ]),
+            "Curtiss-Wright",
+        )
+
+    def test_company_pronoun_followup_retains_parent_scope(self):
+        history = [
+            {"role": "user", "content": "Give me the quick picture on Curtiss-Wright as a defence supplier."},
+            {"role": "assistant", "content": "Curtiss-Wright has prime and reported subcontract activity."},
+            {"role": "user", "content": "Which sites and customers matter most"},
+            {"role": "assistant", "content": "Electric Boat is a leading reported prime-contractor route."},
+            {"role": "user", "content": "what about their subcontracts"},
+        ]
+        request = lab.AskRequest(
+            messages=history,
+            active_scope={"scope_type": "company_parent", "scope_id": "PARENT_CURTISS",
+                          "scope_name": "CURTISS-WRIGHT CORPORATION", "resolved_cages": ["04808"]},
+            answer_mode="conversation",
+        )
+        self.assertIsNone(lab.explicit_company_name_query(request.messages))
+        with patch.object(lab, "runtime", self.runtime, create=True):
+            route = lab.routing_decision_for_request(request)
+        self.assertEqual(route.workflow, "company_site_intelligence")
+        self.assertFalse(route.clarification_needed)
+        self.assertFalse(route.subject_changed)
+        self.assertTrue(route.candidates[0].uses_current_scope)
+
+    def test_new_subject_escapes_a_prior_contract_thread(self):
+        contract_scope = {"scope_type": "contract", "scope_id": "N0001923F2616",
+                          "scope_name": "N0001923F2616"}
+        history = [
+            {"role": "user", "content": "Explain contract N0001923F2616"},
+            {"role": "assistant", "content": "It buys Tomahawk engineering services."},
+        ]
+        cases = (
+            ("Please show me sources sought opportunities that an avionics supplier may be able to respond to",
+             "market_record_search"),
+            ("Give me the quick picture on Curtiss-Wright as a defence supplier.",
+             "company_site_intelligence"),
+        )
+        with patch.object(lab, "runtime", self.runtime, create=True):
+            for question, workflow in cases:
+                with self.subTest(question=question):
+                    request = lab.AskRequest(
+                        messages=history + [{"role": "user", "content": question}],
+                        active_scope=contract_scope, answer_mode="conversation",
+                    )
+                    route = lab.routing_decision_for_request(request)
+                    self.assertEqual(route.workflow, workflow)
+                    self.assertTrue(route.subject_changed)
+                    self.assertFalse(route.clarification_needed)
+
+    def test_general_research_company_evidence_establishes_only_unambiguous_scope(self):
+        def company_entry(scope_id):
+            return {"tool": "get_company_context", "result": {
+                "scope": {"scope_type": "company_parent", "scope_id": scope_id,
+                          "scope_name": scope_id},
+                "identity": {"resolved_cages": ["04808"],
+                             "scope_kind": "observed_company_group"},
+            }}
+        single = lab.active_scope_from_result({"tool_trace": [company_entry("PARENT_CURTISS")]})
+        self.assertEqual(single.scope_id, "PARENT_CURTISS")
+        self.assertEqual(single.resolved_cages, ["04808"])
+        comparison = lab.active_scope_from_result({"tool_trace": [
+            company_entry("PARENT_CURTISS"), company_entry("PARENT_OTHER")
+        ]})
+        self.assertIsNone(comparison)
 
     def test_broad_conversation_language_routes_across_main_workflows(self):
         cases = (
             ("Tell me about B-52.", "platform_intelligence"),
             ("How much was spent on B-52 in FY2025 and FY2026?", "platform_intelligence"),
             ("I'm assessing Curtiss-Wright as a defense supplier. Give me the quick picture: its important sites, customers, awards, and platform exposure.", "company_site_intelligence"),
+            ("Give me the quick picture on Curtiss-Wright as a defence supplier.", "company_site_intelligence"),
             ("What does NSN 1560-00-817-5790 tell us about demand, available sources, and competition?", "item_intelligence"),
             ("Explain contract N0001923F2616 in plain language: what it buys, who received it, how much has been obligated, and how the actions changed over time.", "contract_or_opportunity"),
             ("Across US missile programs, what has actually grown in the observed fiscal years, and which rankings are sensitive to data gaps?", "program_momentum"),
