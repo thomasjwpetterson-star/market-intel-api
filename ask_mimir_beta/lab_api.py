@@ -4125,8 +4125,17 @@ def access_from_request(request: Request) -> AccessContext:
         proxy_secret
         and request.headers.get("x-ask-mimir-proxy-secret") == proxy_secret
     )
+    pilot_secret = os.getenv("ASK_MIMIR_LOCAL_PILOT_SECRET")
+    pilot_subject = os.getenv("ASK_MIMIR_LOCAL_PILOT_SUBJECT")
+    trusted_pilot = bool(
+        pilot_secret
+        and len(pilot_secret) >= 32
+        and pilot_subject
+        and requested_subject == pilot_subject
+        and request.headers.get("x-ask-mimir-pilot-secret") == pilot_secret
+    )
     test_identities = os.getenv("ASK_MIMIR_ALLOW_TEST_IDENTITIES", "0") == "1"
-    if (trusted_proxy or test_identities) and requested_subject:
+    if (trusted_proxy or trusted_pilot or test_identities) and requested_subject:
         return AccessContext(
             subject_id=f"user:{requested_subject[:160]}",
             tier=requested_tier,

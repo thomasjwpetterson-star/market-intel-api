@@ -61,6 +61,27 @@ class DirectAccessTests(unittest.TestCase):
 
         self.client = TestClient(app)
 
+    def test_local_pilot_credential_is_limited_to_one_account(self):
+        secret = "pilot-secret-with-at-least-thirty-two-bytes"
+        headers = {
+            "X-Ask-Mimir-Pilot-Secret": secret,
+            "X-Ask-Mimir-Subject": "pilot-account",
+            "X-Ask-Mimir-Tier": "professional",
+        }
+        with patch.dict(os.environ, {
+            "ASK_MIMIR_TRUSTED_PROXY_SECRET": self.secret,
+            "ASK_MIMIR_LOCAL_PILOT_SECRET": secret,
+            "ASK_MIMIR_LOCAL_PILOT_SUBJECT": "pilot-account",
+            "ASK_MIMIR_ALLOW_TEST_IDENTITIES": "0",
+        }):
+            allowed = self.client.get("/access", headers=headers)
+            wrong_account = self.client.get("/access", headers={**headers, "X-Ask-Mimir-Subject": "someone-else"})
+            wrong_secret = self.client.get("/access", headers={**headers, "X-Ask-Mimir-Pilot-Secret": "wrong"})
+        self.assertEqual(allowed.status_code, 200, allowed.text)
+        self.assertEqual(allowed.json()["subject_id"], "user:pilot-account")
+        self.assertEqual(wrong_account.status_code, 401)
+        self.assertEqual(wrong_secret.status_code, 401)
+
     def request(self, token):
         with patch.dict(os.environ, {"ASK_MIMIR_TRUSTED_PROXY_SECRET": self.secret}):
             return self.client.get("/access", headers={
