@@ -274,6 +274,10 @@ class PlatformFollowupTests(unittest.TestCase):
         self.assertIn("FY2026 is underway", september)
         self.assertIn("latest ended U.S. federal fiscal year is FY2026", october)
         self.assertIn("FY2027 is underway", october)
+        self.assertIn(
+            "do not call that year observed",
+            lab.PLATFORM_CONVERSATION_PROMPT,
+        )
 
     def test_company_overview_does_not_hide_explicit_site_or_item_detail(self):
         for question in (

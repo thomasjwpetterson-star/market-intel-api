@@ -209,7 +209,11 @@ obligations, supplier relationships and related parts at a useful high level;
 do not imply that selected examples exhaust any lane. For a focused topic,
 answer that topic directly. Aim for a useful, compact conversational answer.
 Give the fiscal-year observation window for financial figures and keep
-completed years distinct from the partial year shown in scope. Distinguish direct
+completed years distinct from the partial year shown in scope. If the partial
+fiscal year has no annual_activity records, it is only a current-year marker:
+do not call that year observed, assign it a value or extend an observed-records
+heading through it. Use actual annual_activity years for the prime/DLA window.
+Distinguish direct
 government award recipients, reported first-tier supplier sites, and wider DLA
 item suppliers. Reported subcontract values are Mimir-modelled from reported
 records; they are not prime obligations or sales. A selected row list is not
