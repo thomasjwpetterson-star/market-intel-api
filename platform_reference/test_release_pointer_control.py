@@ -82,7 +82,8 @@ class PointerControlTests(unittest.TestCase):
     def test_candidate_promotes_and_exact_old_body_is_restored(self):
         snapshot(self.s3, "bucket", "current.json", self.journal)
         self.pointer.write_text(json.dumps(candidate()))
-        result = promote(self.s3, self.pointer, self.journal)
+        result = promote(self.s3, self.pointer, self.journal,
+                         approved_release_id="release-new")
         self.assertEqual(result["version_id"], "2")
         restored = rollback(self.s3, self.journal)
         self.assertEqual(restored["version_id"], "3")
@@ -92,7 +93,8 @@ class PointerControlTests(unittest.TestCase):
         snapshot(self.s3, "bucket", "current.json", self.journal)
         self.pointer.write_text(json.dumps(candidate(ready=False)))
         with self.assertRaisesRegex(ValueError, "promotion-ready"):
-            promote(self.s3, self.pointer, self.journal)
+            promote(self.s3, self.pointer, self.journal,
+                    approved_release_id="release-new")
         self.assertEqual(self.s3.body, self.old)
 
     def test_child_manifest_change_cannot_promote(self):
@@ -101,7 +103,8 @@ class PointerControlTests(unittest.TestCase):
         root["components"]["public"]["immutable_manifest_sha256"] = "0" * 64
         self.pointer.write_text(json.dumps(root))
         with self.assertRaisesRegex(ValueError, "manifest hash"):
-            promote(self.s3, self.pointer, self.journal)
+            promote(self.s3, self.pointer, self.journal,
+                    approved_release_id="release-new")
         self.assertEqual(self.s3.body, self.old)
 
     def test_snapshot_is_read_only_and_cannot_overwrite_a_journal(self):
@@ -117,16 +120,29 @@ class PointerControlTests(unittest.TestCase):
         self.s3.put_object(Body=b'{"release_id":"another"}', IfMatch='"' + hashlib.md5(self.old).hexdigest() + '"')
         self.pointer.write_text(json.dumps(candidate()))
         with self.assertRaisesRegex(RuntimeError, "changed after snapshot"):
-            promote(self.s3, self.pointer, self.journal)
+            promote(self.s3, self.pointer, self.journal,
+                    approved_release_id="release-new")
 
     def test_rollback_refuses_a_later_release(self):
         snapshot(self.s3, "bucket", "current.json", self.journal)
         self.pointer.write_text(json.dumps(candidate()))
-        promote(self.s3, self.pointer, self.journal)
+        promote(self.s3, self.pointer, self.journal,
+                approved_release_id="release-new")
         current = self.s3.body
         self.s3.put_object(Body=b'{"release_id":"another"}', IfMatch='"' + hashlib.md5(current).hexdigest() + '"')
         with self.assertRaisesRegex(RuntimeError, "no longer contains"):
             rollback(self.s3, self.journal)
+
+    def test_promotion_requires_matching_explicit_release_approval(self):
+        snapshot(self.s3, "bucket", "current.json", self.journal)
+        self.pointer.write_text(json.dumps(candidate()))
+        for approval in (None, "", "another-release"):
+            with self.assertRaisesRegex(ValueError, "explicit approval"):
+                promote(self.s3, self.pointer, self.journal,
+                        approved_release_id=approval)
+            self.assertEqual(self.s3.body, self.old)
+            self.assertEqual(json.loads(self.journal.read_text())["state"],
+                             "SNAPSHOT_ONLY")
 
 
 if __name__ == "__main__":

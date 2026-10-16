@@ -139,12 +139,15 @@ def verify_snapshot(s3, journal_path: Path) -> dict:
             "snapshot_version_id": journal["prior"]["version_id"]}
 
 
-def promote(s3, candidate_path: Path, journal_path: Path) -> dict:
+def promote(s3, candidate_path: Path, journal_path: Path,
+            approved_release_id: str | None = None) -> dict:
     journal = json.loads(journal_path.read_text())
     if journal["state"] != "SNAPSHOT_ONLY":
         raise ValueError("promotion requires an unused pointer snapshot")
     body = candidate_path.read_bytes()
     candidate = json.loads(body)
+    if not approved_release_id or approved_release_id != candidate.get("release_id"):
+        raise ValueError("promotion requires explicit approval for this exact release ID")
     validate_candidate(candidate)
     validate_candidate_children(s3, journal["bucket"], candidate)
     current = read_pointer(s3, journal["bucket"], journal["pointer_key"])
@@ -206,6 +209,8 @@ def main() -> None:
     parser.add_argument("--pointer-key", default="mimir/platform/current_manifest.json")
     parser.add_argument("--journal", type=Path, required=True)
     parser.add_argument("--candidate", type=Path)
+    parser.add_argument("--approved-release-id",
+                        help="Exact release ID approved for promotion")
     args = parser.parse_args()
     s3 = boto3.client("s3", region_name="us-east-1")
     if args.action == "snapshot":
@@ -215,7 +220,8 @@ def main() -> None:
     elif args.action == "promote":
         if args.candidate is None:
             parser.error("--candidate is required for promote")
-        result = promote(s3, args.candidate, args.journal)
+        result = promote(s3, args.candidate, args.journal,
+                         approved_release_id=args.approved_release_id)
     else:
         result = rollback(s3, args.journal)
     print(json.dumps(result, indent=2))
