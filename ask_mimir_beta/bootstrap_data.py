@@ -64,6 +64,9 @@ def selected_runtime_manifest(s3: Any, bucket: str) -> tuple[Dict[str, Any], Dic
                 os.getenv("MIMIR_PLATFORM_MANIFEST_VERSION_ID", "").strip() or None
             ),
             components=("ask_mimir",),
+            allow_candidate_preview=(
+                os.getenv("MIMIR_PLATFORM_ALLOW_CANDIDATE_PREVIEW", "0") == "1"
+            ),
         )
         return resolved["components"]["ask_mimir"], resolved
 
@@ -242,6 +245,45 @@ def _download_verified(
     return destination
 
 
+def _stage_atomic_release(
+    s3: Any,
+    bucket: str,
+    manifest: Dict[str, Any],
+    runtime_root: Path,
+) -> Path:
+    """Expose a new runtime only after every pinned file has verified."""
+    fingerprint = manifest_fingerprint(manifest)
+    releases_root = runtime_root / "releases"
+    releases_root.mkdir(parents=True, exist_ok=True)
+    release_root = releases_root / fingerprint
+    marker_name = ".verified-release.json"
+    if release_root.exists():
+        if verified_release_is_ready(release_root, manifest, release_root / marker_name):
+            return release_root
+        raise RuntimeError(f"Incomplete atomic Ask release: {release_root}")
+
+    staging_root = releases_root / f"{fingerprint}.staging"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    marker_path = staging_root / marker_name
+    if not verified_release_is_ready(staging_root, manifest, marker_path):
+        try:
+            prior_marker = json.loads(marker_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            prior_marker = {}
+        signatures = prior_marker.get("file_signatures") or {}
+        for entry in manifest["files"]:
+            _download_verified(
+                s3, bucket, entry, staging_root,
+                signatures.get(entry["local_path"]),
+            )
+        write_verified_release_marker(marker_path, manifest)
+    (staging_root / "runtime_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
+    staging_root.replace(release_root)
+    return release_root
+
+
 def bootstrap() -> Dict[str, Any]:
     runtime_root = Path(
         os.getenv("ASK_MIMIR_RUNTIME_ROOT", str(Path(__file__).parent / ".runtime-data"))
@@ -256,28 +298,32 @@ def bootstrap() -> Dict[str, Any]:
     if not manifest.get("release_id") or not manifest.get("files"):
         raise RuntimeError("Ask Mimir runtime manifest is incomplete")
 
-    marker_path = runtime_root / ".verified-release.json"
-    if not verified_release_is_ready(runtime_root, manifest, marker_path):
-        try:
-            prior_marker = json.loads(marker_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            prior_marker = {}
-        prior_signatures = prior_marker.get("file_signatures") or {}
-        for entry in manifest["files"]:
-            _download_verified(
-                s3,
-                bucket,
-                entry,
-                runtime_root,
-                prior_signatures.get(entry["local_path"]),
-            )
-        write_verified_release_marker(marker_path, manifest)
+    if os.getenv("ASK_MIMIR_ATOMIC_RELEASES", "0") == "1":
+        release_root = _stage_atomic_release(s3, bucket, manifest, runtime_root)
+        manifest_path.unlink(missing_ok=True)
+    else:
+        marker_path = runtime_root / ".verified-release.json"
+        if not verified_release_is_ready(runtime_root, manifest, marker_path):
+            try:
+                prior_marker = json.loads(marker_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                prior_marker = {}
+            prior_signatures = prior_marker.get("file_signatures") or {}
+            for entry in manifest["files"]:
+                _download_verified(
+                    s3,
+                    bucket,
+                    entry,
+                    runtime_root,
+                    prior_signatures.get(entry["local_path"]),
+                )
+            write_verified_release_marker(marker_path, manifest)
+        final_manifest = runtime_root / "runtime_manifest.json"
+        manifest_path.replace(final_manifest)
+        release_root = runtime_root
 
-    final_manifest = runtime_root / "runtime_manifest.json"
-    manifest_path.replace(final_manifest)
-
-    data_root = runtime_root / "data"
-    artifact_root = runtime_root / "artifacts"
+    data_root = release_root / "data"
+    artifact_root = release_root / "artifacts"
     os.environ["ASK_MIMIR_DATA_ROOT"] = str(data_root)
     os.environ["ASK_MIMIR_RELEASE_ID"] = str(manifest["release_id"])
     if platform_release is not None:
