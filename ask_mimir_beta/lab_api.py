@@ -43,6 +43,8 @@ from capability_discovery import (
     resolve_capability,
 )
 from geographic_market import (
+    STATE_NAMES,
+    US_STATES,
     StateIndustrialBaseStore,
     is_state_forward_demand_request,
     is_geographic_market_request,
@@ -2331,8 +2333,18 @@ def company_site_dossier_cage(messages: List[ChatMessage]) -> str | None:
     return match.group(1).upper()
 
 
+def _is_independent_glossary_question(text: str) -> bool:
+    return bool(re.fullmatch(
+        r"(?:what is|define|explain)\s+(?:(?:an?|the)\s+)?(?:NSN|NIIN|CAGE(?:\s+code)?)\??",
+        text.strip(),
+        re.IGNORECASE,
+    ))
+
+
 def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     text = str(messages[-1].content or "").strip()
+    if _is_independent_glossary_question(text):
+        return None
     if platform_award_follow_up_intent(text):
         return None
     lowered_text = re.sub(r"\s+", " ", text.lower()).strip(" .?!")
@@ -3703,6 +3715,10 @@ def _company_routing_candidate(request: AskRequest) -> RoutingCandidate | None:
 
 def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
     latest = str(request.messages[-1].content or "")
+    if _is_independent_glossary_question(latest):
+        return [_routing_candidate(
+            "general_defense_research", "standalone_definition", 0.99,
+        )]
     candidates: List[RoutingCandidate] = []
 
     def add(candidate: RoutingCandidate | None) -> None:
@@ -3957,7 +3973,63 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
     return candidates
 
 
+def _geographic_clarification_question(request: AskRequest) -> str | None:
+    """Resolve only short, compatible state/topic/measure clarification turns."""
+    user_turns = [message.content.strip() for message in request.messages if message.role == "user"][-3:]
+    if len(user_turns) < 2:
+        return None
+
+    def state_fragment(value: str) -> str | None:
+        value = re.sub(r"^(?:in|within|across)\s+", "", value.strip(), flags=re.IGNORECASE)
+        value = value.strip(" .?!").upper()
+        code = US_STATES.get(value) or (value if value in STATE_NAMES else None)
+        return STATE_NAMES.get(code) if code else None
+
+    def contractor_fragment(value: str) -> str | None:
+        match = re.fullmatch(
+            r"(?:(?:major|top|leading|largest|main)\s+)?"
+            r"(?:(?:defen[cs]e|military)\s+)?(?:prime\s+)?"
+            r"(contractors|subcontractors|companies|suppliers)",
+            value.strip(" .?!"),
+            flags=re.IGNORECASE,
+        )
+        return match.group(1).lower() if match else None
+
+    latest = user_turns[-1]
+    prior = user_turns[-2]
+    location = state_fragment(latest)
+    if location and re.search(r"\b(?:defen[cs]e|military)\b", prior, re.IGNORECASE):
+        if re.search(r"\b(?:companies|contractors|suppliers)\b", prior, re.IGNORECASE) and re.search(
+            r"\b(?:contracts|obligations)\b", prior, re.IGNORECASE
+        ) and not resolve_state(prior):
+            return f"{prior.rstrip(' .?!')} in {location}?"
+
+    topic = contractor_fragment(latest)
+    preceding_location = state_fragment(prior)
+    if topic and preceding_location:
+        if topic == "subcontractors":
+            return f"Identify the leading defence subcontractors in {preceding_location} by reported subcontract value."
+        return f"Identify the major defense {topic} in {preceding_location}."
+
+    if re.fullmatch(r"(?:by\s+)?prime(?:\s+contract)?\s+obligations", latest.strip(" .?!"), re.IGNORECASE):
+        topic = contractor_fragment(prior)
+        location = state_fragment(user_turns[-3]) if len(user_turns) >= 3 else None
+        if not location and request.active_scope and request.active_scope.scope_type == "state_market":
+            location = STATE_NAMES.get(request.active_scope.scope_id.upper())
+        if topic and topic != "subcontractors" and location:
+            return f"Identify the major defense {topic} in {location}, ranked by prime contract obligations."
+    return None
+
+
+def _request_with_resolved_geographic_clarification(request: AskRequest) -> AskRequest:
+    question = _geographic_clarification_question(request)
+    if not question:
+        return request
+    return request.model_copy(update={"messages": [ChatMessage(role="user", content=question)]})
+
+
 def routing_decision_for_request(request: AskRequest) -> RoutingDecision:
+    request = _request_with_resolved_geographic_clarification(request)
     candidates = _candidate_workflows(request)
     scope = request.active_scope
     if not candidates:
@@ -6933,13 +7005,15 @@ def answer_messages_for_request(
         selected_workflow == "company_site_intelligence"
         and explicit_company_name_query(request.messages)
     )
-    if (routing and routing.subject_changed) or explicit_company_subject:
+    independent_definition = _is_independent_glossary_question(request.messages[-1].content)
+    if (routing and routing.subject_changed) or explicit_company_subject or independent_definition:
         return request.messages[-1:]
     return request.messages
 
 
 def request_for_execution(request: AskRequest, routing: RoutingDecision) -> AskRequest:
     """Never let historical scope override the authoritative routing decision."""
+    request = _request_with_resolved_geographic_clarification(request)
     scope = request.active_scope
     compatible = bool(scope and SCOPE_WORKFLOWS.get(scope.scope_type) == routing.workflow)
     if scope and scope.scope_type in {"company_site", "company_parent"}:
