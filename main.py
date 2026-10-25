@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from api_traffic_protection import ApiTrafficProtectionMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
@@ -502,6 +503,8 @@ else:
 allow_all = os.getenv("CORS_ALLOW_ALL", "false").lower() == "true"
 if allow_all:
     origins = ["*"]
+
+app.add_middleware(ApiTrafficProtectionMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
