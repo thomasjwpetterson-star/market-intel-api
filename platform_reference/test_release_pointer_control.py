@@ -12,7 +12,7 @@ from release_pointer_control import (REQUIRED_COMPONENTS, REQUIRED_GATES,
 from main_release_cache import PLATFORM_FILES, REQUIRED_FILES
 
 
-def child_body(name):
+def child_body(name, reference_status="BUILT_FRIDAY"):
     child = {"release_id": name + "-v2", "etl_run_id": "run-new"}
     if name == "main":
         child.update(schema_version=2, platform_reference_release_id="platform_reference-v2",
@@ -26,15 +26,16 @@ def child_body(name):
     elif name == "ask_mimir":
         child.update(metric_release_id="metric-v2", files=[{"local_path": "data/a"}])
     else:
-        child.update(downstream_cache_rebuild_status="BUILT_FRIDAY",
+        child.update(downstream_cache_rebuild_status=reference_status,
                      rebuilt_main_release_id="main-v2", financial_allocation_rows=0)
     return json.dumps(child, sort_keys=True).encode()
 
 
 class FakeS3:
-    def __init__(self, body: bytes):
+    def __init__(self, body: bytes, reference_status="BUILT_FRIDAY"):
         self.body = body
         self.version = 1
+        self.reference_status = reference_status
 
     def get_object(self, **kwargs):
         key = kwargs.get("Key", "")
@@ -42,7 +43,7 @@ class FakeS3:
             name = key.split("/")[1]
             if kwargs.get("VersionId") != "version-" + name:
                 raise ValueError("wrong child version")
-            body = child_body(name)
+            body = child_body(name, self.reference_status)
             return {"Body": io.BytesIO(body), "VersionId": "version-" + name}
         return {"Body": io.BytesIO(self.body),
                 "ETag": '"' + hashlib.md5(self.body).hexdigest() + '"',
@@ -57,7 +58,7 @@ class FakeS3:
         return {"VersionId": str(self.version)}
 
 
-def candidate(ready=True):
+def candidate(ready=True, reference_status="BUILT_FRIDAY"):
     return {"schema_version": 2, "release_id": "release-new",
             "etl_run_id": "run-new", "ask_metric_release_id": "metric-v2",
             "promotion_ready": ready,
@@ -65,7 +66,8 @@ def candidate(ready=True):
                                   "etl_run_id": "run-new",
                                   "immutable_manifest_key": "releases/" + name + "/manifest.json",
                                   "immutable_manifest_version_id": "version-" + name,
-                                  "immutable_manifest_sha256": hashlib.sha256(child_body(name)).hexdigest()}
+                                  "immutable_manifest_sha256": hashlib.sha256(
+                                      child_body(name, reference_status)).hexdigest()}
                            for name in REQUIRED_COMPONENTS},
             "promotion_gates": {name: True for name in REQUIRED_GATES}}
 
@@ -88,6 +90,22 @@ class PointerControlTests(unittest.TestCase):
         restored = rollback(self.s3, self.journal)
         self.assertEqual(restored["version_id"], "3")
         self.assertEqual(self.s3.body, self.old)
+
+    def test_later_same_run_cache_rebuild_is_accepted(self):
+        self.s3 = FakeS3(self.old, reference_status="BUILT_SAME_RUN")
+        snapshot(self.s3, "bucket", "current.json", self.journal)
+        self.pointer.write_text(json.dumps(candidate(reference_status="BUILT_SAME_RUN")))
+        result = promote(self.s3, self.pointer, self.journal,
+                         approved_release_id="release-new")
+        self.assertEqual(result["state"], "PROMOTED")
+
+    def test_missing_same_run_cache_rebuild_is_rejected(self):
+        self.s3 = FakeS3(self.old, reference_status="MISSING")
+        snapshot(self.s3, "bucket", "current.json", self.journal)
+        self.pointer.write_text(json.dumps(candidate(reference_status="MISSING")))
+        with self.assertRaisesRegex(ValueError, "same-run cache rebuild"):
+            promote(self.s3, self.pointer, self.journal,
+                    approved_release_id="release-new")
 
     def test_incomplete_release_cannot_promote(self):
         snapshot(self.s3, "bucket", "current.json", self.journal)

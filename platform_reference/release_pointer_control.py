@@ -100,8 +100,10 @@ def validate_candidate_children(s3, bucket: str, candidate: dict) -> None:
         raise ValueError("Main uses another platform reference")
     if public.get("source_main_release_id") != main["release_id"]:
         raise ValueError("Public was not built from this Main release")
-    if reference.get("downstream_cache_rebuild_status") != "BUILT_FRIDAY":
-        raise ValueError("platform reference has no completed Friday cache rebuild")
+    if reference.get("downstream_cache_rebuild_status") not in {
+        "BUILT_FRIDAY", "BUILT_SAME_RUN"
+    }:
+        raise ValueError("platform reference has no completed same-run cache rebuild")
     if reference.get("rebuilt_main_release_id") != main["release_id"]:
         raise ValueError("platform reference wrapper names another Main release")
     if reference.get("financial_allocation_rows") != 0:
