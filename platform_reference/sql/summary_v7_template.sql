@@ -97,7 +97,7 @@ resolved AS (
  LEFT JOIN "market_intel_platform_candidate"."award_platform_cache_sidecar_20261015_hellfire_jagm_v7" a ON c.award_key=a.award_key
  LEFT JOIN label_bridge l ON UPPER(TRIM(CAST(c.platform_family AS VARCHAR)))=l.normalized_label
  LEFT JOIN hidden_label_bridge h ON UPPER(TRIM(CAST(c.platform_family AS VARCHAR)))=h.normalized_label
- LEFT JOIN "market_intel_platform_candidate"."niin_platform_cache_sidecar_20261015_hellfire_jagm_v7" n ON LPAD(TRIM(CAST(c.niin AS VARCHAR)),9,'0')=n.niin
+ LEFT JOIN __NIIN_SIDECAR_TABLE__ n ON LPAD(TRIM(CAST(c.niin AS VARCHAR)),9,'0')=n.niin
 ), psc_ref AS (
  SELECT psc_code, MAX(product_and_service_code_name) AS psc_name
  FROM market_intel_silver.ref_psc GROUP BY 1

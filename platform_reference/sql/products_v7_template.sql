@@ -34,5 +34,5 @@ SELECT
     COALESCE(n.canonical_entity_id IS NOT NULL AND n.financial_allocation_eligible, FALSE) AS "pricing_evidence_eligible",
     '2026-10-15-hellfire-jagm-split-v7' AS "platform_reference_release_id"
 FROM __SOURCE_TABLE__ c
-LEFT JOIN "market_intel_platform_candidate"."niin_platform_cache_sidecar_20261015_hellfire_jagm_v7" n
+LEFT JOIN __NIIN_SIDECAR_TABLE__ n
               ON LPAD(TRIM(CAST(c.niin AS VARCHAR)), 9, '0') = n.niin
