@@ -17,12 +17,13 @@ class EmbargoReconcileTests(unittest.TestCase):
         ])
 
     def test_material_gap_selects_missing_month(self):
-        with patch.object(reconcile, "silver_counts", return_value={
-            "2026-04": 1000, "2026-05": 1000, "2026-06": 1000,
-            "2026-07": 22093, "2026-08": 1000, "2026-09": 1000,
-        }), patch.object(reconcile, "official_count", side_effect=[
-            1000, 1000, 1000, 280554, 1000, 1000,
-        ]):
+        months = reconcile.month_windows(date(2026, 10, 28))
+        self.assertEqual((months[0][0], months[-1][0]), (date(2025, 10, 1), date(2026, 9, 1)))
+        observed = {start.strftime("%Y-%m"): 1000 for start, _ in months}
+        observed["2026-07"] = 22093
+        with patch.object(reconcile, "silver_counts", return_value=observed), patch.object(
+            reconcile, "official_count", side_effect=lambda start, end: 280554 if start.month == 7 else 1000
+        ):
             selected = reconcile.select_gap(None, date(2026, 10, 28))
         self.assertEqual(selected, (date(2026, 7, 1), date(2026, 7, 31), 280554, 22093))
 

@@ -19,7 +19,11 @@ class CoverageError(RuntimeError):
     """Published action-month coverage is unavailable or materially incomplete."""
 
 
-def recent_closed_months(today: date, count: int = 6) -> list[tuple[str, str, str]]:
+def recent_closed_months(today: date, count: int | None = None) -> list[tuple[str, str, str]]:
+    if count is None:
+        current_fy = today.year + (today.month >= 10)
+        first_prior_fy_month = date(current_fy - 2, 10, 1)
+        count = (today.year - first_prior_fy_month.year) * 12 + today.month - first_prior_fy_month.month
     year, month = today.year, today.month
     months = []
     for _ in range(count):

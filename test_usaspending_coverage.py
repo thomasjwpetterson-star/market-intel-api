@@ -18,9 +18,15 @@ class Response:
 
 class CoverageTests(unittest.TestCase):
     def test_closed_month_windows_cross_fiscal_year(self):
-        months = recent_closed_months(date(2026, 10, 28))
+        months = recent_closed_months(date(2026, 10, 28), count=6)
         self.assertEqual(months[0], ("2026-04", "2026-04-01", "2026-04-30"))
         self.assertEqual(months[-1], ("2026-09", "2026-09-01", "2026-09-30"))
+
+    def test_default_audits_current_and_previous_fiscal_year(self):
+        october = recent_closed_months(date(2026, 10, 28))
+        self.assertEqual((october[0][0], october[-1][0]), ("2025-10", "2026-09"))
+        september = recent_closed_months(date(2027, 9, 10))
+        self.assertEqual((september[0][0], september[-1][0]), ("2025-10", "2027-08"))
 
     def test_official_count_uses_dod_primes_and_action_dates(self):
         calls = []

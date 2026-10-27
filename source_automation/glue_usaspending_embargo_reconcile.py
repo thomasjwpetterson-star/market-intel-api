@@ -30,7 +30,11 @@ SILVER_PREFIX = "silver/usaspending/dataset=prime_contracts/"
 BRONZE_PREFIX = "bronze/usaspending/dataset=prime_contracts/"
 
 
-def month_windows(today, count=6):
+def month_windows(today, count=None):
+    if count is None:
+        current_fy = today.year + (today.month >= 10)
+        first_prior_fy_month = date(current_fy - 2, 10, 1)
+        count = (today.year - first_prior_fy_month.year) * 12 + today.month - first_prior_fy_month.month
     first = date(today.year, today.month, 1)
     out = []
     for _ in range(count):
