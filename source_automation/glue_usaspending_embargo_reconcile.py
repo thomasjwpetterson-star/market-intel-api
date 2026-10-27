@@ -132,14 +132,21 @@ def download_week(start, end, workdir):
         raise TimeoutError(f"Bulk download timed out for {start} to {end}")
     path = os.path.join(workdir, f"{start}-{end}.zip")
     for attempt in range(10):
-        response = requests.get(info["file_url"], stream=True, timeout=(30, 600), verify=False)
-        if response.status_code < 400:
-            with open(path, "wb") as out:
-                for chunk in response.iter_content(1024 * 1024):
-                    out.write(chunk)
-            break
-        if response.status_code not in {403, 404, 429, 500, 502, 503, 504}:
-            response.raise_for_status()
+        try:
+            with requests.get(info["file_url"], stream=True,
+                              timeout=(30, 600), verify=False) as response:
+                if response.status_code < 400:
+                    with open(path, "wb") as out:
+                        for chunk in response.iter_content(1024 * 1024):
+                            out.write(chunk)
+                    break
+                if response.status_code not in {403, 404, 429, 500, 502, 503, 504}:
+                    response.raise_for_status()
+        except requests.RequestException:
+            if attempt == 9:
+                raise
+        if os.path.exists(path):
+            os.remove(path)
         time.sleep(min(2 ** attempt, 30))
     else:
         raise RuntimeError(f"Generated ZIP unavailable for {start} to {end}")
