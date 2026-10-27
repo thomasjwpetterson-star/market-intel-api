@@ -29,6 +29,7 @@ COPY rehearse_public_release.py /app/rehearse_public_release.py
 COPY verify_public_rehearsal.py /app/verify_public_rehearsal.py
 COPY smoke_atomic_platform.py /app/smoke_atomic_platform.py
 COPY etl_automation /app/etl_automation
+COPY platform_reference /app/platform_reference
 COPY dla_operational_v2 /app/dla_operational_v2
 COPY source_automation /app/source_automation
 COPY ask_mimir_beta /app/ask_mimir_beta
