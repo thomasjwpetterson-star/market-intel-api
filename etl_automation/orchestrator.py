@@ -19,6 +19,7 @@ from .baseline import run_manual_control, seed_manual_control
 from .comparison import compare_releases
 from .paths import staging_cache_prefix
 from .preflight import validate_daily_upstreams
+from .usaspending_coverage import audit_recent_months
 from .release import (
     CORE_FILENAMES,
     DEPENDENT_FILENAMES,
@@ -265,12 +266,16 @@ def execute_stage(
     }
     if stage in {"preflight", "all", "comparison-all"}:
         session = boto3.Session(region_name=region)
+        athena = session.client("athena")
         result["upstreams"] = validate_daily_upstreams(
             glue=session.client("glue"),
             stepfunctions=session.client("stepfunctions"),
-            athena=session.client("athena"),
+            athena=athena,
             bucket=bucket,
             sam_state_machine_arn=sam_state_machine_arn,
+        )
+        result["source_coverage"] = audit_recent_months(
+            athena, bucket, run_started_at.date()
         )
     if stage == "source-usaspending-archive":
         result["source_candidate"] = acquire_usaspending_archive(
