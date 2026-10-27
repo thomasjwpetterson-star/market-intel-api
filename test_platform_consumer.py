@@ -11,6 +11,7 @@ if importlib.util.find_spec("fastapi") is None:
     raise unittest.SkipTest("FastAPI runtime dependencies are not installed")
 
 from fastapi import Response
+from fastapi import HTTPException
 
 import main
 
@@ -26,6 +27,16 @@ class FileBackedS3:
 
 
 class PlatformConsumerTests(unittest.TestCase):
+    def test_public_platform_route_requires_catalogue_entry_even_if_projection_exists(self):
+        main.resolve_public_platform_slug.cache_clear()
+        self.addCleanup(main.resolve_public_platform_slug.cache_clear)
+        with patch.object(main, "require_public_snapshot_ready"), patch.object(
+            main, "get_public_intelligence_manifest_entry", return_value=None
+        ), patch.object(main, "load_public_page_projection", return_value={"display_name": "Healthcare"}):
+            with self.assertRaises(HTTPException) as caught:
+                main.get_public_platform_page_snapshot("healthcare", Response())
+        self.assertEqual(caught.exception.status_code, 404)
+
     def test_ready_endpoint_returns_503_until_complete_generation_is_loaded(self):
         response = Response()
         with patch.object(
