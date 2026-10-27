@@ -9970,9 +9970,9 @@ def get_nsn_opportunities(
     if len(safe_niin) != 9 or not safe_niin.isdigit():
         raise HTTPException(status_code=400, detail="Enter a valid NSN or NIIN.")
     if not (LOCAL_CACHE_DIR / "nsn_opportunity_detail.parquet").exists():
-        return []
+        raise HTTPException(status_code=503, detail="NSN opportunity intelligence is temporarily unavailable.", headers={"Cache-Control": "no-store", "Retry-After": "30"})
     if not get_duck_table_columns(NSN_OPPORTUNITY_DETAIL_TABLE):
-        return []
+        raise HTTPException(status_code=503, detail="NSN opportunity intelligence is temporarily unavailable.", headers={"Cache-Control": "no-store", "Retry-After": "30"})
     safe_limit = safe_int(limit, 50, 1, 100)
     safe_offset = safe_int(offset, 0, 0, 10000)
     try:
@@ -9995,7 +9995,7 @@ def get_nsn_opportunities(
         return df_sanitize_for_json(frame).to_dict(orient="records")
     except Exception:
         logger.exception("NSN opportunity lookup failed for NIIN=%s", safe_niin)
-        return []
+        raise HTTPException(status_code=503, detail="NSN opportunity intelligence is temporarily unavailable.", headers={"Cache-Control": "no-store", "Retry-After": "30"})
 
 
 @app.get("/api/nsn/profile")
@@ -10867,6 +10867,11 @@ def build_public_nsn_snapshot(
             )).to_dict(orient="records")
     except Exception:
         logger.exception("Public NSN opportunity lookup failed for NIIN=%s", safe_niin)
+        raise HTTPException(
+            status_code=503,
+            detail="NSN opportunity intelligence is temporarily unavailable.",
+            headers={"Cache-Control": "no-store", "Retry-After": "30"},
+        )
 
     public_opportunity_summary.update({
         "active_solicitation_count": active_solicitation_count,

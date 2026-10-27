@@ -60,6 +60,14 @@ class MainReleaseCacheTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_missing_nsn_opportunity_sidecar_blocks_main_release(self):
+        self.manifest["files"] = [
+            row for row in self.manifest["files"]
+            if row["local_path"] != "nsn_opportunity_detail.parquet"
+        ]
+        with self.assertRaisesRegex(ValueError, "nsn_opportunity_detail.parquet"):
+            validate_manifest(self.manifest)
+
     def test_stage_complete_versioned_release_with_multipart_cache(self):
         root = Path(self.temp.name) / "releases"
         release = stage_main_cache(FakeS3(self.objects), "bucket", self.manifest, root)

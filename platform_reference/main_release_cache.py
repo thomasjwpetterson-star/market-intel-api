@@ -25,6 +25,10 @@ REQUIRED_FILES = {
     "nsn_supplier_lookup.parquet", "nsn_cage_reference.parquet",
     "dod_contract_announcements.parquet", "contract_award_metadata.parquet",
     "platform_bom.parquet", "contracts_rolled.parquet",
+    "nsn_supply_state_lookup.parquet",
+    "nsn_price_summary_lookup.parquet",
+    "nsn_opportunity_summary_lookup.parquet",
+    "nsn_opportunity_detail.parquet",
 }
 PLATFORM_FILES = {
     "products.parquet", "network.parquet", "transactions.parquet",
