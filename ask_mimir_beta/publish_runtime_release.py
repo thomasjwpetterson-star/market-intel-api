@@ -183,36 +183,47 @@ def _artifact_source(name: str) -> Path:
     )
 
 
-def artifact_directories() -> Tuple[Tuple[Path, str], ...]:
+def artifact_directories(
+    destinations: Iterable[str] | None = None,
+) -> Tuple[Tuple[Path, str], ...]:
+    selected = None if destinations is None else set(destinations)
     validation_root = ROOT / "validation-output"
-    metric_source = (
-        validation_root
-        if (validation_root / "manifest.json").exists()
-        else _artifact_source("metric-release")
-    )
-    return (
-        (metric_source, "metric-release"),
-        (
+    result = []
+    if selected is None or "metric-release" in selected:
+        metric_source = (
+            validation_root
+            if (validation_root / "manifest.json").exists()
+            else _artifact_source("metric-release")
+        )
+        result.append((metric_source, "metric-release"))
+    if selected is None or "company-context" in selected:
+        company_source = (
             PRECOMPUTED_COMPANY_CONTEXT_DIR
             if (PRECOMPUTED_COMPANY_CONTEXT_DIR / "manifest.json").exists()
-            else _artifact_source("company-context"),
-            "company-context",
-        ),
-        (_artifact_source("company-opportunities"), "company-opportunities"),
-        (_artifact_source("platform-supply-chains"), "platform-supply-chains"),
-        (_artifact_source("program-momentum"), "program-momentum"),
+            else _artifact_source("company-context")
+        )
+        result.append((company_source, "company-context"))
+    for destination in (
+        "company-opportunities", "platform-supply-chains", "program-momentum"
+    ):
+        if selected is None or destination in selected:
+            result.append((_artifact_source(destination), destination))
+    for source, destination in (
         (MARKET_SEGMENT_DIR, "market-segments"),
         (CAPABILITY_DIR, "capability-markets"),
         (PRODUCT_FAMILY_DIR, "product-families"),
         (PLATFORM_CONTEXT_DIR, "platform-contexts"),
         (STATE_MARKET_DIR, "state-markets"),
-    )
+    ):
+        if selected is None or destination in selected:
+            result.append((source, destination))
+    return tuple(result)
 
 
 def artifact_source_for_destination(destination: str) -> Path:
     return next(
         source
-        for source, artifact_destination in artifact_directories()
+        for source, artifact_destination in artifact_directories({destination})
         if artifact_destination == destination
     )
 
@@ -224,7 +235,7 @@ def artifact_files(
     if selected == set():
         return
     included = set()
-    for source_dir, destination_dir in artifact_directories():
+    for source_dir, destination_dir in artifact_directories(selected):
         if selected is not None and destination_dir not in selected:
             continue
         for path in sorted(source_dir.rglob("*")):
