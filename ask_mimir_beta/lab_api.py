@@ -1407,9 +1407,10 @@ identifier, omit this subsection rather than inferring incumbents from a broad P
 The opportunity file is a release snapshot. A future response deadline does not prove that a notice
 is currently open, and notice type inferred from text may be wrong. When scope.status_verification is
 "snapshot_unverified", describe the rows as candidate notices with future deadlines in Mimir's
-release, give scope.release_generated_at as the *release-build* date (not a SAM update time), and
-say current status, notice type, amendments and deadlines have not been checked live. Provide the
-official notice links so the user can confirm them. Never call these rows verified open notices.
+opportunity data. Do not put scope.release_generated_at or the release-build date in the answer
+unless the user asks about data freshness. After the useful results, add one brief note that current
+SAM.gov status, amendments and deadlines have not been checked live; provide the official notice
+links so the user can confirm them. Never call these rows verified open notices.
 When scope.status_verification is "live_sam_required", use the supplied web tool to check the
 strongest candidates against their current official SAM.gov notices before stating that one is open.
 If a current official check fails, fall back to the snapshot-candidate wording.
