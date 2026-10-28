@@ -41,6 +41,22 @@ TERM_EXPANSIONS = {
     ],
 }
 
+# Counter-UAS notices use several spellings across SAM titles and descriptions.
+# Keep this as one capability concept: splitting "counter-drone" into COUNTER
+# and DRONE, or "C-UAS" into UAS, admits unrelated notices.
+COUNTER_UAS_QUERY = re.compile(
+    r"\b(?:cuas|c uas|c suas|counter (?:small )?"
+    r"(?:s?uas|uav|drones?|unmanned (?:aircraft|aerial)(?: systems?)?)|"
+    r"(?:uas|drone) defeat)\b"
+)
+COUNTER_UAS_TERMS = [
+    "CUAS", "C-UAS", "C UAS", "C-SUAS", "C SUAS",
+    "COUNTER-UAS", "COUNTER UAS", "COUNTER-SUAS", "COUNTER SUAS",
+    "COUNTER-DRONE", "COUNTER DRONE", "COUNTER UNMANNED AIRCRAFT",
+    "COUNTER SMALL UNMANNED AIRCRAFT", "COUNTER UNMANNED AERIAL",
+    "UAS DEFEAT", "DRONE DEFEAT",
+]
+
 CONTEXT_ONLY_TERMS = {"aircraft", "vehicle", "platform"}
 
 
@@ -146,6 +162,8 @@ def merge_official_announcements(
 
 def _search_terms(phrase: str) -> List[str]:
     clean = re.sub(r"[^a-z0-9]+", " ", str(phrase or "").lower())
+    if COUNTER_UAS_QUERY.search(clean):
+        return COUNTER_UAS_TERMS
     normalized_tokens = []
     for token in clean.split():
         singular = token[:-1] if token.endswith("s") and len(token) > 4 else token
