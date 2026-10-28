@@ -10,17 +10,23 @@ WITH label_bridge AS (
             THEN MIN(effective_canonical_label) END AS canonical_label,
         CASE WHEN COUNT(DISTINCT effective_canonical_entity_id) = 1
             THEN MIN(entity_type) END AS entity_type
-    FROM "market_intel_platform_candidate"."legacy_to_canonical_bridge_reviewed_overlay_20260924_agav_high_value_v5"
+    FROM __REVIEWED_LEGACY_BRIDGE_TABLE__
     WHERE match_status = 'MATCHED'
       AND platform_visible
       AND effective_canonical_entity_id IS NOT NULL
     GROUP BY 1
 ),
 hidden_label_bridge AS (
+    SELECT UPPER(TRIM(normalized_source_label)) AS normalized_label
+    FROM __REVIEWED_VISIBILITY_TABLE__
+    WHERE review_status = 'APPROVED' AND platform_visible = FALSE
+    GROUP BY 1
+    UNION
     SELECT UPPER(TRIM(legacy_platform_family)) AS normalized_label
-    FROM "market_intel_platform_candidate"."legacy_to_canonical_bridge_reviewed_overlay_20260924_agav_high_value_v5"
+    FROM __REVIEWED_LEGACY_BRIDGE_TABLE__
     WHERE match_status = 'MATCHED' AND platform_visible = FALSE
     GROUP BY 1
+    UNION SELECT 'HELLFIRE / JAGM' AS normalized_label
 ),
 resolved AS (
  SELECT c.vendor_name, c.vendor_cage AS cage_code, c.sub_agency,

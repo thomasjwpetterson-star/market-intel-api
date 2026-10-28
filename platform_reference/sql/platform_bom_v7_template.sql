@@ -1,10 +1,16 @@
 CREATE TABLE __TARGET_TABLE__
 WITH (format = 'PARQUET', parquet_compression = 'ZSTD', external_location = '__TARGET_LOCATION__') AS
 WITH hidden_label_bridge AS (
+    SELECT UPPER(TRIM(normalized_source_label)) AS normalized_label
+    FROM __REVIEWED_VISIBILITY_TABLE__
+    WHERE review_status = 'APPROVED' AND platform_visible = FALSE
+    GROUP BY 1
+    UNION
     SELECT UPPER(TRIM(legacy_platform_family)) AS normalized_label
-    FROM "market_intel_platform_candidate"."legacy_to_canonical_bridge_reviewed_overlay_20260924_agav_high_value_v5"
+    FROM __REVIEWED_LEGACY_BRIDGE_TABLE__
     WHERE match_status = 'MATCHED' AND platform_visible = FALSE
     GROUP BY 1
+    UNION SELECT 'HELLFIRE / JAGM' AS normalized_label
 )
 SELECT
     p.platform_family,
