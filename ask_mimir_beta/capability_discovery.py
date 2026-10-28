@@ -456,7 +456,7 @@ class CapabilityDiscoveryStore:
                            OR UPPER(TRIM(COALESCE(r.market_segment, ''))) IN (SELECT UNNEST(?)))
                       AND (r.fsc_code IN (SELECT UNNEST(?))
                            OR (NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(r.description, '')), ?))
-                           OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
+                           OR (? AND LIST_SUM(LIST_TRANSFORM(?, lambda term:
                                CASE WHEN CONTAINS(LOWER(COALESCE(r.description, '')), term)
                                     THEN 1 ELSE 0 END
                            )) >= ?))
@@ -552,7 +552,7 @@ class CapabilityDiscoveryStore:
                        OR UPPER(TRIM(COALESCE(market_segment, ''))) IN (SELECT UNNEST(?)))
                   AND (fsc_code IN (SELECT UNNEST(?))
                        OR (NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?))
-                       OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
+                       OR (? AND LIST_SUM(LIST_TRANSFORM(?, lambda term:
                            CASE WHEN CONTAINS(LOWER(COALESCE(description, '')), term)
                                 THEN 1 ELSE 0 END
                        )) >= ?))
@@ -623,7 +623,7 @@ class CapabilityDiscoveryStore:
                   AND (c.psc IN (SELECT UNNEST(?))
                        OR (NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(
                            c.base_award_description, c.description, ''
-                       )), ?)) OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
+                       )), ?)) OR (? AND LIST_SUM(LIST_TRANSFORM(?, lambda term:
                            CASE WHEN CONTAINS(LOWER(COALESCE(
                                c.base_award_description, c.description, ''
                            )), term) THEN 1 ELSE 0 END
@@ -681,7 +681,7 @@ class CapabilityDiscoveryStore:
                       AND (psc IN (SELECT UNNEST(?))
                            OR (NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(
                                base_award_description, description, ''
-                           )), ?)) OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
+                           )), ?)) OR (? AND LIST_SUM(LIST_TRANSFORM(?, lambda term:
                                CASE WHEN CONTAINS(LOWER(COALESCE(
                                    base_award_description, description, ''
                                )), term) THEN 1 ELSE 0 END
@@ -737,7 +737,7 @@ class CapabilityDiscoveryStore:
                            OR UPPER(TRIM(COALESCE(market_segment, ''))) IN (SELECT UNNEST(?)))
                       AND (fsc_code IN (SELECT UNNEST(?))
                            OR (NOT ? AND REGEXP_MATCHES(UPPER(COALESCE(description, '')), ?))
-                           OR (? AND LIST_SUM(LIST_TRANSFORM(?, term ->
+                           OR (? AND LIST_SUM(LIST_TRANSFORM(?, lambda term:
                                CASE WHEN CONTAINS(LOWER(COALESCE(description, '')), term)
                                     THEN 1 ELSE 0 END
                            )) >= ?))

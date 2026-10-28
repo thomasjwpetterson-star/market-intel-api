@@ -157,7 +157,7 @@ def build_public_company_profiles(conn) -> None:
                         name := ARRAY_TO_STRING(
                             LIST_TRANSFORM(
                                 STR_SPLIT(LOWER(g.name), ' '),
-                                value -> UPPER(LEFT(value, 1)) || SUBSTR(value, 2)
+                                lambda value: UPPER(LEFT(value, 1)) || SUBSTR(value, 2)
                             ),
                             ' '
                         ),
@@ -192,7 +192,7 @@ def build_public_company_profiles(conn) -> None:
                     ARRAY_TO_STRING(
                         LIST_TRANSFORM(
                             STR_SPLIT(LOWER(name), ' '),
-                            value -> UPPER(LEFT(value, 1)) || SUBSTR(value, 2)
+                            lambda value: UPPER(LEFT(value, 1)) || SUBSTR(value, 2)
                         ),
                         ' '
                     ) ORDER BY item_rank
@@ -283,7 +283,7 @@ def build_public_company_profiles(conn) -> None:
                                 ARRAY_TO_STRING(
                                     LIST_TRANSFORM(
                                         STR_SPLIT(LOWER(TRIM(CAST(description AS VARCHAR))), ' '),
-                                        value -> UPPER(LEFT(value, 1)) || SUBSTR(value, 2)
+                                        lambda value: UPPER(LEFT(value, 1)) || SUBSTR(value, 2)
                                     ),
                                     ' '
                                 ),
@@ -906,8 +906,8 @@ def _build_public_nsn_profiles_monolithic(conn) -> None:
                     WHEN pr.platform_families IS NULL THEN []::VARCHAR[]
                     ELSE LIST_SLICE(
                         LIST_TRANSFORM(
-                            LIST_FILTER(STR_SPLIT(pr.platform_families, '|'), value -> TRIM(value) <> ''),
-                            value -> TRIM(value)
+                            LIST_FILTER(STR_SPLIT(pr.platform_families, '|'), lambda value: TRIM(value) <> ''),
+                            lambda value: TRIM(value)
                         ),
                         1,
                         2
@@ -918,8 +918,8 @@ def _build_public_nsn_profiles_monolithic(conn) -> None:
                         WHEN pr.platform_families IS NULL THEN 0
                         ELSE LEN(LIST_SLICE(
                             LIST_TRANSFORM(
-                                LIST_FILTER(STR_SPLIT(pr.platform_families, '|'), value -> TRIM(value) <> ''),
-                                value -> TRIM(value)
+                                LIST_FILTER(STR_SPLIT(pr.platform_families, '|'), lambda value: TRIM(value) <> ''),
+                                lambda value: TRIM(value)
                             ),
                             1,
                             2
@@ -1246,8 +1246,8 @@ def build_public_nsn_profiles(conn) -> None:
                 CASE
                     WHEN platform_families IS NULL THEN []::VARCHAR[]
                     ELSE LIST_TRANSFORM(
-                        LIST_FILTER(STR_SPLIT(platform_families, '|'), value -> TRIM(value) <> ''),
-                        value -> TRIM(value)
+                        LIST_FILTER(STR_SPLIT(platform_families, '|'), lambda value: TRIM(value) <> ''),
+                        lambda value: TRIM(value)
                     )
                 END AS platforms
             FROM grouped
