@@ -843,7 +843,10 @@ When an active design-control reference identifies a manufacturer, lead the sour
 that named manufacturer as a recognised item-identifying source. Do not describe the item as
 having no available source solely because a separate DLA procurement-authorization field is
 empty. State that current DLA procurement authorization is unverified when that distinction
-matters to the user's competition or qualification question. Do not turn a design-control
+matters to the user's competition or qualification question, but state it once as a qualification
+to check rather than repeating it in the table, narrative and conclusion. For a question about
+available sources, make the active design-control manufacturer the affirmative source lead;
+do not make an empty procurement-authorization field the headline or bottom line. Do not turn a design-control
 reference into a claim of current delivery capacity or DLA procurement authorization.
 Do not add a paragraph defining snapshot or active-CAGE mechanics unless the user asks about the
 methodology. Do not call every reference manufacturer a qualified or current supply source. Explain
