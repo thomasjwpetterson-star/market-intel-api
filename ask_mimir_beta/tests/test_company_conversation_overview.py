@@ -1,10 +1,67 @@
 import unittest
+import tempfile
+import threading
+from pathlib import Path
 from unittest.mock import Mock
 
+from company_context import CompanyContextBuilder
 from company_context_store import CompanyContextStore, LINK_VERSION, FYDP_PLATFORM_LINKAGE_VERSION
 
 
 class CompanyConversationOverviewTests(unittest.TestCase):
+    def test_overview_build_skips_unused_dossier_queries(self):
+        builder = CompanyContextBuilder.__new__(CompanyContextBuilder)
+        builder._site_identities = Mock(return_value=[{"cage": "45934"}])
+        builder._source_manifest = Mock(return_value={"files": {}})
+        for name in (
+            "_product_and_part_evidence", "_place_of_performance_activity",
+            "_missile_program_trajectory", "_location_footprint",
+            "_future_demand_context", "_opportunity_candidates", "_quality_summary",
+            "_site_capability_evidence", "_top_awards", "_site_financials",
+            "_customer_context",
+        ):
+            setattr(builder, name, Mock(side_effect=AssertionError(name)))
+        for name in (
+            "_capability_evidence",
+            "_network_context", "_platform_exposure", "_financial_summary",
+            "_annual_activity",
+        ):
+            setattr(builder, name, Mock(return_value=[]))
+        builder._capability_evidence.return_value = {}
+        context = builder._build_context(
+            scope_type="company_site", scope_id="45934", scope_name="Example",
+            cages=["45934"], fiscal_years=[2025, 2026],
+            site_definitions=[], conversation_overview=True,
+        )
+        self.assertEqual(context["scope"]["scope_id"], "45934")
+        self.assertEqual(context["product_and_part_evidence"], {})
+        self.assertEqual(context["platform_exposure"], [])
+        self.assertEqual(context["site_financials"], [])
+
+    def test_overview_cache_cannot_replace_full_dossier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CompanyContextStore.__new__(CompanyContextStore)
+            store.contexts = []
+            store._context_paths = {}
+            store._dynamic_contexts = {}
+            store._dynamic_overviews = {}
+            store._dynamic_groups = {}
+            store._dynamic_lock = threading.Lock()
+            store._directory_search = Mock(return_value=[{"scope_id": "45934"}])
+            store.dynamic_cache_dir = Path(directory)
+            store.data_root = Path(directory)
+            store._dynamic_builder = Mock()
+            store._dynamic_builder.build_site.side_effect = lambda cage, conversation_overview=False: {
+                "scope": {"scope_type": "company_site", "scope_id": cage},
+                "depth": "overview" if conversation_overview else "full",
+            }
+            overview = store.get_raw("company_site", "45934", conversation_overview=True)
+            full = store.get_raw("company_site", "45934")
+            self.assertEqual(overview["depth"], "overview")
+            self.assertEqual(full["depth"], "full")
+            self.assertTrue((Path(directory) / "company_site-45934-overview.json").exists())
+            self.assertTrue((Path(directory) / "company_site-45934.json").exists())
+
     def test_overview_preserves_financial_summaries_and_labels_omitted_detail(self):
         context = {
             "context_id": "company-test", "evidence_fingerprint": "hash",
