@@ -93,7 +93,7 @@ resolved AS (
         WHEN UPPER(TRIM(CAST(c.platform_family AS VARCHAR))) = 'HELLFIRE / JAGM' THEN 'UNRESOLVED_MIXED_LEGACY_FAMILY'
         WHEN h.normalized_label IS NOT NULL THEN 'REVIEWED_NON_PLATFORM'
         ELSE c.platform_attribution_status END) = 'SHARED_NIIN_UNALLOCATED' THEN COALESCE(c.spend_amount, 0) ELSE 0 END AS DOUBLE) AS shared_use_exposure_amount
- FROM market_intel_gold.dashboard_master_view c
+ FROM __TRANSACTIONS_SOURCE_TABLE__ c
  LEFT JOIN "market_intel_platform_candidate"."award_platform_cache_sidecar_20261015_hellfire_jagm_v7" a ON c.award_key=a.award_key
  LEFT JOIN label_bridge l ON UPPER(TRIM(CAST(c.platform_family AS VARCHAR)))=l.normalized_label
  LEFT JOIN hidden_label_bridge h ON UPPER(TRIM(CAST(c.platform_family AS VARCHAR)))=h.normalized_label
