@@ -10,6 +10,8 @@ from unittest.mock import ANY, patch
 from bootstrap_data import (
     DEFAULT_CURRENT_MANIFEST_KEY,
     _download_verified,
+    _stage_atomic_release,
+    bootstrap,
     manifest_entry_signature,
     manifest_fingerprint,
     selected_manifest_key,
@@ -51,6 +53,78 @@ class SpaceConstrainedDownloadS3(RecordingDownloadS3):
 
 
 class BootstrapReleaseMarkerTests(unittest.TestCase):
+    def test_failed_atomic_stage_preserves_active_runtime(self):
+        class FailingS3:
+            def download_file(self, _bucket, key, destination, **_kwargs):
+                if key.endswith("second"):
+                    raise RuntimeError("download interrupted")
+                Path(destination).write_bytes(b"new")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active = root / "data" / "first"
+            active.parent.mkdir(parents=True)
+            active.write_bytes(b"old")
+            manifest = {
+                "release_id": "friday",
+                "files": [
+                    {"local_path": f"data/{name}", "s3_key": f"releases/{name}", "size": 3}
+                    for name in ("first", "second")
+                ],
+            }
+            with self.assertRaisesRegex(RuntimeError, "download interrupted"):
+                _stage_atomic_release(FailingS3(), "bucket", manifest, root)
+            self.assertEqual(active.read_bytes(), b"old")
+            self.assertFalse((root / "releases" / manifest_fingerprint(manifest)).exists())
+
+            ready = _stage_atomic_release(RecordingDownloadS3(b"new"), "bucket", manifest, root)
+            self.assertEqual((ready / "data" / "second").read_bytes(), b"new")
+            self.assertTrue(verified_release_is_ready(ready, manifest, ready / ".verified-release.json"))
+            self.assertEqual(active.read_bytes(), b"old")
+
+    def test_atomic_bootstrap_selects_only_completed_release(self):
+        class CandidateS3(RecordingDownloadS3):
+            def __init__(self, manifest):
+                super().__init__(b"new")
+                self.manifest = manifest
+
+            def get_object(self, **_kwargs):
+                class Body:
+                    def __init__(self, manifest):
+                        self.manifest = manifest
+
+                    def read(self):
+                        return json.dumps(self.manifest).encode()
+
+                return {"Body": Body(self.manifest)}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active = root / "data" / "transactions.parquet"
+            active.parent.mkdir(parents=True)
+            active.write_bytes(b"old")
+            manifest = {"release_id": "friday-v7", "files": [{
+                "local_path": "data/transactions.parquet",
+                "s3_key": "releases/friday-v7/transactions.parquet",
+                "size": 3,
+            }]}
+            env = {
+                "ASK_MIMIR_RUNTIME_ROOT": str(root),
+                "ASK_MIMIR_BUCKET": "bucket",
+                "ASK_MIMIR_FOLLOW_CURRENT_RELEASE": "0",
+                "ASK_MIMIR_PINNED_MANIFEST_KEY": "releases/friday-v7/runtime_manifest.json",
+                "ASK_MIMIR_ATOMIC_RELEASES": "1",
+                "MIMIR_USE_PLATFORM_MANIFEST": "0",
+            }
+            with patch.dict(os.environ, env, clear=True), patch(
+                "bootstrap_data.boto3.client", return_value=CandidateS3(manifest)
+            ):
+                self.assertEqual(bootstrap()["release_id"], "friday-v7")
+                selected = Path(os.environ["ASK_MIMIR_TRANSACTIONS"])
+                self.assertEqual(selected.read_bytes(), b"new")
+                self.assertEqual(selected.parent.parent.name, manifest_fingerprint(manifest))
+                self.assertEqual(active.read_bytes(), b"old")
+
     def test_atomic_platform_opt_in_selects_ask_child_without_legacy_fallback(self):
         resolved = {
             "platform": {"release_id": "platform-run-1", "etl_run_id": "run-1"},
@@ -81,6 +155,7 @@ class BootstrapReleaseMarkerTests(unittest.TestCase):
             platform_key="rehearsal/platform.json",
             platform_version_id="version-9",
             components=("ask_mimir",),
+            allow_candidate_preview=False,
         )
 
     def test_reuses_unchanged_version_pinned_file_without_sha256(self):

@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from api_traffic_protection import ApiTrafficProtectionMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
@@ -72,6 +73,9 @@ from public_intelligence_release import (
     public_release_table_columns,
     stage_public_intelligence_manifest,
 )
+from platform_reference.main_release_cache import (
+    stage_main_cache,
+)
 from public_page_projections import build_public_page_projections
 from public_nsn_policy import (
     PUBLIC_NSN_ACTIVE_SOLICITATION_LIMIT,
@@ -124,6 +128,8 @@ GLOBAL_CACHE = {
 
 LOCAL_CACHE_DIR = Path(os.getenv("LOCAL_CACHE_DIR", "./local_data"))
 LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+RELEASE_PINNED_CACHE = False
+PINNED_PLATFORM_BUNDLE = None
 
 DUCKDB_PATH = LOCAL_CACHE_DIR / "mimir.duckdb"
 DUCK_CONN = None
@@ -244,6 +250,34 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("API starting up (Hybrid V5 Mode)...")
+
+    if os.getenv("MIMIR_MAIN_FOLLOW_ROOT", "0").strip().lower() in {"1", "true", "yes"}:
+        global LOCAL_CACHE_DIR, DUCKDB_PATH, RELEASE_PINNED_CACHE, PINNED_PLATFORM_BUNDLE
+        if not platform_manifest_enabled():
+            raise RuntimeError("MIMIR_MAIN_FOLLOW_ROOT requires MIMIR_USE_PLATFORM_MANIFEST=1")
+        bucket = os.getenv("ATHENA_OUTPUT_BUCKET", "a-and-d-intel-lake-newaccount").replace("s3://", "").split("/")[0]
+        s3_release = boto3.client(
+            "s3", region_name=os.getenv("AWS_REGION", "us-east-1"),
+            config=BotoConfig(max_pool_connections=40),
+        )
+        pointer_key = os.getenv("MIMIR_PLATFORM_MANIFEST_KEY", DEFAULT_PLATFORM_MANIFEST_KEY)
+        bundle = await asyncio.to_thread(
+            resolve_platform_release, s3_release, bucket,
+            platform_key=pointer_key,
+            platform_version_id=os.getenv("MIMIR_PLATFORM_MANIFEST_VERSION_ID", "").strip() or None,
+            components=("main", "public", "ask_mimir", "platform_reference"),
+            allow_candidate_preview=(os.getenv("MIMIR_PLATFORM_ALLOW_CANDIDATE_PREVIEW", "0") == "1"),
+        )
+        manifest = bundle["components"]["main"]
+        release_root = Path(os.getenv("MIMIR_MAIN_RELEASE_ROOT", str(LOCAL_CACHE_DIR.parent / "main-releases")))
+        LOCAL_CACHE_DIR = await asyncio.to_thread(
+            stage_main_cache, s3_release, bucket, manifest, release_root
+        )
+        DUCKDB_PATH = (LOCAL_CACHE_DIR / "mimir.duckdb").resolve()
+        PINNED_PLATFORM_BUNDLE = bundle
+        RELEASE_PINNED_CACHE = True
+        logger.info("Main cache pinned to %s with platform reference %s",
+                    manifest["release_id"], manifest["platform_reference_release_id"])
 
     # ✅ OOM-friendly thread limiter (don’t set too high on small Render instances)
     try:
@@ -503,6 +537,8 @@ allow_all = os.getenv("CORS_ALLOW_ALL", "false").lower() == "true"
 if allow_all:
     origins = ["*"]
 
+app.add_middleware(ApiTrafficProtectionMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -725,7 +761,8 @@ def run_athena_query(query: str):
         resp = athena.start_query_execution(
             QueryString=query,
             QueryExecutionContext={"Database": DATABASE},
-            ResultConfiguration={"OutputLocation": f"s3://{BUCKET_NAME}/temp_api_queries/"},
+            ResultConfiguration={"OutputLocation":
+                                 f"s3://{BUCKET_NAME}/{os.getenv('ATHENA_QUERY_OUTPUT_PREFIX', 'temp_api_queries/').strip('/')}/"},
         )
         qid = resp["QueryExecutionId"]
 
@@ -3047,7 +3084,11 @@ def reload_all_data():
         platform_bundle = None
         main_platform_files: Dict[str, Dict[str, Any]] = {}
         public_platform_manifest = None
-        if platform_manifest_enabled():
+        if PINNED_PLATFORM_BUNDLE is not None:
+            platform_bundle = PINNED_PLATFORM_BUNDLE
+            main_platform_files = _manifest_file_map(platform_bundle["components"]["main"])
+            public_platform_manifest = platform_bundle["components"]["public"]
+        elif platform_manifest_enabled():
             platform_key = os.getenv(
                 "MIMIR_PLATFORM_MANIFEST_KEY",
                 DEFAULT_PLATFORM_MANIFEST_KEY,
@@ -3134,6 +3175,11 @@ def reload_all_data():
 
         def fetch_file(filename: str) -> str:
             final_path = (LOCAL_CACHE_DIR / filename).resolve()
+
+            if RELEASE_PINNED_CACHE:
+                if not final_path.exists() and filename not in optional_release_files:
+                    raise FileNotFoundError(f"Pinned Main release lacks {filename}")
+                return filename
 
             if platform_bundle is not None:
                 entry = main_platform_files.get(filename)
