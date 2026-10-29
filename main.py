@@ -11461,33 +11461,11 @@ def get_database_stats():
     Avoids DuckDB COUNT(*) over many files.
     """
     try:
-        import glob
-        import pyarrow.parquet as pq
-
-        single_path = (LOCAL_CACHE_DIR / "contracts_rolled.parquet").resolve()
-        folder_glob = (LOCAL_CACHE_DIR / "contracts_rolled" / "*.parquet").resolve()
-
-        total_rows = 0
-
-        # Case A: single consolidated file
-        if os.path.exists(single_path):
-            pf = pq.ParquetFile(str(single_path))
-            total_rows = int(pf.metadata.num_rows)
-
-        # Case B: multi-part dataset (your current setup)
-        else:
-            for p in glob.glob(str(folder_glob)):
-                try:
-                    pf = pq.ParquetFile(p)
-                    total_rows += int(pf.metadata.num_rows)
-                except Exception:
-                    pass
-
-        return [{"total": int(total_rows)}]
-
+        from platform_reference.award_stats import count_contract_rows
+        return [{"total": count_contract_rows(LOCAL_CACHE_DIR)}]
     except Exception:
         logger.exception("Stats Parquet Metadata Error")
-        return [{"total": 0}]
+        raise HTTPException(status_code=503, detail="Award statistics are unavailable")
 
 
 # ==========================================
