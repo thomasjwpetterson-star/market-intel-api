@@ -26,7 +26,7 @@ FYDP_PLATFORM_LINKAGE_VERSION = json.loads(
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
-DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v15"
+DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v16"
 
 CANONICAL_CONSOLIDATED_PARENT_NAMES = {
     "CURTISS WRIGHT": "CURTISS-WRIGHT CORPORATION",
@@ -2244,7 +2244,7 @@ class CompanyContextStore:
                 else:
                     self._dynamic_contexts[key] = cached_context
                 return cached_context
-            from company_context import CompanyContextBuilder
+            from company_context import CompanyContextBuilder, DEFAULT_FISCAL_YEARS
 
             if self._dynamic_builder is None:
                 self._dynamic_builder = CompanyContextBuilder(data_root=self.data_root)
@@ -2263,9 +2263,14 @@ class CompanyContextStore:
                         "method": "reported ultimate-parent relationship",
                     }
             else:
-                context = self._dynamic_builder.build_site(
-                    clean_id, conversation_overview=conversation_overview
-                )
+                if conversation_overview:
+                    from company_quick_context import build_site_conversation
+
+                    context = build_site_conversation(
+                        self._dynamic_builder, clean_id, DEFAULT_FISCAL_YEARS
+                    )
+                else:
+                    context = self._dynamic_builder.build_site(clean_id)
             self._write_dynamic_cache(
                 scope_type, clean_id, context, overview=conversation_overview
             )

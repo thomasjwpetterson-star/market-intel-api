@@ -2,13 +2,58 @@ import unittest
 import tempfile
 import threading
 from pathlib import Path
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from company_context import CompanyContextBuilder
+from company_quick_context import build_site_conversation
 from company_context_store import CompanyContextStore, LINK_VERSION, FYDP_PLATFORM_LINKAGE_VERSION
 
 
 class CompanyConversationOverviewTests(unittest.TestCase):
+    def test_quick_site_keeps_signed_lanes_and_subcontract_count_separate(self):
+        transactions = [
+            {"source_system": "USA_SPENDING", "award_key": "A1", "transaction_key": "T1",
+             "contract_id": "C1", "action_date": "2026-04-01", "year": 2026,
+             "spend_amount": 100.0, "platform_family": "F-16",
+             "base_award_description": "Radar control", "description": "Radar control"},
+            {"source_system": "USA_SPENDING", "award_key": "A1", "transaction_key": "T2",
+             "contract_id": "C1", "action_date": "2026-05-01", "year": 2026,
+             "spend_amount": -20.0, "platform_family": "F-16",
+             "base_award_description": "Radar control", "description": "Radar control"},
+            {"source_system": "DLA", "award_key": "D1", "transaction_key": "T3",
+             "contract_id": "D1", "action_date": "2026-06-01", "year": 2026,
+             "spend_amount": 30.0, "platform_family": "F-16", "niin": "123456789",
+             "nsn": "1560-00-123-4567", "description": "Power module"},
+        ]
+        network = [
+            {"prime_cage": "22222", "prime_name": "Prime", "contract_id": "P1",
+             "award_key": "PA1", "source_dedup_key": "S1", "subaward_value": 40.0,
+             "subaward_value_raw": 40.0, "action_date": "2026-02-01",
+             "year": 2026, "platform_family": "F-16", "description": "Control unit"},
+            {"prime_cage": "22222", "prime_name": "Prime", "contract_id": "P1",
+             "award_key": "PA1", "source_dedup_key": "S2", "subaward_value": -5.0,
+             "subaward_value_raw": -5.0, "action_date": "2026-03-01",
+             "year": 2026, "platform_family": "F-16", "description": "Control unit"},
+        ]
+        builder = SimpleNamespace(
+            identity={"version": "test", "parents": []},
+            paths={"transactions": Path("transactions.parquet"), "network": Path("network.parquet")},
+            connection=SimpleNamespace(execute=Mock(return_value=object())),
+            _site_identities=Mock(return_value=[{"cage": "45934", "vendor_name": "Example", "city": "Dayton", "state": "OH"}]),
+            _source_manifest=Mock(return_value={"files": {}}),
+            _evidence_index=CompanyContextBuilder._evidence_index,
+        )
+        with patch("company_quick_context.rows_as_dicts", side_effect=[transactions, network]):
+            context = build_site_conversation(builder, "45934", [2026])
+        totals = {row["measure_type"]: row["net_value_usd"] for row in context["observed_financials"]}
+        self.assertEqual(totals, {"prime_obligations": 80.0, "dla_procurement_value": 30.0})
+        sub = next(row for row in context["annual_activity"] if row["measure_type"] == "mimir_modelled_reported_subcontract_value")
+        self.assertEqual(sub["net_value_usd"], 35.0)
+        self.assertEqual(sub["distinct_awards"], 1)
+        self.assertEqual(context["top_awards"][0]["net_prime_obligations_usd"], 80.0)
+        self.assertEqual(context["reported_subcontract_relationships"]["as_subcontractor_to"][0]["mimir_modelled_subcontract_value_usd"], 35.0)
+
     def test_overview_build_skips_unused_dossier_queries(self):
         builder = CompanyContextBuilder.__new__(CompanyContextBuilder)
         builder._site_identities = Mock(return_value=[{"cage": "45934"}])
@@ -55,7 +100,14 @@ class CompanyConversationOverviewTests(unittest.TestCase):
                 "scope": {"scope_type": "company_site", "scope_id": cage},
                 "depth": "overview" if conversation_overview else "full",
             }
-            overview = store.get_raw("company_site", "45934", conversation_overview=True)
+            with patch(
+                "company_quick_context.build_site_conversation",
+                return_value={
+                    "scope": {"scope_type": "company_site", "scope_id": "45934"},
+                    "depth": "overview",
+                },
+            ):
+                overview = store.get_raw("company_site", "45934", conversation_overview=True)
             full = store.get_raw("company_site", "45934")
             self.assertEqual(overview["depth"], "overview")
             self.assertEqual(full["depth"], "full")
