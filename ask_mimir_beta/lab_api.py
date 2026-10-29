@@ -824,7 +824,7 @@ You are Ask Mimir in Conversation mode. Use the supplied company overview eviden
 the preceding user messages to answer the latest question directly. A bare CAGE reply
 continues the user's prior question; do not turn it into an unrelated company profile.
 
-Give a concise, evidence-led answer, normally under 350 words. For an opportunity
+Give a concise, evidence-led answer, normally under 220 words. For an opportunity
 question, identify the company and registered location, then give two or three concrete
 lanes supported by its observed prime, DLA, reported subcontract, platform, customer,
 or award evidence. Distinguish these historical positions from currently open notices.
@@ -832,7 +832,8 @@ Never imply that a historical award or a broad NAICS match is an open opportunit
 Keep prime obligations, DLA procurement and reported subcontract value separate and
 state the observed fiscal-year window for any dollar figures. Call the latest fiscal
 year's data preliminary when the evidence marks it as incomplete. Do not infer total
-company revenue from these lanes.
+company revenue from these lanes. In customer-facing prose, call the subcontract lane
+"reported subcontract value"; avoid "modelled" unless the user asks about its method.
 
 Retain useful identifiers and links: CAGE references use
 https://www.mimiradvisors.org/dashboard?view=COMPANY&cage=<CAGE>, awards use
@@ -841,7 +842,10 @@ https://www.mimiradvisors.org/dashboard?view=PLATFORM&platform=<PLATFORM>, and N
 https://www.mimiradvisors.org/dashboard?view=PARTS&nsn=<NSN>. Only cite identifiers
 actually present in the evidence. Do not print release IDs, hashes or internal methods.
 If the overview omits a detail, say so briefly and invite a focused follow-up or Deep
-Research. End with at most one useful follow-up question.
+Research. A current-notice search can use Mimir's loaded opportunities; the linked
+government notice should then be checked before pursuit. Do not say a live SAM.gov
+search is required for a useful first answer. End with one natural, context-specific
+follow-up question when it would help narrow the user's next investigation.
 """.strip()
 
 ITEM_DOSSIER_PROMPT = """
@@ -8975,6 +8979,11 @@ def _generate_answer_impl(
             pack = None
         if pack:
             emit_progress(progress, "Assembling company evidence", "Loading activity, customers, suppliers, items and locations", 48)
+            model_pack = pack
+            if request.answer_mode == "conversation" and company_focus == "conversation_overview":
+                from company_quick_context import compact_company_conversation_pack
+
+                model_pack = compact_company_conversation_pack(pack)
             company_prompt = (
                 COMPANY_CONVERSATION_PROMPT
                 if request.answer_mode == "conversation"
@@ -8995,7 +9004,7 @@ def _generate_answer_impl(
                         ({"conversation_overview": "MIMIR COMPANY OVERVIEW EVIDENCE\n",
                           "conversation_award_sites": "MIMIR COMPANY AWARD AND SITE EVIDENCE\n"}
                          .get(arguments["focus"], "MIMIR FULL CAGE-SITE DOSSIER\n"))
-                        + json.dumps(pack, default=str)
+                        + json.dumps(model_pack, default=str)
                     ),
                 }
             )

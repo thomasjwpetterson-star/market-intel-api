@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from company_context import CompanyContextBuilder
-from company_quick_context import build_site_conversation
+from company_quick_context import build_site_conversation, compact_company_conversation_pack
 from company_context_store import CompanyContextStore, LINK_VERSION, FYDP_PLATFORM_LINKAGE_VERSION
 
 
@@ -53,6 +53,12 @@ class CompanyConversationOverviewTests(unittest.TestCase):
         self.assertEqual(sub["distinct_awards"], 1)
         self.assertEqual(context["top_awards"][0]["net_prime_obligations_usd"], 80.0)
         self.assertEqual(context["reported_subcontract_relationships"]["as_subcontractor_to"][0]["mimir_modelled_subcontract_value_usd"], 35.0)
+        model_pack = compact_company_conversation_pack(context)
+        self.assertEqual(model_pack["observed_financials"][0]["net_value_usd"], 80.0)
+        self.assertEqual(model_pack["prime_awards"][0]["contract_id"], "C1")
+        self.assertEqual(model_pack["dla_items"][0]["niin"], "123456789")
+        self.assertEqual(model_pack["reported_subcontract_routes"][0]["mimir_modelled_subcontract_value_usd"], 35.0)
+        self.assertNotIn("evidence_index", model_pack)
 
     def test_overview_build_skips_unused_dossier_queries(self):
         builder = CompanyContextBuilder.__new__(CompanyContextBuilder)

@@ -14,6 +14,79 @@ from reviewed_platform_links import LINK_VERSION, recovered_platform_sql
 MAX_SITE_ROWS = 50_000
 
 
+def compact_company_conversation_pack(pack: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep all evidence lanes, with bounded examples for a short first reply."""
+    capability = pack.get("capability_evidence") or {}
+    network = pack.get("reported_subcontract_relationships") or {}
+    identity = pack.get("identity") or {}
+    return {
+        "scope": pack.get("scope"),
+        "identity": {
+            "sites": [
+                {key: site.get(key) for key in (
+                    "cage", "vendor_name", "city", "state", "official_site_label",
+                    "official_capability_summary",
+                ) if site.get(key)}
+                for site in identity.get("sites", [])[:8]
+            ],
+            "site_count": identity.get("site_count"),
+            "parent_resolution": identity.get("parent_resolution"),
+        },
+        "observed_financials": [
+            {key: row.get(key) for key in ("measure_type", "net_value_usd")}
+            for row in pack.get("observed_financials", [])
+        ],
+        "annual_financial_summary": pack.get("annual_financial_summary", []),
+        "prime_awards": [
+            {key: row.get(key) for key in (
+                "award_key", "contract_id", "base_award_description",
+                "net_prime_obligations_usd", "latest_action_date", "platform_family",
+            ) if row.get(key) is not None}
+            for row in pack.get("top_awards", [])[:8]
+        ],
+        "dla_items": [
+            {key: row.get(key) for key in (
+                "niin", "nsn", "description", "dla_procurement_value_usd",
+                "latest_action_date",
+            ) if row.get(key) is not None}
+            for row in capability.get("dla_items", [])[:8]
+        ],
+        "reported_subcontract_routes": [
+            {key: row.get(key) for key in (
+                "prime_cage", "prime_name", "reported_prime_parent",
+                "mimir_modelled_subcontract_value_usd", "latest_observed_date",
+            ) if row.get(key) is not None}
+            for row in network.get("as_subcontractor_to", [])[:8]
+        ],
+        "reported_subcontract_examples": [
+            {key: row.get(key) for key in (
+                "prime_name", "prime_contract_id", "reported_description",
+                "mimir_modelled_subcontract_value_usd",
+            ) if row.get(key) is not None}
+            for row in capability.get("reported_subaward_descriptions", [])[:6]
+        ],
+        "platform_exposure": [
+            {**{key: row.get(key) for key in (
+                "evidence_layer", "source_system", "platform_family",
+                "observed_value_usd", "latest_date",
+            ) if row.get(key) is not None},
+             "reported_capabilities": (row.get("reported_capabilities") or [])[:2]}
+            for row in pack.get("platform_exposure", [])[:12]
+        ],
+        "government_buyers": [
+            {key: row.get(key) for key in (
+                "sub_agency", "parent_agency", "net_prime_obligations_usd",
+            ) if row.get(key) is not None}
+            for row in pack.get("customer_context", [])[:6]
+        ],
+        "scope_note": (
+            "These are observed historical positions. Current notice status requires "
+            "a separate search of Mimir's loaded opportunities and verification of "
+            "the linked government notice before pursuit."
+        ),
+    }
+
+
 def _date(value: Any) -> str:
     return str(value or "")[:10]
 
