@@ -5947,11 +5947,12 @@ def get_spend_trend(
 
     if mode == "monthly":
         # ✅ Let DuckDB group the months
+        month_sql = "COALESCE(TRY_CAST(month AS INTEGER), 1)"
         df = query_summary_df(
             where_sql=where_sql,
             params=params,
-            select_sql="CAST(COALESCE(month, 1) AS INTEGER) AS month_num, SUM(total_spend) AS spend",
-            group_by_sql="CAST(COALESCE(month, 1) AS INTEGER)",
+            select_sql=f"{month_sql} AS month_num, SUM(total_spend) AS spend",
+            group_by_sql=month_sql,
             limit=0
         )
 
