@@ -292,6 +292,10 @@ class PlatformFollowupTests(unittest.TestCase):
         )
 
     def test_company_overview_does_not_hide_explicit_site_or_item_detail(self):
+        self.assertFalse(lab.company_detail_requested(
+            "Give me a quick picture of CAGE 45934, including prime awards, "
+            "DLA procurement, reported subcontracts and platform exposure."
+        ))
         for question in (
             "Give me an overview, then identify which CAGE sites received the awards.",
             "Give me an overview of every site and its awards.",

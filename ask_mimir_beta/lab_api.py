@@ -5077,7 +5077,6 @@ def company_detail_requested(question: str) -> bool:
         r"parts?|NSNs?|NIINs?)|specific\s+(?:CAGE\s+)?(?:sites?|facilities|"
         r"awards?|parts?|NSNs?|NIINs?)|(?:every|all)\s+(?:sites?|facilities|"
         r"CAGEs?|parts?|NSNs?|NIINs?)|site.by.site|"
-        r"CAGE\s*[:#-]?\s*[A-Z0-9]{5}|"
         r"(?:NSN|NIIN)\s*[:#-]?\s*[A-Z0-9][A-Z0-9-]{4,})\b",
         question, re.IGNORECASE,
     ))
