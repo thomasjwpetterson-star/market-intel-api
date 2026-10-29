@@ -1947,14 +1947,15 @@ def build_public_intelligence_release(conn):
         if remaining and nsn_cap:
             raise
 
-    # Refresh candidates can add or update pages, but absence is never treated
-    # as a deletion instruction. Previously published entities stay in the
-    # release until a deliberate removal policy says otherwise.
+    replace_platform_catalog = os.getenv(
+        "PUBLIC_INTELLIGENCE_REPLACE_PLATFORM_CATALOG", "0"
+    ).strip().lower() in {"1", "true", "yes"}
     manifest_merge_stats = stage_public_intelligence_manifest(
         conn,
         release_id=release_id,
         generated_date=generated_at[:10],
         sitemap_batch_size=PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE,
+        replace_entity_types=("platform",) if replace_platform_catalog else (),
     )
 
     quality_gate_counts = {
@@ -6595,7 +6596,7 @@ def _public_entity_slug(value: str) -> str:
 
 @lru_cache(maxsize=512)
 def resolve_public_platform_slug(slug: str) -> Optional[str]:
-    """Resolve a public platform slug to the most active matching canonical label."""
+    """Resolve only labels admitted to the reviewed public platform catalogue."""
     safe_slug = _public_entity_slug(slug)
     if not safe_slug:
         return None
@@ -6605,33 +6606,7 @@ def resolve_public_platform_slug(slug: str) -> Optional[str]:
         display_name = str(manifest_entry.get("display_name") or "").strip()
         if display_name:
             return display_name
-
-    try:
-        df = duck_fetch_df(
-            """
-            SELECT
-                platform_family,
-                SUM(TRY_CAST(total_spend AS DOUBLE)) AS observed_value
-            FROM v_summary
-            WHERE platform_family IS NOT NULL
-              AND TRIM(CAST(platform_family AS VARCHAR)) <> ''
-            GROUP BY platform_family
-            ORDER BY observed_value DESC NULLS LAST
-            LIMIT 2000
-            """
-        )
-    except Exception:
-        logger.exception("Unable to resolve public platform slug=%s", safe_slug)
-        return None
-
-    matches = []
-    for row in df.to_dict(orient="records"):
-        name = str(row.get("platform_family") or "").strip()
-        if name and _public_entity_slug(name) == safe_slug:
-            matches.append((float(row.get("observed_value") or 0.0), name))
-    if not matches:
-        return None
-    return max(matches, key=lambda item: item[0])[1]
+    return None
 
 
 @app.get("/api/public/intelligence/manifest")
@@ -6947,6 +6922,9 @@ def get_public_platform_page_snapshot(slug: str, response: Response):
     """Stable public platform summary assembled from existing platform queries."""
     require_public_snapshot_ready()
     safe_slug = _public_entity_slug(slug)
+    name = resolve_public_platform_slug(slug)
+    if not name:
+        raise HTTPException(status_code=404, detail="Platform not found")
     projected = load_public_page_projection("platform", safe_slug)
     if projected is not None:
         attach_publication_metadata(projected, "platform", safe_slug)
@@ -6955,10 +6933,6 @@ def get_public_platform_page_snapshot(slug: str, response: Response):
         )
         response.headers["X-Mimir-Public-Projection"] = "daily-release"
         return projected
-
-    name = resolve_public_platform_slug(slug)
-    if not name:
-        raise HTTPException(status_code=404, detail="Platform not found")
 
     profile = get_platform_profile(name=name, years=None, agency=None, domain=None)
     if not profile or not profile.get("found"):
@@ -9974,9 +9948,9 @@ def get_nsn_opportunities(
     if len(safe_niin) != 9 or not safe_niin.isdigit():
         raise HTTPException(status_code=400, detail="Enter a valid NSN or NIIN.")
     if not (LOCAL_CACHE_DIR / "nsn_opportunity_detail.parquet").exists():
-        return []
+        raise HTTPException(status_code=503, detail="NSN opportunity intelligence is temporarily unavailable.", headers={"Cache-Control": "no-store", "Retry-After": "30"})
     if not get_duck_table_columns(NSN_OPPORTUNITY_DETAIL_TABLE):
-        return []
+        raise HTTPException(status_code=503, detail="NSN opportunity intelligence is temporarily unavailable.", headers={"Cache-Control": "no-store", "Retry-After": "30"})
     safe_limit = safe_int(limit, 50, 1, 100)
     safe_offset = safe_int(offset, 0, 0, 10000)
     try:
@@ -9999,7 +9973,7 @@ def get_nsn_opportunities(
         return df_sanitize_for_json(frame).to_dict(orient="records")
     except Exception:
         logger.exception("NSN opportunity lookup failed for NIIN=%s", safe_niin)
-        return []
+        raise HTTPException(status_code=503, detail="NSN opportunity intelligence is temporarily unavailable.", headers={"Cache-Control": "no-store", "Retry-After": "30"})
 
 
 @app.get("/api/nsn/profile")
@@ -10871,6 +10845,11 @@ def build_public_nsn_snapshot(
             )).to_dict(orient="records")
     except Exception:
         logger.exception("Public NSN opportunity lookup failed for NIIN=%s", safe_niin)
+        raise HTTPException(
+            status_code=503,
+            detail="NSN opportunity intelligence is temporarily unavailable.",
+            headers={"Cache-Control": "no-store", "Retry-After": "30"},
+        )
 
     public_opportunity_summary.update({
         "active_solicitation_count": active_solicitation_count,

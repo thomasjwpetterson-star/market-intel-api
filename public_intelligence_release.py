@@ -259,14 +259,14 @@ def stage_public_intelligence_manifest(
     release_id: str,
     generated_date: str,
     sitemap_batch_size: int = PUBLIC_INTELLIGENCE_SITEMAP_BATCH_SIZE,
+    replace_entity_types: tuple[str, ...] = (),
 ) -> dict:
-    """Stage a release manifest without silently evicting published entities.
+    """Stage a release manifest with explicit cohort replacement when required.
 
     ``public_intelligence_manifest_candidates_next`` contains the entities that
     were refreshed and passed today's quality checks.  The active manifest is
     the last-known-good publication set.  A missing candidate is therefore not
-    a deletion instruction: prior rows remain published until a separate,
-    deliberate removal policy is introduced.
+    a deletion instruction unless its entity type is explicitly replaced.
     """
     required = set(PUBLIC_INTELLIGENCE_MANIFEST_COLUMNS)
     candidate_columns = _table_columns(
@@ -284,6 +284,26 @@ def stage_public_intelligence_manifest(
     escaped_release_id = str(release_id).replace("'", "''")
     escaped_generated_date = str(generated_date).replace("'", "''")
     safe_batch_size = max(1, int(sitemap_batch_size))
+    replacement_types = set(replace_entity_types)
+    if replacement_types - {"platform"}:
+        raise ValueError("Only the reviewed platform cohort may be replaced")
+    retain_predicate = (
+        " AND previous.entity_type <> 'platform'" if "platform" in replacement_types else ""
+    )
+    if "platform" in replacement_types:
+        current_platforms = int(conn.execute("""
+            SELECT COUNT(*) FROM public_intelligence_manifest_candidates_next
+            WHERE entity_type = 'platform'
+        """).fetchone()[0])
+        prior_platforms = int(conn.execute("""
+            SELECT COUNT(*) FROM public_intelligence_manifest
+            WHERE entity_type = 'platform'
+        """).fetchone()[0]) if has_previous_manifest else 0
+        if current_platforms < max(1, int(prior_platforms * 0.8)):
+            raise RuntimeError(
+                "Reviewed platform replacement would remove too much of the catalogue: "
+                f"{current_platforms} current vs {prior_platforms} prior"
+            )
 
     conn.execute("DROP TABLE IF EXISTS public_intelligence_manifest_next")
     if has_previous_manifest:
@@ -336,6 +356,7 @@ def stage_public_intelligence_manifest(
                     WHERE candidate.entity_type = previous.entity_type
                       AND candidate.entity_id = previous.entity_id
                 )
+                {retain_predicate}
             )
             SELECT
                 merged.*,
@@ -381,7 +402,7 @@ def stage_public_intelligence_manifest(
         previous_count = int(
             conn.execute("SELECT COUNT(*) FROM public_intelligence_manifest").fetchone()[0]
         )
-        retained_count = int(conn.execute("""
+        retained_count = int(conn.execute(f"""
             SELECT COUNT(*)
             FROM public_intelligence_manifest previous
             WHERE NOT EXISTS (
@@ -390,8 +411,9 @@ def stage_public_intelligence_manifest(
                 WHERE candidate.entity_type = previous.entity_type
                   AND candidate.entity_id = previous.entity_id
             )
+            {retain_predicate}
         """).fetchone()[0])
-        missing_after_merge = int(conn.execute("""
+        missing_after_merge = int(conn.execute(f"""
             SELECT COUNT(*)
             FROM public_intelligence_manifest previous
             WHERE NOT EXISTS (
@@ -400,6 +422,7 @@ def stage_public_intelligence_manifest(
                 WHERE staged.entity_type = previous.entity_type
                   AND staged.entity_id = previous.entity_id
             )
+            {retain_predicate}
         """).fetchone()[0])
         if missing_after_merge:
             conn.execute("DROP TABLE public_intelligence_manifest_next")
@@ -434,7 +457,7 @@ def stage_public_intelligence_manifest(
             f"Public release safety invariant failed: {duplicate_count} duplicate "
             f"entity keys were staged: {duplicate_keys}"
         )
-    if staged_count < previous_count:
+    if staged_count < previous_count and not replacement_types:
         conn.execute("DROP TABLE public_intelligence_manifest_next")
         raise RuntimeError(
             "Public release safety invariant failed: staged manifest is smaller "
@@ -445,6 +468,7 @@ def stage_public_intelligence_manifest(
         "staged_count": staged_count,
         "retained_without_refresh": retained_count,
         "duplicate_count": duplicate_count,
+        "replaced_entity_types": sorted(replacement_types),
     }
 
 
