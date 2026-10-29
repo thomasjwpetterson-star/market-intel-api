@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -42,9 +44,13 @@ def usable_transaction_index(data_root: Path) -> Path | None:
 
 
 def build_transaction_index(
-    data_root: Path, *, memory_limit: str = "2GB", temp_directory: Path | None = None
+    data_root: Path, *, memory_limit: str = "1GB", temp_directory: Path | None = None
 ) -> dict[str, Any]:
     """Sort the narrow evidence columns once during release creation."""
+    if os.getenv("RENDER_SERVICE_ID"):
+        raise RuntimeError(
+            "Build the company Conversation index in dedicated ETL, not on a Render serving instance"
+        )
     data_root = data_root.resolve()
     raw_path = data_root / "transactions.parquet"
     if not raw_path.is_file():
@@ -55,14 +61,19 @@ def build_transaction_index(
     output = data_root / INDEX_FILENAME
     temporary = output.with_suffix(".parquet.tmp")
     temporary.unlink(missing_ok=True)
+    scratch = temp_directory or (data_root.parent / "company-conversation-index-scratch")
+    scratch.mkdir(parents=True, exist_ok=True)
+    required_free = max(256 * 1024**2, 4 * raw_path.stat().st_size)
+    if shutil.disk_usage(scratch).free < required_free:
+        raise RuntimeError(
+            "Not enough scratch space to build the company Conversation index"
+        )
     connection = duckdb.connect()
     try:
         connection.execute("SET preserve_insertion_order = false")
         connection.execute("SET threads = 2")
         connection.execute(f"SET memory_limit = '{memory_limit.upper()}'")
-        if temp_directory is not None:
-            temp_directory.mkdir(parents=True, exist_ok=True)
-            connection.execute("SET temp_directory = ?", [str(temp_directory)])
+        connection.execute("SET temp_directory = ?", [str(scratch)])
         source = str(raw_path).replace("'", "''")
         target = str(temporary).replace("'", "''")
         connection.execute(f"""

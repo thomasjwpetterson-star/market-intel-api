@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import duckdb
 
@@ -16,6 +17,11 @@ from company_context import file_sha256
 
 
 class CompanyConversationIndexTests(unittest.TestCase):
+    def test_refuses_to_sort_on_render_serving_instance(self):
+        with patch.dict("os.environ", {"RENDER_SERVICE_ID": "srv-preview"}):
+            with self.assertRaisesRegex(RuntimeError, "dedicated ETL"):
+                build_transaction_index(Path("/unused"))
+
     def test_sorted_index_requires_same_verified_transaction_release(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
