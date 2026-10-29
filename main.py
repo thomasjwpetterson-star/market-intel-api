@@ -9459,7 +9459,7 @@ def get_company_opportunities_recommended(
     psc: Optional[str] = None
 ):
     # 1. Reuse existing profile logic to find capabilities
-    profile = get_company_profile(cage, name)
+    profile = get_company_profile(cage=cage, name=name, years=None)
 
     if not profile.get('found') or not profile.get('top_naics'):
         return []
