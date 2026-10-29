@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Sequence
 
 from company_context import CompanyContextBuilder, clean_cage, rows_as_dicts
+from company_conversation_index import INDEX_VERSION, usable_transaction_index
 from reviewed_platform_links import LINK_VERSION, recovered_platform_sql
 
 
@@ -97,6 +98,13 @@ def _top(rows: Dict[Any, Dict[str, Any]], field: str, limit: int) -> list[Dict[s
     )[:limit]
 
 
+def _capture_capability(platform: Dict[str, Any], description: str, amount: float) -> None:
+    description = description.strip()[:240]
+    if description:
+        scores = platform.setdefault("_capability_scores", {})
+        scores[description] = max(scores.get(description, 0.0), abs(amount))
+
+
 def build_site_conversation(
     builder: CompanyContextBuilder, cage: str, fiscal_years: Sequence[int]
 ) -> Dict[str, Any]:
@@ -120,18 +128,24 @@ def build_site_conversation(
     )
     if not sites:
         raise KeyError(f"CAGE was not found in the local company identity data: {cage}")
+    transaction_index = usable_transaction_index(builder.paths["transactions"].parent)
+    transaction_path = transaction_index or builder.paths["transactions"]
+    platform_sql = (
+        "raw.platform_family" if transaction_index
+        else recovered_platform_sql("raw", "transactions")
+    )
     transaction_rows = rows_as_dicts(builder.connection.execute(
         f"""
         SELECT source_system, award_key, transaction_key, contract_id, action_date,
                sub_agency, parent_agency, base_award_description, description,
                spend_amount, psc, year, niin, nsn,
-               {recovered_platform_sql('raw', 'transactions')} AS platform_family
+               {platform_sql} AS platform_family
         FROM read_parquet(?) raw
         WHERE vendor_cage = ? AND year IN ({','.join('?' for _ in years)})
           AND source_system IN ('USA_SPENDING', 'DLA')
         LIMIT {MAX_SITE_ROWS + 1}
         """,
-        [str(builder.paths["transactions"]), cage, *years],
+        [str(transaction_path), cage, *years],
     ))
     if len(transaction_rows) > MAX_SITE_ROWS:
         return builder.build_site(cage, years, conversation_overview=True)
@@ -190,14 +204,13 @@ def build_site_conversation(
                 "evidence_layer": "prime_or_dla_action", "source_system": source,
                 "platform_family": platform, "observed_value_usd": 0.0,
                 "_awards": set(), "contributing_sites": 1, "latest_date": "",
-                "reported_capabilities": [],
+                "_capability_scores": {},
             })
             p["observed_value_usd"] += amount
             p["_awards"].add(award_key)
             p["latest_date"] = max(p["latest_date"], date)
             description = str(row.get("base_award_description") or row.get("description") or "").strip()
-            if description and description not in p["reported_capabilities"] and len(p["reported_capabilities"]) < 6:
-                p["reported_capabilities"].append(description[:240])
+            _capture_capability(p, description, amount)
 
         if source == "USA_SPENDING":
             award = awards.setdefault(award_key, {
@@ -280,14 +293,13 @@ def build_site_conversation(
                 "evidence_layer": "reported_subaward", "source_system": "USA_SPENDING_SUBAWARD",
                 "platform_family": platform, "observed_value_usd": 0.0,
                 "_awards": set(), "contributing_sites": 1, "latest_date": "",
-                "reported_capabilities": [],
+                "_capability_scores": {},
             })
             p["observed_value_usd"] += amount
             p["_awards"].add(str(row.get("source_dedup_key") or ""))
             p["latest_date"] = max(p["latest_date"], date)
             description = str(row.get("description") or "").strip()
-            if description and description not in p["reported_capabilities"] and len(p["reported_capabilities"]) < 6:
-                p["reported_capabilities"].append(description[:240])
+            _capture_capability(p, description, amount)
 
     def finish_count(rows: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
         for row in rows:
@@ -306,6 +318,11 @@ def build_site_conversation(
     finish_count(item_rows)
     platform_rows = _top(platforms, "observed_value_usd", 30)
     finish_count(platform_rows)
+    for platform in platform_rows:
+        scores = platform.pop("_capability_scores", {})
+        platform["reported_capabilities"] = sorted(
+            scores, key=lambda description: (-scores[description], description)
+        )[:6]
     customer_rows = _top(customers, "net_prime_obligations_usd", 15)
     finish_count(customer_rows)
     upstream_rows = _top(upstream, "mimir_modelled_subcontract_value_usd", 15)
@@ -328,6 +345,7 @@ def build_site_conversation(
         "evidence_fingerprint": fingerprint,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "calculation_version": "mimir-company-conversation-fast-v1",
+        "conversation_index_version": INDEX_VERSION if transaction_index else None,
         "scope": {
             "scope_type": "company_site", "scope_id": cage,
             "scope_name": sites[0].get("vendor_name") or f"CAGE {cage}",

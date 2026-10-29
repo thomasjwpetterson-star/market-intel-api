@@ -28,6 +28,8 @@ class IncrementalManifestTests(unittest.TestCase):
             parse_domains("companies, platforms,companies"),
             {"companies", "platforms"},
         )
+        self.assertEqual(parse_domains("conversation-index"), {"conversation-index"})
+        self.assertNotIn("conversation-index", publish_runtime_release.BUILD_DOMAINS)
 
     def test_rejects_unknown_domain(self):
         with self.assertRaisesRegex(ValueError, "Unknown release domain"):
