@@ -1,0 +1,597 @@
+{
+  "version": "procurement-demand-v2",
+  "purpose": "Organise observed buying and emerging demand; not a calibrated award predictor.",
+  "rules": [
+    {
+      "id": "PR01",
+      "label": "Published solicitation",
+      "adapter_status": "operational",
+      "lanes": [
+        "published_procurement"
+      ],
+      "legacy_families": [
+        "BS20",
+        "BS18"
+      ],
+      "required_evidence": [
+        "Current notice and defined work",
+        "Response deadline and procurement status",
+        "Relevant company work and notice-specific access"
+      ],
+      "next_action": "Use the current notice and its submission instructions.",
+      "value_method": "Notice amount only if supported; exact comparable contracts remain separate.",
+      "disconfirming_evidence": [
+        "Cancellation",
+        "Award for the same work",
+        "Expired deadline"
+      ]
+    },
+    {
+      "id": "PR02",
+      "label": "Published item request",
+      "adapter_status": "operational",
+      "lanes": [
+        "published_item_procurement"
+      ],
+      "legacy_families": [
+        "BS12",
+        "BS20"
+      ],
+      "required_evidence": [
+        "Exact item and configuration",
+        "Request quantity/unit/deadline",
+        "Site-specific manufacturing or authorised supply route"
+      ],
+      "next_action": "Review the exact request and source requirements before quoting.",
+      "value_method": "Requested quantity \u00d7 same-item/unit reference price; retain each input.",
+      "disconfirming_evidence": [
+        "Wrong configuration",
+        "Restricted source without access",
+        "Expired request"
+      ]
+    },
+    {
+      "id": "PR03",
+      "label": "Item replenishment demand",
+      "adapter_status": "operational",
+      "lanes": [
+        "source_item_forecasts"
+      ],
+      "legacy_families": [
+        "BS12",
+        "BS19"
+      ],
+      "required_evidence": [
+        "Dated forecast quantities",
+        "Stock/on-order/backorder coverage where held",
+        "Item source and unit evidence"
+      ],
+      "next_action": "Check whether forecast demand is converting into a purchase request.",
+      "value_method": "Forecast \u00d7 reference-price scenario only; no confirmed order.",
+      "disconfirming_evidence": [
+        "Inventory or incoming supply meets need",
+        "Forecast reduction",
+        "No source access"
+      ]
+    },
+    {
+      "id": "PR04",
+      "label": "Planned work before solicitation",
+      "adapter_status": "operational",
+      "lanes": [
+        "explicit_work_package_plan"
+      ],
+      "legacy_families": [
+        "BS02",
+        "BS01"
+      ],
+      "required_evidence": [
+        "Source-defined work package",
+        "Named buyer and planned period",
+        "Latest source edition and successor/award checks"
+      ],
+      "next_action": "Identify the package owner and confirm acquisition/engagement route before supplier selection.",
+      "value_method": "Whole planned package; no allocation of programme value to a supplier.",
+      "disconfirming_evidence": [
+        "Package already placed",
+        "Plan cancelled or deferred",
+        "In-house delivery",
+        "Restricted source"
+      ]
+    },
+    {
+      "id": "PR05",
+      "label": "Research and development plans",
+      "adapter_status": "context_only",
+      "lanes": [
+        "research_and_facilities_plan"
+      ],
+      "legacy_families": [
+        "BS01",
+        "BS07",
+        "BS17"
+      ],
+      "required_evidence": [
+        "Research project and technical objective",
+        "Funding stage: request versus enacted",
+        "External delivery task and engagement route"
+      ],
+      "next_action": "Locate the relevant research task, programme team and participation route.",
+      "value_method": "Research programme or facilities funding remains context until a task is identified.",
+      "disconfirming_evidence": [
+        "Funding removed",
+        "Internal government work",
+        "No externally deliverable task"
+      ]
+    },
+    {
+      "id": "PR06",
+      "label": "Research/prototype transition",
+      "adapter_status": "additional_evidence_required",
+      "lanes": [],
+      "legacy_families": [
+        "BS07",
+        "BS08",
+        "BS04"
+      ],
+      "required_evidence": [
+        "Dated trial or prototype result",
+        "Explicit follow-on/transition intent and receiving programme",
+        "Acquisition or teaming route"
+      ],
+      "next_action": "Establish follow-on scope, sponsor and transition/teaming window.",
+      "value_method": "Comparable transitions/tasks; no assumed research-to-production conversion.",
+      "disconfirming_evidence": [
+        "Failed trial",
+        "No transition sponsor",
+        "Follow-on already placed"
+      ]
+    },
+    {
+      "id": "PR07",
+      "label": "Early teaming or consortium entry",
+      "adapter_status": "text_evidence_screen",
+      "lanes": [],
+      "legacy_families": [
+        "BS02",
+        "BS05",
+        "BS18",
+        "BS20"
+      ],
+      "required_evidence": [
+        "Explicit partner/consortium/team invitation",
+        "Defined capability role and named programme or buyer",
+        "Entry window and prime/consortium eligibility"
+      ],
+      "next_action": "Approach the named teaming lead about the required role and entry conditions.",
+      "value_method": "Specific workshare only if stated; otherwise comparable task values with no share assumption.",
+      "disconfirming_evidence": [
+        "Team already selected",
+        "Membership closed",
+        "Role not externally available"
+      ]
+    },
+    {
+      "id": "PR08",
+      "label": "Emerging market / new mission demand",
+      "adapter_status": "additional_evidence_required",
+      "lanes": [],
+      "legacy_families": [
+        "BS16",
+        "BS01",
+        "BS10"
+      ],
+      "required_evidence": [
+        "Defined unmet mission need",
+        "Dated sponsor commitment, funding or trials",
+        "Industry participation mechanism"
+      ],
+      "next_action": "Identify the sponsoring programme and how requirements or demonstrations will be shaped.",
+      "value_method": "Keep mission budget as context; estimate only defined addressable work.",
+      "disconfirming_evidence": [
+        "Strategy without commitment",
+        "No buyer",
+        "Existing programme already fulfils need"
+      ]
+    },
+    {
+      "id": "PR09",
+      "label": "Fleet transition, refresh and obsolescence",
+      "adapter_status": "text_evidence_screen",
+      "lanes": [],
+      "legacy_families": [
+        "BS16",
+        "BS11",
+        "BS10",
+        "BS13",
+        "BS14",
+        "BS15"
+      ],
+      "required_evidence": [
+        "Explicit future capability/change in dated plan",
+        "Affected platform/configuration and responsible organisation",
+        "External work and entry route; no age-only inference"
+      ],
+      "next_action": "Confirm the upgrade or replacement work and engage before configuration/supplier selection.",
+      "value_method": "Defined upgrade lots/tasks or comparable work; no per-platform spend allocation without evidence.",
+      "disconfirming_evidence": [
+        "Retirement removes demand",
+        "Refresh already awarded",
+        "Generic ageing statement only"
+      ]
+    },
+    {
+      "id": "PR10",
+      "label": "New prime/tier-one award \u2192 supplier pull",
+      "adapter_status": "operational",
+      "lanes": [
+        "new_prime_historical_supplier_flow"
+      ],
+      "legacy_families": [
+        "BS05",
+        "BS06",
+        "BS04"
+      ],
+      "required_evidence": [
+        "New funded parent award",
+        "Earlier distinct parent and comparable outsourced work",
+        "Temporal evidence chain and specific scope",
+        "Unplaced work and supplier access remain checks"
+      ],
+      "next_action": "Validate the new work package with the prime/tier-one supply-chain owner and establish the entry route.",
+      "value_method": "Earlier comparable supplier reports, not a percentage of the prime award.",
+      "disconfirming_evidence": [
+        "Work already placed",
+        "Different lot/configuration",
+        "Closed incumbent channel",
+        "No outsourcing evidence"
+      ]
+    },
+    {
+      "id": "PR11",
+      "label": "Existing prime/tier-one supplier activity",
+      "adapter_status": "watch_only",
+      "lanes": [
+        "funded_prime_supplier_packages"
+      ],
+      "legacy_families": [
+        "BS06",
+        "BS18"
+      ],
+      "required_evidence": [
+        "Exact prime-parent linkage",
+        "Specific reported supplier work",
+        "Separate new demand or sourcing event to become a lead"
+      ],
+      "next_action": "Watch for a new task, capacity requirement or explicit supplier opening.",
+      "value_method": "Observed supplier report amounts; no new workshare asserted.",
+      "disconfirming_evidence": [
+        "Report is already placed work",
+        "Cumulative report",
+        "No new buying event"
+      ]
+    },
+    {
+      "id": "PR12",
+      "label": "Repeat demand / recompete / expiry",
+      "adapter_status": "operational",
+      "lanes": [
+        "scoped_recurrence"
+      ],
+      "legacy_families": [
+        "BS03",
+        "BS04",
+        "BS14"
+      ],
+      "required_evidence": [
+        "Specific historical work and buying office",
+        "Distinct awards and observed cadence",
+        "Successor/extension/award checks and accessible route"
+      ],
+      "next_action": "Check the next requirement and contracting route with the responsible office.",
+      "value_method": "Comparable contract/action amounts; cadence window is inferred, not an announced release.",
+      "disconfirming_evidence": [
+        "Extension or successor awarded",
+        "Requirement ended",
+        "Expiry alone without demand evidence"
+      ]
+    },
+    {
+      "id": "PR13",
+      "label": "Alternative-source qualification",
+      "adapter_status": "text_evidence_screen",
+      "lanes": [],
+      "legacy_families": [
+        "BS08",
+        "BS18",
+        "BS19",
+        "BS20"
+      ],
+      "required_evidence": [
+        "Explicit new-source/qualification invitation",
+        "Exact requirement and source date",
+        "Cost, technical data, qualification schedule and site approval"
+      ],
+      "next_action": "Respond to the invitation and establish qualification effort before pursuing an order.",
+      "value_method": "Unit references where available; no order value without quantities.",
+      "disconfirming_evidence": [
+        "No invitation or access",
+        "Qualification closed",
+        "Unusable data rights"
+      ]
+    },
+    {
+      "id": "PR14",
+      "label": "Production ramp, long-lead and capacity",
+      "adapter_status": "additional_evidence_required",
+      "lanes": [],
+      "legacy_families": [
+        "BS09",
+        "BS01",
+        "BS17",
+        "BS10",
+        "BS15"
+      ],
+      "required_evidence": [
+        "Dated production/quantity change or advance procurement",
+        "Affected work packages and supplier tier",
+        "Capacity/outsourcing or industry-entry evidence"
+      ],
+      "next_action": "Identify long-lead or capacity packages and confirm when suppliers can engage.",
+      "value_method": "Source quantities and package-level prices; no arbitrary production-budget share.",
+      "disconfirming_evidence": [
+        "Ramp deferred",
+        "Stock/incoming supply covers demand",
+        "Capacity already contracted"
+      ]
+    },
+    {
+      "id": "PR15",
+      "label": "Procurement and capability funding plan",
+      "adapter_status": "context_only",
+      "lanes": [
+        "all_service_procurement_plan"
+      ],
+      "legacy_families": [
+        "BS01",
+        "BS02",
+        "BS16"
+      ],
+      "required_evidence": [
+        "Specific funding line and stage",
+        "Source fiscal period",
+        "Work-package decomposition and unawarded route"
+      ],
+      "next_action": "Trace the funding line to planned external tasks and the responsible programme office.",
+      "value_method": "Fiscal funding position only; never company opportunity revenue.",
+      "disconfirming_evidence": [
+        "Actual/historical spend",
+        "Already committed funding",
+        "No external package"
+      ]
+    },
+    {
+      "id": "PR16",
+      "label": "SBIR/STTR topics and research progression",
+      "adapter_status": "connected_awards_and_notice_screen",
+      "lanes": [],
+      "legacy_families": [
+        "BS07",
+        "BS08",
+        "BS20"
+      ],
+      "required_evidence": [
+        "Explicit topic and agency/branch",
+        "Phase and opening/closing dates",
+        "Phase-specific applicant or teaming eligibility"
+      ],
+      "next_action": "Use the topic instructions to establish direct-applicant eligibility or a permitted research/teaming role.",
+      "value_method": "Stated topic budget or comparable same-phase awards; historical awards are not new demand.",
+      "disconfirming_evidence": [
+        "Closed topic",
+        "Phase eligibility not met",
+        "Past Phase II award without an external follow-on"
+      ]
+    },
+    {
+      "id": "PR17",
+      "label": "BAA, CSO, challenge and OTA access",
+      "adapter_status": "connected_notice_screen",
+      "lanes": [],
+      "legacy_families": [
+        "BS02",
+        "BS07",
+        "BS20"
+      ],
+      "required_evidence": [
+        "Named challenge or acquisition mechanism",
+        "Defined technical problem and submission window",
+        "Award/consortium and eligibility conditions"
+      ],
+      "next_action": "Check the named call, white-paper process or consortium entry route.",
+      "value_method": "Call/task amount where stated; vehicle ceilings remain context.",
+      "disconfirming_evidence": [
+        "Closed submission window",
+        "Consortium closed",
+        "Umbrella announcement without an active topic"
+      ]
+    },
+    {
+      "id": "PR18",
+      "label": "Contract-vehicle on-ramp and task-order access",
+      "adapter_status": "connected_notice_screen",
+      "lanes": [],
+      "legacy_families": [
+        "BS03",
+        "BS04",
+        "BS18"
+      ],
+      "required_evidence": [
+        "Named vehicle/on-ramp or task-order requirement",
+        "Current holder status and entry/teaming conditions",
+        "Task scope and response window"
+      ],
+      "next_action": "Determine whether to bid directly, use an on-ramp or team with an eligible holder.",
+      "value_method": "Defined task/order history; never the whole IDIQ ceiling.",
+      "disconfirming_evidence": [
+        "Closed holder group without an on-ramp",
+        "Task already awarded",
+        "No direct or permitted teaming route"
+      ]
+    },
+    {
+      "id": "PR19",
+      "label": "Allied/FMS programme demand",
+      "adapter_status": "additional_evidence_required",
+      "lanes": [],
+      "legacy_families": [
+        "BS15",
+        "BS05",
+        "BS09"
+      ],
+      "required_evidence": [
+        "Named country/case and equipment or work scope",
+        "Approved versus signed/funded stage",
+        "Delivery and prime/subcontract route"
+      ],
+      "next_action": "Verify funded case scope and the prime or buying organisation before pursuing downstream work.",
+      "value_method": "Funded package or comparable work only; approval ceilings remain context.",
+      "disconfirming_evidence": [
+        "Policy approval only",
+        "Case not funded",
+        "Domestic/content or export eligibility unresolved"
+      ]
+    },
+    {
+      "id": "PR20",
+      "label": "Operating workload and replenishment change",
+      "adapter_status": "additional_evidence_required",
+      "lanes": [],
+      "legacy_families": [
+        "BS10",
+        "BS12",
+        "BS09"
+      ],
+      "required_evidence": [
+        "Physical activity/workload or fleet change",
+        "Comparable dates/configuration and budget basis",
+        "Inventory/incoming supply or contracted capacity"
+      ],
+      "next_action": "Identify the externally procured workload caused by the activity change.",
+      "value_method": "Workload \u00d7 supported unit/task cost; a budget increase alone is insufficient.",
+      "disconfirming_evidence": [
+        "Inflation-only change",
+        "Fleet retirement",
+        "Inventory or existing capacity covers the need"
+      ]
+    },
+    {
+      "id": "PR21",
+      "label": "Failed procurement and resolicitation",
+      "adapter_status": "additional_evidence_required",
+      "lanes": [],
+      "legacy_families": [
+        "BS18",
+        "BS20",
+        "BS21"
+      ],
+      "required_evidence": [
+        "Explicit cancellation/no-award/failed procurement",
+        "Successor notice or explicit plan to compete again",
+        "Same work and updated eligibility/date"
+      ],
+      "next_action": "Review why the previous procurement failed and the successor requirement.",
+      "value_method": "Prior bid/award comparators remain distinct from a new purchase estimate.",
+      "disconfirming_evidence": [
+        "Cancellation without replacement",
+        "Different scope",
+        "Successor awarded"
+      ]
+    },
+    {
+      "id": "PR22",
+      "label": "Mandatory retrofit, security or standards change",
+      "adapter_status": "additional_evidence_required",
+      "lanes": [],
+      "legacy_families": [
+        "BS11",
+        "BS13",
+        "BS08"
+      ],
+      "required_evidence": [
+        "Specific published requirement affecting a platform/system",
+        "Dated compliance/implementation period",
+        "External retrofit/integration task and access route"
+      ],
+      "next_action": "Confirm the affected configuration and responsible retrofit/integration package.",
+      "value_method": "Defined retrofit tasks and quantities; no allocation from a broad compliance budget.",
+      "disconfirming_evidence": [
+        "No externally funded work",
+        "Already compliant",
+        "Wrong configuration"
+      ]
+    },
+    {
+      "id": "PR23",
+      "label": "Supplier exit, disruption and replacement capacity",
+      "adapter_status": "additional_evidence_required",
+      "lanes": [],
+      "legacy_families": [
+        "BS19",
+        "BS11",
+        "BS09"
+      ],
+      "required_evidence": [
+        "Documented disruption or exit affecting a specific work scope",
+        "Affected buyer/platform and substitute capacity need",
+        "Explicit source expansion or accessible new design route"
+      ],
+      "next_action": "Validate the buyer response and any alternative-source qualification or capacity opening.",
+      "value_method": "Affected work-package history; no automatic incumbent revenue transfer.",
+      "disconfirming_evidence": [
+        "Supply restored",
+        "Alternative already contracted",
+        "Restricted design without a qualification route"
+      ]
+    }
+  ],
+  "global_rules": [
+    "Evidence of demand and evidence of a route to participate are separate.",
+    "No NSN/part/NAICS/PSC overlap independently establishes an opportunity or approval.",
+    "An absent solicitation is not proof that planned work is unawarded.",
+    "An inferred opening is never labelled a published sources sought.",
+    "Unknown programme funding is not company-addressable value.",
+    "A new prime award can imply supplier demand without proving unplaced work.",
+    "Teaming, new designs and R&D do not inherit approval from comparable incumbent products.",
+    "All supported, contextual and rejected decisions retain source/revision and logic version.",
+    "Cancellation, deferment, closed entry and same-scope awards supersede positive signals; weak text links cannot close a requirement.",
+    "SBIR Phase I/II awards are observed research activity; they do not establish a future Phase III contract.",
+    "A phase/vehicle/consortium entry condition is evaluated separately from technical similarity.",
+    "SBIR award values and USAspending values for the same contract are alternative observations, never added.",
+    "A policy-approved FMS ceiling, an IDIQ ceiling and a consortium programme budget are not individual opportunity values."
+  ],
+  "negative_signal_families": [
+    "BS21"
+  ],
+  "lifecycle": [
+    "planning_context",
+    "emerging_demand",
+    "teaming_opening",
+    "qualification_opening",
+    "published_requirement",
+    "source_forecast",
+    "historical_watch",
+    "repeat_demand_inference",
+    "resolved_or_elapsed",
+    "evidence_gap"
+  ],
+  "unimplemented_sources": [
+    "Full planning-document narrative extraction and task/schedule normalisation",
+    "Dated teaming/consortium entry notices and their closure updates",
+    "Prototype milestones linked to receiving acquisition programmes",
+    "Force-plan/platform changes joined to externally deliverable work packages",
+    "Production-rate/advance-procurement changes with actual sourcing/capacity evidence",
+    "Tier-one/private sourcing notices, work-package placement and technical-access facts"
+  ],
+  "promotion": "Text screens identify source passages for review. They do not prove access, additional demand, unawarded work or forecast accuracy."
+}

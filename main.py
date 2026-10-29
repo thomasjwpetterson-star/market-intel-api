@@ -464,6 +464,10 @@ app = FastAPI(
     lifespan=lifespan 
 )
 
+# Additive, sign-in-only pilot; no ingestion or production cache mutation.
+from opportunity_intelligence.mount import mount as mount_opportunity_intelligence
+mount_opportunity_intelligence(app)
+
 # ✅ FIX: Add a middleware to catch NaNs in responses or handle it in your dataframes
 # The safest surgical fix without rewriting every endpoint is to enforce simplejson or handle it in the response class.
 # However, for FastAPI/Starlette, the easiest fix is to patch the dataframe conversion or use a custom JSON encoder.
