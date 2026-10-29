@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from copy import deepcopy
+from pathlib import Path
 
 import uvicorn
 
@@ -20,12 +21,21 @@ def service_log_config():
 
 
 if __name__ == "__main__":
-    # Reuse verified files and fetch only changed objects from the atomic release.
-    bootstrap()
     os.environ["ASK_MIMIR_ALLOW_TEST_IDENTITIES"] = "0"
     os.environ.setdefault("ASK_MIMIR_STRICT_CITATIONS", "1")
+    distribution_enabled = os.getenv("MIMIR_DISTRIBUTION_ENABLED", "0") == "1"
+    if distribution_enabled:
+        # The factory verifies configuration, bootstraps once, and shares the
+        # existing lab_api runtime and credit store with the bounded MCP app.
+        os.environ.setdefault("ASK_MIMIR_CODE_ROOT", str(Path(__file__).resolve().parent))
+        application = "mimir_distribution.serve_existing_ask:build_app"
+    else:
+        # Reuse verified files and fetch only changed objects from the atomic release.
+        bootstrap()
+        application = "lab_api:app"
     uvicorn.run(
-        "lab_api:app",
+        application,
+        factory=distribution_enabled,
         host="0.0.0.0",
         port=int(os.getenv("PORT", "10000")),
         workers=1,
