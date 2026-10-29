@@ -96,6 +96,21 @@ class MainReleaseCacheTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_manifest(missing)
 
+    def test_schema_two_requires_all_four_operational_nsn_sidecars(self):
+        sidecars = (
+            "nsn_supply_state_lookup.parquet",
+            "nsn_price_summary_lookup.parquet",
+            "nsn_opportunity_summary_lookup.parquet",
+            "nsn_opportunity_detail.parquet",
+        )
+        self.assertTrue(set(sidecars).issubset(REQUIRED_FILES))
+        for sidecar in sidecars:
+            missing = json.loads(json.dumps(self.manifest))
+            missing["files"] = [row for row in missing["files"]
+                                if row["local_path"] != sidecar]
+            with self.subTest(sidecar=sidecar), self.assertRaisesRegex(ValueError, "Main cache set differs"):
+                validate_manifest(missing)
+
     def test_root_and_main_release_must_agree(self):
         self.objects["mimir/platform/current_manifest.json"] = {
             "body": json.dumps({"schema_version": 2, "promotion_ready": True,

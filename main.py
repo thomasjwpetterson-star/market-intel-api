@@ -3166,7 +3166,10 @@ def reload_all_data():
             "nsn_opportunity_detail.parquet",
         }
         if platform_bundle is not None:
-            missing_main_files = set(files) - optional_release_files - set(main_platform_files)
+            required_main_files = set(files)
+            if platform_bundle["platform"].get("schema_version") == 1:
+                required_main_files -= optional_release_files
+            missing_main_files = required_main_files - set(main_platform_files)
             if missing_main_files:
                 raise PlatformManifestError(
                     "Main platform component is missing required serving files: "
