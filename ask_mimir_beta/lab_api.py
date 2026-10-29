@@ -2397,6 +2397,7 @@ def company_site_dossier_cage(messages: List[ChatMessage]) -> str | None:
             "company profile",
             "site profile",
             "full picture",
+            "quick picture",
             "overview",
             "what does",
         )
