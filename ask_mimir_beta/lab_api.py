@@ -2343,8 +2343,9 @@ def company_site_trajectory_cage(messages: List[ChatMessage]) -> str | None:
             "changed",
             "change",
             "since",
-            "exposure",
             "history",
+            "trajectory",
+            "over time",
         )
     ):
         return None

@@ -186,6 +186,7 @@ class PlatformFollowupTests(unittest.TestCase):
             ("Tell me about B-52.", "platform_intelligence"),
             ("How much was spent on B-52 in FY2025 and FY2026?", "platform_intelligence"),
             ("I'm assessing Curtiss-Wright as a defense supplier. Give me the quick picture: its important sites, customers, awards, and platform exposure.", "company_site_intelligence"),
+            ("Give me a quick picture of CAGE 45934, including prime awards, DLA procurement, reported subcontracts and platform exposure.", "company_site_intelligence"),
             ("Give me the quick picture on Curtiss-Wright as a defence supplier.", "company_site_intelligence"),
             ("What does NSN 1560-00-817-5790 tell us about demand, available sources, and competition?", "item_intelligence"),
             ("Explain contract N0001923F2616 in plain language: what it buys, who received it, how much has been obligated, and how the actions changed over time.", "contract_or_opportunity"),
@@ -200,6 +201,17 @@ class PlatformFollowupTests(unittest.TestCase):
                     route = lab.routing_decision_for_request(request)
                     self.assertEqual(route.workflow, workflow)
                     self.assertFalse(route.clarification_needed)
+
+    def test_explicit_cage_temporal_question_uses_trajectory(self):
+        with patch.object(lab, "runtime", self.runtime, create=True):
+            request = lab.AskRequest(
+                messages=[{"role": "user", "content": "How has CAGE 45934 changed over time?"}],
+                answer_mode="conversation",
+            )
+            self.assertEqual(
+                lab.routing_decision_for_request(request).workflow,
+                "company_site_trajectory",
+            )
 
     def test_record_search_follow_up_keeps_opportunity_scope(self):
         request = lab.AskRequest(
