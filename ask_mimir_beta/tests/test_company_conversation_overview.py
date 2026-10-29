@@ -1,3 +1,5 @@
+import hashlib
+import json
 import unittest
 import tempfile
 import threading
@@ -5,12 +7,40 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from company_context import CompanyContextBuilder
+from company_context import CompanyContextBuilder, verified_runtime_file_hashes
 from company_quick_context import build_site_conversation, compact_company_conversation_pack
 from company_context_store import CompanyContextStore, LINK_VERSION, FYDP_PLATFORM_LINKAGE_VERSION
 
 
 class CompanyConversationOverviewTests(unittest.TestCase):
+    def test_verified_runtime_hashes_require_matching_complete_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            source = data / "transactions.parquet"
+            source.write_bytes(b"verified source")
+            expected = hashlib.sha256(source.read_bytes()).hexdigest()
+            manifest = {
+                "release_id": "release-1",
+                "files": [{"local_path": "data/transactions.parquet", "size": source.stat().st_size,
+                           "sha256": expected}],
+            }
+            fingerprint = hashlib.sha256(json.dumps(
+                {"release_id": manifest["release_id"], "files": manifest["files"]},
+                sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+            (root / "runtime_manifest.json").write_text(json.dumps(manifest))
+            marker = {"release_id": "release-1", "manifest_fingerprint": fingerprint}
+            (root / ".verified-release.json").write_text(json.dumps(marker))
+            self.assertEqual(verified_runtime_file_hashes(data), {source.resolve(): expected})
+            source.write_bytes(b"short")
+            self.assertEqual(verified_runtime_file_hashes(data), {})
+            source.write_bytes(b"verified source")
+            marker["manifest_fingerprint"] = "stale"
+            (root / ".verified-release.json").write_text(json.dumps(marker))
+            self.assertEqual(verified_runtime_file_hashes(data), {})
+
     def test_quick_site_keeps_signed_lanes_and_subcontract_count_separate(self):
         transactions = [
             {"source_system": "USA_SPENDING", "award_key": "A1", "transaction_key": "T1",

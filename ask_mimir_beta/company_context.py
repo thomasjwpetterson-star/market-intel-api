@@ -81,6 +81,34 @@ def file_sha256(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def verified_runtime_file_hashes(data_root: Path) -> Dict[Path, str]:
+    """Reuse hashes from a complete, bootstrap-verified immutable release."""
+    runtime_root = data_root.resolve().parent
+    try:
+        manifest = json.loads((runtime_root / "runtime_manifest.json").read_text())
+        marker = json.loads((runtime_root / ".verified-release.json").read_text())
+        payload = json.dumps(
+            {"release_id": manifest.get("release_id"), "files": manifest.get("files", [])},
+            sort_keys=True, separators=(",", ":"),
+        ).encode()
+        if (
+            not manifest.get("release_id")
+            or marker.get("release_id") != manifest["release_id"]
+            or marker.get("manifest_fingerprint") != hashlib.sha256(payload).hexdigest()
+        ):
+            return {}
+        hashes: Dict[Path, str] = {}
+        for entry in manifest["files"]:
+            path = (runtime_root / entry["local_path"]).resolve()
+            if runtime_root not in path.parents or path.stat().st_size != int(entry["size"]):
+                return {}
+            if entry.get("sha256"):
+                hashes[path] = str(entry["sha256"])
+        return hashes
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
 def stable_id(prefix: str, *parts: Any) -> str:
     value = "|".join(str(part or "").strip().upper() for part in parts)
     return f"{prefix}_{hashlib.sha256(value.encode()).hexdigest()[:20]}"
@@ -2492,6 +2520,11 @@ class CompanyContextBuilder:
     def _source_manifest(self) -> Dict[str, Any]:
         if self._source_manifest_cache is not None:
             return self._source_manifest_cache
+        runtime_hashes = verified_runtime_file_hashes(self.data_root)
+
+        def source_hash(path: Path) -> str:
+            return runtime_hashes.get(path.resolve()) or file_sha256(path)
+
         self._source_manifest_cache = {
             "generated_on": str(date.today()),
             "identity_definition": {
@@ -2502,7 +2535,7 @@ class CompanyContextBuilder:
             "files": {
                 name: {
                     "path": str(path),
-                    "sha256": file_sha256(path),
+                    "sha256": source_hash(path),
                     "size_bytes": path.stat().st_size,
                 }
                 for name, path in self.paths.items()
@@ -2512,13 +2545,13 @@ class CompanyContextBuilder:
         if self.fydp_budget_path.exists():
             self._source_manifest_cache["fydp_budget"] = {
                 "path": str(self.fydp_budget_path),
-                "sha256": file_sha256(self.fydp_budget_path),
+                "sha256": source_hash(self.fydp_budget_path),
                 "size_bytes": self.fydp_budget_path.stat().st_size,
             }
         if self.dod_budget_path.exists():
             self._source_manifest_cache["dod_budget"] = {
                 "path": str(self.dod_budget_path),
-                "sha256": file_sha256(self.dod_budget_path),
+                "sha256": source_hash(self.dod_budget_path),
                 "size_bytes": self.dod_budget_path.stat().st_size,
             }
         self._source_manifest_cache["fydp_platform_linkages"] = {
