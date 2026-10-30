@@ -85,6 +85,15 @@ class OpportunityPilotTests(unittest.TestCase):
         for cage, episode, limit in [("45934'", None, 10), ('45934', "bad'", 10), ('45934', None, 1000)]:
             with self.assertRaises(ValueError): repo.company_events(cage, episode, limit)
 
+    def test_negative_future_forecasts_are_withheld_without_suppressing_real_requests(self):
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
+        repo.manifest=lambda:{'as_of':'2026-10-30','tables':{'dla_forecasts':{}}}
+        repo.opportunities('CAGE:45934',24,0,False,'items')
+        self.assertIn("forecast_qty<0",aws.sql)
+        self.assertIn("DATE '2026-10-30'",aws.sql)
+        self.assertIn("o.lane<>'source_item_forecasts' OR fq.niin IS NULL",aws.sql)
+        self.assertIn("JOIN safe.company_matches",aws.sql)
+
     def test_registry_relationships_are_exact_and_distinguish_replacements(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
         repo.manifest=lambda:{'tables':{'company_registry':{}}}

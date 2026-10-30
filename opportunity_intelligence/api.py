@@ -76,6 +76,13 @@ class Repository:
    if 'company_notice_item_prices' in self.manifest()['tables']:
     join+=' LEFT JOIN '+self.table('company_notice_item_prices')+' np ON np.company_id=m.company_id AND np.episode_id=o.episode_id AND np.record_hash=o.record_hash'
     extra+=',np.items_json notice_item_pricing_json,np.interpretation notice_item_price_interpretation'
+  if 'dla_forecasts' in self.manifest()['tables']:
+   asof=self.manifest().get('as_of')
+   if not asof or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',asof):raise ValueError('Invalid release as-of date')
+   # Negative monthly source quantities are unresolved data, not purchases or
+   # offsets that can silently be netted into a positive sales scenario.
+   join+=' LEFT JOIN (SELECT DISTINCT niin FROM '+self.table('dla_forecasts')+" WHERE forecast_qty<0 AND try_cast(substr(cast(forecast_month AS varchar),1,10) AS date)>=DATE '"+asof+"') fq ON fq.niin=json_extract_scalar(o.value_inputs_json,'$.niin')"
+   where+=" AND (o.lane<>'source_item_forecasts' OR fq.niin IS NULL)"
   selected='SELECT DISTINCT o.*,d.stage,d.decision_json'+extra+' FROM '+o+' o JOIN '+d+' d ON o.episode_id=d.episode_id'+join+' WHERE '+where
   ordering=("q.priority_score DESC," if company else '')+"CASE q.stage WHEN 'qualification_opening' THEN 0 WHEN 'teaming_opening' THEN 0 WHEN 'published_requirement' THEN 1 WHEN 'emerging_demand' THEN 2 ELSE 3 END,CASE WHEN q.lane='source_item_forecasts' THEN 1 ELSE 0 END,q.window_end ASC NULLS LAST,q.episode_id"
   return self.rows('SELECT q.* FROM ('+selected+') q ORDER BY '+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit))
@@ -178,7 +185,7 @@ def create_router(verify_principal,repository=None):
  def innovation(limit:int=Query(20,ge=1,le=100)):return {'records':call(repo.innovation,limit),'status':'Published agency engagement evidence; no company qualification or award probability inferred'}
  @router.get('/methodology')
  def methodology():
-  m=repo.manifest();return dict(m['rules'],release=m['run_id'],company_matching={'evidence':'Observed award and reported supplier work, exact item references, program/vehicle links and specific technical scope. Classification overlap alone is insufficient.','entry_routes':'Named prior suppliers, defined service work or explicit development/source-opening context take priority. Other hardware similarity is market context until an entry route is evidenced.','qualification':'A company/item association is separate from manufacturing rights, procurement approval, current configuration, eligibility and capacity.'},values={'historical_benchmarks':'Revision-resolved award net obligations and reported outsourced-package amounts. Approximate median and observed range use the complete comparison group; recent/extreme awards form a short preview.','unit_prices':'Exact company/item reference prices are unit evidence. Missing quantities do not produce totals. Forecast quantity × price is an alternative gross scenario, not company revenue.','allocation':'Prime/program funding is context. Company-addressable value remains unallocated without workshare evidence.'})
+  m=repo.manifest();return dict(m['rules'],release=m['run_id'],company_matching={'evidence':'Observed award and reported supplier work, exact item references, program/vehicle links and specific technical scope. Classification overlap alone is insufficient.','entry_routes':'Named prior suppliers, defined service work or explicit development/source-opening context take priority. Other hardware similarity is market context until an entry route is evidenced.','qualification':'A company/item association is separate from manufacturing rights, procurement approval, current configuration, eligibility and capacity.'},values={'historical_benchmarks':'Revision-resolved award net obligations and reported outsourced-package amounts. Approximate median and observed range use the complete comparison group; recent/extreme awards form a short preview.','unit_prices':'Exact company/item reference prices are unit evidence. Missing quantities do not produce totals. Forecast quantity × price is an alternative gross scenario, not company revenue.','allocation':'Prime/program funding is context. Company-addressable value remains unallocated without workshare evidence.','source_quality':'Item forecasts with negative future monthly quantities are withheld from actionable feeds until reconciled; published purchase requests remain separate evidence.'})
  @router.get('/opportunities')
  def opportunities(company:str=None,limit:int=Query(20,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000),kind:str=Query('all',pattern='^(all|work|items)$')):
   return {'records':call(repo.opportunities,company,limit,offset,False,kind),'release':repo.manifest()['run_id'],'status':'authenticated_evidence_feed','eligibility':'Company fit, access and qualification require evidence; these are not win probabilities.'}
@@ -224,5 +231,5 @@ def create_router(verify_principal,repository=None):
  def benchmark(topic_id:str):return {'records':call(repo.benchmark,topic_id)}
  @router.get('/sources')
  def sources():
-  m=repo.manifest();return {'release':m['run_id'],'as_of':m['as_of'],'sources':m['source_status'],'limitations':m['limitations']}
+  m=repo.manifest();return {'release':m['run_id'],'as_of':m['as_of'],'sources':m['source_status'],'limitations':m['limitations']+['Forecasts containing negative future monthly quantities are withheld from actionable feeds pending source reconciliation; positive months are not silently priced alone.']}
  return router

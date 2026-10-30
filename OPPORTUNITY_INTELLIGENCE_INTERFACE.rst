@@ -96,3 +96,5 @@ adds no global personalization or feedback-learning service.
 Exact registry relationship reader
 ----------------------------------
 GET /companies/<CAGE>/relationships returns bounded parent/child edges from the native parent_cage field and separately typed replacement_cage edges. Each has stable relationship_id, content record_hash, subject/object CAGEs and names, evidence_field, source_last_update and record_coverage. Response provenance includes the immutable registry table hash, source bindings and release. No name matching or ultimate-parent consolidation occurs. An empty available result means no valid retained exact edge; it does not establish that the company is independent. These candidate relationships do not transfer qualifications or authorize financial consolidation.
+
+Source quality: item forecasts containing negative monthly quantities in the future horizon are withheld from actionable read feeds pending reconciliation. Published item purchase requests are separate and remain eligible. Source rows stay retained; no cancellation or negative sale value is inferred.
