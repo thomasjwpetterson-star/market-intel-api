@@ -1,7 +1,7 @@
 """Authenticated FastAPI adapter for the shared AWS read model.
 The application must inject its existing verified-principal dependency.
 """
-import json,re,time
+import hashlib,json,re,time
 from pathlib import Path
 from functools import lru_cache
 from .aws import AWS,BUCKET,PREFIX,DATABASE
@@ -22,6 +22,23 @@ class Repository:
  def company(self,cage):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
   return self.rows('SELECT * FROM '+self.table('company_registry')+" WHERE cage_code='"+cage+"'")
+ def relationships(self,cage,limit=50,offset=0):
+  if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
+  if not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid pagination')
+  if 'company_registry' not in self.manifest()['tables']:return []
+  registry=self.table('company_registry')
+  sql="""WITH candidates AS(SELECT * FROM REGISTRY WHERE cage_code='CAGEVALUE' OR upper(trim(parent_cage))='CAGEVALUE' OR upper(trim(replacement_cage))='CAGEVALUE'),
+  edges AS(SELECT cage_code subject_cage,upper(trim(parent_cage)) object_cage,company_name subject_name,dla_last_update source_last_update,'registered_parent_cage' relationship_type,'parent_cage' evidence_field FROM candidates
+  UNION ALL SELECT cage_code,upper(trim(replacement_cage)),company_name,dla_last_update,'replacement_cage','replacement_cage' FROM candidates)
+  SELECT e.*,p.company_name object_name,CASE WHEN p.cage_code IS NULL THEN 'referenced_cage_not_in_registry' ELSE 'both_registry_records_available' END record_coverage
+  FROM edges e LEFT JOIN REGISTRY p ON p.cage_code=e.object_cage
+  WHERE regexp_like(e.object_cage,'^[A-Z0-9]{5}$') AND e.object_cage NOT IN ('00000','99999','XXXXX','ZZZZZ') AND e.subject_cage<>e.object_cage AND (e.subject_cage='CAGEVALUE' OR e.object_cage='CAGEVALUE')
+  ORDER BY e.relationship_type,e.subject_cage,e.object_cage OFFSET OFFSETVALUE LIMIT LIMITVALUE""".replace('REGISTRY',registry).replace('CAGEVALUE',cage).replace('OFFSETVALUE',str(offset)).replace('LIMITVALUE',str(limit))
+  rows=self.rows(sql)
+  for row in rows:
+   key='|'.join(str(row.get(k) or '') for k in ('relationship_type','subject_cage','object_cage'))
+   row['relationship_id']=hashlib.sha256(key.encode()).hexdigest();row['record_hash']=hashlib.sha256(json.dumps(row,sort_keys=True).encode()).hexdigest()
+  return rows
  def companies(self,query,limit=20):
   if not query or len(query)>100 or not 1<=limit<=100:raise ValueError('Invalid company search')
   term=query.upper().replace("'","''");exact=bool(re.fullmatch('[A-Z0-9]{5}',query.upper()))
@@ -153,6 +170,10 @@ def create_router(verify_principal,repository=None):
   records=call(repo.company,cage)
   if not records:raise HTTPException(status_code=404,detail='CAGE not found in the bound sources')
   return records[0]
+ @router.get('/companies/{cage}/relationships')
+ def relationships(cage:str,limit:int=Query(50,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
+  m=repo.manifest();table=m['tables'].get('company_registry',{})
+  return {'records':call(repo.relationships,cage,limit,offset),'release':m['run_id'],'availability':'available' if table else 'not_published','source_provenance':{'table':'company_registry','table_sha256':table.get('sha256'),'sources':{k:v for k,v in m.get('source_status',{}).items() if k in ('cage_registry','sam_company_capabilities')}},'interpretation':'Exact registry relationship candidates from parent_cage or replacement_cage. Replacements are not ownership. No ultimate-parent consolidation, name similarity or transfer of technical qualifications is inferred.'}
  @router.get('/innovation-signals')
  def innovation(limit:int=Query(20,ge=1,le=100)):return {'records':call(repo.innovation,limit),'status':'Published agency engagement evidence; no company qualification or award probability inferred'}
  @router.get('/methodology')

@@ -22,6 +22,7 @@ Main FastAPI mounts /opportunity-intelligence. The browser uses same-origin /api
 
 GET /companies?q=<name-prefix-or-CAGE>&limit=20
 GET /companies/<CAGE>
+GET /companies/<CAGE>/relationships?limit=50&offset=0
 GET /opportunities?company=CAGE:<CAGE>&kind=work|items|all&limit=24&offset=0
 GET /companies/<CAGE>/monitoring?limit=24&offset=0
 GET /opportunities/<episode_id>
@@ -78,3 +79,20 @@ Complete native derivation
 The native pipeline aggregates all source award actions before site attribution, retains parent award/agency identities, and connects subcontract recipients through unambiguous UEI/CAGE mappings. Supplier episodes group current funded work by prime, programme/vehicle, functional scope and work mode, rather than repeating one lead for every task order. Explicit new work phases on older contracts are included; administrative and funding-only changes are excluded. Historical supplier reports must predate the signal. Current reports are downstream-placement evidence, not proof that the full package remains open. All underlying prime, supplier and placement records are paginated through supplier-evidence.
 
 Historical value cohorts retain all comparator awards in a normalized observation table, with a short preview and full paginated drilldown. Approximate medians and observed ranges describe historical award packages. Exact item prices without quantities stay unit prices. Company-addressable value is not obtained by dividing or allocating a prime/programme total.
+
+Personal review overlay (separate consumer contract)
+---------------------------------------------------
+The company-home owner stores focus, description, interests, saved status,
+qualify/disqualify decision and notes as an authenticated user-owned overlay.
+These are personal judgments, not changes to source demand or global stages,
+and are not automatic engine-training inputs. A future reader can join by
+company_id/site CAGE, episode_id (or explicit entity type and stable source ID),
+saved record_hash/release and updatedAt. Retain the decision when evidence
+changes, expose a review-needed flag and link the saved/current evidence
+versions. Structured rejection reasons can support explicit relevance filters;
+company-team policy requires separate ownership/authorization. This release
+adds no global personalization or feedback-learning service.
+
+Exact registry relationship reader
+----------------------------------
+GET /companies/<CAGE>/relationships returns bounded parent/child edges from the native parent_cage field and separately typed replacement_cage edges. Each has stable relationship_id, content record_hash, subject/object CAGEs and names, evidence_field, source_last_update and record_coverage. Response provenance includes the immutable registry table hash, source bindings and release. No name matching or ultimate-parent consolidation occurs. An empty available result means no valid retained exact edge; it does not establish that the company is independent. These candidate relationships do not transfer qualifications or authorize financial consolidation.

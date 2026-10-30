@@ -85,6 +85,18 @@ class OpportunityPilotTests(unittest.TestCase):
         for cage, episode, limit in [("45934'", None, 10), ('45934', "bad'", 10), ('45934', None, 1000)]:
             with self.assertRaises(ValueError): repo.company_events(cage, episode, limit)
 
+    def test_registry_relationships_are_exact_and_distinguish_replacements(self):
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
+        repo.manifest=lambda:{'tables':{'company_registry':{}}}
+        repo.relationships('45934',25,0)
+        self.assertIn("upper(trim(parent_cage))='45934'",aws.sql)
+        self.assertIn("'registered_parent_cage' relationship_type",aws.sql)
+        self.assertIn("'replacement_cage','replacement_cage'",aws.sql)
+        self.assertNotIn('LIKE',aws.sql)
+        self.assertNotIn('parent_name',aws.sql)
+        with self.assertRaises(ValueError):repo.relationships("45934'",25,0)
+        with self.assertRaises(ValueError):repo.relationships('45934',1000,0)
+
     def test_invalid_company_or_kind_rejected(self):
         repo = Repository(CaptureAWS()); repo.table = lambda name: 'safe.' + name
         for company, kind in [("CAGE:45934' OR 1=1", 'work'), ('CAGE:45934', 'arbitrary')]:
