@@ -42,6 +42,7 @@ class Repository:
    if not re.fullmatch(r'(?:CAGE:[A-Z0-9]{5}|UEI:[A-Z0-9]{12})',company):raise ValueError('Invalid company identifier')
    join=' JOIN '+self.table('company_matches')+" m ON m.episode_id=o.episode_id AND m.company_id='"+company+"'";where+=' AND m.opportunity_hash=o.record_hash'
    extra=',m.match_id,m.match_route,m.matched_terms,m.sample_evidence_id,m.company_evidence_caveat'
+   extra+=",least(100.0,(CASE d.stage WHEN 'published_requirement' THEN 55 WHEN 'qualification_opening' THEN 45 WHEN 'teaming_opening' THEN 50 WHEN 'emerging_demand' THEN 40 WHEN 'source_forecast' THEN 25 ELSE 10 END)+least(15.0,m.score/6.0)+least(20.0,5.0*ln(1.0+greatest(coalesce(o.value_median,0.0),0.0)/100000.0))+(CASE WHEN o.window_end IS NOT NULL THEN 5 ELSE 0 END)) priority_score,'Demand stage, observed company scope fit, supported package value and dated engagement window; not a win probability' priority_basis"
    if 'company_work_matches' in self.manifest()['tables']:
     join+=' LEFT JOIN '+self.table('company_work_matches')+' cw ON cw.company_id=m.company_id AND cw.episode_id=o.episode_id AND cw.opportunity_hash=o.record_hash'
     extra+=',cw.doc_id matched_doc_id,cw.work_text matched_work_text,cw.source_kind matched_source_kind,cw.last_observed matched_work_date'
@@ -52,7 +53,7 @@ class Repository:
     join+=' LEFT JOIN '+self.table('company_item_valuations')+' v ON v.company_id=m.company_id AND v.episode_id=o.episode_id AND v.record_hash=o.record_hash'
     extra+=',v.quantity forecast_quantity,v.catalogue_unit forecast_catalogue_unit,v.government_reference_unit_price,v.supplier_average_unit_price,v.government_reference_lot_scenario,v.supplier_average_lot_scenario,v.supplier_average_last_sale,v.monthly_evidence_json,v.catalogue_evidence_json'
   selected='SELECT DISTINCT o.*,d.stage,d.decision_json'+extra+' FROM '+o+' o JOIN '+d+' d ON o.episode_id=d.episode_id'+join+' WHERE '+where
-  ordering="CASE q.stage WHEN 'qualification_opening' THEN 0 WHEN 'teaming_opening' THEN 0 WHEN 'published_requirement' THEN 1 WHEN 'emerging_demand' THEN 2 ELSE 3 END,CASE WHEN q.lane='source_item_forecasts' THEN 1 ELSE 0 END,q.window_end ASC NULLS LAST,q.episode_id"
+  ordering=("q.priority_score DESC," if company else '')+"CASE q.stage WHEN 'qualification_opening' THEN 0 WHEN 'teaming_opening' THEN 0 WHEN 'published_requirement' THEN 1 WHEN 'emerging_demand' THEN 2 ELSE 3 END,CASE WHEN q.lane='source_item_forecasts' THEN 1 ELSE 0 END,q.window_end ASC NULLS LAST,q.episode_id"
   return self.rows('SELECT q.* FROM ('+selected+') q ORDER BY '+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit))
 
  def detail(self,eid):
@@ -80,6 +81,20 @@ class Repository:
  def price_lines(self,episode_id):
   if not re.fullmatch('[a-f0-9]{64}',episode_id):raise ValueError('Invalid opportunity identifier')
   return self.rows('SELECT * FROM '+self.table('notice_price_links')+" WHERE episode_id='"+episode_id+"' ORDER BY pricing_record_id LIMIT 100")
+
+ def value_evidence(self,episode_id):
+  rows=self.detail(episode_id)
+  if not rows:return {}
+  o=rows[0]
+  return dict(episode_id=episode_id,record_hash=o['record_hash'],value_low=o.get('value_low'),value_median=o.get('value_median'),value_high=o.get('value_high'),value_basis=o.get('value_basis'),value_scope=o.get('value_scope'),inputs=rules.decode(o.get('value_inputs_json')),source_url=o.get('source_url'),source_evidence_id=o.get('source_evidence_id'))
+
+ def company_history(self,cage,kind,limit=50):
+  if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
+  if kind not in ('awards','subcontracts','coverage'):raise ValueError('Invalid history kind')
+  name={'awards':'company_award_facts','subcontracts':'company_subcontract_facts','coverage':'company_history_coverage'}[kind]
+  if name not in self.manifest()['tables']:return []
+  ordering={'awards':'latest_action_date DESC,award_key','subcontracts':'event_date DESC,report_key','coverage':'company_id'}[kind]
+  return self.rows('SELECT * FROM '+self.table(name)+" WHERE company_id='CAGE:"+cage+"' ORDER BY "+ordering+' LIMIT '+str(max(1,min(limit,100))))
 
  def award(self,award_id):
   if not re.fullmatch('[a-f0-9]{64}',award_id):raise ValueError('Invalid award identifier')
@@ -112,7 +127,7 @@ def create_router(verify_principal,repository=None):
  def methodology():return repo.manifest()['rules']
  @router.get('/opportunities')
  def opportunities(company:str=None,limit:int=Query(20,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000),kind:str=Query('all',pattern='^(all|work|items)$')):
-  return {'records':call(repo.opportunities,company,limit,offset,False,kind),'release':repo.manifest()['run_id'],'status':'internal_candidate','eligibility':'Company fit, access and qualification require evidence; these are not win probabilities.'}
+  return {'records':call(repo.opportunities,company,limit,offset,False,kind),'release':repo.manifest()['run_id'],'status':'authenticated_evidence_feed','eligibility':'Company fit, access and qualification require evidence; these are not win probabilities.'}
  @router.get('/companies/{cage}/monitoring')
  def monitoring(cage:str,limit:int=Query(20,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise HTTPException(status_code=400,detail='Invalid CAGE')
@@ -126,6 +141,14 @@ def create_router(verify_principal,repository=None):
  def research(cage:str,limit:int=Query(20,ge=1,le=100)):return {'awards':call(repo.research,cage,limit),'topic_calls':call(repo.research_calls,cage,limit)}
  @router.get('/opportunities/{episode_id}/price-evidence')
  def prices(episode_id:str):return {'records':call(repo.price_lines,episode_id),'interpretation':'Historical line evidence; no current requirement total or company value is inferred'}
+ @router.get('/opportunities/{episode_id}/value-evidence')
+ def values(episode_id:str):return call(repo.value_evidence,episode_id)
+ @router.get('/companies/{cage}/awards')
+ def company_awards(cage:str,limit:int=Query(50,ge=1,le=100)):return {'records':call(repo.company_history,cage,'awards',limit)}
+ @router.get('/companies/{cage}/subcontracts')
+ def company_subcontracts(cage:str,limit:int=Query(50,ge=1,le=100)):return {'records':call(repo.company_history,cage,'subcontracts',limit)}
+ @router.get('/companies/{cage}/coverage')
+ def company_coverage(cage:str):return {'records':call(repo.company_history,cage,'coverage',1),'release':repo.manifest()['run_id']}
  @router.get('/work-evidence/{doc_id}')
  def work_evidence(doc_id:str):return {'records':call(repo.work_evidence,doc_id)}
  @router.get('/research-topics')
