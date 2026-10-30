@@ -34,6 +34,7 @@ GET /companies/<CAGE>/subcontracts
 GET /companies/<CAGE>/coverage
 GET /companies/<CAGE>/events?episode_id=<optional>&limit=50&offset=0
 GET /work-evidence/<doc_id>
+GET /work-evidence/<doc_id>/sources?limit=25&offset=0
 GET /opportunities/<episode_id>/price-evidence
 GET /companies/<CAGE>/research
 GET /research-topics?cage=<CAGE>

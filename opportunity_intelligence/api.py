@@ -109,6 +109,26 @@ class Repository:
  def work_evidence(self,doc_id):
   if not re.fullmatch('[a-f0-9]{64}',doc_id):raise ValueError('Invalid document identifier')
   return self.rows('SELECT * FROM '+self.table('company_work')+" WHERE doc_id='"+doc_id+"' LIMIT 1")
+ def work_sources(self,doc_id,limit=25,offset=0):
+  if not re.fullmatch('[a-f0-9]{64}',doc_id):raise ValueError('Invalid document identifier')
+  if not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid pagination')
+  docs=self.work_evidence(doc_id)
+  if not docs:return []
+  doc=docs[0];kind=doc.get('source_kind');cid=doc.get('company_id') or ''
+  if kind not in ('prime_award','latest_prime_action','subaward_report') or not re.fullmatch(r'(?:CAGE:[A-Z0-9]{5}|UEI:[A-Z0-9]{12})',cid):return []
+  name='company_subcontract_facts' if kind=='subaward_report' else 'company_award_facts'
+  if name not in self.manifest()['tables']:return []
+  if kind=='subaward_report':condition="a.company_id='"+cid+"'";ordering='a.event_date DESC,a.report_key'
+  else:
+   condition=("a.cage_code='"+cid[5:]+"'") if cid.startswith('CAGE:') else ("a.uei='"+cid[4:]+"'")
+   ordering='a.latest_action_date DESC,a.award_key'
+   for field in ('psc','naics'):
+    condition+=" AND coalesce(a."+field+",'')='"+str(doc.get(field) or '').replace("'","''")+"'"
+  field='latest_description' if kind=='latest_prime_action' else 'work_text'
+  norm=lambda value:"regexp_replace(upper(regexp_replace(coalesce("+value+",''),'^[0-9]{8,12}!\\s*','')),'[^A-Z0-9]','')"
+  text="'"+str(doc.get('work_text') or '').replace("'","''")+"'"
+  condition+=' AND '+norm('a.'+field)+'='+norm(text)
+  return self.rows('SELECT a.* FROM '+self.table(name)+' a WHERE '+condition+' ORDER BY '+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit))
  def price_lines(self,episode_id):
   if not re.fullmatch('[a-f0-9]{64}',episode_id):raise ValueError('Invalid opportunity identifier')
   return self.rows('SELECT * FROM '+self.table('notice_price_links')+" WHERE episode_id='"+episode_id+"' ORDER BY pricing_record_id LIMIT 100")
@@ -223,6 +243,10 @@ def create_router(verify_principal,repository=None):
   return {'records':call(repo.company_events,cage,episode_id,limit,offset),'release':repo.manifest()['run_id'],'availability':'available' if 'company_opportunity_events' in repo.manifest()['tables'] else 'not_published','interpretation':'Source and matching changes, not user-managed sales stages; a missing snapshot is not a lost award'}
  @router.get('/work-evidence/{doc_id}')
  def work_evidence(doc_id:str):return {'records':call(repo.work_evidence,doc_id)}
+ @router.get('/work-evidence/{doc_id}/sources')
+ def work_sources(doc_id:str,limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
+  m=repo.manifest()
+  return {'records':call(repo.work_sources,doc_id,limit,offset),'release':m['run_id'],'availability':'available' if 'company_award_facts' in m['tables'] and 'company_subcontract_facts' in m['tables'] else 'not_published','interpretation':'Underlying native records for this exact retained company scope, paginated. Award net obligations are lifetime observed award amounts; supplier reports and revisions are not additive revenue or a future opportunity value.'}
  @router.get('/research-topics')
  def topics(cage:str=None,limit:int=Query(20,ge=1,le=100)):return {'records':call(repo.topics,cage,limit),'fit':'Capability retrieval; applicant eligibility is not established'}
  @router.get('/research-awards/{award_id}')

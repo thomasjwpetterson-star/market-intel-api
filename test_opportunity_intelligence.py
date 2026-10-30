@@ -106,6 +106,17 @@ class OpportunityPilotTests(unittest.TestCase):
         with self.assertRaises(ValueError):repo.relationships("45934'",25,0)
         with self.assertRaises(ValueError):repo.relationships('45934',1000,0)
 
+    def test_company_scope_drilldown_uses_exact_native_scope_and_company(self):
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
+        repo.manifest=lambda:{'tables':{'company_subcontract_facts':{}}}
+        repo.work_evidence=lambda doc:[{'company_id':'CAGE:45934','source_kind':'subaward_report','work_text':"PUMP FUEL BOOST"}]
+        repo.work_sources('a'*64,25,0)
+        self.assertIn("a.company_id='CAGE:45934'",aws.sql)
+        self.assertIn("'PUMP FUEL BOOST'",aws.sql)
+        self.assertIn('safe.company_subcontract_facts',aws.sql)
+        self.assertIn('OFFSET 0 LIMIT 25',aws.sql)
+        with self.assertRaises(ValueError):repo.work_sources("bad'",25,0)
+
     def test_invalid_company_or_kind_rejected(self):
         repo = Repository(CaptureAWS()); repo.table = lambda name: 'safe.' + name
         for company, kind in [("CAGE:45934' OR 1=1", 'work'), ('CAGE:45934', 'arbitrary')]:
