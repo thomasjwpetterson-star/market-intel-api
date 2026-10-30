@@ -69,8 +69,10 @@ class Repository:
   if not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid pagination')
   o=self.table('opportunities');d=self.table('demand_decisions');where="d.stage IN ('historical_watch','repeat_demand_inference')" if monitoring_only else "d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context','historical_watch','repeat_demand_inference')";join='';extra=''
   if kind not in ('all','work','items'):raise ValueError('Invalid opportunity kind')
-  if kind=='items':where+=" AND o.lane IN ('published_item_procurement','source_item_forecasts')"
-  if kind=='work':where+=" AND o.lane NOT IN ('published_item_procurement','source_item_forecasts')"
+  if company and not re.fullmatch(r'(?:CAGE:[A-Z0-9]{5}|UEI:[A-Z0-9]{12})',company):raise ValueError('Invalid company identifier')
+  quality='opportunity_quality_reviews' in self.manifest()['tables']
+  item_condition="(o.lane IN ('published_item_procurement','source_item_forecasts')"+(" OR coalesce(qr.category_override='items',false)" if quality else '')+")"
+  category_where=(' AND '+item_condition if kind=='items' else " AND o.lane NOT IN ('published_item_procurement','source_item_forecasts')"+(" AND coalesce(qr.category_override,'')<>'items'" if quality else '') if kind=='work' else '')
   if company:
    if not re.fullmatch(r'(?:CAGE:[A-Z0-9]{5}|UEI:[A-Z0-9]{12})',company):raise ValueError('Invalid company identifier')
    join=' JOIN '+self.table('company_matches')+" m ON m.episode_id=o.episode_id AND m.company_id='"+company+"'";where+=' AND m.opportunity_hash=o.record_hash'
@@ -83,6 +85,7 @@ class Repository:
     if monitoring_only:where="(d.stage IN ('historical_watch','repeat_demand_inference') OR (cw.review_category='market_context' AND d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context'))) AND m.opportunity_hash=o.record_hash"
     else:where+=" AND (cw.review_category IS NULL OR cw.review_category<>'market_context')"
     if any(x['Name']=='company_entry_status' for x in self.manifest()['tables']['company_work_matches'].get('columns',[])):extra+=',cw.company_entry_status'
+    if any(x['Name']=='fit_verdict' for x in self.manifest()['tables']['company_work_matches'].get('columns',[])):extra+=',cw.fit_verdict,cw.fit_reason'
    if 'company_item_matches' in self.manifest()['tables']:
     join+=' LEFT JOIN '+self.table('company_item_matches')+' ci ON ci.company_id=m.company_id AND ci.episode_id=o.episode_id AND ci.opportunity_hash=o.record_hash'
     extra+=',ci.niin item_reference_niin,ci.reference_description item_reference_description,ci.reference_part_number item_reference_part_number'
@@ -92,6 +95,13 @@ class Repository:
    if 'company_notice_item_prices' in self.manifest()['tables']:
     join+=' LEFT JOIN '+self.table('company_notice_item_prices')+' np ON np.company_id=m.company_id AND np.episode_id=o.episode_id AND np.record_hash=o.record_hash'
     extra+=',np.items_json notice_item_pricing_json,np.interpretation notice_item_price_interpretation'
+   if 'company_notice_source_evidence' in self.manifest()['tables']:
+    join+=' LEFT JOIN (SELECT company_id,episode_id,json_format(cast(array_agg(cast(row(evidence_id,niin,part_number,rncc_codes,rnvc_codes,rnsc_codes,source_snapshot_sha256,source_row,interpretation) AS row(evidence_id varchar,niin varchar,part_number varchar,rncc_codes varchar,rnvc_codes varchar,rnsc_codes varchar,source_snapshot_sha256 varchar,source_row bigint,interpretation varchar))) AS json)) source_evidence_json FROM '+self.table('company_notice_source_evidence')+' GROUP BY company_id,episode_id) se ON se.company_id=m.company_id AND se.episode_id=o.episode_id'
+    extra+=',se.source_evidence_json company_source_access_evidence_json'
+  if quality:
+   join+=' LEFT JOIN '+self.table('opportunity_quality_reviews')+' qr ON qr.episode_id=o.episode_id AND qr.record_hash=o.record_hash'
+   extra+=',qr.source_entry_kind,qr.verdict source_quality_verdict,qr.reason source_quality_reason,qr.passages_json source_quality_passages_json,qr.body_deadline source_body_deadline'
+  where+=category_where
   if 'dla_forecasts' in self.manifest()['tables']:
    asof=self.manifest().get('as_of')
    if not asof or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',asof):raise ValueError('Invalid release as-of date')

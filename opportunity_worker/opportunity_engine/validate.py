@@ -81,6 +81,15 @@ def validate(directory):
   check('no_future_supplier_average',c.execute("SELECT count(*) FROM company_item_valuations WHERE supplier_average_lot_scenario IS NOT NULL AND substr(supplier_average_last_sale,1,10)>?",[m['as_of']]).fetchone()[0]==0)
  if 'company_opportunity_events' in m['tables']:
   check('company_events_unique',c.execute('SELECT count(*)-count(DISTINCT event_id) FROM company_opportunity_events').fetchone()[0]==0)
+ if 'company_match_assessments' in m['tables']:
+  check('rejected_fit_not_served',c.execute("SELECT count(*) FROM company_matches m JOIN company_match_assessments a USING(company_id,episode_id) WHERE a.verdict='rejected'").fetchone()[0]==0)
+  check('unestablished_access_review_only',c.execute("SELECT count(*) FROM company_work_matches WHERE fit_verdict='review' AND review_category<>'market_context'").fetchone()[0]==0)
+  check('quality_assessments_unique',c.execute('SELECT count(*)-count(DISTINCT (company_id,episode_id)) FROM company_match_assessments').fetchone()[0]==0)
+ if 'opportunity_quality_reviews' in m['tables']:
+  check('source_conflicts_not_actionable',c.execute("SELECT count(*) FROM opportunity_quality_reviews q JOIN demand_decisions d USING(episode_id) WHERE q.verdict='source_review_required' AND d.stage NOT IN ('evidence_gap','resolved_or_elapsed')").fetchone()[0]==0)
+  check('source_review_has_quotes',c.execute("SELECT count(*) FROM opportunity_quality_reviews WHERE verdict='source_review_required' AND (nullif(reason,'') IS NULL OR json_array_length(passages_json)=0)").fetchone()[0]==0)
+ if 'company_notice_source_evidence' in m['tables']:
+  check('source_access_not_from_ambiguous_reference_codes',c.execute("SELECT count(*) FROM company_notice_source_evidence WHERE trim(upper(rnsc_codes))<>'A' OR trim(rnvc_codes)<>'2' OR NOT regexp_full_match(trim(rncc_codes),'[35 ,;|/]+')").fetchone()[0]==0)
  check('public_not_silently_released',m['public_release_approved'] is False)
  v=dict(passed=sum(x['passed'] for x in checks),failed=sum(not x['passed'] for x in checks),checks=checks,logic_sha256=m['logic_sha256']);(r/'validation.json').write_text(json.dumps(v,indent=2)+'\n');c.close()
  if v['failed']:raise ValueError('Failed release gates: '+', '.join(x['name'] for x in checks if not x['passed']))

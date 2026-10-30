@@ -12,13 +12,15 @@ VERSION='company-first-portable-v3'
 LOGIC_HASH=hashlib.sha256(Path(__file__).read_bytes()+(Path(__file__).parent/'scope_stopwords.json').read_bytes()).hexdigest()
 def words(s):return [ALIASES.get(w,w) for w in re.findall(r'[a-z][a-z0-9]*',html.unescape(re.sub('<[^>]+>',' ',str(s or ''))).lower())]
 def scope_terms(s):
+ from .quality_core import administrative_scope,NOISE
+ if administrative_scope(s):return []
  w=words(s)
  if len(w)>24 or len(str(s or ''))>260:return []
  if re.search(r'awards subcontracts for|may or may not be billed|see footnote',str(s or ''),re.I):return []
  # Classification labels are not delivered work. The presence of the word
  # manufacturing in an otherwise specific statement is not grounds to drop it.
  if re.search(r'(?i)^(?:search, detection, navigation|instrument manufacturing for|other aircraft parts and auxiliary|aircraft manufacturing$)',str(s or '').strip()):return []
- t=sorted(set(x for x in w if x not in STOP and len(x)>=3 and not x.isdigit()))
+ t=sorted(set(x for x in w if x not in STOP and x not in NOISE and len(x)>=3 and not x.isdigit()))
  if set(t)<=set('article first test testing contractor government environmental qual qualification option'.split()):return []
  return t if 2<=len(t)<=12 else []
 def scope_fragments(s):
@@ -72,6 +74,8 @@ def augment(directory,skip_work=False,reuse_features=False):
  c.create_function('scope_terms',scope_terms,['VARCHAR'],duckdb.list_type('VARCHAR'))
  c.create_function('scope_fragments',scope_fragments,['VARCHAR'],duckdb.list_type('VARCHAR'))
  c.create_function('scope_words',words,['VARCHAR'],duckdb.list_type('VARCHAR'))
+ from .quality_core import title_score
+ c.create_function('scope_title_score',title_score,['VARCHAR','VARCHAR'],'BIGINT')
  c.create_function('scope_nsns',nsns,['VARCHAR'],duckdb.list_type('VARCHAR'))
  c.create_function('scope_admissible',lambda w,t,s,l,stage,ctx,inc:admissible(w,{'title':t,'scope_text':s,'lane':l},stage,ctx,inc),['VARCHAR']*6+['BOOLEAN'],'BOOLEAN')
  work_columns={n for n,*_ in c.execute('DESCRIBE work').fetchall()}
@@ -115,21 +119,21 @@ def augment(directory,skip_work=False,reuse_features=False):
    AND list_max(list_transform(w.terms,t->list_position(o.tokens,t)))-list_min(list_transform(w.terms,t->list_position(o.tokens,t)))<=len(w.terms)+5
    AND hash(w.company_id)%"""+str(partitions)+'='+str(partition))
    c.execute("""CREATE OR REPLACE TEMP VIEW accepted_hits AS SELECT w.company_id,w.doc_id,w.work_text,w.source_kind,w.sample_evidence_id,w.evidence_digest,w.last_observed,w.terms,coalesce(w.programme_context_json,'') work_context,
-   o.episode_id,o.record_hash,o.lane,o.stage,o.customer_name,k.prior_reported_supplier,
+   o.episode_id,o.record_hash,o.lane,o.stage,o.customer_name,k.prior_reported_supplier,scope_title_score(w.work_text,o.title) title_fit_score,
    company_entry_route(w.work_text,o.title,o.scope_text,o.lane,k.prior_reported_supplier) company_entry_status,k.span
    FROM pre_hits k JOIN required w ON w.scope_id=k.scope_id JOIN targets o ON o.episode_id=k.episode_id
    WHERE scope_admissible(w.work_text,o.title,coalesce(o.scope_text,''),o.lane,o.stage,coalesce(w.programme_context_json,''),k.prior_reported_supplier)""")
    if partition==0:c.execute('CREATE TEMP TABLE hits AS SELECT * FROM accepted_hits WHERE false')
-   c.execute("INSERT INTO hits SELECT * FROM accepted_hits QUALIFY row_number() OVER(PARTITION BY company_id,episode_id ORDER BY len(terms) DESC,last_observed DESC,doc_id)=1")
+   c.execute("INSERT INTO hits SELECT * FROM accepted_hits QUALIFY row_number() OVER(PARTITION BY company_id,episode_id ORDER BY title_fit_score DESC,len(terms) DESC,last_observed DESC,doc_id)=1")
    c.execute('DROP VIEW accepted_hits');c.execute('DROP TABLE pre_hits')
    print('Company retrieval partition',partition+1,'/',partitions,flush=True)
   print('Company retrieval join estimate',estimate,flush=True)
   for unused in ('scopes','required','target_tokens','frequency','anchor_counts','chosen_terms','targets'):c.execute('DROP TABLE '+unused)
   print('Admissible work links',c.execute('SELECT count(*) FROM hits').fetchone()[0],flush=True)
-  work_sql="""WITH winners AS(SELECT company_id,episode_id,arg_max(doc_id,struct_pack(e:=CASE WHEN company_entry_status='entry_route_unestablished' THEN 0 ELSE 1 END,n:=len(terms),d:=last_observed,id:=doc_id)) doc_id FROM hits GROUP BY company_id,episode_id) SELECT sha256('"""+VERSION+"""|'||h.company_id||'|'||h.episode_id) match_id,h.company_id,h.episode_id,
+  work_sql="""WITH winners AS(SELECT company_id,episode_id,arg_max(doc_id,struct_pack(e:=CASE WHEN company_entry_status='entry_route_unestablished' THEN 0 ELSE 1 END,t:=title_fit_score,n:=len(terms),d:=last_observed,id:=doc_id)) doc_id FROM hits GROUP BY company_id,episode_id) SELECT sha256('"""+VERSION+"""|'||h.company_id||'|'||h.episode_id) match_id,h.company_id,h.episode_id,
    least(95.0,65.0+len(h.terms)*3)::DOUBLE score,'"""+VERSION+"""' match_route,array_to_string(h.terms,', ') matched_terms,
    CASE WHEN h.prior_reported_supplier THEN 'This site is named in the linked historical supplier reports for the same parent vehicle or reported program. New package availability, configuration, capacity and qualification remain checks.' ELSE 'Observed site work matches the defined functional scope. Configuration, technical access, qualification and unplaced work remain separate checks.' END company_evidence_caveat,h.sample_evidence_id,
-   sha256(concat_ws('|',h.company_id,h.episode_id,h.record_hash,h.evidence_digest,p.profile_hash,h.company_entry_status)) match_hash,h.record_hash opportunity_hash,p.profile_hash,h.doc_id,h.work_text,h.source_kind,h.last_observed,h.work_context,
+   sha256(concat_ws('|',h.company_id,h.episode_id,h.record_hash,h.evidence_digest,p.profile_hash,h.company_entry_status,h.doc_id,h.work_text)) match_hash,h.record_hash opportunity_hash,p.profile_hash,h.doc_id,h.work_text,h.source_kind,h.last_observed,h.work_context,
    CASE WHEN h.stage='historical_watch' THEN 'account_context' WHEN h.stage='repeat_demand_inference' THEN 'historical_watch' WHEN h.company_entry_status='entry_route_unestablished' THEN 'market_context' ELSE 'work_lead' END review_category,h.company_entry_status
    FROM hits h JOIN winners z USING(company_id,episode_id,doc_id) JOIN base_company_profiles p USING(company_id)
    WHERE h.span<=len(h.terms)+5 AND regexp_replace(lower(coalesce(h.customer_name,'')),'[^a-z0-9]','','g')<>regexp_replace(lower(p.company_name),'[^a-z0-9]','','g')"""

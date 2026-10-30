@@ -1,0 +1,62 @@
+import hashlib,json
+import duckdb
+from opportunity_engine import quality_core as q
+from opportunity_engine.quality import apply
+
+
+def test_rejects_actual_false_positive_history_but_retains_specific_work():
+ cases=[('PURCHASE OF MOBILE COMPUTERS','Digital Forensics Examiner Services'),('MODIFICATION TO REDUCE COST','Reusable Illumination System'),('CUSTOM COMPUTER PROGRAMMING SERVICES','Depot Maintenance Applications Consolidated3'),('FORM FIT','M4 Trainer Weapons'),('SUPPLIES/SERVICES, COST REIMBURSEMENT','Coverity Renewal'),('SOFTWARE UPGRADES','Blood bank disease testing'),('PROCUREMENT OF WEST COAST IT SERVICES','Jones Act Tanker Time Charter')]
+ for work,title in cases:
+  assert q.fit_review(work,title,work,'published_procurement','source_specific_route','sam_notices','45934')[0]=='rejected'
+ assert q.fit_review('FUEL BOOST PUMP','Repair aircraft fuel boost pump','Seeking sources with pump repair capability','published_procurement','source_specific_route','sam_notices','45934')[0]=='accepted'
+ assert q.fit_review('C130 mounting base','Potential supplier package: Mounting base','Current funded scope: C130 mounting base','new_prime_historical_supplier_flow','reported_supplier_relationship','supplier_flow','45934')[0]=='accepted'
+
+
+def test_notice_coherence_and_body_deadline_do_not_inherit_fresh_posted_date():
+ body='NSN: 7HH 5990 017271903 NOM: CIRCUIT CARD ASSEMB P/N: 802-05-0309-02/EB4143-H-02 Approved Design Cage Code: Lockheed Martin Corporation (CAGE 12050). Non-OEM sources must provide traceability information tracing material back to the OEM. Return the completed market survey via email by 2:00 PM EST on 18 August 2025.'
+ v=q.notice_quality('59 - ENCODER,SHAFT ANGLE',body,None,'2026-10-30','sam_notices')
+ assert v['verdict']=='source_review_required'
+ assert 'past response deadline' in v['reason'] and 'different product families' in v['reason']
+ assert v['body_deadline']=='2025-08-18'
+ assert v['category_override']=='items'
+ assert q.fit_review('CIRCUIT CARD ASSEMBLY','Circuit card assembly',body,'published_procurement','source_specific_route','sam_notices','45934')[0]=='review'
+ assert q.fit_review('CIRCUIT CARD ASSEMBLY','Circuit card assembly',body,'published_procurement','source_specific_route','sam_notices','12050')[0]=='accepted'
+ assert '80205030902' in q.required_parts('',body)
+ assert q.notice_quality('Circuit card assembly',body,'2026-12-01','2026-10-30','sam_notices')['body_deadline']=='2025-08-18'
+
+
+def test_sbir_relevance_is_not_eligibility_and_source_inquiry_is_not_new_qualification():
+ assert q.fit_review('Optical laser illumination','Reusable laser illumination system','Research topic','published_procurement','source_specific_route','sbir_topics','45934')[0]=='review'
+ body='No substitutes permitted. Source approval requests for alternate manufacturers will be considered.'
+ assert q.explicit_qualification(body)
+ assert q.notice_quality('Fuel boost pump',body,'2027-01-01','2026-10-30','sam_notices')['source_entry_kind']=='new_source_qualification'
+
+
+def test_quality_pipeline_keeps_evidence_and_filters_serving_edges(tmp_path):
+ c=duckdb.connect();tables={}
+ def put(name,sql):
+  path=tmp_path/(name+'.parquet');c.execute("COPY ("+sql+") TO '"+str(path)+"' (FORMAT PARQUET)");tables[name]={'path':str(path)}
+ put('opportunities',"""SELECT 'good' episode_id,'h1' record_hash,'Fuel boost pump repair' title,'Seeking fuel pump repair capability' scope_text,NULL::VARCHAR window_end,'sam_notices' source_name,'e1' source_evidence_id,'https://sam.gov/good' source_url UNION ALL SELECT 'bad','h2','Digital Forensics Examiner Services','Purchase of mobile computers',NULL,'sam_notices','e2','https://sam.gov/bad' UNION ALL SELECT 'stale','h3','Circuit card assembly','Return response by 18 August 2025',NULL,'sam_notices','e3','https://sam.gov/stale'""")
+ put('demand_decisions',"SELECT episode_id,record_hash source_record_hash,'PR13' rule_id,'qualification_opening' stage,'oldhash' decision_hash,'{\"stage\":\"qualification_opening\",\"unresolved\":[],\"negative_evidence\":[]}' decision_json FROM read_parquet('"+str(tmp_path/'opportunities.parquet')+"')")
+ put('company_matches',"""SELECT episode_id match_id,'CAGE:45934' company_id,episode_id,90.0 score,'work-route' match_route,'terms' matched_terms,'caveat' company_evidence_caveat,'evidence' sample_evidence_id,'matchhash' match_hash,record_hash opportunity_hash,'profilehash' profile_hash FROM read_parquet('"""+str(tmp_path/'opportunities.parquet')+"')")
+ put('company_work_matches',"""SELECT *,episode_id doc_id,CASE episode_id WHEN 'good' THEN 'FUEL BOOST PUMP' WHEN 'bad' THEN 'PURCHASE OF MOBILE COMPUTERS' ELSE 'CIRCUIT CARD ASSEMBLY' END work_text,'prime_award' source_kind,'2026-01-01' last_observed,'' work_context,'work_lead' review_category,'source_specific_route' company_entry_status FROM read_parquet('"""+str(tmp_path/'company_matches.parquet')+"')")
+ c.close();(tmp_path/'manifest.json').write_text(json.dumps(dict(tables=tables,sources={},as_of='2026-10-30',logic_sha256='old')));apply(tmp_path);c=duckdb.connect()
+ assert c.execute('SELECT episode_id FROM read_parquet(?) ORDER BY episode_id',[str(tmp_path/'company_matches.parquet')]).fetchall()==[('good',),('stale',)]
+ assert c.execute("SELECT stage FROM read_parquet(?) WHERE episode_id='stale'",[str(tmp_path/'demand_decisions.parquet')]).fetchone()[0]=='evidence_gap'
+ assert c.execute("SELECT work_text,verdict FROM read_parquet(?) WHERE episode_id='bad'",[str(tmp_path/'company_match_assessments.parquet')]).fetchone()==('PURCHASE OF MOBILE COMPUTERS','rejected')
+ assert c.execute('SELECT count(*) FROM read_parquet(?)',[str(tmp_path/'opportunity_quality_reviews.parquet')]).fetchone()[0]==3
+
+
+def test_exact_source_codes_require_named_part_and_nonconflicting_authorization(tmp_path):
+ c=duckdb.connect();tables={}
+ def put(name,sql):
+  p=tmp_path/(name+'.parquet');c.execute("COPY ("+sql+") TO '"+str(p)+"' (FORMAT PARQUET)");tables[name]={'path':str(p)}
+ put('opportunities',"SELECT 'inquiry' episode_id,'requirement-hash' record_hash,'Circuit card assembly' title,'NSN 5990017271903 NOM: CIRCUIT CARD ASSEMB P/N: AA-12 Approved source required. Non-OEM suppliers must provide traceability to OEM.' scope_text,'2027-01-01' window_end,'sam_notices' source_name,'e' source_evidence_id,'https://sam.gov/notice' source_url")
+ put('demand_decisions',"SELECT 'inquiry' episode_id,'requirement-hash' source_record_hash,'PR13' rule_id,'qualification_opening' stage,'dh' decision_hash,'{\"stage\":\"qualification_opening\"}' decision_json")
+ put('company_matches',"SELECT cage match_id,'CAGE:'||cage company_id,'inquiry' episode_id,90.0 score,'work-route' match_route,'circuit,card' matched_terms,'caveat' company_evidence_caveat,'evidence' sample_evidence_id,'mh' match_hash,'requirement-hash' opportunity_hash,'ph' profile_hash FROM (VALUES ('45934'),('07639'),('12050')) n(cage)")
+ put('company_work_matches',"SELECT *,match_id doc_id,'CIRCUIT CARD ASSEMBLY' work_text,'prime_award' source_kind,'2026-01-01' last_observed,'' work_context,'work_lead' review_category,'source_specific_route' company_entry_status FROM read_parquet('"+str(tmp_path/'company_matches.parquet')+"')")
+ put('catalogue',"SELECT cage_code,'017271903' niin,part_number,'3' rncc_codes,rnvc_codes,'A' rnsc_codes,cage_code evidence_id,'snapshot' source_snapshot_sha256,1::BIGINT source_row FROM (VALUES ('45934','AA-12','2'),('07639','AA-12','2,9'),('12050','DIFFERENT','2')) v(cage_code,part_number,rnvc_codes)")
+ catalogue=tables.pop('catalogue');c.close();(tmp_path/'manifest.json').write_text(json.dumps(dict(tables=tables,sources={'item_reference_facts':{'files':[catalogue]}},as_of='2026-10-30',logic_sha256='old')));apply(tmp_path);c=duckdb.connect()
+ assert c.execute('SELECT company_id FROM read_parquet(?)',[str(tmp_path/'company_notice_source_evidence.parquet')]).fetchall()==[('CAGE:45934',)]
+ result=dict(c.execute('SELECT company_id,review_category FROM read_parquet(?)',[str(tmp_path/'company_work_matches.parquet')]).fetchall())
+ assert result=={'CAGE:45934':'work_lead','CAGE:07639':'market_context','CAGE:12050':'market_context'}

@@ -112,7 +112,7 @@ The native comparator library holds 16,725,041 of 17,932,825 positive awards wit
 
 Retained product-reference evidence
 -----------------------------------
-A metadata-only Parquet audit confirmed 17,467,537 retained company/item reference rows, including CAGE, NIIN/NSN, part number, unit of issue, government reference price, supplier average price, last sale, RNCC, RNVC and RNSC, plus immutable source hash and row provenance. These codes must not be described as absent. The current price drilldown uses exact company/item references; it does not yet interpret these retained codes into a manufacturing/qualification decision. Document availability/data-rights fields are not in this particular normalized reference projection. Do not infer their absence from the wider source estate. Catalogue association, design-control evidence, procurement approval and usable technical data are distinct facts.
+A metadata-only Parquet audit confirmed 17,467,537 retained company/item reference rows, including CAGE, NIIN/NSN, part number, unit of issue, government reference price, supplier average price, last sale, RNCC, RNVC and RNSC, plus immutable source hash and row provenance. These codes must not be described as absent. The price drilldown uses exact company/item references. The source-access review additionally checks an exact notice NIIN and named part against nonconflicting RNSC A, RNVC 2 and RNCC 3/5 references; it retains code values, source hash and row. This supports procurement-source evidence, not data rights or transferable manufacturing qualification. Document availability/data-rights fields are not in this particular normalized reference projection. Do not infer their absence from the wider source estate. Catalogue association, design-control evidence, procurement approval and usable technical data are distinct facts.
 
 Supplier roles and source recency
 --------------------------------
@@ -123,3 +123,17 @@ A bounded recency audit found broad retained prime latest-action coverage throug
 Complete category exports
 --------------------------
 The opportunity page traverses every page of the selected company/category in bounded authenticated requests, with progress and cancellation. A changed release or repeated/invalid identifier aborts before download. Saved-only exports filter the complete current category using the user-owned saved IDs; they do not export archived or absent source records. CSV rows include company CAGE and evidence release, clean display titles, original source titles, provenance and value inputs. JSON evidence is preserved as valid JSON and spreadsheet formula starts are neutralized. This replaces the former loaded-card export restriction.
+
+Operational refresh metadata
+----------------------------
+GET /sources adds refresh.status and optional started_at, finished_at and refresh_mode. Values are running, succeeded, failed_preserved_previous_current_pointer, status_stale or unavailable. Error strings and infrastructure diagnostics are withheld. This operational report is separate from the pinned evidence release and does not advance source observation dates. The page rechecks while visible and offers an explicit reload for newer releases; it does not replace evidence underneath an open review or mix releases within exports.
+
+Source coherence and company-fit review
+---------------------------------------
+The native daily worker applies a versioned quality pass to the complete retrieved edge population. A bounded quality-only mode can re-review the same immutable published sources without re-extracting award actions. This is the actual backend used by /opportunities; there is no separate limited company sample or recommendation quota. Legacy pilot URLs redirect to the canonical page, and their proxy routes are compatibility aliases.
+
+opportunity_quality_reviews retains quoted conflicting nomenclature/response deadlines, the original source record hash and prior decision JSON. Conflicting current records become evidence_gap pending source revalidation, preserving their source records. A newly posted timestamp cannot make an old response date current. Existing-OEM sourcing inquiries are item demand; they are not automatically new-manufacturer qualification calls.
+
+company_match_assessments records accepted/review/rejected scope findings, selected company work/evidence IDs, requirement/profile hashes and policy hash. Administrative wording and incidental geographic/body overlap are rejected from serving links. Unknown OEM access and SBIR applicant/teaming eligibility remain review-only context. Direct reported-supplier lineage is retained for meaningful work streams; generic administrative descriptions do not establish such a package. These deterministic gates improve precision but do not constitute calibrated semantic accuracy or eligibility guarantees.
+
+Additive response fields when quality tables are published: source_entry_kind, source_quality_verdict/reason/passages_json, source_body_deadline, fit_verdict, fit_reason and company_source_access_evidence_json. Category overrides are applied before sorting/pagination, including CSV export. Qualification/data rights remain separate from reference-code authorization. Consumers must preserve unknown fields and the pinned release.

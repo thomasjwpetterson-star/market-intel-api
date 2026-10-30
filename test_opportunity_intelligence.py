@@ -59,6 +59,18 @@ class OpportunityPilotTests(unittest.TestCase):
         repo.opportunities('CAGE:45934',24,0,True)
         self.assertIn("cw.review_category='market_context'",aws.sql)
 
+    def test_source_quality_category_applies_before_pagination_and_preserves_unknowns(self):
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
+        repo.manifest=lambda:{'tables':{'opportunity_quality_reviews':{},'company_notice_source_evidence':{},'company_work_matches':{'columns':[{'Name':'fit_verdict'}]}}}
+        repo.opportunities('CAGE:45934',24,25,False,'work')
+        self.assertIn("coalesce(qr.category_override,'')<>'items'",aws.sql)
+        self.assertIn('qr.record_hash=o.record_hash',aws.sql)
+        self.assertIn('cw.fit_reason',aws.sql)
+        self.assertIn('source_evidence_json company_source_access_evidence_json',aws.sql)
+        self.assertIn('OFFSET 25 LIMIT 24',aws.sql)
+        repo.opportunities('CAGE:45934',24,0,False,'items')
+        self.assertIn("OR coalesce(qr.category_override='items',false)",aws.sql)
+
     def test_supplier_lineage_is_scoped_to_the_opportunity(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
         repo.manifest = lambda: {'tables': {'supplier_pull_prime_evidence': {}}}

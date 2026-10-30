@@ -1,9 +1,10 @@
 {
-  "version": "0.5.15",
-  "sha256": "8253e88c7a79d11c19cd2bea4a0c86a74c59aea6faba6e2df59a5be71bfc0d16",
-  "package_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=8253e88c7a79d11c19cd2bea4a0c86a74c59aea6faba6e2df59a5be71bfc0d16/mimir_opportunity_engine-0.5.15-py3-none-any.whl",
-  "dependency_bundle_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=bfbfb966d5c4e5fae202aba8c4bedffbe1959dee75c2ba40a16904e78741b300/mimir-0.5.15.gluewheels.zip",
-  "dependency_bundle_sha256": "bfbfb966d5c4e5fae202aba8c4bedffbe1959dee75c2ba40a16904e78741b300",
+  "mode": "quality",
+  "version": "0.5.17",
+  "sha256": "ca4596b03e3042e77673a7b4224bef2e4c1cd6d84bd2572c4ecc07eb193ed666",
+  "package_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=ca4596b03e3042e77673a7b4224bef2e4c1cd6d84bd2572c4ecc07eb193ed666/mimir_opportunity_engine-0.5.17-py3-none-any.whl",
+  "dependency_bundle_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=58cdd89f709dccde17637bdcaf1d3d83a30cd93160afad33d8216d2b99af6887/mimir-0.5.17.gluewheels.zip",
+  "dependency_bundle_sha256": "58cdd89f709dccde17637bdcaf1d3d83a30cd93160afad33d8216d2b99af6887",
   "dependencies": [
     {
       "file": "beautifulsoup4-4.15.0-py3-none-any.whl",
@@ -72,14 +73,14 @@
       "sha256": "0ed14ccfbf1c30a9072c7ca157e4319b70d65f623e91e7b32fadb2853431016e"
     },
     {
-      "file": "mimir_opportunity_engine-0.5.15-py3-none-any.whl",
+      "file": "mimir_opportunity_engine-0.5.17-py3-none-any.whl",
       "name": "mimir-opportunity-engine",
-      "version": "0.5.15",
-      "sha256": "8253e88c7a79d11c19cd2bea4a0c86a74c59aea6faba6e2df59a5be71bfc0d16"
+      "version": "0.5.17",
+      "sha256": "ca4596b03e3042e77673a7b4224bef2e4c1cd6d84bd2572c4ecc07eb193ed666"
     }
   ],
-  "run_id": "jr_30d9e2bee00b94d286e67c9e7ebf8fa7026a5cd8d2b4b176ddb7de145b54e6bb",
-  "recovery_key": "governance/opportunity_intelligence/sources/recovery_0_5_15/manifest.json",
+  "run_id": "jr_785da53aae7b25bf09132d7b0e6ffdedb0d28d936ed6555d371cbdccaabb80ca",
+  "recovery_key": "governance/opportunity_intelligence/sources/recovery_0_5_17/manifest.json",
   "role_unchanged": true,
   "source_permissions_unchanged": true,
   "schedule": "cron(30 2 * * ? *)",
@@ -93,12 +94,12 @@
   },
   "code_hashes": {
     "opportunity_engine/__init__.py": "311d2ebdc48d6b5d5ea4c6f48f126b89ab5ac1168003eafac03167866c21a097",
-    "opportunity_engine/__main__.py": "6ee6436ae6250fd08bd879d5d5dde87d6d10826f971e45bcfc025eab74cd4da2",
+    "opportunity_engine/__main__.py": "2fcdea8bed0b5ad917c236ef66128e66bcd8bacf76082a3addb4548bde8f9f30",
     "opportunity_engine/api.py": "fff6cfa99cc1376a5d3750d71d431d066f4e8b20170fb68671cc7767fa955896",
     "opportunity_engine/aws.py": "80bb2737b0566614959a3cc9d44b0f2bd9d3dfcef746327cad5d675fe0c2800a",
     "opportunity_engine/build.py": "068e149a878cb4edcd71259d59bd600f0164701b89ec5af3c228abfa0c2f0756",
     "opportunity_engine/checkpoint.py": "2e5ea87ed44127e122a4beba935f0cdef4947adba285536af6220d2dcbcf0fd2",
-    "opportunity_engine/company_enrichment.py": "c7838ee6b27be0bb7c453fbd85a199a89e9f04fae48ee44cf54abc7022d4b985",
+    "opportunity_engine/company_enrichment.py": "738607565700e0ef6b29bd07760358b78d377cca2b9feda6678d0f100903ceef",
     "opportunity_engine/company_history.py": "a54b45a3a2fcdd4a9f872b6b7407bb3210e51a85c386090697b5a8a66c315fc0",
     "opportunity_engine/company_history_distributed.py": "64bd97042da3d3888437aca49fc09cd54e97ec12d14001aa2196bacef70e2bd0",
     "opportunity_engine/demand_history.py": "4d85585141daf87f0115d30144676842693ba2e156dbad0f22a06106e25752ce",
@@ -118,10 +119,12 @@
     "opportunity_engine/native_sources.py": "535285b0b81878b0f579aa6a889843427d99d693bcdc09a57cb2af392dc64085",
     "opportunity_engine/procurement_rules.json": "457c125f23a01a36ee36e9174ec682849b6c351c285af46c7a6cc0511624603d",
     "opportunity_engine/publish.py": "1842d6be193efc4ba9a6a15b0ea575b85afd4d1e0d8d295d7763bc7ab0ae80da",
+    "opportunity_engine/quality.py": "953eee44e7410ee4486bc6245e1bac0e4fc460dc23d3184eb65a54e9e2d2c26a",
+    "opportunity_engine/quality_core.py": "52b4df30929f46c1e1311db49c7b247e3376c383a48f7b0e4bab8182c7f6880a",
     "opportunity_engine/registry.py": "4372797e5f3a7fec58526caf0450debf5c420dbddcc78d055cd57e536d4a3006",
     "opportunity_engine/rules.py": "829b6268f7aef9ee77e97a2dac1bddefc2328721b725edcb6c5b1119d6732ce7",
     "opportunity_engine/scope_stopwords.json": "1889521d5395576931a3d0872a27eb95cf5a86146a68a1c7efa4aa530d1662cd",
     "opportunity_engine/supplier_demand.py": "0b036835f49a2d97dd6b7c57b18e9a74ff4605ea43adaa94c63ff31bdf710800",
-    "opportunity_engine/validate.py": "cddc6239ac711604a973f73759edd88c648831d01734ea4e140c29631c1aaff6"
+    "opportunity_engine/validate.py": "98b710951bc0a65775772386338dfc0e4db89dec33b5247e3becb95cafa9d2a1"
   }
 }

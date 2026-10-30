@@ -12,12 +12,18 @@ from .company_history import rebuild as rebuild_history
 from .events import track as track_events
 from .checkpoint import archive_failed_attempt
 from .demand_history import rebuild as rebuild_demand,refresh_forecast_episodes
+from .quality import apply as apply_quality,review_current
 
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--from-current',action='store_true',required=True);ap.add_argument('--workdir',required=True);ap.add_argument('--as-of',default=datetime.datetime.now(datetime.timezone.utc).date().isoformat());ap.add_argument('--publish',action='store_true');ap.add_argument('--refresh',action='store_true');ap.add_argument('--source-bindings-key');args=ap.parse_args();a=AWS();root=Path(args.workdir).resolve();root.mkdir(parents=True,exist_ok=True)
+ ap=argparse.ArgumentParser();ap.add_argument('--from-current',action='store_true',required=True);ap.add_argument('--workdir',required=True);ap.add_argument('--as-of',default=datetime.datetime.now(datetime.timezone.utc).date().isoformat());ap.add_argument('--publish',action='store_true');ap.add_argument('--refresh',action='store_true');ap.add_argument('--review-current',action='store_true');ap.add_argument('--source-bindings-key');args=ap.parse_args();a=AWS();root=Path(args.workdir).resolve();root.mkdir(parents=True,exist_ok=True)
  pointer=json.loads(a.s3.get_object(Bucket=BUCKET,Key=PREFIX+'/current.json')['Body'].read());key=pointer['manifest_key']
  if not key.startswith(PREFIX+'/releases/'):raise ValueError('Invalid release pointer')
  m=json.loads(a.s3.get_object(Bucket=BUCKET,Key=key)['Body'].read())
+ if args.review_current:
+  if args.refresh or args.source_bindings_key:raise ValueError('Quality review reuses the published source snapshot')
+  out=review_current(m,root,a);track_events(out,m,a);v=validate(out)
+  if args.publish:publish(out)
+  print(json.dumps(dict(directory=str(out),validation_passed=v['passed'],published=args.publish)));return
  def download(uri,sha,suffix='.parquet'):
   if not uri.startswith('s3://'+BUCKET+'/'+PREFIX+'/'):raise ValueError('Unexpected source namespace')
   p=root/'sources'/(sha+suffix);p.parent.mkdir(exist_ok=True)
@@ -59,6 +65,7 @@ def main():
  build(seed,sb,out,args.as_of,inputs);validate_demand_integrity(out);enrich(out,inputs if 'governed_price_lines' in sources else None)
  if 'cage_registry' in sources:augment(out,[inputs])
  if 'company_work' in sources:augment_companies(out)
+ if 'company_work' in sources:apply_quality(out)
  if all(n in m.get('tables',{}) for n in ('opportunities','demand_decisions','company_matches')):track_events(out,m,a)
  try:
   v=validate(out)
