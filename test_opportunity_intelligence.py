@@ -62,7 +62,7 @@ class OpportunityPilotTests(unittest.TestCase):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
         repo.manifest = lambda: {'tables': {'supplier_pull_prime_evidence': {}}}
         repo.supplier_evidence('a' * 64, 'primes', 25, 0)
-        self.assertIn("WHERE episode_id='" + 'a' * 64 + "'", aws.sql)
+        self.assertIn("WHERE e.episode_id='" + 'a' * 64 + "'", aws.sql)
         self.assertIn('safe.supplier_pull_prime_evidence', aws.sql)
         with self.assertRaises(ValueError): repo.supplier_evidence('a' * 64, "bad'", 25, 0)
         with self.assertRaises(ValueError): repo.supplier_evidence("bad'", 'primes', 25, 0)
@@ -75,6 +75,16 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn('OFFSET 25 LIMIT 25', aws.sql)
         with self.assertRaises(ValueError): repo.cohort_awards("bad'", 25, 0)
         with self.assertRaises(ValueError): repo.cohort_awards('a' * 64, 1000, 0)
+
+    def test_supplier_roles_reuse_exact_profile_evidence_without_fuzzy_identity(self):
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
+        repo.manifest=lambda:{'tables':{'supplier_pull_report_evidence':{},'company_profiles':{'columns':[{'Name':n} for n in ['role_assessment','manufacturer_declared_awards','profile_hash']]}}}
+        repo.supplier_evidence('a'*64,'reports',25,0)
+        self.assertIn('p.company_id=e.supplier_company_id',aws.sql)
+        self.assertIn('p.role_assessment supplier_role_assessment',aws.sql)
+        self.assertIn('p.profile_hash supplier_profile_hash',aws.sql)
+        self.assertNotIn('LIKE',aws.sql)
+        self.assertNotIn('p.manufacturing_data_rights',aws.sql)
 
     def test_event_history_is_scoped_and_identifiers_are_validated(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name

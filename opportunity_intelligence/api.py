@@ -149,8 +149,14 @@ class Repository:
   if kind not in names or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid evidence request')
   name=names[kind]
   if name not in self.manifest()['tables']:return []
-  ordering='first_action_date DESC,award_key' if kind=='primes' else 'event_date DESC,evidence_id'
-  return self.rows('SELECT * FROM '+self.table(name)+" WHERE episode_id='"+episode_id+"' ORDER BY "+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit))
+  ordering='e.first_action_date DESC,e.award_key' if kind=='primes' else 'e.event_date DESC,e.evidence_id'
+  selection='e.*';join=''
+  profile_columns={c['Name'] for c in self.manifest()['tables'].get('company_profiles',{}).get('columns',[])}
+  if kind!='primes' and 'role_assessment' in profile_columns:
+   join=' LEFT JOIN '+self.table('company_profiles')+' p ON p.company_id=e.supplier_company_id'
+   for column in ('role_assessment','manufacturer_declared_awards','manufacturing_naics_awards','wholesale_naics_awards','manufacturer_uses_distributors_rows','manufacturing_data_rights','manufacturing_source_digest','profile_hash'):
+    if column in profile_columns:selection+=',p.'+column+' supplier_'+column
+  return self.rows('SELECT '+selection+' FROM '+self.table(name)+" e"+join+" WHERE e.episode_id='"+episode_id+"' ORDER BY "+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit))
 
  def cohort_awards(self,cohort_id,limit=25,offset=0):
   if not re.fullmatch('[a-f0-9]{64}',cohort_id):raise ValueError('Invalid value cohort')
@@ -239,7 +245,7 @@ def create_router(verify_principal,repository=None):
  def research(cage:str,limit:int=Query(20,ge=1,le=100)):return {'awards':call(repo.research,cage,limit),'topic_calls':call(repo.research_calls,cage,limit)}
  @router.get('/opportunities/{episode_id}/supplier-evidence')
  def supplier_evidence(episode_id:str,kind:str='primes',limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
-  return {'records':call(repo.supplier_evidence,episode_id,kind,limit,offset),'release':repo.manifest()['run_id'],'kind':kind,'interpretation':'Complete source lineage, paginated. Performance locations are not assumed to be procurement or production sites.'}
+  return {'records':call(repo.supplier_evidence,episode_id,kind,limit,offset),'release':repo.manifest()['run_id'],'kind':kind,'interpretation':'Complete source lineage, paginated. Role indicators reuse the exact company profile in this release; they are company-level evidence, not proof of manufacturing or approval for this package. Performance locations are not assumed to be procurement or production sites.'}
  @router.get('/opportunities/{episode_id}/price-evidence')
  def prices(episode_id:str):return {'records':call(repo.price_lines,episode_id),'release':repo.manifest()['run_id'],'interpretation':'Historical line evidence; no current requirement total or company value is inferred'}
  @router.get('/opportunities/{episode_id}/value-evidence')
