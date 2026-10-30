@@ -85,7 +85,14 @@ def review_current(previous,root,aws):
  m=copy.deepcopy(previous);m.update(run_id=r.name,reuse_parent_release=previous['run_id'],refresh_mode='quality_review_of_current_sources')
  for name,t in m['tables'].items():
   t['reuse_parent_binding']=True
-  if t.get('remote_binding'):continue
+  if t.get('remote_binding'):
+   # Cohort gates inspect every comparator summary locally; the 29m awards
+   # and 16m raw observations remain immutable remote bindings.
+   if name=='contract_value_cohorts':
+    for index,f in enumerate(m['sources'][t['source_binding']]['files']):
+     path=r/('cohort_source_'+str(index)+'.parquet');aws.s3.download_file(BUCKET,f['s3_uri'].split('/',3)[3],str(path));f['path']=str(path)
+     if hashlib.sha256(path.read_bytes()).hexdigest()!=f['sha256']:raise ValueError('Value-cohort source checksum changed')
+   continue
   uri=t['s3_uri']+'part-00000.parquet'
   if t.get('source_binding'):
    uri=next(f['s3_uri'] for f in m['sources'][t['source_binding']]['files'] if f['sha256']==t['sha256'])

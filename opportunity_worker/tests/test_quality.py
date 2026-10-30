@@ -60,3 +60,18 @@ def test_exact_source_codes_require_named_part_and_nonconflicting_authorization(
  assert c.execute('SELECT company_id FROM read_parquet(?)',[str(tmp_path/'company_notice_source_evidence.parquet')]).fetchall()==[('CAGE:45934',)]
  result=dict(c.execute('SELECT company_id,review_category FROM read_parquet(?)',[str(tmp_path/'company_work_matches.parquet')]).fetchall())
  assert result=={'CAGE:45934':'work_lead','CAGE:07639':'market_context','CAGE:12050':'market_context'}
+
+
+def test_portable_quality_review_fetches_cohort_files_for_full_release_gates(tmp_path,monkeypatch):
+ from opportunity_engine import quality
+ source=tmp_path/'cohort.parquet';c=duckdb.connect();c.execute("COPY (SELECT 1 awards) TO '"+str(source)+"' (FORMAT PARQUET)");c.close();sha=hashlib.sha256(source.read_bytes()).hexdigest()
+ previous={'run_id':'prior','sources':{'contract_value_cohorts':{'files':[{'s3_uri':'s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/cohort.parquet','sha256':sha}]}},'tables':{'contract_value_cohorts':{'remote_binding':True,'source_binding':'contract_value_cohorts'}}}
+ class S3:
+  def download_file(self,bucket,key,path):
+   Path=__import__('pathlib').Path;Path(path).write_bytes(source.read_bytes())
+ class AWS:s3=S3()
+ monkeypatch.setattr(quality,'apply',lambda directory:None)
+ out=quality.review_current(previous,tmp_path/'review',AWS());m=json.loads((out/'manifest.json').read_text());f=m['sources']['contract_value_cohorts']['files'][0]
+ assert __import__('pathlib').Path(f['path']).is_file()
+ assert hashlib.sha256(__import__('pathlib').Path(f['path']).read_bytes()).hexdigest()==sha
+ assert m['reuse_parent_release']=='prior'
