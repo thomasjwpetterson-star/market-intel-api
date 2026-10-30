@@ -9,6 +9,7 @@ import duckdb
 from . import quality_core as q
 from .aws import BUCKET,PREFIX
 from .company_enrichment import nsns
+from .delivery_modes import required_mode,mode_fit,PSC_REFERENCE
 POLICY_HASH=hashlib.sha256(q.LOGIC_HASH.encode()+Path(__file__).read_bytes()).hexdigest()
 
 
@@ -27,10 +28,14 @@ def apply(directory):
   count=c.execute('SELECT count(*) FROM read_parquet(?)',[str(p)]).fetchone()[0];m['tables'][name]=dict(path=str(p),sha256=hashlib.sha256(p.read_bytes()).hexdigest(),rows=count,columns=columns);c.read_parquet(str(p)).create_view('quality_'+name,replace=True);print('Quality output',name,count,flush=True)
  # Assess each source once; do not reparse long descriptions for each company.
  p=r/'source_quality.jsonl'
- rows=c.execute('SELECT episode_id,record_hash,title,scope_text,window_end,source_name,source_evidence_id,source_url FROM prior_opportunities').fetchall()
+ op_columns={n for n,*_ in c.execute('DESCRIBE prior_opportunities').fetchall()}
+ psc_expression='psc' if 'psc' in op_columns else 'NULL::VARCHAR'
+ rows=c.execute('SELECT episode_id,record_hash,title,scope_text,window_end,source_name,source_evidence_id,source_url,'+psc_expression+' requirement_psc FROM prior_opportunities').fetchall()
  with p.open('w') as f:
-  for eid,rh,title,body,end,source,evidence,url in rows:
+  for eid,rh,title,body,end,source,evidence,url,psc in rows:
    v=q.notice_quality(title,body,end,m['as_of'],source)
+   mode,mode_basis=required_mode(title,body,psc,source=='sam_notices')
+   v.update(required_delivery_mode=mode,delivery_mode_basis=mode_basis,requirement_psc=psc,psc_reference_url=PSC_REFERENCE)
    v.update(episode_id=eid,record_hash=rh,source_evidence_id=evidence,source_url=url,nomenclature=q.nomenclature(body),restricted_item=q.restricted_item(body),qualification_invitation=q.explicit_qualification(body),source_cages_json=json.dumps(sorted(q.listed_sources(body))),required_parts_json=json.dumps(sorted(q.required_parts(title,body))),policy_hash=POLICY_HASH)
    f.write(json.dumps(v)+'\n')
  c.read_json(str(p),format='newline_delimited',sample_size=-1).create_view('raw_source_quality')
@@ -61,21 +66,36 @@ def apply(directory):
  c.create_function('quality_decision',decision,['VARCHAR']*4,'VARCHAR')
  c.execute('CREATE TEMP TABLE reviewed_decisions AS SELECT d.* EXCLUDE(stage,decision_hash,decision_json),quality_decision(b.decision_json,q.verdict,q.reason,q.passages_json) decision_json FROM prior_demand_decisions d JOIN source_quality q USING(episode_id) JOIN decision_baselines b USING(episode_id)')
  output('demand_decisions',"SELECT *,json_extract_string(decision_json,'$.stage') stage,json_extract_string(decision_json,'$.decision_hash') decision_hash FROM reviewed_decisions")
- def fit(work,title,named,entry,source,cage,restricted,invitation,cages,authority):
-  verdict,reason=q.fit_fields(work,title,named,entry,source,cage,restricted,invitation,json.loads(cages),authority)
-  return json.dumps(dict(verdict=verdict,reason=reason))
- c.create_function('assess_fit',fit,['VARCHAR']*6+['BOOLEAN','BOOLEAN','VARCHAR','BOOLEAN'],'VARCHAR',null_handling='special')
- c.execute("""CREATE TEMP TABLE assessed AS SELECT cw.*,q.verdict source_verdict,
- assess_fit(cw.work_text,o.title,q.nomenclature,cw.company_entry_status,o.source_name,substr(cw.company_id,6),q.restricted_item,q.qualification_invitation,q.source_cages_json,coalesce(a.authorized,false)) fit_json
- FROM prior_company_work_matches cw JOIN prior_opportunities o USING(episode_id) JOIN source_quality q USING(episode_id)
- LEFT JOIN (SELECT DISTINCT company_id,episode_id,true authorized FROM quality_company_notice_source_evidence) a ON a.company_id=cw.company_id AND a.episode_id=cw.episode_id""")
- output('company_match_assessments',"SELECT match_id,company_id,episode_id,opportunity_hash,profile_hash,doc_id,work_text,sample_evidence_id,source_verdict,json_extract_string(fit_json,'$.verdict') verdict,json_extract_string(fit_json,'$.reason') reason,'"+POLICY_HASH+"' policy_hash FROM assessed")
- # Remove only rejected links; access questions remain explicitly review-only.
- # Original work text, identifier and underlying awards are never rewritten.
+ # Selected document coding is supporting evidence for delivery mode, not a
+ # substitute for the named scope. Do not inherit a prime's PSC into a component.
  cols={n for n,*_ in c.execute('DESCRIBE prior_company_work_matches').fetchall()}
- excluded='review_category,match_hash'+(',fit_verdict,fit_reason' if 'fit_verdict' in cols else '')
- output('company_work_matches',"SELECT * EXCLUDE(fit_json,source_verdict,"+excluded+"),CASE WHEN json_extract_string(fit_json,'$.verdict')='review' THEN 'market_context' ELSE review_category END review_category,sha256(concat_ws('|',match_id,opportunity_hash,profile_hash,doc_id,work_text,'"+POLICY_HASH+"',fit_json)) match_hash,json_extract_string(fit_json,'$.verdict') fit_verdict,json_extract_string(fit_json,'$.reason') fit_reason FROM assessed")
- output('company_matches',"""SELECT m.* REPLACE(coalesce(w.match_hash,m.match_hash) AS match_hash)
+ if 'company_scope_features' in m['tables']:
+  c.read_parquet(m['tables']['company_scope_features']['path']).create_view('scope_features')
+  c.execute("""CREATE TEMP TABLE selected_doc_codings AS SELECT f.company_id,f.doc_id,
+   CASE WHEN count(DISTINCT nullif(trim(f.psc),''))=1 THEN min(nullif(trim(f.psc),'')) END observed_work_psc,
+   to_json(list(DISTINCT struct_pack(psc:=f.psc,naics:=f.naics))) work_classification_evidence_json
+   FROM scope_features f SEMI JOIN prior_company_work_matches w ON w.company_id=f.company_id AND w.doc_id=f.doc_id GROUP BY f.company_id,f.doc_id""")
+ else:c.execute("CREATE TEMP TABLE selected_doc_codings AS SELECT NULL::VARCHAR company_id,NULL::VARCHAR doc_id,NULL::VARCHAR observed_work_psc,NULL::VARCHAR work_classification_evidence_json WHERE false")
+ def fit(work,title,named,entry,source,cage,restricted,invitation,cages,authority,delivery,work_psc):
+  verdict,reason=q.fit_fields(work,title,named,entry,source,cage,restricted,invitation,json.loads(cages),authority,delivery,work_psc)
+  _,observed,mode_reason=mode_fit(work,delivery,work_psc)
+  target=q.terms(__import__('re').split(r'(?i)_End_Item_|\bNSN\b',title or '')[0])|q.terms(named)
+  return json.dumps(dict(verdict=verdict,reason=reason,observed_delivery_mode=observed,mode_reason=mode_reason,shared_scope_terms=sorted(q.terms(work)&target)))
+ c.create_function('assess_fit',fit,['VARCHAR']*6+['BOOLEAN','BOOLEAN','VARCHAR','BOOLEAN','VARCHAR','VARCHAR'],'VARCHAR',null_handling='special')
+ old_mode_columns=cols&set('required_delivery_mode delivery_mode_basis observed_work_psc observed_delivery_mode work_classification_evidence_json mode_reason shared_scope_terms_json'.split())
+ cw_selection='cw.*'+(' EXCLUDE('+','.join(sorted(old_mode_columns))+')' if old_mode_columns else '')
+ c.execute("""CREATE TEMP TABLE assessed AS SELECT """+cw_selection+""",q.verdict source_verdict,q.required_delivery_mode,q.delivery_mode_basis,f.observed_work_psc,f.work_classification_evidence_json,
+ assess_fit(cw.work_text,o.title,q.nomenclature,cw.company_entry_status,o.source_name,substr(cw.company_id,6),q.restricted_item,q.qualification_invitation,q.source_cages_json,coalesce(a.authorized,false),q.required_delivery_mode,f.observed_work_psc) fit_json
+ FROM prior_company_work_matches cw JOIN prior_opportunities o USING(episode_id) JOIN source_quality q USING(episode_id)
+ LEFT JOIN selected_doc_codings f ON f.company_id=cw.company_id AND f.doc_id=cw.doc_id
+ LEFT JOIN (SELECT DISTINCT company_id,episode_id,true authorized FROM quality_company_notice_source_evidence) a ON a.company_id=cw.company_id AND a.episode_id=cw.episode_id""")
+ original_caveat='pre_quality_company_evidence_caveat' if 'pre_quality_company_evidence_caveat' in cols else 'company_evidence_caveat'
+ output('company_match_assessments',"SELECT match_id,company_id,episode_id,opportunity_hash,profile_hash,doc_id,work_text,sample_evidence_id,source_verdict,company_entry_status,required_delivery_mode,delivery_mode_basis,observed_work_psc,work_classification_evidence_json,"+original_caveat+" original_company_evidence_caveat,json_extract_string(fit_json,'$.observed_delivery_mode') observed_delivery_mode,json_extract_string(fit_json,'$.mode_reason') mode_reason,cast(json_extract(fit_json,'$.shared_scope_terms') AS VARCHAR) shared_scope_terms_json,json_extract_string(fit_json,'$.verdict') verdict,json_extract_string(fit_json,'$.reason') reason,'"+POLICY_HASH+"' policy_hash FROM assessed")
+ # All candidates and their prior caveats remain auditable. Serving caveats
+ # must not claim proven delivery capability for review-only relationships.
+ excluded='review_category,match_hash,company_evidence_caveat'+(',fit_verdict,fit_reason' if 'fit_verdict' in cols else '')+(',pre_quality_company_evidence_caveat' if 'pre_quality_company_evidence_caveat' in cols else '')
+ output('company_work_matches',"SELECT * EXCLUDE(fit_json,source_verdict,"+excluded+"),"+original_caveat+" pre_quality_company_evidence_caveat,CASE WHEN json_extract_string(fit_json,'$.verdict')<>'accepted' THEN json_extract_string(fit_json,'$.reason') ELSE "+original_caveat+" END company_evidence_caveat,CASE WHEN json_extract_string(fit_json,'$.verdict')='review' THEN 'market_context' WHEN json_extract_string(fit_json,'$.verdict')='rejected' THEN 'not_recommended' ELSE review_category END review_category,sha256(concat_ws('|',match_id,opportunity_hash,profile_hash,doc_id,work_text,'"+POLICY_HASH+"',fit_json)) match_hash,json_extract_string(fit_json,'$.verdict') fit_verdict,json_extract_string(fit_json,'$.reason') fit_reason,json_extract_string(fit_json,'$.observed_delivery_mode') observed_delivery_mode,json_extract_string(fit_json,'$.mode_reason') mode_reason,cast(json_extract(fit_json,'$.shared_scope_terms') AS VARCHAR) shared_scope_terms_json FROM assessed")
+ output('company_matches',"""SELECT m.* REPLACE(coalesce(w.match_hash,m.match_hash) AS match_hash,coalesce(w.company_evidence_caveat,m.company_evidence_caveat) AS company_evidence_caveat)
  FROM prior_company_matches m LEFT JOIN quality_company_work_matches w ON m.company_id=w.company_id AND m.episode_id=w.episode_id
  WHERE w.fit_verdict IS NULL OR w.fit_verdict<>'rejected'""")
  m['source_quality_logic_sha256']=POLICY_HASH;m['quality_policy_version']=q.VERSION

@@ -24,6 +24,12 @@ class Repository:
   if not re.fullmatch(r'oi_[a-z0-9_]+',t):raise ValueError('Invalid engine table binding')
   return DATABASE+'.'+t
  def rows(self,sql):return self.aws.result(sql)[0]
+ def quality_projection(self):
+  extra=',qr.source_entry_kind,qr.verdict source_quality_verdict,qr.reason source_quality_reason,qr.passages_json source_quality_passages_json,qr.body_deadline source_body_deadline'
+  columns={x['Name'] for x in self.manifest()['tables'].get('opportunity_quality_reviews',{}).get('columns',[])}
+  for name in ('required_delivery_mode','delivery_mode_basis','requirement_psc','psc_reference_url'):
+   if name in columns:extra+=',qr.'+name
+  return extra
  def refresh_status(self):
   try:
    value=json.loads(self.aws.s3.get_object(Bucket=BUCKET,Key=PREFIX+'/operations/last_run.json')['Body'].read())
@@ -87,6 +93,9 @@ class Repository:
     else:where+=" AND (cw.review_category IS NULL OR cw.review_category<>'market_context')"
     if any(x['Name']=='company_entry_status' for x in self.manifest()['tables']['company_work_matches'].get('columns',[])):extra+=',cw.company_entry_status'
     if any(x['Name']=='fit_verdict' for x in self.manifest()['tables']['company_work_matches'].get('columns',[])):extra+=',cw.fit_verdict,cw.fit_reason'
+    work_columns={x['Name'] for x in self.manifest()['tables']['company_work_matches'].get('columns',[])}
+    for name in ('observed_delivery_mode','observed_work_psc','work_classification_evidence_json','mode_reason','shared_scope_terms_json'):
+     if name in work_columns:extra+=',cw.'+name
    if 'company_item_matches' in self.manifest()['tables']:
     join+=' LEFT JOIN '+self.table('company_item_matches')+' ci ON ci.company_id=m.company_id AND ci.episode_id=o.episode_id AND ci.opportunity_hash=o.record_hash'
     extra+=',ci.niin item_reference_niin,ci.reference_description item_reference_description,ci.reference_part_number item_reference_part_number'
@@ -101,7 +110,7 @@ class Repository:
     extra+=',se.source_evidence_json company_source_access_evidence_json'
   if quality:
    join+=' LEFT JOIN '+self.table('opportunity_quality_reviews')+' qr ON qr.episode_id=o.episode_id AND qr.record_hash=o.record_hash'
-   extra+=',qr.source_entry_kind,qr.verdict source_quality_verdict,qr.reason source_quality_reason,qr.passages_json source_quality_passages_json,qr.body_deadline source_body_deadline'
+   extra+=self.quality_projection()
   where+=category_where
   if 'dla_forecasts' in self.manifest()['tables']:
    asof=self.manifest().get('as_of')
@@ -127,10 +136,19 @@ class Repository:
   extra='';join=''
   if 'opportunity_quality_reviews' in self.manifest()['tables']:
    join=' LEFT JOIN '+self.table('opportunity_quality_reviews')+' qr ON qr.episode_id=o.episode_id AND qr.record_hash=o.record_hash'
-   extra=',qr.source_entry_kind,qr.verdict source_quality_verdict,qr.reason source_quality_reason,qr.passages_json source_quality_passages_json,qr.body_deadline source_body_deadline'
+   extra=self.quality_projection()
   records=self.rows('SELECT o.*,d.stage,d.decision_json'+extra+' FROM '+self.table('opportunities')+' o JOIN '+self.table('demand_decisions')+" d ON o.episode_id=d.episode_id"+join+" WHERE o.episode_id='"+eid+"'")
   for record in records:record.update(quantity_fact(record))
   return records
+ def company_match_review(self,cage,eid):
+  if not re.fullmatch('[A-Z0-9]{5}',cage) or not re.fullmatch('[a-f0-9]{64}',eid):raise ValueError('Invalid company/source identifier')
+  if 'company_match_assessments' not in self.manifest()['tables']:return []
+  return self.rows("""SELECT a.*,o.title,o.source_url,d.stage source_stage,
+  CASE WHEN a.source_verdict<>'usable' OR d.stage IN ('evidence_gap','resolved_or_elapsed') THEN 'source_not_actionable'
+   WHEN a.verdict='rejected' THEN 'not_recommended' WHEN a.verdict='review' OR cw.review_category='market_context' THEN 'review_required'
+   WHEN m.match_id IS NULL THEN 'not_currently_served' WHEN d.stage IN ('historical_watch','repeat_demand_inference','planning_context') THEN 'context_only'
+   ELSE 'current_scope_match_access_unconfirmed' END engine_company_fit_status
+  FROM """+self.table('company_match_assessments')+' a JOIN '+self.table('opportunities')+' o ON a.episode_id=o.episode_id AND a.opportunity_hash=o.record_hash JOIN '+self.table('company_profiles')+' p ON p.company_id=a.company_id AND p.profile_hash=a.profile_hash JOIN '+self.table('demand_decisions')+' d ON d.episode_id=o.episode_id LEFT JOIN '+self.table('company_matches')+' m ON m.company_id=a.company_id AND m.episode_id=a.episode_id AND m.opportunity_hash=o.record_hash LEFT JOIN '+self.table('company_work_matches')+" cw ON cw.company_id=a.company_id AND cw.episode_id=a.episode_id AND cw.opportunity_hash=o.record_hash WHERE a.company_id='CAGE:"+cage+"' AND a.episode_id='"+eid+"' LIMIT 1")
  def research(self,cage,limit=20):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
   if not 1<=limit<=100:raise ValueError('Invalid limit')
@@ -261,11 +279,15 @@ def create_router(verify_principal,repository=None):
  def relationships(cage:str,limit:int=Query(50,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   m=repo.manifest();table=m['tables'].get('company_registry',{})
   return {'records':call(repo.relationships,cage,limit,offset),'release':m['run_id'],'availability':'available' if table else 'not_published','source_provenance':{'table':'company_registry','table_sha256':table.get('sha256'),'sources':{k:v for k,v in m.get('source_status',{}).items() if k in ('cage_registry','sam_company_capabilities')}},'interpretation':'Exact registry relationship candidates from parent_cage or replacement_cage. Replacements are not ownership. No ultimate-parent consolidation, name similarity or transfer of technical qualifications is inferred.'}
+ @router.get('/companies/{cage}/opportunities/{episode_id}/match-review')
+ def company_match_review(cage:str,episode_id:str):
+  m=repo.manifest()
+  return {'records':call(repo.company_match_review,cage,episode_id),'release':m['run_id'],'availability':'available' if 'company_match_assessments' in m['tables'] else 'not_published','interpretation':'Current engine assessment for this exact company and source/profile version, including rejected candidates. This is not technical qualification, applicant eligibility or a user-owned assessment. An empty assessment does not establish absence of capability; item-reference matching is separate.'}
  @router.get('/innovation-signals')
  def innovation(limit:int=Query(20,ge=1,le=100)):return {'records':call(repo.innovation,limit),'status':'Published agency engagement evidence; no company qualification or award probability inferred'}
  @router.get('/methodology')
  def methodology():
-  m=repo.manifest();return dict(m['rules'],release=m['run_id'],company_matching={'evidence':'Observed award and reported supplier work, exact item references, program/vehicle links and specific technical scope. Classification overlap alone is insufficient.','entry_routes':'Named prior suppliers, defined service work or explicit development/source-opening context take priority. Other hardware similarity is market context until an entry route is evidenced.','qualification':'A company/item association is separate from manufacturing rights, procurement approval, current configuration, eligibility and capacity.'},source_quality={'policy_version':m.get('quality_policy_version'),'policy_hash':m.get('source_quality_logic_sha256'),'source_conflicts':'Conflicting title/nomenclature or past response dates without a current deadline override are held for source review, with quoted passages.','company_scope':'Administrative phrases, postal-location fragments and unspecific work labels cannot establish capability. Matching words in incidental body text are insufficient.','item_access':'Existing-OEM sourcing is distinct from an invitation to qualify a new manufacturer. Exact named part, NIIN and nonconflicting procurement reference codes are retained separately from manufacturing data rights.','research_eligibility':'Research relevance is separate from SBIR/STTR applicant eligibility or a permitted teaming route.','notice_grouping':'The same buyer, complete normalized title and identifier with a trailing -00 variant may be grouped for display. Every notice source is retained; different procurement identifiers remain separate and values are not summed.'},values={'source_quantities':'A quoted explicit quantity is exposed only for a single-item notice with one consistent quantity and unit. Estimates are not orders; ranges, multiple quantities and annual/monthly rates are not collapsed. No total is inferred from a different NSN or part.', 'historical_benchmarks':'Revision-resolved award net obligations and reported outsourced-package amounts. Approximate median and observed range use the complete comparison group; recent/extreme awards form a short preview.','unit_prices':'Exact company/item reference prices are unit evidence. Missing quantities do not produce totals. Forecast quantity × price is an alternative gross scenario, not company revenue.','allocation':'Prime/program funding is context. Company-addressable value remains unallocated without workshare evidence.','source_quality':'Item forecasts with negative future monthly quantities are withheld from actionable feeds until reconciled; published purchase requests remain separate evidence.'})
+  m=repo.manifest();return dict(m['rules'],release=m['run_id'],company_matching={'evidence':'Observed award and reported supplier work, exact item references, program/vehicle links and specific technical scope. Classification overlap alone is insufficient.','entry_routes':'Named prior suppliers, defined service work or explicit development/source-opening context take priority. Other hardware similarity is market context until an entry route is evidenced.','qualification':'A company/item association is separate from manufacturing rights, procurement approval, current configuration, eligibility and capacity.'},source_quality={'policy_version':m.get('quality_policy_version'),'policy_hash':m.get('source_quality_logic_sha256'),'source_conflicts':'Conflicting title/nomenclature or past response dates without a current deadline override are held for source review, with quoted passages.','company_scope':'Administrative phrases, postal-location fragments, unspecific labels and a single shared product/work word cannot establish the complete deliverable. Matching words in incidental body text are insufficient.','delivery_mode':'Component supply, repair/overhaul, equipment installation, onsite services and facility construction are assessed separately. Selected delivery statements and their exact document PSC are retained. A manufacturing NAICS or similar product noun does not establish onsite-service capability.','psc_reference':'https://origin-www.acquisition.gov/sites/default/files/manual/PSC%20Manual%20April%202025.pdf','item_access':'Existing-OEM sourcing is distinct from an invitation to qualify a new manufacturer. Exact named part, NIIN and nonconflicting procurement reference codes are retained separately from manufacturing data rights.','research_eligibility':'Research relevance is separate from SBIR/STTR applicant eligibility or a permitted teaming route.','notice_grouping':'The same buyer, complete normalized title and identifier with a trailing -00 variant may be grouped for display. Every notice source is retained; different procurement identifiers remain separate and values are not summed.'},values={'source_quantities':'A quoted explicit quantity is exposed only for a single-item notice with one consistent quantity and unit. Estimates are not orders; ranges, multiple quantities and annual/monthly rates are not collapsed. No total is inferred from a different NSN or part.', 'historical_benchmarks':'Revision-resolved award net obligations and reported outsourced-package amounts. Approximate median and observed range use the complete comparison group; recent/extreme awards form a short preview.','unit_prices':'Exact company/item reference prices are unit evidence. Missing quantities do not produce totals. Forecast quantity × price is an alternative gross scenario, not company revenue.','allocation':'Prime/program funding is context. Company-addressable value remains unallocated without workshare evidence.','source_quality':'Item forecasts with negative future monthly quantities are withheld from actionable feeds until reconciled; published purchase requests remain separate evidence.'})
  @router.get('/opportunities')
  def opportunities(company:str=None,limit:int=Query(20,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000),kind:str=Query('all',pattern='^(all|work|items)$')):
   return {'records':call(repo.opportunities,company,limit,offset,False,kind),'release':repo.manifest()['run_id'],'status':'authenticated_evidence_feed','eligibility':'Company fit, access and qualification require evidence; these are not win probabilities.'}

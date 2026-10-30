@@ -76,6 +76,8 @@ def augment(directory,skip_work=False,reuse_features=False):
  c.create_function('scope_words',words,['VARCHAR'],duckdb.list_type('VARCHAR'))
  from .quality_core import title_score
  c.create_function('scope_title_score',title_score,['VARCHAR','VARCHAR'],'BIGINT')
+ from .delivery_modes import required_mode,mode_fit
+ c.create_function('scope_delivery_score',lambda w,t,b,wp,tp,source: int(mode_fit(w,required_mode(t,b,tp,source=='sam_notices')[0],wp)[0]),['VARCHAR']*6,'BIGINT',null_handling='special')
  c.create_function('scope_nsns',nsns,['VARCHAR'],duckdb.list_type('VARCHAR'))
  c.create_function('scope_admissible',lambda w,t,s,l,stage,ctx,inc:admissible(w,{'title':t,'scope_text':s,'lane':l},stage,ctx,inc),['VARCHAR']*6+['BOOLEAN'],'BOOLEAN')
  work_columns={n for n,*_ in c.execute('DESCRIBE work').fetchall()}
@@ -93,6 +95,10 @@ def augment(directory,skip_work=False,reuse_features=False):
    c.execute("CREATE TEMP TABLE scopes AS SELECT w.* EXCLUDE(work_text),f.fragment work_text,sha256(w.doc_id||'|'||f.fragment) scope_id,scope_terms(f.fragment) terms FROM retrieval_work w,unnest(scope_fragments(w.work_text)) f(fragment) WHERE substr(cast(last_observed AS VARCHAR),1,10)<='"+m['as_of']+"'")
    c.execute("DELETE FROM scopes WHERE len(terms)<2")
   target_query="""CREATE TEMP TABLE targets AS SELECT o.episode_id,o.record_hash,o.lane,o.title,o.customer_name,coalesce(from_json(json_extract(o.value_inputs_json,'$.prior_supplier_company_ids'),'["VARCHAR"]'),list_transform(from_json(json_extract(o.value_inputs_json,'$.preview'),'[{"supplier_company_id":"VARCHAR"}]'),x->x.supplier_company_id),[]::VARCHAR[]) historical_supplier_ids,CASE WHEN o.lane='published_procurement' THEN len(scope_nsns(coalesce(o.scope_text,''))) ELSE 0 END full_nsn_count,substr(o.scope_text,1,12000) scope_text,d.stage,scope_words(concat_ws(' ',o.title,substr(o.scope_text,1,12000))) tokens,scope_words(o.title) title_tokens FROM base_opportunities o JOIN base_demand_decisions d USING(episode_id) WHERE d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context') AND o.lane NOT IN ('source_item_forecasts','published_item_procurement')"""
+  op_columns={n for n,*_ in c.execute('DESCRIBE base_opportunities').fetchall()}
+  target_psc='o.psc' if 'psc' in op_columns else 'NULL::VARCHAR'
+  demand_source='o.source_name' if 'source_name' in op_columns else "CASE WHEN o.lane='published_procurement' THEN 'sam_notices' ELSE '' END"
+  target_query=target_query.replace('o.lane,o.title,o.customer_name','o.lane,o.title,'+target_psc+' target_psc,'+demand_source+' demand_source_name,o.customer_name')
   if any(n=='programme' for n,*_ in c.execute('DESCRIBE base_opportunities').fetchall()):target_query=target_query.replace('substr(o.scope_text,1,12000) scope_text',"concat_ws(' ',o.programme,substr(o.scope_text,1,12000)) scope_text")
   c.execute(target_query)
   c.execute('CREATE TEMP TABLE target_tokens AS SELECT DISTINCT episode_id,unnest(tokens) token FROM targets')
@@ -119,18 +125,18 @@ def augment(directory,skip_work=False,reuse_features=False):
    AND list_max(list_transform(w.terms,t->list_position(o.tokens,t)))-list_min(list_transform(w.terms,t->list_position(o.tokens,t)))<=len(w.terms)+5
    AND hash(w.company_id)%"""+str(partitions)+'='+str(partition))
    c.execute("""CREATE OR REPLACE TEMP VIEW accepted_hits AS SELECT w.company_id,w.doc_id,w.work_text,w.source_kind,w.sample_evidence_id,w.evidence_digest,w.last_observed,w.terms,coalesce(w.programme_context_json,'') work_context,
-   o.episode_id,o.record_hash,o.lane,o.stage,o.customer_name,k.prior_reported_supplier,scope_title_score(w.work_text,o.title) title_fit_score,
+   o.episode_id,o.record_hash,o.lane,o.stage,o.customer_name,k.prior_reported_supplier,scope_title_score(w.work_text,o.title) title_fit_score,scope_delivery_score(w.work_text,o.title,o.scope_text,w.psc,o.target_psc,o.demand_source_name) delivery_fit_score,
    company_entry_route(w.work_text,o.title,o.scope_text,o.lane,k.prior_reported_supplier) company_entry_status,k.span
    FROM pre_hits k JOIN required w ON w.scope_id=k.scope_id JOIN targets o ON o.episode_id=k.episode_id
    WHERE scope_admissible(w.work_text,o.title,coalesce(o.scope_text,''),o.lane,o.stage,coalesce(w.programme_context_json,''),k.prior_reported_supplier)""")
    if partition==0:c.execute('CREATE TEMP TABLE hits AS SELECT * FROM accepted_hits WHERE false')
-   c.execute("INSERT INTO hits SELECT * FROM accepted_hits QUALIFY row_number() OVER(PARTITION BY company_id,episode_id ORDER BY title_fit_score DESC,len(terms) DESC,last_observed DESC,doc_id)=1")
+   c.execute("INSERT INTO hits SELECT * FROM accepted_hits QUALIFY row_number() OVER(PARTITION BY company_id,episode_id ORDER BY delivery_fit_score DESC,title_fit_score DESC,len(terms) DESC,last_observed DESC,doc_id)=1")
    c.execute('DROP VIEW accepted_hits');c.execute('DROP TABLE pre_hits')
    print('Company retrieval partition',partition+1,'/',partitions,flush=True)
   print('Company retrieval join estimate',estimate,flush=True)
   for unused in ('scopes','required','target_tokens','frequency','anchor_counts','chosen_terms','targets'):c.execute('DROP TABLE '+unused)
   print('Admissible work links',c.execute('SELECT count(*) FROM hits').fetchone()[0],flush=True)
-  work_sql="""WITH winners AS(SELECT company_id,episode_id,arg_max(doc_id,struct_pack(e:=CASE WHEN company_entry_status='entry_route_unestablished' THEN 0 ELSE 1 END,t:=title_fit_score,n:=len(terms),d:=last_observed,id:=doc_id)) doc_id FROM hits GROUP BY company_id,episode_id) SELECT sha256('"""+VERSION+"""|'||h.company_id||'|'||h.episode_id) match_id,h.company_id,h.episode_id,
+  work_sql="""WITH winners AS(SELECT company_id,episode_id,arg_max(doc_id,struct_pack(e:=CASE WHEN company_entry_status='entry_route_unestablished' THEN 0 ELSE 1 END,m:=delivery_fit_score,t:=title_fit_score,n:=len(terms),d:=last_observed,id:=doc_id)) doc_id FROM hits GROUP BY company_id,episode_id) SELECT sha256('"""+VERSION+"""|'||h.company_id||'|'||h.episode_id) match_id,h.company_id,h.episode_id,
    least(95.0,65.0+len(h.terms)*3)::DOUBLE score,'"""+VERSION+"""' match_route,array_to_string(h.terms,', ') matched_terms,
    CASE WHEN h.prior_reported_supplier THEN 'This site is named in the linked historical supplier reports for the same parent vehicle or reported program. New package availability, configuration, capacity and qualification remain checks.' ELSE 'Observed site work matches the defined functional scope. Configuration, technical access, qualification and unplaced work remain separate checks.' END company_evidence_caveat,h.sample_evidence_id,
    sha256(concat_ws('|',h.company_id,h.episode_id,h.record_hash,h.evidence_digest,p.profile_hash,h.company_entry_status,h.doc_id,h.work_text)) match_hash,h.record_hash opportunity_hash,p.profile_hash,h.doc_id,h.work_text,h.source_kind,h.last_observed,h.work_context,

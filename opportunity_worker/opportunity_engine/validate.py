@@ -85,6 +85,10 @@ def validate(directory):
   check('rejected_fit_not_served',c.execute("SELECT count(*) FROM company_matches m JOIN company_match_assessments a USING(company_id,episode_id) WHERE a.verdict='rejected'").fetchone()[0]==0)
   check('unestablished_access_review_only',c.execute("SELECT count(*) FROM company_work_matches WHERE fit_verdict='review' AND review_category<>'market_context'").fetchone()[0]==0)
   check('quality_assessments_unique',c.execute('SELECT count(*)-count(DISTINCT (company_id,episode_id)) FROM company_match_assessments').fetchone()[0]==0)
+  columns={n for n,*_ in c.execute('DESCRIBE company_match_assessments').fetchall()}
+  if 'observed_delivery_mode' in columns:
+   check('onsite_capability_not_from_component_only_history',c.execute("SELECT count(*) FROM company_match_assessments WHERE verdict='accepted' AND required_delivery_mode='onsite_services' AND observed_delivery_mode<>'onsite_services'").fetchone()[0]==0)
+   check('accepted_scope_not_single_incidental_noun',c.execute("SELECT count(*) FROM company_match_assessments WHERE verdict='accepted' AND company_entry_status<>'reported_supplier_relationship' AND json_array_length(shared_scope_terms_json)<2").fetchone()[0]==0)
  if 'opportunity_quality_reviews' in m['tables']:
   check('source_conflicts_not_actionable',c.execute("SELECT count(*) FROM opportunity_quality_reviews q JOIN demand_decisions d USING(episode_id) WHERE q.verdict='source_review_required' AND d.stage NOT IN ('evidence_gap','resolved_or_elapsed')").fetchone()[0]==0)
   check('source_review_has_quotes',c.execute("SELECT count(*) FROM opportunity_quality_reviews WHERE verdict='source_review_required' AND (nullif(reason,'') IS NULL OR json_array_length(passages_json)=0)").fetchone()[0]==0)

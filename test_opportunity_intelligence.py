@@ -93,6 +93,35 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn('d.stage',aws.sql)
         self.assertNotIn('company_matches',aws.sql)
 
+    def test_company_match_review_is_exact_versioned_and_retains_rejected_evidence(self):
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
+        repo.manifest=lambda:{'tables':{'company_match_assessments':{}}}
+        repo.company_match_review('45934','a'*64)
+        self.assertIn("a.company_id='CAGE:45934'",aws.sql)
+        self.assertIn("a.episode_id='"+'a'*64+"'",aws.sql)
+        self.assertIn('a.opportunity_hash=o.record_hash',aws.sql)
+        self.assertIn('p.profile_hash=a.profile_hash',aws.sql)
+        self.assertIn("WHEN a.verdict='rejected' THEN 'not_recommended'",aws.sql)
+        self.assertIn('LIMIT 1',aws.sql)
+        with self.assertRaises(ValueError):repo.company_match_review("45934'",'a'*64)
+        with self.assertRaises(ValueError):repo.company_match_review('45934','not-an-id')
+        repo.manifest=lambda:{'tables':{}}
+        self.assertEqual(repo.company_match_review('45934','a'*64),[])
+
+    def test_match_review_requires_sign_in_and_does_not_change_personal_qualification(self):
+        class Reviews:
+            calls=0
+            def manifest(self):return {'run_id':'current','tables':{'company_match_assessments':{}}}
+            def company_match_review(self,cage,eid):
+                self.calls+=1;return [{'company_id':'CAGE:'+cage,'episode_id':eid,'verdict':'rejected','engine_company_fit_status':'not_recommended'}]
+        repo=Reviews();app=FastAPI();app.include_router(create_router(verified_application_principal,repo));client=TestClient(app)
+        url='/opportunity-intelligence/companies/45934/opportunities/'+'a'*64+'/match-review'
+        self.assertEqual(client.get(url).status_code,401);self.assertEqual(repo.calls,0)
+        response=client.get(url,headers={'X-Mimir-Export-Key':'test-proxy-secret','X-Mimir-Opportunity-User':'11111111-1111-4111-8111-111111111111'})
+        self.assertEqual(response.status_code,200);self.assertEqual(repo.calls,1)
+        self.assertEqual(response.json()['records'][0]['engine_company_fit_status'],'not_recommended')
+        self.assertIn('not technical qualification',response.json()['interpretation'])
+
     def test_supplier_lineage_is_scoped_to_the_opportunity(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
         repo.manifest = lambda: {'tables': {'supplier_pull_prime_evidence': {}}}

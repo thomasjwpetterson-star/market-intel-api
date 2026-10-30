@@ -10,7 +10,8 @@ def test_rejects_actual_false_positive_history_but_retains_specific_work():
   assert q.fit_review(work,title,work,'published_procurement','source_specific_route','sam_notices','45934')[0]=='rejected'
  assert not q.administrative_scope('WASHER, FL')
  assert q.administrative_scope('ALEXANDRIA, VA 22314')
- assert q.fit_review('FUEL BOOST PUMP','Repair aircraft fuel boost pump','Seeking sources with pump repair capability','published_procurement','source_specific_route','sam_notices','45934')[0]=='accepted'
+ assert q.fit_review('FUEL BOOST PUMP','Repair aircraft fuel boost pump','Seeking sources with pump repair capability','published_procurement','source_specific_route','sam_notices','45934')[0]=='review'
+ assert q.fit_review('FUEL BOOST PUMP REPAIR','Repair aircraft fuel boost pump','Seeking sources with pump repair capability','published_procurement','source_specific_route','sam_notices','45934')[0]=='accepted'
  assert q.fit_review('C130 mounting base','Potential supplier package: Mounting base','Current funded scope: C130 mounting base','new_prime_historical_supplier_flow','reported_supplier_relationship','supplier_flow','45934')[0]=='accepted'
 
 
@@ -42,11 +43,13 @@ def test_quality_pipeline_keeps_evidence_and_filters_serving_edges(tmp_path):
  put('demand_decisions',"SELECT episode_id,record_hash source_record_hash,'PR13' rule_id,'qualification_opening' stage,'oldhash' decision_hash,'{\"stage\":\"qualification_opening\",\"unresolved\":[],\"negative_evidence\":[]}' decision_json FROM read_parquet('"+str(tmp_path/'opportunities.parquet')+"')")
  put('company_matches',"""SELECT episode_id match_id,'CAGE:45934' company_id,episode_id,90.0 score,'work-route' match_route,'terms' matched_terms,'caveat' company_evidence_caveat,'evidence' sample_evidence_id,'matchhash' match_hash,record_hash opportunity_hash,'profilehash' profile_hash FROM read_parquet('"""+str(tmp_path/'opportunities.parquet')+"')")
  put('company_work_matches',"""SELECT *,episode_id doc_id,CASE episode_id WHEN 'good' THEN 'FUEL BOOST PUMP' WHEN 'bad' THEN 'PURCHASE OF MOBILE COMPUTERS' ELSE 'CIRCUIT CARD ASSEMBLY' END work_text,'prime_award' source_kind,'2026-01-01' last_observed,'' work_context,'work_lead' review_category,'source_specific_route' company_entry_status FROM read_parquet('"""+str(tmp_path/'company_matches.parquet')+"')")
+ put('company_scope_features',"SELECT 'CAGE:45934' company_id,'good' doc_id,'J043' psc,'811310' naics")
  c.close();(tmp_path/'manifest.json').write_text(json.dumps(dict(tables=tables,sources={},as_of='2026-10-30',logic_sha256='old')));apply(tmp_path);c=duckdb.connect()
  assert c.execute('SELECT episode_id FROM read_parquet(?) ORDER BY episode_id',[str(tmp_path/'company_matches.parquet')]).fetchall()==[('good',),('stale',)]
  assert c.execute("SELECT stage FROM read_parquet(?) WHERE episode_id='stale'",[str(tmp_path/'demand_decisions.parquet')]).fetchone()[0]=='evidence_gap'
  assert c.execute("SELECT work_text,verdict FROM read_parquet(?) WHERE episode_id='bad'",[str(tmp_path/'company_match_assessments.parquet')]).fetchone()==('PURCHASE OF MOBILE COMPUTERS','rejected')
  assert c.execute('SELECT count(*) FROM read_parquet(?)',[str(tmp_path/'opportunity_quality_reviews.parquet')]).fetchone()[0]==3
+ assert c.execute("SELECT observed_work_psc,observed_delivery_mode FROM read_parquet(?) WHERE episode_id='good'",[str(tmp_path/'company_match_assessments.parquet')]).fetchone()==('J043','maintenance_repair')
  assert c.execute("DESCRIBE SELECT body_deadline FROM read_parquet(?)",[str(tmp_path/'opportunity_quality_reviews.parquet')]).fetchone()[1]=='VARCHAR'
  c.close();apply(tmp_path);c=duckdb.connect()
  d=json.loads(c.execute("SELECT decision_json FROM read_parquet(?) WHERE episode_id='stale'",[str(tmp_path/'demand_decisions.parquet')]).fetchone()[0]);assert len(d['negative_evidence'])==1
@@ -80,3 +83,23 @@ def test_portable_quality_review_fetches_cohort_files_for_full_release_gates(tmp
  assert __import__('pathlib').Path(f['path']).is_file()
  assert hashlib.sha256(__import__('pathlib').Path(f['path']).read_bytes()).hexdigest()==sha
  assert m['reuse_parent_release']=='prior'
+
+
+def test_component_supply_does_not_establish_facility_or_shipyard_service_capability():
+ from opportunity_engine.delivery_modes import required_mode,mode_fit
+ rejected=q.fit_review('4610038458!TOILET ASSEMBLY,AIR','(AFDW/CCP) Toilet Partition Replacement','A construction requirement to remove old partitions and install new toilet partitions at a conference center.','published_procurement','source_specific_route','sam_notices','45934',work_psc='4610',target_psc='Z2AB')
+ assert rejected[0]=='rejected'
+ body='This contract shall provide on-site wire rope replacement services for a naval shipyard.'
+ for title in ['Wire Rope Replacement Services at PSNS','Wire Rope Replacement Sources Sought Bangor']:
+  verdict,reason=q.fit_review('8510338769!WIRE ROPE ASSEMBLY,',title,body,'published_procurement','source_specific_route','sam_notices','45934',work_psc='4010',target_psc='J040')
+  assert verdict=='review' and 'onsite services' in reason and 'component supply' in reason
+  assert q.fit_review('ON-SITE WIRE ROPE REPLACEMENT SERVICES',title,body,'published_procurement','source_specific_route','sam_notices','OTHER',work_psc='J040',target_psc='J040')[0]=='accepted'
+  assert q.fit_review('WIRE ROPE ASSEMBLY',title,body,'published_procurement','reported_supplier_relationship','sam_notices','OTHER',work_psc='4010',target_psc='J040')[0]=='review'
+ assert required_mode('Installation kit for fuel boost pump','','2915',True)[0]=='component_supply'
+ assert mode_fit('FUEL BOOST PUMP','maintenance_repair','J043')[0] is True
+ assert q.fit_review('TOILET PARTITION INSTALLATION','Toilet Partition Replacement','Install new partitions in a building.','published_procurement','source_specific_route','sam_notices','OTHER',work_psc='Z2AB',target_psc='Z2AB')[0]=='accepted'
+
+def test_single_product_noun_and_reverse_service_to_manufacture_are_not_direct_matches():
+ assert q.fit_review('VALVE, PRESSURE','Hydraulic control valve','Generic valve family','published_procurement','source_specific_route','sam_notices','OTHER')[0]=='rejected'
+ assert q.fit_review('REPAIR FUEL BOOST PUMP','Fuel boost pump','New manufacturing of pumps','published_procurement','source_specific_route','sam_notices','OTHER',work_psc='J043',target_psc='2915')[0]=='review'
+ assert q.fit_review('FUEL BOOST PUMP','Research prototype for fuel boost pump','New research design','published_procurement','source_specific_route','sam_notices','OTHER',work_psc='2915',target_psc='AC12')[0]=='accepted'
