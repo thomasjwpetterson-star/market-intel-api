@@ -21,6 +21,8 @@ def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manife
   c.execute('CREATE VIEW '+name+' AS SELECT * FROM read_parquet('+quote(p)+')')
  for extra in ([shared] if shared else [])+list(additional_manifests):
   for name,s in json.loads(Path(extra).read_text())['sources'].items():
+   if s.get('remote_only'):
+    sources[name]=s;continue
    paths=[x['path'] for x in s['files']]
    if not paths:raise ValueError('Empty live source '+name)
    for f in s['files']:
@@ -44,6 +46,20 @@ def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manife
    if glue=='string' and typ not in ('VARCHAR',):raise ValueError('Nonportable output type '+typ+' in '+name+'.'+col)
    cols.append(dict(Name=col,Type=glue))
   tables[name]=dict(path=str(path),rows=rows,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),columns=cols);print(name,rows,flush=True)
+ def bind_source(name):
+  source=sources[name]
+  if source.get('remote_only'):
+   tables[name]=dict(rows=source['rows'],sha256=source['sha256'],columns=source['columns'],remote_binding=True,table=source['table'],s3_uri=source['s3_uri'],source_binding=name,profileable_rows=source.get('profileable_rows'),profile_observed_net_total=source.get('profile_observed_net_total'))
+   print('Bound complete distributed source',name,source['rows'],flush=True);return
+  if len(source['files'])!=1:raise ValueError('Derived serving source must be consolidated: '+name)
+  f=source['files'][0];c.execute('CREATE VIEW oi_'+name+' AS SELECT * FROM '+name)
+  types={'VARCHAR':'string','BIGINT':'bigint','INTEGER':'bigint','DOUBLE':'double','FLOAT':'double','BOOLEAN':'boolean'}
+  columns=[]
+  for col,typ,*_ in c.execute('DESCRIBE oi_'+name).fetchall():
+   if typ not in types:raise ValueError('Nonportable source binding '+name+'.'+col+': '+typ)
+   columns.append(dict(Name=col,Type=types[typ]))
+  tables[name]=dict(path=f['path'],rows=source['rows'],sha256=f['sha256'],columns=columns,source_binding=name)
+  print('Bound complete serving source',name,source['rows'],flush=True)
  c.execute("CREATE TABLE raw_research AS SELECT row_number() OVER() source_csv_record_number,* FROM read_csv(?,header=true,all_varchar=true,sample_size=1000,max_line_size=2000000)",[sbir['path']])
  c.execute("CREATE TEMP VIEW research_cage_identity AS SELECT uei,min(cage_code) cage_code,list(DISTINCT evidence_id) identity_evidence FROM research_identity GROUP BY uei HAVING count(DISTINCT cage_code)=1")
  # No raw contact details are included in the derived research layer.
@@ -143,7 +159,7 @@ def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manife
  # are silently added to its counts as validated opportunities.
  materialise('company_profiles','SELECT * FROM company_profiles')
  for name in ('company_award_facts','company_subcontract_facts','company_observed_features','company_history_coverage','contract_value_cohorts'):
-  if name in sources:materialise(name,'SELECT * FROM '+name)
+  if name in sources and not skip_matching:bind_source(name)
  materialise('company_matches','SELECT match_id,company_id,episode_id,score,match_route,matched_terms,company_evidence_caveat,sample_evidence_id,match_hash,opportunity_hash,profile_hash FROM company_matches')
  rows=c.execute('SELECT episode_id,record_hash,lane,title,scope_text,customer_name,window_start,window_end,date_basis,value_inputs_json,procurement_state,reconciled_state,source_name,source_evidence_id,source_url,source_locator,notice_posted_date,notice_type FROM all_current_demand ORDER BY episode_id').fetchall();names=[x[0] for x in c.description]
  decisions=out/'decision_rows.jsonl'
@@ -166,5 +182,5 @@ def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manife
  materialise('company_research_calls',"""SELECT DISTINCT r.company_id,l.notice_id,l.topic_code,l.entry_state,l.notice_hash,
  'Prior research on the exact topic; applicant/phase eligibility and new task fit require review' match_basis,
  'not_established' applicant_eligibility,NULL::DOUBLE company_addressable_value FROM oi_research_awards r JOIN oi_research_notice_links l USING(topic_key) WHERE r.evidence_state='observed_research_activity'""")
- manifest=dict(run_id=out.name,as_of=as_of,created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),logic_sha256=rules.LOGIC_HASH,rules=rules.catalogue(),sources=sources,sbir_source=sbir,tables=tables,publication_state='internal_candidate',build_logic_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),matching=matching_summary,matching_logic_sha256=hashlib.sha256((Path(__file__).parent/'matching.py').read_bytes()).hexdigest(),public_release_approved=False,source_mutations=[],source_scope='Full declared sources; research/company/topic edges do not establish technical eligibility or a future award')
+ manifest=dict(run_id=out.name,as_of=as_of,created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),logic_sha256=rules.LOGIC_HASH,rules=rules.catalogue(),sources=sources,sbir_source=sbir,tables=tables,publication_state='authenticated_service',build_logic_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),matching=matching_summary,matching_logic_sha256=hashlib.sha256((Path(__file__).parent/'matching.py').read_bytes()).hexdigest(),public_release_approved=False,source_mutations=[],source_scope='Full declared sources; research/company/topic edges do not establish technical eligibility or a future award')
  (out/'manifest.json').write_text(json.dumps(manifest,indent=2,default=str)+'\n');c.close();(out/'build.duckdb').unlink();decisions.unlink();return manifest

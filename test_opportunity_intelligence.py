@@ -41,6 +41,15 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn("o.lane NOT IN ('published_item_procurement','source_item_forecasts')", aws.sql)
         self.assertNotIn('18', aws.sql)
         self.assertNotIn('historical_watch\' THEN', aws.sql)
+    def test_event_history_is_scoped_and_identifiers_are_validated(self):
+        aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
+        repo.manifest = lambda: {'tables': {'company_opportunity_events': {}}}
+        repo.company_events('45934', 'a' * 64, 10, 0)
+        self.assertIn("company_id='CAGE:45934'", aws.sql)
+        self.assertIn("episode_id='" + 'a' * 64 + "'", aws.sql)
+        for cage, episode, limit in [("45934'", None, 10), ('45934', "bad'", 10), ('45934', None, 1000)]:
+            with self.assertRaises(ValueError): repo.company_events(cage, episode, limit)
+
     def test_invalid_company_or_kind_rejected(self):
         repo = Repository(CaptureAWS()); repo.table = lambda name: 'safe.' + name
         for company, kind in [("CAGE:45934' OR 1=1", 'work'), ('CAGE:45934', 'arbitrary')]:

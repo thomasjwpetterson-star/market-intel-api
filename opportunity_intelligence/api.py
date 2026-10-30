@@ -94,7 +94,17 @@ class Repository:
   name={'awards':'company_award_facts','subcontracts':'company_subcontract_facts','coverage':'company_history_coverage'}[kind]
   if name not in self.manifest()['tables']:return []
   ordering={'awards':'latest_action_date DESC,award_key','subcontracts':'event_date DESC,report_key','coverage':'company_id'}[kind]
-  return self.rows('SELECT * FROM '+self.table(name)+" WHERE company_id='CAGE:"+cage+"' ORDER BY "+ordering+' LIMIT '+str(max(1,min(limit,100))))
+  field='cage_code' if kind=='awards' and self.manifest()['tables'][name].get('remote_binding') and not any(c['Name']=='company_id' for c in self.manifest()['tables'][name]['columns']) else 'company_id'
+  value=cage if field=='cage_code' else 'CAGE:'+cage
+  return self.rows('SELECT * FROM '+self.table(name)+" WHERE "+field+"='"+value+"' ORDER BY "+ordering+' LIMIT '+str(max(1,min(limit,100))))
+
+ def company_events(self,cage,episode_id=None,limit=50,offset=0):
+  if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
+  if episode_id is not None and not re.fullmatch('[a-f0-9]{64}',episode_id):raise ValueError('Invalid opportunity identifier')
+  if not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid pagination')
+  if 'company_opportunity_events' not in self.manifest()['tables']:return []
+  where="company_id='CAGE:"+cage+"'"+(" AND episode_id='"+episode_id+"'" if episode_id else '')
+  return self.rows('SELECT * FROM '+self.table('company_opportunity_events')+' WHERE '+where+' ORDER BY event_date DESC,release_id DESC,event_id OFFSET '+str(offset)+' LIMIT '+str(limit))
 
  def award(self,award_id):
   if not re.fullmatch('[a-f0-9]{64}',award_id):raise ValueError('Invalid award identifier')
@@ -149,6 +159,9 @@ def create_router(verify_principal,repository=None):
  def company_subcontracts(cage:str,limit:int=Query(50,ge=1,le=100)):return {'records':call(repo.company_history,cage,'subcontracts',limit)}
  @router.get('/companies/{cage}/coverage')
  def company_coverage(cage:str):return {'records':call(repo.company_history,cage,'coverage',1),'release':repo.manifest()['run_id']}
+ @router.get('/companies/{cage}/events')
+ def company_events(cage:str,episode_id:str=None,limit:int=Query(50,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
+  return {'records':call(repo.company_events,cage,episode_id,limit,offset),'release':repo.manifest()['run_id'],'interpretation':'Source and matching changes, not user-managed sales stages; a missing snapshot is not a lost award'}
  @router.get('/work-evidence/{doc_id}')
  def work_evidence(doc_id:str):return {'records':call(repo.work_evidence,doc_id)}
  @router.get('/research-topics')

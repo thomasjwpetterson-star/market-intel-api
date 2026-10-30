@@ -4,6 +4,9 @@ from pathlib import Path
 import duckdb
 
 def rebuild(sources,folder,as_of):
+    if 'native_company_prime_stats' in sources:
+        from .company_history_distributed import rebuild as compact_rebuild
+        return compact_rebuild(sources,folder,as_of)
     if 'native_prime_awards' not in sources or 'native_subcontract_reports' not in sources:
         raise ValueError('Both native award and subcontract histories are required')
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
@@ -12,7 +15,7 @@ def rebuild(sources,folder,as_of):
     for name in ('native_prime_awards','native_subcontract_reports','company_profiles','company_work','sam_company_capabilities'):
         if name in sources:c.read_parquet([f['path'] for f in sources[name]['files']]).create_view(name)
     c.execute("CREATE MACRO valid_cage(x) AS CASE WHEN regexp_full_match(upper(trim(x)),'[A-Z0-9]{5}') THEN upper(trim(x)) END")
-    c.execute("CREATE MACRO norm(x) AS regexp_replace(upper(coalesce(x,'')),'[^A-Z0-9]','','g')")
+    c.execute("CREATE MACRO norm(x) AS regexp_replace(upper(regexp_replace(coalesce(x,''),'^[0-9]{8,12}!\\s*','')),'[^A-Z0-9]','','g')")
     c.execute("""CREATE TEMP TABLE identity AS SELECT uei,CASE WHEN count(DISTINCT cage_code)=1 THEN min(cage_code) END cage_code,count(DISTINCT cage_code) candidate_sites
     FROM (SELECT uei,valid_cage(cage_code) cage_code FROM native_prime_awards
     UNION SELECT uei,valid_cage(cage_code) FROM sam_company_capabilities)
@@ -59,7 +62,7 @@ def rebuild(sources,folder,as_of):
         'subcontract_reports':'coalesce(b.subcontract_reports,0)','commercial_customers':'coalesce(b.commercial_customers,0)','last_subcontract_report':'b.last_subcontract_report',
         'manufacturer_declared_awards':'coalesce(a.manufacturer_declared_awards,0)','manufacturing_naics_awards':'coalesce(a.manufacturing_naics_awards,0)','wholesale_naics_awards':'coalesce(a.wholesale_naics_awards,0)',
         'prime_evidence_digest':'a.prime_evidence_digest','sub_evidence_digest':'b.sub_evidence_digest',
-        'parent_name':"coalesce(nullif(a.parent_name,''),p.parent_name)",'parent_uei':"coalesce(nullif(a.parent_uei,''),p.parent_uei)",
+        'parent_name':"coalesce(nullif(p.parent_name,''),nullif(a.parent_name,''))",'parent_uei':"coalesce(nullif(p.parent_uei,''),nullif(a.parent_uei,''))",
         'role_assessment':"CASE WHEN a.manufacturing_naics_awards>0 OR a.manufacturer_declared_awards>0 THEN 'manufacturing_source_indicated' WHEN a.wholesale_naics_awards>0 THEN 'distribution_activity_indicated' ELSE coalesce(p.role_assessment,'unknown') END",
         'profile_hash':"sha256(concat_ws('|',k.company_id,a.prime_evidence_digest,b.sub_evidence_digest,p.item_evidence_digest,p.research_evidence_digest))",
         'public_release_approved':'false'}

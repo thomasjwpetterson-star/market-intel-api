@@ -25,6 +25,8 @@ def work_mode(text,psc=''):
     return 'supply_or_unspecified'
 
 def rebuild(sources,folder,as_of):
+    if 'native_supplier_pull' in sources:
+        return merge_distributed(sources,folder,as_of)
     today=datetime.date.fromisoformat(as_of);folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
     c=duckdb.connect();c.execute("SET threads=2;SET memory_limit='1800MB';SET preserve_insertion_order=false")
     c.execute("SET temp_directory='"+str(folder/'tmp').replace("'","''")+"'");c.execute("SET max_temp_directory_size='20GB'")
@@ -85,3 +87,40 @@ def rebuild(sources,folder,as_of):
     FROM awards WHERE scope_key<>'' AND observed_net_obligations>0 AND try_cast(substr(latest_action_date,1,10) AS DATE)>=DATE '"""+as_of+"""'-INTERVAL 5 YEAR
     GROUP BY scope_key,work_mode,buyer_office_code,buyer_name,buyer_office,psc""")
     c.close();return output
+
+
+def merge_distributed(sources,folder,as_of):
+    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1200MB'")
+    for name in ('demand_candidates','native_supplier_pull'):
+        c.read_parquet([f['path'] for f in sources[name]['files']]).create_view(name)
+    incoming={n for n,*_ in c.execute('DESCRIBE native_supplier_pull').fetchall()}
+    projection=','.join('cast('+('"'+n+'"' if n in incoming else 'NULL')+' AS '+t+') "'+n+'"' for n,t,*_ in c.execute('DESCRIBE demand_candidates').fetchall())
+    p=folder/'demand_candidates.parquet';c.execute("COPY (SELECT * FROM demand_candidates WHERE lane<>'new_prime_historical_supplier_flow' UNION ALL SELECT "+projection+" FROM native_supplier_pull) TO '"+str(p).replace("'","''")+"' (FORMAT PARQUET,COMPRESSION ZSTD)")
+    sha=hashlib.sha256(p.read_bytes()).hexdigest();count=c.execute('SELECT count(*) FROM read_parquet(?)',[str(p)]).fetchone()[0];c.close()
+    return {'demand_candidates':dict(path=str(p),files=[dict(path=str(p),sha256=sha)],sha256=sha,rows=count,as_of=as_of,kind='native_warehouse_derived_demand',status='SUCCEEDED')}
+
+
+def refresh_forecast_episodes(sources,folder,as_of):
+    """Use the full source-stated future horizon, preserving existing NIIN IDs."""
+    if 'dla_forecasts' not in sources:return {}
+    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1200MB'")
+    for name in ('demand_candidates','dla_forecasts'):
+        c.read_parquet([f['path'] for f in sources[name]['files']]).create_view(name)
+    c.execute("""CREATE TEMP TABLE prior AS SELECT json_extract_string(value_inputs_json,'$.niin') niin,min(episode_id) episode_id,min(source_url) source_url
+    FROM demand_candidates WHERE lane='source_item_forecasts' GROUP BY json_extract_string(value_inputs_json,'$.niin') HAVING count(*)=1""")
+    c.execute("""CREATE TEMP TABLE demand AS SELECT niin,min(forecast_month) first_month,max(forecast_month) last_month,sum(forecast_qty) quantity,count(*) month_rows,
+    min(source_release) source_release,min(source_file) source_file,sha256(string_agg(concat_ws('|',forecast_month,cast(forecast_qty AS VARCHAR),source_release,source_file),'|' ORDER BY forecast_month,source_item_id)) evidence_digest
+    FROM dla_forecasts WHERE try_cast(substr(forecast_month,1,10) AS DATE)>=DATE '"""+as_of+"""' AND forecast_qty>0 GROUP BY niin""")
+    expressions={
+    'episode_id':"coalesce(p.episode_id,sha256('native-dla-forecast-v1|'||d.niin))",'record_hash':"sha256(concat_ws('|','native-dla-forecast-v1',d.niin,d.evidence_digest))",'lane':"'source_item_forecasts'",
+    'title':"'DLA forecast demand — NIIN '||d.niin",'scope_text':"'DLA source forecast for this NIIN, across the full source-stated future period. No order or technical source approval is inferred.'",'customer_name':"'Defense Logistics Agency'",
+    'window_start':'d.first_month','window_end':'d.last_month','date_basis':"'Monthly dates in the native DLA forecast; not solicitation or delivery deadlines'",'value_basis':"'company_item_quantity_price_scenarios'",'value_scope':"'Source forecast quantities; company-specific historical/reference price scenarios are separate from orders'",
+    'value_inputs_json':"to_json(struct_pack(niin:=d.niin,forecast_quantity:=d.quantity,positive_forecast_months:=d.month_rows,first_month:=d.first_month,last_month:=d.last_month,source_release:=d.source_release,source_file:=d.source_file,evidence_digest:=d.evidence_digest,unit_basis:='The forecast does not specify a unit; catalogue unit agreement is required before pricing'))",
+    'source_name':"'dla_forecasts'",'source_url':'p.source_url','source_evidence_id':'d.evidence_digest','source_locator':"concat_ws('|',d.source_release,d.source_file,d.niin)",
+    'procurement_state':"'source_forecast_not_ordered'",'reconciled_state':"'conversion_to_procurement_not_established'",'access_state':"'Exact company/item reference and current source access require verification'",
+    'rationale':"'The native DLA file forecasts positive demand for this item during the displayed months. Item references establish relevance; stock, incoming supply and purchase-request conversion remain separate evidence.'",
+    'limitations':"'Long-range source forecasts can change. A forecast quantity is not an order, and catalogue association is not technical approval or company-addressable revenue.'"}
+    projection=','.join('cast('+expressions.get(n,'NULL')+' AS '+t+') "'+n+'"' for n,t,*_ in c.execute('DESCRIBE demand_candidates').fetchall())
+    path=folder/'demand_candidates.parquet';c.execute("COPY (SELECT * FROM demand_candidates WHERE lane<>'source_item_forecasts' UNION ALL SELECT "+projection+" FROM demand d LEFT JOIN prior p USING(niin)) TO '"+str(path).replace("'","''")+"' (FORMAT PARQUET,COMPRESSION ZSTD)")
+    sha=hashlib.sha256(path.read_bytes()).hexdigest();count=c.execute('SELECT count(*) FROM read_parquet(?)',[str(path)]).fetchone()[0];c.close()
+    return {'demand_candidates':dict(path=str(path),files=[dict(path=str(path),sha256=sha)],sha256=sha,rows=count,as_of=as_of,kind='native_warehouse_demand_episodes',status='SUCCEEDED')}

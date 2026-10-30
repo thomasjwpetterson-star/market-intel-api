@@ -8,6 +8,8 @@ def augment(directory,manifests):
  c.execute("SET temp_directory='"+str(r/'registry_tmp').replace("'","''")+"'")
  for path in manifests:
   for name,s in json.loads(Path(path).read_text())['sources'].items():
+   if s.get('remote_only'):
+    m['sources'][name]=s;continue
    for f in s['files']:
     if hashlib.sha256(Path(f['path']).read_bytes()).hexdigest()!=f['sha256']:raise ValueError('Source checksum mismatch: '+name)
    c.read_parquet([f['path'] for f in s['files']]).create_view(name);m['sources'][name]=s

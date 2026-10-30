@@ -39,12 +39,12 @@ def scope_fragments(s):
 def nsns(s):return sorted(set(re.sub(r'\D','',x) for x in re.findall(r'(?<!\d)\d{4}[- ]?\d{2}[- ]?\d{3}[- ]?\d{4}(?!\d)',str(s or ''))))
 def platforms(s):return set(re.findall(r'\b(?:AH|UH|HH|CH|MH|SH|KC|RC|EC|MC|AC|WC|HC|C|F|B|T|P|E|V)[ -]?[0-9]{1,3}[A-Z]{0,2}\b',str(s or '').upper()))
 def canonical_platforms(s):return {re.sub('[ -]','',v) for v in platforms(s)}
-def admissible(work,opportunity,stage):
+def admissible(work,opportunity,stage,work_context=""):
  if stage in ('resolved_or_elapsed','evidence_gap','planning_context'):return False
  terms=scope_terms(work)
  if not terms:return False
  if ('supplier' in str(opportunity.get('lane')) or stage=='emerging_demand') and len(terms)<3:return False
- a=canonical_platforms(work);b=canonical_platforms(str(opportunity.get('title'))+' '+str(opportunity.get('scope_text')))
+ a=canonical_platforms(str(work)+' '+str(work_context or ''));b=canonical_platforms(str(opportunity.get('title'))+' '+str(opportunity.get('scope_text')))
  if a and b and a.isdisjoint(b):return False
  target=str(opportunity.get('title') or '')+' '+str(opportunity.get('scope_text') or '')
  if re.search(r'\b(?:repair|overhaul|remanufactur\w*)\b',str(work),re.I) and not re.search(r'\b(?:repair|overhaul|remanufactur\w*)\b',target,re.I):return False
@@ -56,13 +56,15 @@ def augment(directory,skip_work=False,reuse_features=False):
  r=Path(directory);m=json.loads((r/'manifest.json').read_text());c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1500MB';SET preserve_insertion_order=false");c.execute("SET temp_directory='"+str(r/'company_tmp').replace("'","''")+"'");c.execute("SET max_temp_directory_size='8GB'")
  for n in ['company_profiles','opportunities','demand_decisions','company_matches','published_calls','dla_forecasts']:
   if n in m['tables']:c.read_parquet(m['tables'][n]['path']).create_view('base_'+n)
- c.execute('CREATE TEMP TABLE original_match_snapshot AS SELECT * FROM base_company_matches');c.execute('DROP VIEW base_company_matches');c.execute('CREATE TEMP VIEW base_company_matches AS SELECT * FROM original_match_snapshot')
+ c.execute('CREATE TEMP TABLE original_match_snapshot AS SELECT m.* FROM base_company_matches m JOIN base_opportunities o ON m.episode_id=o.episode_id AND m.opportunity_hash=o.record_hash');c.execute('DROP VIEW base_company_matches');c.execute('CREATE TEMP VIEW base_company_matches AS SELECT * FROM original_match_snapshot')
  c.read_parquet([f['path'] for f in m['sources']['company_work']['files']]).create_view('work')
  c.create_function('scope_terms',scope_terms,['VARCHAR'],duckdb.list_type('VARCHAR'))
  c.create_function('scope_fragments',scope_fragments,['VARCHAR'],duckdb.list_type('VARCHAR'))
  c.create_function('scope_words',words,['VARCHAR'],duckdb.list_type('VARCHAR'))
  c.create_function('scope_nsns',nsns,['VARCHAR'],duckdb.list_type('VARCHAR'))
- c.create_function('scope_admissible',lambda w,t,s,l,stage:admissible(w,{'title':t,'scope_text':s,'lane':l},stage),['VARCHAR']*5,'BOOLEAN')
+ c.create_function('scope_admissible',lambda w,t,s,l,stage,ctx:admissible(w,{'title':t,'scope_text':s,'lane':l},stage,ctx),['VARCHAR']*6,'BOOLEAN')
+ work_columns={n for n,*_ in c.execute('DESCRIBE work').fetchall()}
+ c.execute('CREATE TEMP VIEW retrieval_work AS SELECT *'+(",NULL::VARCHAR programme_context_json" if 'programme_context_json' not in work_columns else '')+' FROM work')
  def output(name,sql):
   c.execute('CREATE OR REPLACE TEMP VIEW result AS '+sql);p=r/(name+'.parquet');temporary=r/(name+'.writing.parquet');c.execute("COPY result TO '"+str(temporary).replace("'","''")+"' (FORMAT PARQUET,COMPRESSION ZSTD)");temporary.replace(p)
   cols=[dict(Name=n,Type='bigint' if t in ('BIGINT','INTEGER') else 'double' if t in ('FLOAT','DOUBLE') else 'boolean' if t=='BOOLEAN' else 'string') for n,t,*_ in c.execute('DESCRIBE result').fetchall()];n=c.execute('SELECT count(*) FROM read_parquet(?)',[str(p)]).fetchone()[0];m['tables'][name]=dict(path=str(p),sha256=hashlib.sha256(p.read_bytes()).hexdigest(),rows=n,columns=cols);c.read_parquet(str(p)).create_view('oi_'+name,replace=True);print(name,n,flush=True)
@@ -73,13 +75,15 @@ def augment(directory,skip_work=False,reuse_features=False):
    c.read_parquet(str(r/'company_scope_features.parquet')).create_view('saved_features')
    c.execute("CREATE TEMP TABLE scopes AS SELECT * EXCLUDE(terms_json,profile_hash),from_json(terms_json,'[\"VARCHAR\"]') terms FROM saved_features")
   else:
-   c.execute("CREATE TEMP TABLE scopes AS SELECT w.* EXCLUDE(work_text),f.fragment work_text,sha256(w.doc_id||'|'||f.fragment) scope_id,scope_terms(f.fragment) terms FROM work w,unnest(scope_fragments(w.work_text)) f(fragment) WHERE substr(last_observed,1,10)<='"+m['as_of']+"'")
+   c.execute("CREATE TEMP TABLE scopes AS SELECT w.* EXCLUDE(work_text),f.fragment work_text,sha256(w.doc_id||'|'||f.fragment) scope_id,scope_terms(f.fragment) terms FROM retrieval_work w,unnest(scope_fragments(w.work_text)) f(fragment) WHERE substr(last_observed,1,10)<='"+m['as_of']+"'")
    c.execute("DELETE FROM scopes WHERE len(terms)<2")
-  c.execute("CREATE TEMP TABLE targets AS SELECT o.episode_id,o.record_hash,o.lane,o.title,o.customer_name,CASE WHEN o.lane='published_procurement' THEN len(scope_nsns(coalesce(o.scope_text,''))) ELSE 0 END full_nsn_count,substr(o.scope_text,1,12000) scope_text,d.stage,scope_words(concat_ws(' ',o.title,substr(o.scope_text,1,12000))) tokens,scope_words(o.title) title_tokens FROM base_opportunities o JOIN base_demand_decisions d USING(episode_id) WHERE d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context') AND o.lane NOT IN ('source_item_forecasts','published_item_procurement')")
+  target_query="CREATE TEMP TABLE targets AS SELECT o.episode_id,o.record_hash,o.lane,o.title,o.customer_name,CASE WHEN o.lane='published_procurement' THEN len(scope_nsns(coalesce(o.scope_text,''))) ELSE 0 END full_nsn_count,substr(o.scope_text,1,12000) scope_text,d.stage,scope_words(concat_ws(' ',o.title,substr(o.scope_text,1,12000))) tokens,scope_words(o.title) title_tokens FROM base_opportunities o JOIN base_demand_decisions d USING(episode_id) WHERE d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context') AND o.lane NOT IN ('source_item_forecasts','published_item_procurement')"
+  if any(n=='programme' for n,*_ in c.execute('DESCRIBE base_opportunities').fetchall()):target_query=target_query.replace('substr(o.scope_text,1,12000) scope_text',"concat_ws(' ',o.programme,substr(o.scope_text,1,12000)) scope_text")
+  c.execute(target_query)
   c.execute('CREATE TEMP TABLE target_tokens AS SELECT DISTINCT episode_id,unnest(tokens) token FROM targets')
   c.execute('CREATE TEMP TABLE frequency AS SELECT token,count(*) docs FROM target_tokens GROUP BY token')
   # Persist reusable company scope features; no company-name or classification-only fit.
-  if not reuse_features:output('company_scope_features',"SELECT s.company_id,s.doc_id,s.scope_id,s.work_text,s.source_kind,s.psc,s.naics,s.last_observed,s.sample_evidence_id,s.evidence_digest,to_json(s.terms) terms_json,p.profile_hash FROM scopes s JOIN base_company_profiles p USING(company_id)")
+  if not reuse_features:output('company_scope_features',"SELECT s.company_id,s.doc_id,s.scope_id,s.work_text,s.source_kind,s.psc,s.naics,s.last_observed,s.sample_evidence_id,s.evidence_digest,s.programme_context_json,to_json(s.terms) terms_json,p.profile_hash FROM scopes s JOIN base_company_profiles p USING(company_id)")
   c.execute('CREATE TEMP TABLE anchor_counts AS SELECT token,count(*) n FROM target_tokens GROUP BY token')
   # Anchor is the least frequent present term; all terms must still occur together.
   c.execute("CREATE TEMP TABLE chosen_terms AS SELECT s.scope_id,arg_min(u.token,struct_pack(n:=f.docs,t:=u.token)) anchor_token,min(f.docs) docs FROM scopes s,unnest(s.terms) u(token) JOIN frequency f USING(token) GROUP BY s.scope_id")
@@ -87,7 +91,7 @@ def augment(directory,skip_work=False,reuse_features=False):
   estimate=c.execute('SELECT sum(w.n*d.n) FROM (SELECT anchor_token token,count(*) n FROM required WHERE docs<=200 OR (len(terms)>=3 AND docs<=2000) GROUP BY anchor_token) w JOIN anchor_counts d USING(token)').fetchone()[0] or 0
   partitions=max(1,(int(estimate)+3999999)//4000000)
   for partition in range(partitions):
-   c.execute("""CREATE OR REPLACE TEMP TABLE pre_hits AS SELECT w.company_id,w.doc_id,w.work_text,w.source_kind,w.sample_evidence_id,w.evidence_digest,w.last_observed,w.terms,o.episode_id,o.record_hash,o.lane,o.stage,o.customer_name,o.title,o.scope_text,
+   c.execute("""CREATE OR REPLACE TEMP TABLE pre_hits AS SELECT w.company_id,w.doc_id,w.work_text,w.source_kind,w.sample_evidence_id,w.evidence_digest,w.last_observed,w.terms,coalesce(w.programme_context_json,'') work_context,o.episode_id,o.record_hash,o.lane,o.stage,o.customer_name,o.title,o.scope_text,
    list_max(list_transform(w.terms,t->list_position(o.tokens,t)))-list_min(list_transform(w.terms,t->list_position(o.tokens,t))) span
    FROM required w JOIN target_tokens tok ON tok.token=w.anchor_token JOIN targets o USING(episode_id)
    WHERE (w.docs<=200 OR (len(w.terms)>=3 AND w.docs<=2000)) AND list_has_all(o.tokens,w.terms)
@@ -96,7 +100,7 @@ def augment(directory,skip_work=False,reuse_features=False):
   AND list_max(list_transform(w.terms,t->list_position(o.tokens,t)))-list_min(list_transform(w.terms,t->list_position(o.tokens,t)))<=len(w.terms)+5
   AND hash(w.company_id)%"""+str(partitions)+'='+str(partition))
    if partition==0:c.execute('CREATE TEMP TABLE hits AS SELECT * EXCLUDE(title,scope_text) FROM pre_hits WHERE false')
-   c.execute("INSERT INTO hits SELECT * EXCLUDE(title,scope_text) FROM pre_hits WHERE scope_admissible(work_text,title,coalesce(scope_text,''),lane,stage) QUALIFY row_number() OVER(PARTITION BY company_id,episode_id ORDER BY len(terms) DESC,last_observed DESC,doc_id)=1")
+   c.execute("INSERT INTO hits SELECT * EXCLUDE(title,scope_text) FROM pre_hits WHERE scope_admissible(work_text,title,coalesce(scope_text,''),lane,stage,work_context) QUALIFY row_number() OVER(PARTITION BY company_id,episode_id ORDER BY len(terms) DESC,last_observed DESC,doc_id)=1")
    c.execute('DROP TABLE pre_hits')
    print('Company retrieval partition',partition+1,'/',partitions,flush=True)
   print('Company retrieval join estimate',estimate,flush=True)
@@ -105,7 +109,7 @@ def augment(directory,skip_work=False,reuse_features=False):
   output('company_work_matches',"""WITH winners AS(SELECT company_id,episode_id,arg_max(doc_id,struct_pack(n:=len(terms),d:=last_observed,id:=doc_id)) doc_id FROM hits GROUP BY company_id,episode_id) SELECT sha256('"""+VERSION+"""|'||h.company_id||'|'||h.episode_id) match_id,h.company_id,h.episode_id,
    least(95.0,65.0+len(h.terms)*3)::DOUBLE score,'"""+VERSION+"""' match_route,array_to_string(h.terms,', ') matched_terms,
    'Observed site work matches the defined functional scope. Configuration, technical access, qualification and unplaced work remain separate checks.' company_evidence_caveat,h.sample_evidence_id,
-   sha256(concat_ws('|',h.company_id,h.episode_id,h.record_hash,h.evidence_digest,p.profile_hash)) match_hash,h.record_hash opportunity_hash,p.profile_hash,h.doc_id,h.work_text,h.source_kind,h.last_observed,
+   sha256(concat_ws('|',h.company_id,h.episode_id,h.record_hash,h.evidence_digest,p.profile_hash)) match_hash,h.record_hash opportunity_hash,p.profile_hash,h.doc_id,h.work_text,h.source_kind,h.last_observed,h.work_context,
    CASE WHEN h.stage='historical_watch' THEN 'account_context' WHEN h.stage='repeat_demand_inference' THEN 'historical_watch' ELSE 'work_lead' END review_category
    FROM hits h JOIN winners z USING(company_id,episode_id,doc_id) JOIN base_company_profiles p USING(company_id)
    WHERE h.span<=len(h.terms)+5 AND regexp_replace(lower(coalesce(h.customer_name,'')),'[^a-z0-9]','','g')<>regexp_replace(lower(p.company_name),'[^a-z0-9]','','g')""")

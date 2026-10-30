@@ -58,6 +58,15 @@ def publish(directory):
    original=parent['tables'][name] if parent else None
    if not original or any(t.get(k)!=original.get(k) for k in ('sha256','rows','table','s3_uri','columns')):raise ValueError('Invalid immutable parent binding: '+name)
    print('Reused verified immutable table',name,t['rows'],flush=True);continue
+  if t.get('remote_binding'):
+   source=m['sources'][t['source_binding']]
+   if any(t.get(k)!=source.get(k) for k in ('rows','sha256','table','s3_uri','columns')):raise ValueError('Distributed serving binding changed: '+name)
+   print('Reused complete distributed serving table',name,t['rows'],flush=True);continue
+  if t.get('source_binding'):
+   source=m['sources'][t['source_binding']];files=source['files']
+   if len(files)!=1 or files[0]['sha256']!=t['sha256'] or source['rows']!=t['rows']:raise ValueError('Serving source binding mismatch: '+name)
+   t['table']='oi_'+run+'_'+name;t['s3_uri']=files[0]['s3_uri'].rsplit('/',1)[0]+'/'
+   a.register(t['table'],t['s3_uri'],t['columns']);print('Registered complete source binding',name,t['rows'],flush=True);continue
   p=Path(t['path'])
   if hashlib.sha256(p.read_bytes()).hexdigest()!=t['sha256']:raise ValueError('Output hash changed: '+name)
   key=base+'/tables/'+name+'/data/part-00000.parquet';a.upload(p,key)
@@ -67,10 +76,14 @@ def publish(directory):
  sql=' UNION ALL '.join("SELECT '"+n+"' name,count(*) records FROM "+DATABASE+'.'+t['table'] for n,t in m['tables'].items())
  remote,e=a.result(sql);observed={x['name']:int(x['records']) for x in remote}
  if observed!={n:t['rows'] for n,t in m['tables'].items()}:raise ValueError('AWS readback count mismatch')
+ if 'company_award_facts' in m['tables'] and m['tables']['company_award_facts'].get('remote_binding'):
+  t=m['tables']['company_award_facts'];facts,evidence_query=a.result('SELECT count(*)-count(DISTINCT award_key) duplicates,count_if(substr(latest_action_date,1,10)>'+"'"+m['as_of']+"'"+') future_rows FROM '+DATABASE+'.'+t['table'])
+  if int(facts[0]['duplicates']) or int(facts[0]['future_rows']):raise ValueError('Distributed award integrity check failed')
+  m['distributed_award_validation']=dict(query_id=evidence_query['QueryExecutionId'],checks=facts)
  m['remote_validation']={'query_id':e['QueryExecutionId'],'counts':observed,'scanned_bytes':e['Statistics'].get('DataScannedInBytes',0)}
  m['source_status']={n:{'rows':s.get('rows'),'as_of':s.get('as_of'),'kind':s.get('kind','live_athena_extract'),'query_id':s.get('query_id'),'status':s.get('status','retained_versioned_source'),'partition_coverage':s.get('partition_coverage'),'source_gap':s.get('source_gap')} for n,s in m['sources'].items()}
  m['source_status']['sbir_awards']={k:m['sbir_source'].get(k) for k in ['source_url','source_sha256','source_s3_uri','retrieved_at','bytes']}
- m['limitations']=['Internal candidate data, not a public recommendation certification','SBIR phase history is observed research, not a Phase III forecast','SBA listing coverage was verified at retrieval; agency amendments and eligibility still require agency verification','Company eligibility, technical access and unplaced supplier work remain evidence gates','Held older demand/company sources retain their original as-of dates']
+ m['limitations']=['Authenticated opportunity intelligence; publication permission is separate from company access','SBIR phase history is observed research, not a Phase III forecast','SBA listing coverage was verified at retrieval; agency amendments and eligibility still require agency verification','Company eligibility, technical access and unplaced supplier work remain evidence gates','Each source retains its own observation and refresh dates; a build timestamp does not advance historical source dates']
  key=base+'/manifest.json';a.put_json(key,m);a.put_json(base+'/validation.json',v);a.put_json(base+'/rules.json',m['rules'])
  a.put_json(PREFIX+'/current.json',dict(run_id=m['run_id'],manifest_key=key,logic_sha256=m['logic_sha256']))
  (r/'published.json').write_text(json.dumps(m,indent=2,default=str)+'\n');print('Shared release published:',key,flush=True);return m

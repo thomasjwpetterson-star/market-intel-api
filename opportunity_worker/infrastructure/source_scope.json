@@ -1,0 +1,51 @@
+{
+  "tables": [
+    "market_intel_silver.candidate_dod_budget_justification_pages",
+    "market_intel_silver.dataset_prime_contracts",
+    "market_intel_silver.fact_dla_forecast_demand_20260916_candidate",
+    "market_intel_silver.fact_dla_inventory_snapshot_20260916_candidate",
+    "market_intel_silver.fact_sam_governed_unit_pricing",
+    "market_intel_silver.fact_sam_opportunities",
+    "market_intel_silver.raw_dla_cage_address",
+    "market_intel_silver.ref_dla_cage_address",
+    "market_intel_silver.ref_dla_cage_entities",
+    "market_intel_silver.ref_dla_cage_status_and_type",
+    "market_intel_silver.ref_dod_fydp_budget_facts",
+    "market_intel_silver.ref_dod_fydp_budget_facts_fy2026",
+    "market_intel_silver.ref_manual_platform_map_from_contracts",
+    "market_intel_silver.ref_sam_archived_opportunity_notice_versions",
+    "market_intel_silver.ref_sam_entities",
+    "market_intel_silver.v_sam_opportunities_canonical",
+    "market_intel_silver.dataset_sub_contracts"
+  ],
+  "read_prefixes": [
+    "athena-query-results/",
+    "bronze/dla/cage_address/",
+    "governance/opportunity_intelligence/",
+    "silver/dla/operational_v2_candidate/source_release=2026-09-16-1038/forecast/",
+    "silver/dla/operational_v2_candidate/source_release=2026-09-16-1038/inventory_backorder/",
+    "silver/dod_budget/ref_fydp_budget_facts/releases/pb_fy2026_v1/data/",
+    "silver/dod_budget/ref_fydp_budget_facts/releases/pb_fy2027_v1/data/",
+    "silver/pricing/budget_page_index/submission_fy=2026/run_id=20260919T053628Z/data/",
+    "silver/pricing/warehouse/market_intel_silver.db/fact_sam_governed_unit_pricing/",
+    "silver/ref_dla_cage_address/",
+    "silver/ref_dla_cage_status_and_type/",
+    "silver/reference/ref_manual_platform_map_from_contracts/",
+    "silver/sam/fact_sam_opportunities/",
+    "silver/sam/ref_sam_entities/",
+    "silver/sam/reference_warehouse/market_intel_silver.db/ref_sam_archived_opportunity_notice_versions/",
+    "silver/usaspending/dataset=prime_contracts/",
+    "silver/usaspending/dataset=sub_contracts/"
+  ],
+  "write_prefixes": [
+    "governance/opportunity_intelligence/",
+    "athena-query-results/"
+  ],
+  "bucket_wide_read": false,
+  "bucket_wide_listing": false,
+  "job": "mimir-opportunity-evidence-refresh",
+  "proposed_daily_time": "14:30 Pacific/Fiji",
+  "maximum_capacity_dpu": 1.0,
+  "timeout_minutes": 120,
+  "permission_status": "explicit_user_approval_received_2026-10-30"
+}

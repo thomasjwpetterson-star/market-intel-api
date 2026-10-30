@@ -7,8 +7,11 @@ def validate(directory):
  r=Path(directory);m=json.loads((r/'manifest.json').read_text());c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1400MB';SET preserve_insertion_order=false");checks=[]
  def check(name,ok,detail=None):checks.append(dict(name=name,passed=bool(ok),detail=detail))
  for n,t in m['tables'].items():
+  if t.get('remote_binding'):
+   check(n+'_distributed_source_integrity',bool(t.get('sha256') and t.get('rows') and t.get('table') and t.get('columns')));continue
   p=Path(t['path']);check(n+'_content_hash',hashlib.sha256(p.read_bytes()).hexdigest()==t['sha256']);c.read_parquet(str(p)).create_view(n);check(n+'_count',c.execute('SELECT count(*) FROM '+n).fetchone()[0]==t['rows'])
  for n,key in [('research_awards','award_id'),('opportunities','episode_id'),('demand_decisions','episode_id'),('company_profiles','company_id')]:check(n+'_unique',c.execute('SELECT count(*)-count(DISTINCT '+key+') FROM '+n).fetchone()[0]==0)
+ check('opportunity_ids_routable',c.execute("SELECT count(*) FROM opportunities WHERE NOT regexp_full_match(episode_id,'[a-f0-9]{64}')").fetchone()[0]==0)
  check('decision_population',c.execute('SELECT count(*) FROM opportunities o ANTI JOIN demand_decisions d USING(episode_id)').fetchone()[0]==0)
  check('decision_record_version',c.execute('SELECT count(*) FROM opportunities o JOIN demand_decisions d USING(episode_id) WHERE o.record_hash<>d.source_record_hash').fetchone()[0]==0)
  check('no_invented_company_value',c.execute("SELECT count(*) FROM demand_decisions WHERE json_extract_string(decision_json,'$.company_addressable_value') IS NOT NULL").fetchone()[0]==0)
@@ -28,7 +31,10 @@ def validate(directory):
   check('registry_valid_codes',c.execute("SELECT count(*) FROM company_registry WHERE NOT regexp_full_match(cage_code,'[A-Z0-9]{5}')").fetchone()[0]==0)
   check('registry_universe_not_shrunk_to_profile_cohort',m['tables']['company_registry']['rows']>=m['tables']['company_profiles']['rows'])
   check('identity_only_not_capability_claim',c.execute("SELECT count(*) FROM company_registry WHERE coverage_state='registered_identity_only' AND (prime_awards>0 OR subcontract_reports>0 OR research_awards>0 OR referenced_items>0)").fetchone()[0]==0)
- if 'company_award_facts' in m['tables']:
+ if 'company_award_facts' in m['tables'] and m['tables']['company_award_facts'].get('remote_binding'):
+  t=m['tables']['company_award_facts'];check('native_company_award_population',c.execute('SELECT sum(prime_awards) FROM company_profiles').fetchone()[0]==t['profileable_rows'])
+  observed=c.execute('SELECT sum(observed_prime_net_obligations) FROM company_profiles').fetchone()[0];check('native_company_obligations_reconcile',abs((observed or 0)-(t['profile_observed_net_total'] or 0))<1.0)
+ elif 'company_award_facts' in m['tables']:
   check('native_awards_unique',c.execute('SELECT count(*)-count(DISTINCT award_key) FROM company_award_facts').fetchone()[0]==0)
   check('native_company_award_population',c.execute('SELECT sum(prime_awards) FROM company_profiles').fetchone()[0]==m['tables']['company_award_facts']['rows'])
   totals=c.execute('SELECT (SELECT sum(observed_net_obligations) FROM company_award_facts)-(SELECT sum(observed_prime_net_obligations) FROM company_profiles)').fetchone()[0]
@@ -52,6 +58,8 @@ def validate(directory):
   check('forecast_scenarios_have_all_months',c.execute('SELECT count(*) FROM company_item_valuations WHERE json_array_length(monthly_evidence_json)<>month_count').fetchone()[0]==0)
   check('forecast_scenario_arithmetic',c.execute('SELECT count(*) FROM company_item_valuations WHERE abs(government_reference_lot_scenario-quantity*government_reference_unit_price)>0.005 OR abs(supplier_average_lot_scenario-quantity*supplier_average_unit_price)>0.005').fetchone()[0]==0)
   check('no_future_supplier_average',c.execute("SELECT count(*) FROM company_item_valuations WHERE supplier_average_lot_scenario IS NOT NULL AND substr(supplier_average_last_sale,1,10)>?",[m['as_of']]).fetchone()[0]==0)
+ if 'company_opportunity_events' in m['tables']:
+  check('company_events_unique',c.execute('SELECT count(*)-count(DISTINCT event_id) FROM company_opportunity_events').fetchone()[0]==0)
  check('public_not_silently_released',m['public_release_approved'] is False)
  v=dict(passed=sum(x['passed'] for x in checks),failed=sum(not x['passed'] for x in checks),checks=checks,logic_sha256=m['logic_sha256']);(r/'validation.json').write_text(json.dumps(v,indent=2)+'\n');c.close()
  if v['failed']:raise ValueError('Failed release gates: '+', '.join(x['name'] for x in checks if not x['passed']))
