@@ -130,4 +130,6 @@ def review_current(previous,root,aws):
   for f in s['files']:
    path=r/('reference_'+f['sha256']+'.parquet');aws.s3.download_file(BUCKET,f['s3_uri'].split('/',3)[3],str(path));f['path']=str(path)
    if hashlib.sha256(path.read_bytes()).hexdigest()!=f['sha256']:raise ValueError('Catalogue evidence checksum changed')
- (r/'manifest.json').write_text(json.dumps(m,indent=2)+'\n');apply(r);return r
+ (r/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')
+ from .notice_prices import refresh as refresh_notice_prices
+ refresh_notice_prices(r);apply(r);return r

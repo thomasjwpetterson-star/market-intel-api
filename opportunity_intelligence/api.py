@@ -6,7 +6,7 @@ from pathlib import Path
 from functools import lru_cache
 from .aws import AWS,BUCKET,PREFIX,DATABASE
 from . import rules
-from .notice_facts import quantity_fact
+from .notice_facts import quantity_fact,price_scenario_fact
 _REQUEST_RELEASE=contextvars.ContextVar("mimir_opportunity_request_release",default=None)
 
 class Repository:
@@ -128,7 +128,8 @@ class Repository:
   related="json_format(cast(array_agg(cast(row(c.episode_id,c.native_identifier,c.source_url,c.source_evidence_id,c.notice_posted_date) AS row(episode_id varchar,native_identifier varchar,source_url varchar,source_evidence_id varchar,posted_date varchar))) OVER (PARTITION BY "+family+") AS json)) related_source_records_json"
   grouped="WITH candidates AS ("+selected+"), families AS (SELECT c.*,row_number() OVER (PARTITION BY "+family+" ORDER BY c.notice_posted_date DESC NULLS LAST,c.episode_id) source_family_rank,"+related+" FROM candidates c) SELECT q.* FROM families q WHERE q.source_family_rank=1 ORDER BY "+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit)
   records=self.rows(grouped)
-  for record in records:record.update(quantity_fact(record))
+  for record in records:
+   record.update(quantity_fact(record));record.update(price_scenario_fact(record))
   return records
 
  def detail(self,eid):
@@ -137,8 +138,14 @@ class Repository:
   if 'opportunity_quality_reviews' in self.manifest()['tables']:
    join=' LEFT JOIN '+self.table('opportunity_quality_reviews')+' qr ON qr.episode_id=o.episode_id AND qr.record_hash=o.record_hash'
    extra=self.quality_projection()
+  if 'company_notice_item_prices' in self.manifest()['tables']:
+   # New global item references are identical across candidates; legacy
+   # company-specific rows must never be promoted to global source evidence.
+   join+=" LEFT JOIN (SELECT DISTINCT episode_id,record_hash,items_json,interpretation FROM "+self.table('company_notice_item_prices')+" WHERE json_extract_scalar(items_json,'$[0].price_scope')='global_exact_niin') np ON np.episode_id=o.episode_id AND np.record_hash=o.record_hash"
+   extra+=',np.items_json notice_item_pricing_json,np.interpretation notice_item_price_interpretation'
   records=self.rows('SELECT o.*,d.stage,d.decision_json'+extra+' FROM '+self.table('opportunities')+' o JOIN '+self.table('demand_decisions')+" d ON o.episode_id=d.episode_id"+join+" WHERE o.episode_id='"+eid+"'")
-  for record in records:record.update(quantity_fact(record))
+  for record in records:
+   record.update(quantity_fact(record));record.update(price_scenario_fact(record))
   return records
  def company_match_review(self,cage,eid):
   if not re.fullmatch('[A-Z0-9]{5}',cage) or not re.fullmatch('[a-f0-9]{64}',eid):raise ValueError('Invalid company/source identifier')

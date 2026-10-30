@@ -9,7 +9,7 @@ import duckdb
 STOP=set(json.loads((Path(__file__).parent/'scope_stopwords.json').read_text()))
 ALIASES={'assy':'assembly','assys':'assembly','assemblies':'assembly','pumps':'pump','indicators':'indicator','clutches':'clutch','detectors':'detector','valves':'valve','sensors':'sensor','actuators':'actuator','elec':'electric','elect':'electric','mfg':'manufacturing'}
 VERSION='company-first-portable-v3'
-LOGIC_HASH=hashlib.sha256(Path(__file__).read_bytes()+(Path(__file__).parent/'scope_stopwords.json').read_bytes()).hexdigest()
+LOGIC_HASH=hashlib.sha256(Path(__file__).read_bytes()+(Path(__file__).parent/'scope_stopwords.json').read_bytes()+(Path(__file__).parent/'notice_prices.py').read_bytes()).hexdigest()
 def words(s):return [ALIASES.get(w,w) for w in re.findall(r'[a-z][a-z0-9]*',html.unescape(re.sub('<[^>]+>',' ',str(s or ''))).lower())]
 def scope_terms(s):
  from .quality_core import administrative_scope,NOISE
@@ -165,26 +165,8 @@ def augment(directory,skip_work=False,reuse_features=False):
  if source:
   c.read_parquet([f['path'] for f in source['files']]).create_view('raw_item_reference_facts')
   c.execute("CREATE TEMP VIEW item_reference_facts AS SELECT * REPLACE(CASE WHEN govt_estimated_price>0 THEN govt_estimated_price END AS govt_estimated_price,CASE WHEN supplier_average_price>0 AND (last_sold_date IS NULL OR substr(cast(last_sold_date AS VARCHAR),1,10)<='"+m['as_of']+"') THEN supplier_average_price END AS supplier_average_price) FROM raw_item_reference_facts")
-  # Exact company/notice item references expose unit evidence even where a
-  # capability enquiry publishes no order quantity. No total is inferred.
-  c.execute("""CREATE TEMP TABLE notice_item_keys AS SELECT DISTINCT o.episode_id,o.record_hash,n.nsn,right(n.nsn,9) niin
-  FROM base_opportunities o JOIN base_demand_decisions d USING(episode_id),unnest(scope_nsns(concat_ws(' ',o.title,o.scope_text))) n(nsn)
-  WHERE o.lane='published_procurement' AND d.stage IN ('qualification_opening','published_requirement')""")
-  current_matches='oi_company_matches' if not skip_work else 'base_company_matches'
-  c.execute("""CREATE TEMP TABLE notice_item_references AS SELECT DISTINCT cm.company_id,k.episode_id,k.record_hash,k.nsn,i.*
-  FROM """+current_matches+""" cm JOIN notice_item_keys k ON k.episode_id=cm.episode_id AND k.record_hash=cm.opportunity_hash
-  JOIN item_reference_facts i ON i.cage_code=substr(cm.company_id,6) AND i.niin=k.niin""")
-  c.execute("""CREATE TEMP TABLE notice_item_prices AS SELECT company_id,episode_id,record_hash,nsn,
-  CASE WHEN count(DISTINCT unit_of_issue)=1 THEN min(unit_of_issue) END catalogue_unit,
-  CASE WHEN count(DISTINCT unit_of_issue)=1 AND count(DISTINCT govt_estimated_price)=1 THEN min(govt_estimated_price)::DOUBLE END government_reference_unit_price,
-  CASE WHEN count(DISTINCT unit_of_issue)=1 AND count(DISTINCT supplier_average_price)=1 THEN min(supplier_average_price)::DOUBLE END supplier_average_unit_price,
-  max(last_sold_date) FILTER(WHERE supplier_average_price IS NOT NULL) supplier_average_last_sale,count(*) reference_rows,
-  to_json(list(DISTINCT struct_pack(evidence_id:=evidence_id,part_number:=part_number,description:=description,source_snapshot_sha256:=source_snapshot_sha256,source_row:=source_row,government_reference_price:=govt_estimated_price,supplier_average_price:=supplier_average_price,unit:=unit_of_issue,last_sale:=last_sold_date))) catalogue_evidence_json
-  FROM notice_item_references GROUP BY company_id,episode_id,record_hash,nsn""")
-  output('company_notice_item_prices',"""SELECT company_id,episode_id,record_hash,to_json(list(struct_pack(nsn:=nsn,catalogue_unit:=catalogue_unit,government_reference_unit_price:=government_reference_unit_price,supplier_average_unit_price:=supplier_average_unit_price,supplier_average_last_sale:=supplier_average_last_sale,reference_rows:=reference_rows,catalogue_evidence:=json(catalogue_evidence_json)) ORDER BY nsn)) items_json,
-  'Exact notice NIIN and company catalogue reference. Unit-price evidence only; quantity, configuration, current source access and total opportunity value remain separate checks.' interpretation
-  FROM notice_item_prices GROUP BY company_id,episode_id,record_hash""")
-  for unused in ('notice_item_keys','notice_item_references','notice_item_prices'):c.execute('DROP TABLE '+unused)
+  from .notice_prices import build as build_notice_prices
+  build_notice_prices(c,output,m['as_of'],'oi_company_matches' if not skip_work else 'base_company_matches')
   # Regenerate exact catalogue-to-demand links for every held profile, rather than
   # retaining the prototype's ten-item-per-company seed. A reference is not approval.
   c.execute("""CREATE TEMP TABLE item_demand_keys AS SELECT o.episode_id,o.record_hash,o.lane,

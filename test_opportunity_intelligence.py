@@ -76,7 +76,7 @@ class OpportunityPilotTests(unittest.TestCase):
 
     def test_exact_saved_source_retains_quality_and_quantity_without_claiming_company_fit(self):
         aws=CaptureAWS();repo=Repository(aws)
-        repo._manifest={'run_id':'current','tables':{n:{'table':'oi_current_'+n} for n in ['opportunities','demand_decisions','opportunity_quality_reviews']}};repo._expires=float('inf')
+        repo._manifest={'run_id':'current','tables':{n:{'table':'oi_current_'+n} for n in ['opportunities','demand_decisions','opportunity_quality_reviews','company_notice_item_prices']}};repo._expires=float('inf')
         row={'episode_id':'a'*64,'title':'Generator NSN 6115012704801','source_name':'sam_notices','scope_text':'Estimated Spares Requirement: 9ea','source_evidence_id':'notice-evidence','stage':'qualification_opening','decision_json':'{"stage":"qualification_opening"}','source_entry_kind':'existing_item_sourcing_inquiry','source_quality_verdict':'usable','source_quality_reason':'','source_quality_passages_json':'[]','source_body_deadline':None}
         def result(sql):aws.sql=sql;return [dict(row)],{}
         aws.result=result
@@ -91,6 +91,8 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn('not revalidated',data['source_check_scope'])
         self.assertIn('qr.record_hash=o.record_hash',aws.sql)
         self.assertIn('d.stage',aws.sql)
+        self.assertIn("json_extract_scalar(items_json,'$[0].price_scope')='global_exact_niin'",aws.sql)
+        self.assertIn('np.record_hash=o.record_hash',aws.sql)
         self.assertNotIn('company_matches',aws.sql)
 
     def test_company_match_review_is_exact_versioned_and_retains_rejected_evidence(self):
@@ -245,6 +247,20 @@ class OpportunityPilotTests(unittest.TestCase):
 if __name__ == '__main__': unittest.main()
 
 class NoticeQuantityTests(unittest.TestCase):
+    def test_exact_item_reference_scenario_requires_matching_unit_item_and_explicit_quantity(self):
+        from opportunity_intelligence.notice_facts import quantity_fact,price_scenario_fact
+        row={'source_name':'sam_notices','title':'Generator NSN 6115012704801','scope_text':'Estimated Spares Requirement: 9ea'}
+        item={'nsn':'6115012704801','catalogue_unit':'EA','government_reference_unit_price':84079.48,'supplier_average_unit_price':None,'catalogue_evidence':[{'reference_cage':'62983','evidence_id':'source-row'}]}
+        row.update(quantity_fact(row));row['notice_item_pricing_json']=json.dumps([item])
+        scenario=json.loads(price_scenario_fact(row)['notice_item_lot_scenarios_json'])[0]
+        self.assertEqual(scenario['gross_reference_scenario'],756715.32)
+        self.assertEqual(scenario['price_evidence'][0]['reference_cage'],'62983')
+        self.assertIn('engineering',scenario['interpretation'])
+        for changed in [{'catalogue_unit':'BX'},{'nsn':'6115009468441'},{'government_reference_unit_price':float('nan')}]:
+            self.assertEqual(price_scenario_fact({**row,'notice_item_pricing_json':json.dumps([{**item,**changed}])}),{})
+        self.assertEqual(price_scenario_fact({**row,'notice_item_pricing_json':json.dumps([item,item])}),{})
+        self.assertEqual(price_scenario_fact({**row,'notice_quantity':None}),{})
+
     def test_explicit_single_item_quantity_is_quoted_and_not_a_price(self):
         from opportunity_intelligence.notice_facts import quantity_fact
         row={'source_name':'sam_notices','title':'Generator NSN 6115012704801','scope_text':'Part Number: 418446. NSN: 6115-01-270-4801HY Estimated Spares Requirement: 9ea','source_evidence_id':'retained-notice'}
