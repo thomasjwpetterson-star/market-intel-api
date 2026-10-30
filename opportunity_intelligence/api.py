@@ -1,7 +1,7 @@
 """Authenticated FastAPI adapter for the shared AWS read model.
 The application must inject its existing verified-principal dependency.
 """
-import contextvars,hashlib,json,re,time
+import contextvars,datetime,hashlib,json,re,time
 from pathlib import Path
 from functools import lru_cache
 from .aws import AWS,BUCKET,PREFIX,DATABASE
@@ -23,6 +23,18 @@ class Repository:
   if not re.fullmatch(r'oi_[a-z0-9_]+',t):raise ValueError('Invalid engine table binding')
   return DATABASE+'.'+t
  def rows(self,sql):return self.aws.result(sql)[0]
+ def refresh_status(self):
+  try:
+   value=json.loads(self.aws.s3.get_object(Bucket=BUCKET,Key=PREFIX+'/operations/last_run.json')['Body'].read())
+   status=value.get('status')
+   if status not in ('running','succeeded','failed_preserved_previous_current_pointer'):return {'status':'unavailable'}
+   if status=='running':
+    started=datetime.datetime.fromisoformat(value['started_at'].replace('Z','+00:00'))
+    if started.tzinfo is None:return {'status':'unavailable'}
+    if (datetime.datetime.now(datetime.timezone.utc)-started).total_seconds()>4*3600:status='status_stale'
+   # Never expose exception strings, stack traces or infrastructure details.
+   return dict(status=status,**{k:value[k] for k in ('started_at','finished_at','refresh_mode') if isinstance(value.get(k),str) and len(value[k])<=128})
+  except Exception:return {'status':'unavailable'}
  def company(self,cage):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
   return self.rows('SELECT * FROM '+self.table('company_registry')+" WHERE cage_code='"+cage+"'")
@@ -278,5 +290,5 @@ def create_router(verify_principal,repository=None):
  def benchmark(topic_id:str):return {'records':call(repo.benchmark,topic_id)}
  @router.get('/sources')
  def sources():
-  m=repo.manifest();return {'release':m['run_id'],'as_of':m['as_of'],'sources':m['source_status'],'limitations':m['limitations']+['Forecasts containing negative future monthly quantities are withheld from actionable feeds pending source reconciliation; positive months are not silently priced alone.']}
+  m=repo.manifest();return {'release':m['run_id'],'as_of':m['as_of'],'refresh':repo.refresh_status(),'sources':m['source_status'],'limitations':m['limitations']+['Forecasts containing negative future monthly quantities are withheld from actionable feeds pending source reconciliation; positive months are not silently priced alone.']}
  return router

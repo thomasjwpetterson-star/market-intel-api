@@ -1,5 +1,6 @@
 """Security and query-boundary checks; no cloud calls or migrations."""
 import os
+import datetime,io,json
 import unittest
 from unittest.mock import patch
 from fastapi import FastAPI
@@ -145,6 +146,19 @@ class OpportunityPilotTests(unittest.TestCase):
         repo = Repository(CaptureAWS()); repo.table = lambda name: 'safe.' + name
         for company, kind in [("CAGE:45934' OR 1=1", 'work'), ('CAGE:45934', 'arbitrary')]:
             with self.assertRaises(ValueError): repo.opportunities(company, 24, 0, False, kind)
+
+    def test_refresh_health_redacts_errors_and_detects_stale_running_reports(self):
+        class S3:
+            def __init__(self,value):self.value=value
+            def get_object(self,**kwargs):return {'Body':io.BytesIO(json.dumps(self.value).encode())}
+        aws=CaptureAWS();aws.s3=S3({'status':'failed_preserved_previous_current_pointer','error':'private infrastructure diagnostic','finished_at':'2026-10-30T05:00:00+00:00'})
+        repo=Repository(aws);status=repo.refresh_status()
+        self.assertNotIn('error',status)
+        self.assertEqual(status['status'],'failed_preserved_previous_current_pointer')
+        aws.s3.value={'status':'running','started_at':'2020-01-01T00:00:00+00:00'}
+        self.assertEqual(repo.refresh_status()['status'],'status_stale')
+        aws.s3.value={'status':'running','started_at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+        self.assertEqual(repo.refresh_status()['status'],'running')
 
     def test_deployed_lazy_mount_pins_the_concrete_repository_after_authentication(self):
         old={'run_id':'old','tables':{'opportunities':{'table':'oi_old_opportunities'},'demand_decisions':{'table':'oi_old_decisions'}}}
