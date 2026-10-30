@@ -74,6 +74,25 @@ class OpportunityPilotTests(unittest.TestCase):
         repo.opportunities('CAGE:45934',24,0,False,'items')
         self.assertIn("OR coalesce(qr.category_override='items',false)",aws.sql)
 
+    def test_exact_saved_source_retains_quality_and_quantity_without_claiming_company_fit(self):
+        aws=CaptureAWS();repo=Repository(aws)
+        repo._manifest={'run_id':'current','tables':{n:{'table':'oi_current_'+n} for n in ['opportunities','demand_decisions','opportunity_quality_reviews']}};repo._expires=float('inf')
+        row={'episode_id':'a'*64,'title':'Generator NSN 6115012704801','source_name':'sam_notices','scope_text':'Estimated Spares Requirement: 9ea','source_evidence_id':'notice-evidence','stage':'qualification_opening','decision_json':'{"stage":"qualification_opening"}','source_entry_kind':'existing_item_sourcing_inquiry','source_quality_verdict':'usable','source_quality_reason':'','source_quality_passages_json':'[]','source_body_deadline':None}
+        def result(sql):aws.sql=sql;return [dict(row)],{}
+        aws.result=result
+        app=FastAPI();app.include_router(create_router(verified_application_principal,repo));client=TestClient(app)
+        url='/opportunity-intelligence/opportunities/'+'a'*64
+        self.assertEqual(client.get(url).status_code,401)
+        response=client.get(url,headers={'X-Mimir-Export-Key':'test-proxy-secret','X-Mimir-Opportunity-User':'11111111-1111-4111-8111-111111111111'})
+        self.assertEqual(response.status_code,200)
+        data=response.json();self.assertEqual(data['release'],'current')
+        self.assertEqual(data['source_entry_kind'],'existing_item_sourcing_inquiry')
+        self.assertEqual(data['notice_quantity'],9);self.assertEqual(data['notice_quantity_unit'],'EA')
+        self.assertIn('not revalidated',data['source_check_scope'])
+        self.assertIn('qr.record_hash=o.record_hash',aws.sql)
+        self.assertIn('d.stage',aws.sql)
+        self.assertNotIn('company_matches',aws.sql)
+
     def test_supplier_lineage_is_scoped_to_the_opportunity(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
         repo.manifest = lambda: {'tables': {'supplier_pull_prime_evidence': {}}}

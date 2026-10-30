@@ -149,3 +149,7 @@ The serving projection exposes notice_quantity, notice_quantity_unit, notice_qua
 Serving authority
 ------------------
 company_work_matches retains the retrieved evidence population, including fit_verdict=rejected rows for audit. company_matches is the filtered serving-edge projection. Consumers should use the authenticated API or join the serving edges; raw candidate/review-category counts are not counts of qualified opportunities.
+
+Exact saved-source checks
+-------------------------
+GET /opportunities/<episode_id> returns the same source_entry_kind, source-quality verdict/reason/passages/body deadline, top-level source stage and quoted notice_quantity facts as list projection. Quality joins bind both episode_id and record_hash. The response source_check_scope explicitly states that this company-independent endpoint checks demand evidence only: it does not revalidate company fit, source access, applicant eligibility, personal qualification decisions or a saved company overlay. Existing-OEM inquiries must retain their source-entry wording instead of falling back to a generic new-manufacturer qualification action.

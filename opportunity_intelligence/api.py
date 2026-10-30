@@ -124,7 +124,13 @@ class Repository:
 
  def detail(self,eid):
   if not re.fullmatch('[a-f0-9]{64}',eid):raise ValueError('Invalid opportunity identifier')
-  return self.rows('SELECT o.*,d.decision_json FROM '+self.table('opportunities')+' o JOIN '+self.table('demand_decisions')+" d ON o.episode_id=d.episode_id WHERE o.episode_id='"+eid+"'")
+  extra='';join=''
+  if 'opportunity_quality_reviews' in self.manifest()['tables']:
+   join=' LEFT JOIN '+self.table('opportunity_quality_reviews')+' qr ON qr.episode_id=o.episode_id AND qr.record_hash=o.record_hash'
+   extra=',qr.source_entry_kind,qr.verdict source_quality_verdict,qr.reason source_quality_reason,qr.passages_json source_quality_passages_json,qr.body_deadline source_body_deadline'
+  records=self.rows('SELECT o.*,d.stage,d.decision_json'+extra+' FROM '+self.table('opportunities')+' o JOIN '+self.table('demand_decisions')+" d ON o.episode_id=d.episode_id"+join+" WHERE o.episode_id='"+eid+"'")
+  for record in records:record.update(quantity_fact(record))
+  return records
  def research(self,cage,limit=20):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
   if not 1<=limit<=100:raise ValueError('Invalid limit')
@@ -271,7 +277,7 @@ def create_router(verify_principal,repository=None):
  def opportunity(episode_id:str):
   r=call(repo.detail,episode_id)
   if not r:raise HTTPException(status_code=404,detail='Opportunity not found')
-  return dict(r[0],release=repo.manifest()['run_id'])
+  return dict(r[0],release=repo.manifest()['run_id'],source_check_scope='Demand evidence only; company fit, access and eligibility are not revalidated by this company-independent endpoint')
  @router.get('/companies/{cage}/research')
  def research(cage:str,limit:int=Query(20,ge=1,le=100)):return {'awards':call(repo.research,cage,limit),'topic_calls':call(repo.research_calls,cage,limit)}
  @router.get('/opportunities/{episode_id}/supplier-evidence')
