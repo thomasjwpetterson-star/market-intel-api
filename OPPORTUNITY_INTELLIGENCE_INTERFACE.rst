@@ -141,3 +141,11 @@ Additive response fields when quality tables are published: source_entry_kind, s
 Related notice display
 -----------------------
 The reader groups only SAM records sharing the same buyer, normalized complete title and procurement identifier after removing a trailing -00 variant. The latest posted retained record represents the group; related_source_records_json retains every episode, identifier, source URL and evidence ID. Different procurement IDs for the same item are kept separate. This is transparent display grouping, not proof of an agency amendment relationship. Values are never summed. Grouping precedes pagination/export.
+
+Explicit single-item notice quantities
+--------------------------------------
+The serving projection exposes notice_quantity, notice_quantity_unit, notice_quantity_basis, notice_quantity_evidence, notice_quantity_policy and notice_quantity_source_evidence_id when a retained SAM notice has one NSN and a consistent explicit estimated-spares/quantity-required statement. Multiple item IDs, conflicting quantities, ranges and recurring rates are not reduced to a lot size. The quoted text and source hash remain available. These facts do not turn an inquiry into an order or price it from a different item. CSV preserves the additive fields. GET /methodology includes these rules and the published source/fit policy version/hash.
+
+Serving authority
+------------------
+company_work_matches retains the retrieved evidence population, including fit_verdict=rejected rows for audit. company_matches is the filtered serving-edge projection. Consumers should use the authenticated API or join the serving edges; raw candidate/review-category counts are not counts of qualified opportunities.

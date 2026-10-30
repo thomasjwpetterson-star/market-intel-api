@@ -195,3 +195,16 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertEqual(repo.manifest()['run_id'],'new')
 
 if __name__ == '__main__': unittest.main()
+
+class NoticeQuantityTests(unittest.TestCase):
+    def test_explicit_single_item_quantity_is_quoted_and_not_a_price(self):
+        from opportunity_intelligence.notice_facts import quantity_fact
+        row={'source_name':'sam_notices','title':'Generator NSN 6115012704801','scope_text':'Part Number: 418446. NSN: 6115-01-270-4801HY Estimated Spares Requirement: 9ea','source_evidence_id':'retained-notice'}
+        result=quantity_fact(row)
+        self.assertEqual(result['notice_quantity'],9)
+        self.assertEqual(result['notice_quantity_unit'],'EA')
+        self.assertEqual(result['notice_quantity_evidence'],'Estimated Spares Requirement: 9ea')
+        self.assertIn('not an order',result['notice_quantity_basis'])
+        self.assertNotIn('value',result)
+        for body in ['NSN 6115012704801 and NSN 6115009468441 Estimated Spares Requirement: 9ea','NSN 6115012704801 Estimated Quantity: 9EA Estimated Quantity: 15EA','NSN 6115012704801 Minimum Quantity Required: 9EA','NSN 6115012704801 Quantity Required: 0EA']:
+            self.assertEqual(quantity_fact({**row,'scope_text':body}),{})
