@@ -90,7 +90,7 @@ def rebuild(sources,folder,as_of):
 
 
 def merge_distributed(sources,folder,as_of):
-    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1200MB'")
+    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1200MB';SET preserve_insertion_order=false")
     for name in ('demand_candidates','native_supplier_pull'):
         c.read_parquet([f['path'] for f in sources[name]['files']]).create_view(name)
     incoming={n for n,*_ in c.execute('DESCRIBE native_supplier_pull').fetchall()}
@@ -103,14 +103,18 @@ def merge_distributed(sources,folder,as_of):
 def refresh_forecast_episodes(sources,folder,as_of):
     """Use the full source-stated future horizon, preserving existing NIIN IDs."""
     if 'dla_forecasts' not in sources:return {}
-    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1200MB'")
+    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1200MB';SET preserve_insertion_order=false")
     for name in ('demand_candidates','dla_forecasts'):
         c.read_parquet([f['path'] for f in sources[name]['files']]).create_view(name)
     c.execute("""CREATE TEMP TABLE prior AS SELECT json_extract_string(value_inputs_json,'$.niin') niin,min(episode_id) episode_id,min(source_url) source_url
     FROM demand_candidates WHERE lane='source_item_forecasts' GROUP BY json_extract_string(value_inputs_json,'$.niin') HAVING count(*)=1""")
-    c.execute("""CREATE TEMP TABLE demand AS SELECT niin,min(forecast_month) first_month,max(forecast_month) last_month,sum(forecast_qty) quantity,count(*) month_rows,
-    min(source_release) source_release,min(source_file) source_file,sha256(string_agg(concat_ws('|',forecast_month,cast(forecast_qty AS VARCHAR),source_release,source_file),'|' ORDER BY forecast_month,source_item_id)) evidence_digest
-    FROM dla_forecasts WHERE try_cast(substr(cast(forecast_month AS VARCHAR),1,10) AS DATE)>=DATE '"""+as_of+"""' AND forecast_qty>0 GROUP BY niin""")
+    # Ordered aggregates allocate per-group state that cannot spill. Partition
+    # by complete NIIN so each item's full horizon and exact digest stay intact.
+    for partition in range(16):
+        prefix='CREATE TEMP TABLE demand AS ' if partition==0 else 'INSERT INTO demand '
+        c.execute(prefix+"""SELECT niin,min(forecast_month) first_month,max(forecast_month) last_month,sum(forecast_qty) quantity,count(*) month_rows,
+        min(source_release) source_release,min(source_file) source_file,sha256(string_agg(concat_ws('|',forecast_month,cast(forecast_qty AS VARCHAR),source_release,source_file),'|' ORDER BY forecast_month,source_item_id)) evidence_digest
+        FROM dla_forecasts WHERE try_cast(substr(cast(forecast_month AS VARCHAR),1,10) AS DATE)>=DATE '"""+as_of+"""' AND forecast_qty>0 AND hash(niin)%16="""+str(partition)+" GROUP BY niin")
     expressions={
     'episode_id':"coalesce(p.episode_id,sha256('native-dla-forecast-v1|'||d.niin))",'record_hash':"sha256(concat_ws('|','native-dla-forecast-v1',d.niin,d.evidence_digest))",'lane':"'source_item_forecasts'",
     'title':"'DLA forecast demand — NIIN '||d.niin",'scope_text':"'DLA source forecast for this NIIN, across the full source-stated future period. No order or technical source approval is inferred.'",'customer_name':"'Defense Logistics Agency'",
