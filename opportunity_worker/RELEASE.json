@@ -1,0 +1,20 @@
+{
+  "version": "0.5.0",
+  "sha256": "452cf244cb09774ff4bac2ddd11c68fc47716bdad17f43e49ba413877a678bf8",
+  "package_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=452cf244cb09774ff4bac2ddd11c68fc47716bdad17f43e49ba413877a678bf8/mimir_opportunity_engine-0.5.0-py3-none-any.whl",
+  "overlays": {
+    "__main__.py": "9c3c28befea68956401bc6e0b37bff0a241b2977a0bc0f9d4baba07569062e49",
+    "build.py": "7dfdef3fbfce8c60ea659a100cab8e07d23ec35a942a39ba06440e8910b8cbab",
+    "api.py": "34f84b91c0ce93e44ae783d10cfe34371906cb473bbc2408d307e18d05f51cd0",
+    "validate.py": "a216f790ab2368a6fc3e7d8be314fcbf2baf5cf4edb18360ad756a60506995fa",
+    "company_enrichment.py": "cb71689d94130ed45652c744519b284bb40533312430812b37d237930985a175",
+    "company_history.py": "0491fdb40bb5d898a0c33f39e063eee8fafc80a92f2a9bc1e7674d9fe9b23137",
+    "demand_history.py": "7e89af161daa7979e015d98b69a30cd885067ffcb93668bf9781c78344b46f6f",
+    "native_sources.py": "98510396155c80913ca14c1c0b0f0f74c1ad41f0c9495a68cae68bfb5868121e",
+    "ingestion/refresh_company_history.py": "8df5b663c78e081b6c08f1a3d0706ee8254fcf8d9a68f9ac9f3eeb166649fc8f"
+  },
+  "role_unchanged": true,
+  "schedule_unchanged": true,
+  "previous_package_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=43ff3ee33625cbda6aa76237d1a5018725644a23bb55e847b15b5071e3d6304f/mimir_opportunity_engine-0.4.2-py3-none-any.whl",
+  "run_id": "jr_4834f5e3639e0903ccab4585f8a51124e0f36d675a725410bc6a3e7640c27643"
+}
