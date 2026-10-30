@@ -84,7 +84,7 @@
   "role_unchanged": true,
   "source_permissions_unchanged": true,
   "schedule": "cron(30 2 * * ? *)",
-  "schedule_temporarily_disabled_until_success": true,
+  "schedule_temporarily_disabled_until_success": false,
   "runtime": {
     "GlueVersion": "5.0",
     "WorkerType": "G.2X",
@@ -126,5 +126,14 @@
     "opportunity_engine/scope_stopwords.json": "1889521d5395576931a3d0872a27eb95cf5a86146a68a1c7efa4aa530d1662cd",
     "opportunity_engine/supplier_demand.py": "0b036835f49a2d97dd6b7c57b18e9a74ff4605ea43adaa94c63ff31bdf710800",
     "opportunity_engine/validate.py": "98b710951bc0a65775772386338dfc0e4db89dec33b5247e3becb95cafa9d2a1"
-  }
+  },
+  "published_release": "20261030_065056_1b7027",
+  "worker_status": "SUCCEEDED",
+  "validation_passed": 135,
+  "validation_failed": 0,
+  "tables": 47,
+  "remote_readback_query_id": "67127433-7a9d-4c92-a094-ac382b890380",
+  "trigger_state": "ACTIVATED",
+  "completed_at": "2026-10-30 18:56:19.656000+12:00",
+  "automatic_date_and_native_refresh": true
 }
