@@ -105,3 +105,11 @@ Read consistency: authenticated requests pin one immutable release for table sel
 Runtime capacity
 ----------------
 The full-market worker uses the existing Glue job/role with Glue 5.0, two G.2X workers and the same declared source/read and opportunity/output permissions. A frozen wheel bundle includes native Linux CPython 3.11 dependencies. Logs retain the existing authorized /aws-glue/python-jobs prefix. Company matching uses narrow candidate keys, then supporting scope records; compute partitions do not truncate the company or opportunity population. The recurring trigger is restored only after successful end-to-end publication following a runtime change.
+
+Historical valuation coverage (30 October 2026)
+----------------------------------------------
+The native comparator library holds 16,725,041 of 17,932,825 positive awards with latest action on/after 2021-10-30: 93.3% by record count and 77.7% by observed lifetime net obligations ($2.441T of $3.143T). This is library coverage, not the fraction of new opportunities priced, annual spending or a company-addressable market. Scope/work-mode/buyer comparison requirements still leave individual opportunities unvalued. Query 6c4257c7-f141-4975-81b1-f1aa39ecf77c and the bounded coverage audit retain the population definition.
+
+Retained product-reference evidence
+-----------------------------------
+A metadata-only Parquet audit confirmed 17,467,537 retained company/item reference rows, including CAGE, NIIN/NSN, part number, unit of issue, government reference price, supplier average price, last sale, RNCC, RNVC and RNSC, plus immutable source hash and row provenance. These codes must not be described as absent. The current price drilldown uses exact company/item references; it does not yet interpret these retained codes into a manufacturing/qualification decision. Document availability/data-rights fields are not in this particular normalized reference projection. Do not infer their absence from the wider source estate. Catalogue association, design-control evidence, procurement approval and usable technical data are distinct facts.

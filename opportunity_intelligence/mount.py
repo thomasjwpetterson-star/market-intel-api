@@ -17,7 +17,7 @@ def verified_application_principal(request: Request):
     if not expected:
         raise HTTPException(503, 'Opportunity authentication is unavailable')
     if not supplied or not hmac.compare_digest(expected, supplied):
-        raise HTTPException(401, 'Sign in through Mimir to access this pilot')
+        raise HTTPException(401, 'Sign in through Mimir to access opportunity intelligence')
     try:
         return {'id': str(uuid.UUID(identity)), 'verified_by': 'mimir_signed_in_proxy'}
     except (ValueError, TypeError):
