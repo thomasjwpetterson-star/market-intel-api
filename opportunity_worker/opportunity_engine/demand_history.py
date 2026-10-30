@@ -110,7 +110,7 @@ def refresh_forecast_episodes(sources,folder,as_of):
     FROM demand_candidates WHERE lane='source_item_forecasts' GROUP BY json_extract_string(value_inputs_json,'$.niin') HAVING count(*)=1""")
     c.execute("""CREATE TEMP TABLE demand AS SELECT niin,min(forecast_month) first_month,max(forecast_month) last_month,sum(forecast_qty) quantity,count(*) month_rows,
     min(source_release) source_release,min(source_file) source_file,sha256(string_agg(concat_ws('|',forecast_month,cast(forecast_qty AS VARCHAR),source_release,source_file),'|' ORDER BY forecast_month,source_item_id)) evidence_digest
-    FROM dla_forecasts WHERE try_cast(substr(forecast_month,1,10) AS DATE)>=DATE '"""+as_of+"""' AND forecast_qty>0 GROUP BY niin""")
+    FROM dla_forecasts WHERE try_cast(substr(cast(forecast_month AS VARCHAR),1,10) AS DATE)>=DATE '"""+as_of+"""' AND forecast_qty>0 GROUP BY niin""")
     expressions={
     'episode_id':"coalesce(p.episode_id,sha256('native-dla-forecast-v1|'||d.niin))",'record_hash':"sha256(concat_ws('|','native-dla-forecast-v1',d.niin,d.evidence_digest))",'lane':"'source_item_forecasts'",
     'title':"'DLA forecast demand — NIIN '||d.niin",'scope_text':"'DLA source forecast for this NIIN, across the full source-stated future period. No order or technical source approval is inferred.'",'customer_name':"'Defense Logistics Agency'",

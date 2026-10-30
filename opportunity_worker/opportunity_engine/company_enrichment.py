@@ -8,7 +8,7 @@ from pathlib import Path
 import duckdb
 STOP=set(json.loads((Path(__file__).parent/'scope_stopwords.json').read_text()))
 ALIASES={'assy':'assembly','assys':'assembly','assemblies':'assembly','pumps':'pump','indicators':'indicator','clutches':'clutch','detectors':'detector','valves':'valve','sensors':'sensor','actuators':'actuator','elec':'electric','elect':'electric','mfg':'manufacturing'}
-VERSION='company-first-portable-v2'
+VERSION='company-first-portable-v3'
 LOGIC_HASH=hashlib.sha256(Path(__file__).read_bytes()+(Path(__file__).parent/'scope_stopwords.json').read_bytes()).hexdigest()
 def words(s):return [ALIASES.get(w,w) for w in re.findall(r'[a-z][a-z0-9]*',html.unescape(re.sub('<[^>]+>',' ',str(s or ''))).lower())]
 def scope_terms(s):
@@ -52,12 +52,23 @@ def admissible(work,opportunity,stage,work_context="",prior_reported_supplier=Fa
  if nsns(opportunity.get('scope_text')) and opportunity.get('lane')=='published_procurement':return False
  return True
 
+def company_entry_route(work,title,scope,lane,prior_reported_supplier=False):
+ if lane!='new_prime_historical_supplier_flow':return 'source_specific_route'
+ if prior_reported_supplier:return 'reported_supplier_relationship'
+ expected=str(title or '').lower()
+ if re.search(r'\b(software|cyber|logistics|training|simulation|analysis|test services|testing services|professional services|technical services|engineering services|systems engineering)\b',expected):return 'defined_services_scope'
+ current=str(scope or '').split('Current funded scope example:',1)[-1]
+ opening=re.search(r'\b(prototyp\w*|research|development|redesign\w*|new design|new source|alternate source|source approval|supplier on.ramp|open architecture)\b',current,re.I)
+ if opening and set(scope_terms(work)).issubset(set(words(current))):return 'development_or_source_opening_context'
+ return 'entry_route_unestablished'
+
 def augment(directory,skip_work=False,reuse_features=False):
  r=Path(directory);m=json.loads((r/'manifest.json').read_text());c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1500MB';SET preserve_insertion_order=false");c.execute("SET temp_directory='"+str(r/'company_tmp').replace("'","''")+"'");c.execute("SET max_temp_directory_size='8GB'")
  for n in ['company_profiles','opportunities','demand_decisions','company_matches','published_calls','dla_forecasts']:
   if n in m['tables']:c.read_parquet(m['tables'][n]['path']).create_view('base_'+n)
- c.execute('CREATE TEMP TABLE original_match_snapshot AS SELECT m.* FROM base_company_matches m JOIN base_opportunities o ON m.episode_id=o.episode_id AND m.opportunity_hash=o.record_hash');c.execute('DROP VIEW base_company_matches');c.execute('CREATE TEMP VIEW base_company_matches AS SELECT * FROM original_match_snapshot')
+ c.execute('CREATE TEMP TABLE original_match_snapshot AS SELECT m.* FROM base_company_matches m JOIN base_opportunities o ON m.episode_id=o.episode_id AND m.opportunity_hash=o.record_hash JOIN base_company_profiles p ON p.company_id=m.company_id AND p.profile_hash=m.profile_hash');c.execute('DROP VIEW base_company_matches');c.execute('CREATE TEMP VIEW base_company_matches AS SELECT * FROM original_match_snapshot')
  c.read_parquet([f['path'] for f in m['sources']['company_work']['files']]).create_view('work')
+ c.create_function('company_entry_route',company_entry_route,['VARCHAR']*4+['BOOLEAN'],'VARCHAR')
  c.create_function('scope_terms',scope_terms,['VARCHAR'],duckdb.list_type('VARCHAR'))
  c.create_function('scope_fragments',scope_fragments,['VARCHAR'],duckdb.list_type('VARCHAR'))
  c.create_function('scope_words',words,['VARCHAR'],duckdb.list_type('VARCHAR'))
@@ -91,7 +102,7 @@ def augment(directory,skip_work=False,reuse_features=False):
   estimate=c.execute('SELECT sum(w.n*d.n) FROM (SELECT anchor_token token,count(*) n FROM required WHERE docs<=200 OR (len(terms)>=3 AND docs<=2000) GROUP BY anchor_token) w JOIN anchor_counts d USING(token)').fetchone()[0] or 0
   partitions=max(1,(int(estimate)+3999999)//4000000)
   for partition in range(partitions):
-   c.execute("""CREATE OR REPLACE TEMP TABLE pre_hits AS SELECT w.company_id,w.doc_id,w.work_text,w.source_kind,w.sample_evidence_id,w.evidence_digest,w.last_observed,w.terms,coalesce(w.programme_context_json,'') work_context,o.episode_id,o.record_hash,o.lane,o.stage,o.customer_name,o.title,o.scope_text,list_contains(o.historical_supplier_ids,w.company_id) prior_reported_supplier,
+   c.execute("""CREATE OR REPLACE TEMP TABLE pre_hits AS SELECT w.company_id,w.doc_id,w.work_text,w.source_kind,w.sample_evidence_id,w.evidence_digest,w.last_observed,w.terms,coalesce(w.programme_context_json,'') work_context,o.episode_id,o.record_hash,o.lane,o.stage,o.customer_name,o.title,o.scope_text,list_contains(o.historical_supplier_ids,w.company_id) prior_reported_supplier,company_entry_route(w.work_text,o.title,o.scope_text,o.lane,list_contains(o.historical_supplier_ids,w.company_id)) company_entry_status,
    list_max(list_transform(w.terms,t->list_position(o.tokens,t)))-list_min(list_transform(w.terms,t->list_position(o.tokens,t))) span
    FROM required w JOIN target_tokens tok ON tok.token=w.anchor_token JOIN targets o USING(episode_id)
    WHERE (w.docs<=200 OR (len(w.terms)>=3 AND w.docs<=2000)) AND list_has_all(o.tokens,w.terms)
@@ -106,13 +117,27 @@ def augment(directory,skip_work=False,reuse_features=False):
   print('Company retrieval join estimate',estimate,flush=True)
   for unused in ('scopes','required','target_tokens','frequency','anchor_counts','chosen_terms','targets'):c.execute('DROP TABLE '+unused)
   print('Admissible work links',c.execute('SELECT count(*) FROM hits').fetchone()[0],flush=True)
-  output('company_work_matches',"""WITH winners AS(SELECT company_id,episode_id,arg_max(doc_id,struct_pack(n:=len(terms),d:=last_observed,id:=doc_id)) doc_id FROM hits GROUP BY company_id,episode_id) SELECT sha256('"""+VERSION+"""|'||h.company_id||'|'||h.episode_id) match_id,h.company_id,h.episode_id,
+  work_sql="""WITH winners AS(SELECT company_id,episode_id,arg_max(doc_id,struct_pack(e:=CASE WHEN company_entry_status='entry_route_unestablished' THEN 0 ELSE 1 END,n:=len(terms),d:=last_observed,id:=doc_id)) doc_id FROM hits GROUP BY company_id,episode_id) SELECT sha256('"""+VERSION+"""|'||h.company_id||'|'||h.episode_id) match_id,h.company_id,h.episode_id,
    least(95.0,65.0+len(h.terms)*3)::DOUBLE score,'"""+VERSION+"""' match_route,array_to_string(h.terms,', ') matched_terms,
    CASE WHEN h.prior_reported_supplier THEN 'This site is named in the linked historical supplier reports for the same parent vehicle or reported program. New package availability, configuration, capacity and qualification remain checks.' ELSE 'Observed site work matches the defined functional scope. Configuration, technical access, qualification and unplaced work remain separate checks.' END company_evidence_caveat,h.sample_evidence_id,
-   sha256(concat_ws('|',h.company_id,h.episode_id,h.record_hash,h.evidence_digest,p.profile_hash)) match_hash,h.record_hash opportunity_hash,p.profile_hash,h.doc_id,h.work_text,h.source_kind,h.last_observed,h.work_context,
-   CASE WHEN h.stage='historical_watch' THEN 'account_context' WHEN h.stage='repeat_demand_inference' THEN 'historical_watch' ELSE 'work_lead' END review_category
+   sha256(concat_ws('|',h.company_id,h.episode_id,h.record_hash,h.evidence_digest,p.profile_hash,h.company_entry_status)) match_hash,h.record_hash opportunity_hash,p.profile_hash,h.doc_id,h.work_text,h.source_kind,h.last_observed,h.work_context,
+   CASE WHEN h.stage='historical_watch' THEN 'account_context' WHEN h.stage='repeat_demand_inference' THEN 'historical_watch' WHEN h.company_entry_status='entry_route_unestablished' THEN 'market_context' ELSE 'work_lead' END review_category,h.company_entry_status
    FROM hits h JOIN winners z USING(company_id,episode_id,doc_id) JOIN base_company_profiles p USING(company_id)
-   WHERE h.span<=len(h.terms)+5 AND regexp_replace(lower(coalesce(h.customer_name,'')),'[^a-z0-9]','','g')<>regexp_replace(lower(p.company_name),'[^a-z0-9]','','g')""")
+   WHERE h.span<=len(h.terms)+5 AND regexp_replace(lower(coalesce(h.customer_name,'')),'[^a-z0-9]','','g')<>regexp_replace(lower(p.company_name),'[^a-z0-9]','','g')"""
+  c.execute('CREATE TEMP VIEW generic_work_matches AS '+work_sql)
+  report_source=m['sources'].get('supplier_pull_report_evidence')
+  if report_source and all(f.get('path') and Path(f['path']).exists() for f in report_source['files']):
+   c.read_parquet([f['path'] for f in report_source['files']]).create_view('reported_supplier_history')
+   c.execute("""CREATE TEMP VIEW incumbent_matches AS SELECT sha256('reported-supplier-lineage-v1|'||r.supplier_company_id||'|'||r.episode_id) match_id,r.supplier_company_id company_id,r.episode_id,95.0::DOUBLE score,'reported-supplier-lineage-v1' match_route,
+   'Named supplier in the linked historical outsourcing reports' matched_terms,'This site is a reported prior supplier in the evidenced prime work stream. Current package availability, configuration, technical access and capacity remain checks.' company_evidence_caveat,r.evidence_id sample_evidence_id,
+   sha256(concat_ws('|',r.supplier_company_id,r.episode_id,o.record_hash,w.evidence_digest,p.profile_hash)) match_hash,o.record_hash opportunity_hash,p.profile_hash,w.doc_id,w.work_text,w.source_kind,r.event_date last_observed,coalesce(w.programme_context_json,'') work_context,
+   'work_lead' review_category,'reported_supplier_relationship' company_entry_status
+   FROM reported_supplier_history r JOIN base_opportunities o USING(episode_id) JOIN base_demand_decisions d USING(episode_id) JOIN base_company_profiles p ON p.company_id=r.supplier_company_id
+   JOIN retrieval_work w ON w.company_id=r.supplier_company_id AND w.doc_id=sha256(concat_ws('|',r.supplier_company_id,'subaward_report',regexp_replace(upper(regexp_replace(coalesce(r.work_text,''),'^[0-9]{8,12}!\\s*','')),'[^A-Z0-9]','','g')))
+   WHERE o.lane='new_prime_historical_supplier_flow' AND d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context')
+   QUALIFY row_number() OVER(PARTITION BY r.supplier_company_id,r.episode_id ORDER BY r.event_date DESC,r.evidence_id)=1""")
+   output('company_work_matches','SELECT g.* FROM generic_work_matches g WHERE NOT EXISTS(SELECT 1 FROM incumbent_matches i WHERE i.company_id=g.company_id AND i.episode_id=g.episode_id) UNION ALL SELECT * FROM incumbent_matches')
+  else:output('company_work_matches','SELECT * FROM generic_work_matches')
   # The same edge contract feeds the authenticated API and hosted export.
   output('company_matches',"""SELECT * FROM base_company_matches WHERE match_route<>'specific_work_text' AND match_route NOT LIKE 'company-first-portable-%' UNION ALL SELECT match_id,company_id,episode_id,score,match_route,matched_terms,company_evidence_caveat,sample_evidence_id,match_hash,opportunity_hash,profile_hash FROM oi_company_work_matches n WHERE NOT EXISTS(SELECT 1 FROM base_company_matches b WHERE b.company_id=n.company_id AND b.episode_id=n.episode_id AND b.opportunity_hash=n.opportunity_hash AND b.match_route<>'specific_work_text' AND b.match_route NOT LIKE 'company-first-portable-%')""")
  if not skip_work:c.execute('DROP TABLE hits')

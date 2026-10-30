@@ -48,7 +48,7 @@ def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manife
   tables[name]=dict(path=str(path),rows=rows,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),columns=cols);print(name,rows,flush=True)
  def bind_source(name):
   source=sources[name]
-  if source.get('remote_only'):
+  if source.get('remote_only') or source.get('table'):
    tables[name]=dict(rows=source['rows'],sha256=source['sha256'],columns=source['columns'],remote_binding=True,table=source['table'],s3_uri=source['s3_uri'],source_binding=name,profileable_rows=source.get('profileable_rows'),profile_observed_net_total=source.get('profile_observed_net_total'))
    print('Bound complete distributed source',name,source['rows'],flush=True);return
   if len(source['files'])!=1:raise ValueError('Derived serving source must be consolidated: '+name)
@@ -90,7 +90,7 @@ def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manife
  c.execute("CREATE TABLE native_notice_heads AS WITH keys AS(SELECT *,CASE WHEN nullif(nid(solicitation_id),'') IS NOT NULL THEN coalesce(nullif(aac_code,''),nullif(office,''),nullif(sub_tier,''),notice_id)||'|'||nid(solicitation_id) ELSE 'notice|'||notice_id END chain_key FROM sam_notices) SELECT *,sha256(concat_ws('|',notice_id,selected_notice_version_id,title,description,cast(response_deadline AS VARCHAR))) notice_hash FROM keys QUALIFY row_number() OVER(PARTITION BY chain_key ORDER BY dt(posted_at) DESC,posted_at DESC,notice_id DESC)=1")
  if 'contract_value_cohorts' in sources:
   c.execute("""CREATE TEMP VIEW notice_comparators AS SELECT n.notice_id,v.* FROM native_notice_heads n JOIN contract_value_cohorts v ON technical_scope_key(n.title)=v.scope_key
-  AND work_mode(n.title,coalesce(n.psc_code,''))=v.work_mode AND nid(n.office)=nid(v.buyer_office)
+  AND work_mode(n.title,coalesce(n.psc_code,''))=v.work_mode AND ((nullif(nid(n.aac_code),'') IS NOT NULL AND nid(n.aac_code)=nid(v.buyer_office_code)) OR nid(n.office)=nid(v.buyer_office))
   AND (nullif(n.psc_code,'') IS NULL OR starts_with(v.psc,n.psc_code))
   QUALIFY row_number() OVER(PARTITION BY n.notice_id ORDER BY v.awards DESC,v.psc,v.buyer_office_code)=1""")
  else:

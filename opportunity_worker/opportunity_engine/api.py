@@ -43,10 +43,13 @@ class Repository:
    join=' JOIN '+self.table('company_matches')+" m ON m.episode_id=o.episode_id AND m.company_id='"+company+"'";where+=' AND m.opportunity_hash=o.record_hash'
    ranking_value='coalesce(o.value_median,least(v.government_reference_lot_scenario,v.supplier_average_lot_scenario),v.government_reference_lot_scenario,v.supplier_average_lot_scenario,0.0)' if 'company_item_valuations' in self.manifest()['tables'] else 'coalesce(o.value_median,0.0)'
    extra=',m.match_id,m.match_route,m.matched_terms,m.sample_evidence_id,m.company_evidence_caveat'
-   extra+=",least(100.0,(CASE d.stage WHEN 'published_requirement' THEN 55 WHEN 'qualification_opening' THEN 45 WHEN 'teaming_opening' THEN 50 WHEN 'emerging_demand' THEN 40 WHEN 'source_forecast' THEN 25 ELSE 10 END)+least(15.0,m.score/6.0)+least(20.0,5.0*ln(1.0+greatest("+ranking_value+",0.0)/100000.0))+(CASE WHEN o.window_end IS NOT NULL THEN 5 ELSE 0 END)) priority_score,'Demand stage, observed company scope fit, supported package benchmarks or item-price scenarios, and dated engagement window; not a win probability or company revenue' priority_basis"
+   extra+=",least(100.0,(CASE d.stage WHEN 'published_requirement' THEN 70 WHEN 'qualification_opening' THEN 65 WHEN 'teaming_opening' THEN 65 WHEN 'emerging_demand' THEN 35 WHEN 'source_forecast' THEN 20 ELSE 10 END)+least(15.0,m.score/6.0)+least(20.0,5.0*ln(1.0+greatest("+ranking_value+",0.0)/100000.0))+(CASE WHEN o.window_end IS NOT NULL THEN 5 ELSE 0 END)) priority_score,'Demand stage, observed company scope fit, supported package benchmarks or item-price scenarios, and dated engagement window; not a win probability or company revenue' priority_basis"
    if 'company_work_matches' in self.manifest()['tables']:
     join+=' LEFT JOIN '+self.table('company_work_matches')+' cw ON cw.company_id=m.company_id AND cw.episode_id=o.episode_id AND cw.opportunity_hash=o.record_hash'
-    extra+=',cw.doc_id matched_doc_id,cw.work_text matched_work_text,cw.source_kind matched_source_kind,cw.last_observed matched_work_date'
+    extra+=',cw.doc_id matched_doc_id,cw.work_text matched_work_text,cw.source_kind matched_source_kind,cw.last_observed matched_work_date,cw.review_category'
+    if monitoring_only:where="(d.stage IN ('historical_watch','repeat_demand_inference') OR (cw.review_category='market_context' AND d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context'))) AND m.opportunity_hash=o.record_hash"
+    else:where+=" AND (cw.review_category IS NULL OR cw.review_category<>'market_context')"
+    if any(x['Name']=='company_entry_status' for x in self.manifest()['tables']['company_work_matches'].get('columns',[])):extra+=',cw.company_entry_status'
    if 'company_item_matches' in self.manifest()['tables']:
     join+=' LEFT JOIN '+self.table('company_item_matches')+' ci ON ci.company_id=m.company_id AND ci.episode_id=o.episode_id AND ci.opportunity_hash=o.record_hash'
     extra+=',ci.niin item_reference_niin,ci.reference_description item_reference_description,ci.reference_part_number item_reference_part_number'
@@ -153,14 +156,15 @@ def create_router(verify_principal,repository=None):
  @router.get('/innovation-signals')
  def innovation(limit:int=Query(20,ge=1,le=100)):return {'records':call(repo.innovation,limit),'status':'Published agency engagement evidence; no company qualification or award probability inferred'}
  @router.get('/methodology')
- def methodology():return repo.manifest()['rules']
+ def methodology():
+  m=repo.manifest();return dict(m['rules'],release=m['run_id'],company_matching={'evidence':'Observed award and reported supplier work, exact item references, program/vehicle links and specific technical scope. Classification overlap alone is insufficient.','entry_routes':'Named prior suppliers, defined service work or explicit development/source-opening context take priority. Other hardware similarity is market context until an entry route is evidenced.','qualification':'A company/item association is separate from manufacturing rights, procurement approval, current configuration, eligibility and capacity.'},values={'historical_benchmarks':'Revision-resolved award net obligations and reported outsourced-package amounts. Approximate median and observed range use the complete comparison group; recent/extreme awards form a short preview.','unit_prices':'Exact company/item reference prices are unit evidence. Missing quantities do not produce totals. Forecast quantity × price is an alternative gross scenario, not company revenue.','allocation':'Prime/program funding is context. Company-addressable value remains unallocated without workshare evidence.'})
  @router.get('/opportunities')
  def opportunities(company:str=None,limit:int=Query(20,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000),kind:str=Query('all',pattern='^(all|work|items)$')):
   return {'records':call(repo.opportunities,company,limit,offset,False,kind),'release':repo.manifest()['run_id'],'status':'authenticated_evidence_feed','eligibility':'Company fit, access and qualification require evidence; these are not win probabilities.'}
  @router.get('/companies/{cage}/monitoring')
  def monitoring(cage:str,limit:int=Query(20,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise HTTPException(status_code=400,detail='Invalid CAGE')
-  return {'records':call(repo.opportunities,'CAGE:'+cage,limit,offset,True),'status':'Historical account and recurrence signals; not current opportunities'}
+  return {'records':call(repo.opportunities,'CAGE:'+cage,limit,offset,True),'release':repo.manifest()['run_id'],'status':'Market context and historical signals; company entry route or fresh demand remains unestablished'}
  @router.get('/opportunities/{episode_id}')
  def opportunity(episode_id:str):
   r=call(repo.detail,episode_id)
@@ -179,14 +183,16 @@ def create_router(verify_principal,repository=None):
  def cohort_awards(cohort_id:str,limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   return {'records':call(repo.cohort_awards,cohort_id,limit,offset),'cohort_id':cohort_id,'release':repo.manifest()['run_id'],'interpretation':'All historical award observations in this comparison group, paginated; no future company revenue is inferred'}
  @router.get('/companies/{cage}/awards')
- def company_awards(cage:str,limit:int=Query(50,ge=1,le=100)):return {'records':call(repo.company_history,cage,'awards',limit)}
+ def company_awards(cage:str,limit:int=Query(50,ge=1,le=100)):
+  m=repo.manifest();return {'records':call(repo.company_history,cage,'awards',limit),'release':m['run_id'],'availability':'available' if 'company_award_facts' in m['tables'] else 'not_published'}
  @router.get('/companies/{cage}/subcontracts')
- def company_subcontracts(cage:str,limit:int=Query(50,ge=1,le=100)):return {'records':call(repo.company_history,cage,'subcontracts',limit)}
+ def company_subcontracts(cage:str,limit:int=Query(50,ge=1,le=100)):
+  m=repo.manifest();return {'records':call(repo.company_history,cage,'subcontracts',limit),'release':m['run_id'],'availability':'available' if 'company_subcontract_facts' in m['tables'] else 'not_published'}
  @router.get('/companies/{cage}/coverage')
- def company_coverage(cage:str):return {'records':call(repo.company_history,cage,'coverage',1),'release':repo.manifest()['run_id']}
+ def company_coverage(cage:str):return {'records':call(repo.company_history,cage,'coverage',1),'release':repo.manifest()['run_id'],'availability':'available' if 'company_history_coverage' in repo.manifest()['tables'] else 'not_published'}
  @router.get('/companies/{cage}/events')
  def company_events(cage:str,episode_id:str=None,limit:int=Query(50,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
-  return {'records':call(repo.company_events,cage,episode_id,limit,offset),'release':repo.manifest()['run_id'],'interpretation':'Source and matching changes, not user-managed sales stages; a missing snapshot is not a lost award'}
+  return {'records':call(repo.company_events,cage,episode_id,limit,offset),'release':repo.manifest()['run_id'],'availability':'available' if 'company_opportunity_events' in repo.manifest()['tables'] else 'not_published','interpretation':'Source and matching changes, not user-managed sales stages; a missing snapshot is not a lost award'}
  @router.get('/work-evidence/{doc_id}')
  def work_evidence(doc_id:str):return {'records':call(repo.work_evidence,doc_id)}
  @router.get('/research-topics')

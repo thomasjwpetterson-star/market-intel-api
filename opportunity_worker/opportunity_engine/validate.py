@@ -8,7 +8,11 @@ def validate(directory):
  def check(name,ok,detail=None):checks.append(dict(name=name,passed=bool(ok),detail=detail))
  for n,t in m['tables'].items():
   if t.get('remote_binding'):
-   check(n+'_distributed_source_integrity',bool(t.get('sha256') and t.get('rows') and t.get('table') and t.get('columns')));continue
+   check(n+'_distributed_source_integrity',bool(t.get('sha256') and isinstance(t.get('rows'),int) and t['rows']>=0 and t.get('table') and t.get('columns')))
+   source=m['sources'][t['source_binding']];files=source.get('files',[])
+   if files and all(f.get('path') and Path(f['path']).is_file() for f in files):
+    check(n+'_local_source_hashes',all(hashlib.sha256(Path(f['path']).read_bytes()).hexdigest()==f['sha256'] for f in files));c.read_parquet([f['path'] for f in files]).create_view(n);check(n+'_local_source_count',c.execute('SELECT count(*) FROM '+n).fetchone()[0]==t['rows'])
+   continue
   p=Path(t['path']);check(n+'_content_hash',hashlib.sha256(p.read_bytes()).hexdigest()==t['sha256']);c.read_parquet(str(p)).create_view(n);check(n+'_count',c.execute('SELECT count(*) FROM '+n).fetchone()[0]==t['rows'])
  for n,key in [('research_awards','award_id'),('opportunities','episode_id'),('demand_decisions','episode_id'),('company_profiles','company_id')]:check(n+'_unique',c.execute('SELECT count(*)-count(DISTINCT '+key+') FROM '+n).fetchone()[0]==0)
  check('opportunity_ids_routable',c.execute("SELECT count(*) FROM opportunities WHERE NOT regexp_full_match(episode_id,'[a-f0-9]{64}')").fetchone()[0]==0)

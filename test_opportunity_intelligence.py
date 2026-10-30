@@ -50,6 +50,14 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn('np.record_hash=o.record_hash', aws.sql)
         self.assertIn('not a win probability or company revenue', aws.sql)
 
+    def test_unknown_company_entry_is_context_not_a_ranked_work_opportunity(self):
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
+        repo.manifest=lambda:{'tables':{'company_work_matches':{'columns':[]}}}
+        repo.opportunities('CAGE:45934',24,0,False,'work')
+        self.assertIn("cw.review_category<>'market_context'",aws.sql)
+        repo.opportunities('CAGE:45934',24,0,True)
+        self.assertIn("cw.review_category='market_context'",aws.sql)
+
     def test_supplier_lineage_is_scoped_to_the_opportunity(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
         repo.manifest = lambda: {'tables': {'supplier_pull_prime_evidence': {}}}

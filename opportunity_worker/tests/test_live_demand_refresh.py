@@ -9,9 +9,9 @@ def test_full_native_forecast_horizon_and_stable_existing_identity(tmp_path):
     def put(name,sql):
         p=tmp_path/(name+'.parquet');c.execute("COPY ("+sql+") TO '"+str(p)+"' (FORMAT PARQUET)");sources[name]={'files':[{'path':str(p)}]}
     put('demand_candidates',"""SELECT 'stable-forecast' episode_id,'old-hash' record_hash,'source_item_forecasts' lane,'Prior forecast' title,'Forecast' scope_text,'DLA' customer_name,NULL::VARCHAR programme,NULL::VARCHAR psc,NULL::VARCHAR naics,'2026-11-01' window_start,'2028-04-01' window_end,'source months' date_basis,NULL::DOUBLE value_low,NULL::DOUBLE value_median,NULL::DOUBLE value_high,'basis' value_basis,'scope' value_scope,'{"niin":"012345678"}' value_inputs_json,'DLA' source_name,'https://example.gov/forecast' source_url,'old' source_evidence_id,'file' source_locator,'forecast' procurement_state,'unresolved' reconciled_state,'unknown' access_state,'why' rationale,'limitations' limitations""")
-    put('dla_forecasts',"""SELECT '012345678' niin,'2026-11-01' forecast_month,10::BIGINT forecast_qty,'release' source_release,'source.txt' source_file,'row-1' source_item_id
-    UNION ALL SELECT '012345678','2030-04-01',20,'release','source.txt','row-2'
-    UNION ALL SELECT '012345678','2026-09-01',100,'release','source.txt','row-3'""")
+    put('dla_forecasts',"""SELECT '012345678' niin,DATE '2026-11-01' forecast_month,10::BIGINT forecast_qty,'release' source_release,'source.txt' source_file,'row-1' source_item_id
+    UNION ALL SELECT '012345678',DATE '2030-04-01',20,'release','source.txt','row-2'
+    UNION ALL SELECT '012345678',DATE '2026-09-01',100,'release','source.txt','row-3'""")
     out=refresh_forecast_episodes(sources,tmp_path/'derived','2026-10-30')
     row=c.execute('SELECT episode_id,window_start,window_end,value_inputs_json FROM read_parquet(?)',[out['demand_candidates']['path']]).fetchone()
     assert row[:3]==('stable-forecast','2026-11-01','2030-04-01')
@@ -35,3 +35,13 @@ def test_two_term_supplier_scope_requires_actual_supplier_lineage():
     assert not admissible('Circuit card',opportunity,'emerging_demand','["F-35"]')
     assert admissible('Circuit card',opportunity,'emerging_demand','["F-35"]',True)
     assert not admissible('Circuit card',opportunity,'emerging_demand','["F-16"]',True)
+
+
+def test_entry_route_does_not_turn_equivalent_hardware_into_accessible_work():
+    from opportunity_engine.company_enrichment import company_entry_route
+    lane='new_prime_historical_supplier_flow'
+    scope='Fuel boost pump. Current funded scope example: F-16 production option exercised'
+    assert company_entry_route('Fuel boost pump','Fuel boost pump',scope,lane)=='entry_route_unestablished'
+    assert company_entry_route('Fuel boost pump','Fuel boost pump',scope,lane,True)=='reported_supplier_relationship'
+    assert company_entry_route('Fuel boost pump','Fuel boost pump','Current funded scope example: Prototype development of fuel boost pump',lane)=='development_or_source_opening_context'
+    assert company_entry_route('Software testing services','Software testing services',scope,lane)=='defined_services_scope'
