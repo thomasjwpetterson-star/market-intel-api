@@ -40,11 +40,13 @@ def validate(directory):
   totals=c.execute('SELECT (SELECT sum(observed_net_obligations) FROM company_award_facts)-(SELECT sum(observed_prime_net_obligations) FROM company_profiles)').fetchone()[0]
   check('native_company_obligations_reconcile',abs(totals or 0)<1.0)
   check('native_awards_no_future_actions',c.execute("SELECT count(*) FROM company_award_facts WHERE substr(latest_action_date,1,10)>?",[m['as_of']]).fetchone()[0]==0)
+ if 'contract_value_observations' in m['tables']:
+  check('value_cohort_full_observation_coverage',c.execute('SELECT sum(awards) FROM contract_value_cohorts').fetchone()[0]==m['tables']['contract_value_observations']['rows'])
  if 'company_subcontract_facts' in m['tables']:
   check('native_subreports_unique',c.execute('SELECT count(*)-count(DISTINCT report_key) FROM company_subcontract_facts').fetchone()[0]==0)
   check('ambiguous_supplier_not_inherited_by_site',c.execute("SELECT count(*) FROM company_subcontract_facts WHERE site_resolution='multiple_sites_uei_only' AND starts_with(company_id,'CAGE:')").fetchone()[0]==0)
  if 'contract_value_cohorts' in m['tables']:
-  check('contract_values_have_source_comparators',c.execute("SELECT count(*) FROM contract_value_cohorts WHERE json_array_length(comparators_json)<>awards OR observed_min_usd<=0 OR observed_min_usd>observed_median_usd OR observed_median_usd>observed_max_usd").fetchone()[0]==0)
+  check('contract_values_have_source_comparators',c.execute("SELECT count(*) FROM contract_value_cohorts WHERE json_array_length(comparators_json)>awards OR json_array_length(comparators_json)>22 OR json_array_length(comparators_json)=0 OR observed_min_usd<=0 OR observed_min_usd>observed_median_usd OR observed_median_usd>observed_max_usd").fetchone()[0]==0)
  if 'company_work_matches' in m['tables']:
   check('work_match_company_episode_unique',c.execute('SELECT count(*)-count(DISTINCT (company_id,episode_id)) FROM company_work_matches').fetchone()[0]==0)
   check('work_matches_bind_current_requirement',c.execute('SELECT count(*) FROM company_work_matches x LEFT JOIN opportunities o USING(episode_id) WHERE o.record_hash IS NULL OR x.opportunity_hash<>o.record_hash').fetchone()[0]==0)

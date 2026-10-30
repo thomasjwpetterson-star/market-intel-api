@@ -94,13 +94,13 @@ def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manife
   AND (nullif(n.psc_code,'') IS NULL OR starts_with(v.psc,n.psc_code))
   QUALIFY row_number() OVER(PARTITION BY n.notice_id ORDER BY v.awards DESC,v.psc,v.buyer_office_code)=1""")
  else:
-  c.execute("CREATE TEMP VIEW notice_comparators AS SELECT NULL::VARCHAR notice_id,NULL::DOUBLE observed_min_usd,NULL::DOUBLE observed_median_usd,NULL::DOUBLE observed_max_usd,NULL::VARCHAR comparators_json WHERE false")
+  c.execute("CREATE TEMP VIEW notice_comparators AS SELECT NULL::VARCHAR notice_id,NULL::DOUBLE observed_min_usd,NULL::DOUBLE observed_median_usd,NULL::DOUBLE observed_max_usd,NULL::VARCHAR comparators_json,NULL::VARCHAR cohort_id,NULL::BIGINT awards WHERE false")
  materialise('published_calls',"""SELECT sha256('sam|'||CASE WHEN nullif(nid(solicitation_id),'') IS NOT NULL THEN coalesce(nullif(aac_code,''),nullif(office,''),nullif(sub_tier,''),notice_id)||'|'||nid(solicitation_id) ELSE 'notice|'||notice_id END) episode_id,
  sha256(concat_ws('|',notice_hash,v.comparators_json)) record_hash,'published_procurement' lane,title,description scope_text,concat_ws(' / ',sub_tier,office) customer_name,NULL::VARCHAR programme,psc_code psc,naics_code naics,NULL::VARCHAR window_start,cast(dt(response_deadline) AS VARCHAR) window_end,
  'Native response date; posting date is separate, not an award forecast' date_basis,v.observed_min_usd value_low,v.observed_median_usd value_median,v.observed_max_usd value_high,
  CASE WHEN v.comparators_json IS NOT NULL THEN 'historical_same_scope_work_mode_and_buyer' ELSE 'no_scoped_comparator_found' END value_basis,
  CASE WHEN v.comparators_json IS NOT NULL THEN 'Observed comparable contract range; current quantity, duration and company workshare remain unpriced' ELSE 'No matching historical scope/work-mode/buyer cohort; no value is assumed' END value_scope,
- CASE WHEN v.comparators_json IS NOT NULL THEN to_json(struct_pack(method:='Historical contract net obligations, exact normalized technical scope, same work mode and buyer office',comparators:=json(v.comparators_json),future_demand_estimate:=NULL::DOUBLE,company_addressable_value:=NULL::DOUBLE)) END value_inputs_json,
+ CASE WHEN v.comparators_json IS NOT NULL THEN to_json(struct_pack(method:='Historical contract net obligations, exact normalized technical scope, same work mode and buyer office',cohort_id:=v.cohort_id,comparable_awards:=v.awards,preview_maximum:=22,comparators:=json(v.comparators_json),future_demand_estimate:=NULL::DOUBLE,company_addressable_value:=NULL::DOUBLE)) END value_inputs_json,
  'sam_notices' source_name,source_url,sha256('sam_native|'||notice_id||'|'||notice_hash) source_evidence_id,notice_id source_locator,
  CASE WHEN lower(notice_type) LIKE '%award%' THEN 'awarded_or_ordered' WHEN lower(notice_type) LIKE '%cancel%' THEN 'cancelled' ELSE 'procurement_published' END procurement_state,
  CASE WHEN lower(notice_type) LIKE '%award%' THEN 'awarded_or_ordered' WHEN lower(notice_type) LIKE '%cancel%' THEN 'cancelled' ELSE 'outcome_not_established' END reconciled_state,
@@ -158,7 +158,7 @@ def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manife
  # Keep the established company-demand population intact. No generic text tags
  # are silently added to its counts as validated opportunities.
  materialise('company_profiles','SELECT * FROM company_profiles')
- for name in ('company_award_facts','company_subcontract_facts','company_observed_features','company_history_coverage','contract_value_cohorts'):
+ for name in ('company_award_facts','company_subcontract_facts','company_observed_features','company_history_coverage','contract_value_cohorts','contract_value_observations'):
   if name in sources and not skip_matching:bind_source(name)
  materialise('company_matches','SELECT match_id,company_id,episode_id,score,match_route,matched_terms,company_evidence_caveat,sample_evidence_id,match_hash,opportunity_hash,profile_hash FROM company_matches')
  rows=c.execute('SELECT episode_id,record_hash,lane,title,scope_text,customer_name,window_start,window_end,date_basis,value_inputs_json,procurement_state,reconciled_state,source_name,source_evidence_id,source_url,source_locator,notice_posted_date,notice_type FROM all_current_demand ORDER BY episode_id').fetchall();names=[x[0] for x in c.description]

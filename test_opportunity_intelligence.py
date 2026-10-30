@@ -41,6 +41,24 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn("o.lane NOT IN ('published_item_procurement','source_item_forecasts')", aws.sql)
         self.assertNotIn('18', aws.sql)
         self.assertNotIn('historical_watch\' THEN', aws.sql)
+    def test_price_scenarios_inform_review_order_without_inventing_contract_values(self):
+        aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
+        repo.manifest = lambda: {'tables': {'company_item_valuations': {}, 'company_notice_item_prices': {}}}
+        repo.opportunities('CAGE:45934', 24, 0, False, 'items')
+        self.assertIn('least(v.government_reference_lot_scenario,v.supplier_average_lot_scenario)', aws.sql)
+        self.assertIn('np.company_id=m.company_id', aws.sql)
+        self.assertIn('np.record_hash=o.record_hash', aws.sql)
+        self.assertIn('not a win probability or company revenue', aws.sql)
+
+    def test_complete_value_evidence_has_bounded_pagination(self):
+        aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
+        repo.manifest = lambda: {'tables': {'contract_value_observations': {}}}
+        repo.cohort_awards('a' * 64, 25, 25)
+        self.assertIn("WHERE cohort_id='" + 'a' * 64 + "'", aws.sql)
+        self.assertIn('OFFSET 25 LIMIT 25', aws.sql)
+        with self.assertRaises(ValueError): repo.cohort_awards("bad'", 25, 0)
+        with self.assertRaises(ValueError): repo.cohort_awards('a' * 64, 1000, 0)
+
     def test_event_history_is_scoped_and_identifiers_are_validated(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
         repo.manifest = lambda: {'tables': {'company_opportunity_events': {}}}
