@@ -114,7 +114,7 @@ def refresh_forecast_episodes(sources,folder,as_of):
         prefix='CREATE TEMP TABLE demand AS ' if partition==0 else 'INSERT INTO demand '
         c.execute(prefix+"""SELECT niin,min(forecast_month) first_month,max(forecast_month) last_month,sum(forecast_qty) quantity,count(*) month_rows,
         min(source_release) source_release,min(source_file) source_file,sha256(string_agg(concat_ws('|',forecast_month,cast(forecast_qty AS VARCHAR),source_release,source_file),'|' ORDER BY forecast_month,source_item_id)) evidence_digest
-        FROM dla_forecasts WHERE try_cast(substr(cast(forecast_month AS VARCHAR),1,10) AS DATE)>=DATE '"""+as_of+"""' AND forecast_qty>0 AND hash(niin)%16="""+str(partition)+" GROUP BY niin")
+        FROM dla_forecasts WHERE regexp_full_match(coalesce(niin,''),'[0-9]{9}') AND try_cast(substr(cast(forecast_month AS VARCHAR),1,10) AS DATE)>=DATE '"""+as_of+"""' AND forecast_qty>0 AND hash(niin)%16="""+str(partition)+" GROUP BY niin")
     expressions={
     'episode_id':"coalesce(p.episode_id,sha256('native-dla-forecast-v1|'||d.niin))",'record_hash':"sha256(concat_ws('|','native-dla-forecast-v1',d.niin,d.evidence_digest))",'lane':"'source_item_forecasts'",
     'title':"'DLA forecast demand — NIIN '||d.niin",'scope_text':"'DLA source forecast for this NIIN, across the full source-stated future period. No order or technical source approval is inferred.'",'customer_name':"'Defense Logistics Agency'",
@@ -126,5 +126,6 @@ def refresh_forecast_episodes(sources,folder,as_of):
     'limitations':"'Long-range source forecasts can change. A forecast quantity is not an order, and catalogue association is not technical approval or company-addressable revenue.'"}
     projection=','.join('cast('+expressions.get(n,'NULL')+' AS '+t+') "'+n+'"' for n,t,*_ in c.execute('DESCRIBE demand_candidates').fetchall())
     path=folder/'demand_candidates.parquet';c.execute("COPY (SELECT * FROM demand_candidates WHERE lane<>'source_item_forecasts' UNION ALL SELECT "+projection+" FROM demand d LEFT JOIN prior p USING(niin)) TO '"+str(path).replace("'","''")+"' (FORMAT PARQUET,COMPRESSION ZSTD)")
+    excluded=c.execute("SELECT count(*) FROM dla_forecasts WHERE NOT regexp_full_match(coalesce(niin,''),'[0-9]{9}') AND forecast_qty>0 AND try_cast(substr(cast(forecast_month AS VARCHAR),1,10) AS DATE)>=cast(? AS DATE)",[as_of]).fetchone()[0]
     sha=hashlib.sha256(path.read_bytes()).hexdigest();count=c.execute('SELECT count(*) FROM read_parquet(?)',[str(path)]).fetchone()[0];c.close()
-    return {'demand_candidates':dict(path=str(path),files=[dict(path=str(path),sha256=sha)],sha256=sha,rows=count,as_of=as_of,kind='native_warehouse_demand_episodes',status='SUCCEEDED')}
+    return {'demand_candidates':dict(path=str(path),files=[dict(path=str(path),sha256=sha)],sha256=sha,rows=count,as_of=as_of,kind='native_warehouse_demand_episodes',status='SUCCEEDED',forecast_identity_quality={'unmapped_positive_future_rows':excluded,'interpretation':'Source rows without a valid NIIN remain retained in dla_forecasts; they cannot form an identifiable item demand episode.'})}

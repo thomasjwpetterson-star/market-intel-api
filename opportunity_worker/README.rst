@@ -13,6 +13,11 @@ is paused during runtime changes and restored only after successful validation. 
 existing governance/opportunity_intelligence prefix and versioned oi_* tables.
 A release becomes current only after local evidence/financial gates and Athena
 readback. Public publication permission is independent of authenticated access.
+Demand identity/version checks run before company matching. Forecast rows without
+a valid NIIN remain in the source ledger, with excluded-row counts in source
+status; they cannot generate anonymous item opportunities. Late validation or
+publication failures archive completed derivations in an unpublished operations
+checkpoint for controlled recovery, while retaining the prior current pointer.
 
 Every native run refreshes award and subcontract projections, resolves revision
 rows before net financial aggregation, rebuilds company work and profiles,

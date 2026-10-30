@@ -91,7 +91,8 @@ def test_refresh_worker_orchestrates_native_sources_before_publication(tmp_path,
  monkeypatch.setattr(worker.subprocess,'run',execute)
  monkeypatch.setattr(worker,'build',lambda *a,**kw:calls.append('prebuild' if kw.get('skip_matching') else 'build'))
  monkeypatch.setattr(worker,'enrich',lambda *a:calls.append('enrich'))
+ monkeypatch.setattr(worker,'validate_demand_integrity',lambda *a:calls.append('early_integrity'))
  monkeypatch.setattr(worker,'validate',lambda *a:{'passed':1,'failed':0})
  monkeypatch.setattr(worker,'publish',lambda *a:calls.append('publish'))
  monkeypatch.setattr(sys,'argv',['worker','--from-current','--workdir',str(tmp_path),'--as-of','2026-10-29','--refresh','--publish']);worker.main()
- assert calls==['refresh_sbir','refresh_topics','refresh_shared_sources','refresh_commercial_sources','refresh_company_registry','refresh_company_history','refresh_innovation','prebuild','connect_cloud_evidence','build','enrich','publish']
+ assert calls==['refresh_sbir','refresh_topics','refresh_shared_sources','refresh_commercial_sources','refresh_company_registry','refresh_company_history','refresh_innovation','prebuild','connect_cloud_evidence','build','early_integrity','enrich','publish']

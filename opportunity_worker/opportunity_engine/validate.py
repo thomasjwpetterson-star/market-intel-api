@@ -3,6 +3,21 @@ import hashlib,json
 from pathlib import Path
 import duckdb
 
+def validate_demand_integrity(directory):
+ r=Path(directory);m=json.loads((r/'manifest.json').read_text());c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1200MB'")
+ for name in ('opportunities','demand_decisions'):c.read_parquet(m['tables'][name]['path']).create_view(name)
+ checks={}
+ for name in ('opportunities','demand_decisions'):
+  checks[name+'_invalid_identity']=c.execute("SELECT count(*) FROM "+name+" WHERE NOT coalesce(regexp_full_match(episode_id,'[a-f0-9]{64}'),false)").fetchone()[0]
+  checks[name+'_duplicates']=c.execute('SELECT count(*)-count(DISTINCT episode_id) FROM '+name).fetchone()[0]
+ checks['missing_decisions']=c.execute('SELECT count(*) FROM opportunities ANTI JOIN demand_decisions USING(episode_id)').fetchone()[0]
+ checks['orphan_decisions']=c.execute('SELECT count(*) FROM demand_decisions ANTI JOIN opportunities USING(episode_id)').fetchone()[0]
+ checks['decision_version_mismatch']=c.execute('SELECT count(*) FROM opportunities o JOIN demand_decisions d USING(episode_id) WHERE o.record_hash IS DISTINCT FROM d.source_record_hash').fetchone()[0];c.close()
+ (r/'demand_integrity.json').write_text(json.dumps(checks,indent=2)+'\n');print('Demand integrity before company matching:',json.dumps(checks),flush=True)
+ failed={k:v for k,v in checks.items() if v}
+ if failed:raise ValueError('Demand integrity failed before company matching: '+json.dumps(failed))
+ return checks
+
 def validate(directory):
  r=Path(directory);m=json.loads((r/'manifest.json').read_text());c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1400MB';SET preserve_insertion_order=false");checks=[]
  def check(name,ok,detail=None):checks.append(dict(name=name,passed=bool(ok),detail=detail))
@@ -15,7 +30,7 @@ def validate(directory):
    continue
   p=Path(t['path']);check(n+'_content_hash',hashlib.sha256(p.read_bytes()).hexdigest()==t['sha256']);c.read_parquet(str(p)).create_view(n);check(n+'_count',c.execute('SELECT count(*) FROM '+n).fetchone()[0]==t['rows'])
  for n,key in [('research_awards','award_id'),('opportunities','episode_id'),('demand_decisions','episode_id'),('company_profiles','company_id')]:check(n+'_unique',c.execute('SELECT count(*)-count(DISTINCT '+key+') FROM '+n).fetchone()[0]==0)
- check('opportunity_ids_routable',c.execute("SELECT count(*) FROM opportunities WHERE NOT regexp_full_match(episode_id,'[a-f0-9]{64}')").fetchone()[0]==0)
+ check('opportunity_ids_routable',c.execute("SELECT count(*) FROM opportunities WHERE NOT coalesce(regexp_full_match(episode_id,'[a-f0-9]{64}'),false)").fetchone()[0]==0)
  check('decision_population',c.execute('SELECT count(*) FROM opportunities o ANTI JOIN demand_decisions d USING(episode_id)').fetchone()[0]==0)
  check('decision_record_version',c.execute('SELECT count(*) FROM opportunities o JOIN demand_decisions d USING(episode_id) WHERE o.record_hash<>d.source_record_hash').fetchone()[0]==0)
  check('no_invented_company_value',c.execute("SELECT count(*) FROM demand_decisions WHERE json_extract_string(decision_json,'$.company_addressable_value') IS NOT NULL").fetchone()[0]==0)

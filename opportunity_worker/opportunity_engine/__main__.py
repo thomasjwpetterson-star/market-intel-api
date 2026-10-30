@@ -3,13 +3,14 @@ import argparse,datetime,hashlib,json,uuid,os,subprocess,sys
 from pathlib import Path
 from .aws import AWS,BUCKET,PREFIX
 from .build import build
-from .validate import validate
+from .validate import validate,validate_demand_integrity
 from .publish import publish
 from .enrich import enrich
 from .registry import augment
 from .company_enrichment import augment as augment_companies
 from .company_history import rebuild as rebuild_history
 from .events import track as track_events
+from .checkpoint import archive_failed_attempt
 from .demand_history import rebuild as rebuild_demand,refresh_forecast_episodes
 
 def main():
@@ -55,11 +56,16 @@ def main():
   (root/'latest_build.json').write_text(json.dumps(dict(directory=str(pre))))
   subprocess.run([sys.executable,'-m','opportunity_engine.ingestion.connect_cloud_evidence'],env=env,check=True)
   ptr=json.loads((root/'inputs/connections_latest.json').read_text());sources.update(json.loads(Path(ptr['path']).read_text())['sources']);inputs.write_text(json.dumps({'sources':sources}))
- build(seed,sb,out,args.as_of,inputs);enrich(out,inputs if 'governed_price_lines' in sources else None)
+ build(seed,sb,out,args.as_of,inputs);validate_demand_integrity(out);enrich(out,inputs if 'governed_price_lines' in sources else None)
  if 'cage_registry' in sources:augment(out,[inputs])
  if 'company_work' in sources:augment_companies(out)
  if all(n in m.get('tables',{}) for n in ('opportunities','demand_decisions','company_matches')):track_events(out,m,a)
- v=validate(out)
- if args.publish:publish(out)
+ try:
+  v=validate(out)
+  if args.publish:publish(out)
+ except Exception:
+  try:archive_failed_attempt(out,a,m.get('run_id'))
+  except Exception as checkpoint_error:print('Could not archive failed derivation:',str(checkpoint_error),flush=True)
+  raise
  print(json.dumps(dict(directory=str(out),validation_passed=v['passed'],published=args.publish)))
 if __name__=='__main__':main()
