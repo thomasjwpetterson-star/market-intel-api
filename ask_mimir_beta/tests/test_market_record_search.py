@@ -6,10 +6,60 @@ from unittest.mock import Mock
 
 import duckdb
 
-from market_record_search import MarketRecordSearchStore
+from market_record_search import MarketRecordSearchStore, resolve_market_record_search
 
 
 class MarketRecordSearchTests(unittest.TestCase):
+    def test_counter_uas_aliases_find_relevant_future_notices_without_generic_uas(self):
+        future = (datetime.now(timezone.utc).date() + timedelta(days=30)).isoformat()
+        expired = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            connection = duckdb.connect()
+            connection.execute(
+                "COPY (SELECT 1 AS placeholder) TO ? (FORMAT PARQUET)",
+                [str(root / "contracts_rolled.parquet")],
+            )
+            connection.execute(
+                "COPY (SELECT 'PSC' classification_type, '1234' code, 'Test' description) TO ? (FORMAT PARQUET)",
+                [str(root / "classification_reference.parquet")],
+            )
+            connection.execute(
+                "COPY (SELECT '11111' cage_code, 'Test' city, 'VA' state) TO ? (FORMAT PARQUET)",
+                [str(root / "cage_locations.parquet")],
+            )
+            connection.execute(
+                """COPY (
+                    SELECT id, id AS sol_num, title, 'DOD' agency, 'ARMY' sub_agency,
+                           deadline, '1234' psc, '123456' naics, NULL AS set_aside_type,
+                           'VA' state, 'https://sam.gov/example' url,
+                           search_text AS description, search_text
+                    FROM (VALUES
+                        ('N1', 'Counter-UAS sensors', ?, 'COUNTER-UAS SENSOR REQUIREMENT'),
+                        ('N2', 'C-sUAS defeat', ?, 'C-SUAS DEFEAT SYSTEM'),
+                        ('N3', 'UAS marketplace', ?, 'SMALL UAS DRONE MARKETPLACE'),
+                        ('N4', 'Expired CUAS', ?, 'CUAS SENSOR REQUIREMENT'),
+                        ('N5', 'Undersea systems', ?, 'COUNTER UNMANNED UNDERSEA SYSTEMS')
+                    ) AS t(id, title, deadline, search_text)
+                ) TO ? (FORMAT PARQUET)""",
+                [str(root / "opportunities.parquet"), future, future,
+                 future, expired, future],
+            )
+            connection.close()
+
+            store = MarketRecordSearchStore(root)
+            for wording in ("CUAS", "C-UAS", "counter-drone"):
+                with self.subTest(wording=wording):
+                    spec = resolve_market_record_search(
+                        f"Find current US defense opportunities relevant to: {wording}"
+                    )
+                    self.assertIsNotNone(spec)
+                    result = store.get(spec)
+                    self.assertEqual(
+                        {row["notice_id"] for row in result["records"]},
+                        {"N1", "N2"},
+                    )
+
     def test_snapshot_opportunity_cache_expires_at_utc_day_boundary(self):
         store = object.__new__(MarketRecordSearchStore)
         store._cache = {}

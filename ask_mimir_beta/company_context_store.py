@@ -26,7 +26,7 @@ FYDP_PLATFORM_LINKAGE_VERSION = json.loads(
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
-DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v14"
+DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v16"
 
 CANONICAL_CONSOLIDATED_PARENT_NAMES = {
     "CURTISS WRIGHT": "CURTISS-WRIGHT CORPORATION",
@@ -1002,6 +1002,7 @@ class CompanyContextStore:
         self._dynamic_lock = threading.Lock()
         self._dynamic_builder = None
         self._dynamic_contexts: Dict[tuple[str, str], Dict[str, Any]] = {}
+        self._dynamic_overviews: Dict[tuple[str, str], Dict[str, Any]] = {}
         self._dynamic_groups: Dict[str, Dict[str, Any]] = {}
         release_identity = os.getenv("ASK_MIMIR_RELEASE_ID", "").strip()
         if not release_identity:
@@ -2029,7 +2030,9 @@ class CompanyContextStore:
         if focus not in FOCUS_SECTIONS:
             raise ValueError(f"unsupported company context focus: {focus}")
         clean_id = str(scope_id).strip().upper()
-        context = self.get_raw(scope_type, clean_id)
+        context = self.get_raw(
+            scope_type, clean_id, conversation_overview=focus == "conversation_overview"
+        )
         if context.get("platform_link_version") != LINK_VERSION and any(
             section in FOCUS_SECTIONS[focus]
             for section in ("platform_exposure", "future_demand_context")
@@ -2195,7 +2198,9 @@ class CompanyContextStore:
         }
         return result
 
-    def get_raw(self, scope_type: str, scope_id: str) -> Dict[str, Any]:
+    def get_raw(
+        self, scope_type: str, scope_id: str, *, conversation_overview: bool = False
+    ) -> Dict[str, Any]:
         clean_id = str(scope_id).strip().upper()
         context = next(
             (
@@ -2217,6 +2222,8 @@ class CompanyContextStore:
             context["_artifact_path"] = str(precomputed_path)
             self._dynamic_contexts[key] = context
             return context
+        if conversation_overview and key in self._dynamic_overviews:
+            return self._dynamic_overviews[key]
         group = self._dynamic_groups.get(clean_id)
         if scope_type == "company_parent" and group:
             pass
@@ -2226,11 +2233,18 @@ class CompanyContextStore:
         with self._dynamic_lock:
             if key in self._dynamic_contexts:
                 return self._dynamic_contexts[key]
-            cached_context = self._read_dynamic_cache(scope_type, clean_id)
+            if conversation_overview and key in self._dynamic_overviews:
+                return self._dynamic_overviews[key]
+            cached_context = self._read_dynamic_cache(
+                scope_type, clean_id, overview=conversation_overview
+            )
             if cached_context is not None:
-                self._dynamic_contexts[key] = cached_context
+                if conversation_overview:
+                    self._dynamic_overviews[key] = cached_context
+                else:
+                    self._dynamic_contexts[key] = cached_context
                 return cached_context
-            from company_context import CompanyContextBuilder
+            from company_context import CompanyContextBuilder, DEFAULT_FISCAL_YEARS
 
             if self._dynamic_builder is None:
                 self._dynamic_builder = CompanyContextBuilder(data_root=self.data_root)
@@ -2241,6 +2255,7 @@ class CompanyContextStore:
                     cages=group["cages"],
                     group_kind=group["group_kind"],
                     identity_sites=group.get("identity_sites", []),
+                    conversation_overview=conversation_overview,
                 )
                 if group.get("parent_name"):
                     context["identity"]["parent_resolution"] = {
@@ -2248,9 +2263,21 @@ class CompanyContextStore:
                         "method": "reported ultimate-parent relationship",
                     }
             else:
-                context = self._dynamic_builder.build_site(clean_id)
-            self._write_dynamic_cache(scope_type, clean_id, context)
-            self._dynamic_contexts[key] = context
+                if conversation_overview:
+                    from company_quick_context import build_site_conversation
+
+                    context = build_site_conversation(
+                        self._dynamic_builder, clean_id, DEFAULT_FISCAL_YEARS
+                    )
+                else:
+                    context = self._dynamic_builder.build_site(clean_id)
+            self._write_dynamic_cache(
+                scope_type, clean_id, context, overview=conversation_overview
+            )
+            if conversation_overview:
+                self._dynamic_overviews[key] = context
+            else:
+                self._dynamic_contexts[key] = context
             return context
 
     def get_export_context(
@@ -2271,8 +2298,11 @@ class CompanyContextStore:
                 self._dynamic_builder = CompanyContextBuilder(data_root=self.data_root)
             return self._dynamic_builder.build_export_context(context, limit)
 
-    def _read_dynamic_cache(self, scope_type: str, scope_id: str) -> Dict[str, Any] | None:
-        path = self.dynamic_cache_dir / f"{scope_type}-{scope_id}.json"
+    def _read_dynamic_cache(
+        self, scope_type: str, scope_id: str, *, overview: bool = False
+    ) -> Dict[str, Any] | None:
+        suffix = "-overview" if overview else ""
+        path = self.dynamic_cache_dir / f"{scope_type}-{scope_id}{suffix}.json"
         if not path.exists():
             return None
         try:
@@ -2288,12 +2318,13 @@ class CompanyContextStore:
         return context
 
     def _write_dynamic_cache(
-        self, scope_type: str, scope_id: str, context: Dict[str, Any]
+        self, scope_type: str, scope_id: str, context: Dict[str, Any], *, overview: bool = False
     ) -> None:
         if os.getenv("ASK_MIMIR_DISABLE_DYNAMIC_CACHE", "0") == "1":
             return
         self.dynamic_cache_dir.mkdir(parents=True, exist_ok=True)
-        destination = self.dynamic_cache_dir / f"{scope_type}-{scope_id}.json"
+        suffix = "-overview" if overview else ""
+        destination = self.dynamic_cache_dir / f"{scope_type}-{scope_id}{suffix}.json"
         temporary = destination.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(context, default=str))
         temporary.replace(destination)

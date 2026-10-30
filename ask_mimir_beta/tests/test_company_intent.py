@@ -11,6 +11,11 @@ class CompanyIntentTests(unittest.TestCase):
             )
         )
 
+    def test_quick_supplier_picture_is_company_wide(self):
+        self.assertTrue(company_wide_intent(
+            "Give me the quick picture on Curtiss-Wright as a defence supplier."
+        ))
+
     def test_company_change_question_retains_active_company_scope(self):
         self.assertTrue(
             company_follow_up_intent(

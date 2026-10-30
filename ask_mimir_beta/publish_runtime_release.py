@@ -30,6 +30,11 @@ from capability_discovery import (
     summarize_platform_breadth,
 )
 from company_context_store import build_precomputed_parent_contexts
+from company_conversation_index import (
+    INDEX_FILENAME as COMPANY_CONVERSATION_INDEX_FILENAME,
+    META_FILENAME as COMPANY_CONVERSATION_INDEX_META,
+    build_transaction_index as build_company_conversation_index,
+)
 from geographic_market import build_precomputed_state_markets
 from market_segment import build_precomputed_market_segments
 from platform_context import build_precomputed_platform_contexts
@@ -141,8 +146,13 @@ BUILD_DOMAINS = (
     "platforms",
     "states",
 )
+OPTIONAL_BUILD_DOMAINS = ("conversation-index",)
 
 DOMAIN_LOCAL_PATHS = {
+    "conversation-index": (
+        f"data/{COMPANY_CONVERSATION_INDEX_FILENAME}",
+        f"data/{COMPANY_CONVERSATION_INDEX_META}",
+    ),
     "serving-data": tuple(f"data/{name}" for name in DATA_FILES),
     "announcements": (f"data/{ANNOUNCEMENT_FILENAME}",),
     "references": tuple(f"data/{name}" for _, name in PINNED_REFERENCE_FILES),
@@ -447,13 +457,13 @@ def parse_domains(value: str | None) -> set[str] | None:
     if value is None:
         return None
     domains = {item.strip().lower() for item in value.split(",") if item.strip()}
-    unknown = domains.difference(BUILD_DOMAINS)
+    unknown = domains.difference((*BUILD_DOMAINS, *OPTIONAL_BUILD_DOMAINS))
     if unknown:
         raise ValueError(
             "Unknown release domain(s): "
             + ", ".join(sorted(unknown))
             + ". Valid domains: "
-            + ", ".join(BUILD_DOMAINS)
+            + ", ".join((*BUILD_DOMAINS, *OPTIONAL_BUILD_DOMAINS))
         )
     if not domains:
         raise ValueError("--only requires at least one release domain")
@@ -892,6 +902,15 @@ def publish(
                 raise
             entries_by_path[entry["local_path"]] = entry
 
+        if (
+            "conversation-index" not in selected_domains
+            and base_entries_by_path.get("data/transactions.parquet", {}).get("sha256")
+            != entries_by_path.get("data/transactions.parquet", {}).get("sha256")
+        ):
+            for local_path in DOMAIN_LOCAL_PATHS["conversation-index"]:
+                entries_by_path.pop(local_path, None)
+            derived_release.pop("company_conversation_index", None)
+
     if "announcements" in selected_domains:
         local_path = f"data/{ANNOUNCEMENT_FILENAME}"
         source_key = f"app_cache/{ANNOUNCEMENT_FILENAME}"
@@ -926,6 +945,26 @@ def publish(
         derived_release["platform_source_depth"] = build_platform_source_depth(
             DATA_ROOT
         )
+
+    if "conversation-index" in selected_domains:
+        transaction_path = "data/transactions.parquet"
+        source_entry = entries_by_path.get(transaction_path)
+        if not source_entry:
+            raise RuntimeError("Company Conversation index needs a pinned transaction source")
+        if not source_entry.get("sha256"):
+            verified_entry = verified_serving_manifest_entry(
+                s3, bucket, source_entry["s3_key"], transaction_path,
+                DATA_ROOT / "transactions.parquet",
+            )
+            if verified_entry.get("s3_version_id") != source_entry.get("s3_version_id"):
+                raise RuntimeError("Transaction source changed during Conversation index build")
+            source_entry = entries_by_path[transaction_path] = verified_entry
+        index_meta = build_company_conversation_index(DATA_ROOT)
+        if index_meta["source_sha256"] != source_entry.get("sha256"):
+            raise RuntimeError(
+                "Company Conversation index source differs from the pinned transaction release"
+            )
+        derived_release["company_conversation_index"] = index_meta
 
     if "companies" in selected_domains:
         shutil.rmtree(PRECOMPUTED_COMPANY_CONTEXT_DIR, ignore_errors=True)
@@ -1004,6 +1043,10 @@ def publish(
         )["release_id"]
 
     generated_by_domain = {
+        "conversation-index": (
+            COMPANY_CONVERSATION_INDEX_FILENAME,
+            COMPANY_CONVERSATION_INDEX_META,
+        ),
         "source-depth": (
             "niin_source_depth.parquet",
             "platform_source_depth.parquet",

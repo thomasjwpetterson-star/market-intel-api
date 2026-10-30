@@ -74,6 +74,7 @@ def company_wide_intent(text: str) -> bool:
             "corporation wide",
             "whole company",
             "entire company",
+            "quick picture",
             "all sites",
             "all facilities",
             "us defence business",

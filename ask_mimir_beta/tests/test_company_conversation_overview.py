@@ -1,10 +1,155 @@
+import hashlib
+import json
 import unittest
-from unittest.mock import Mock
+import tempfile
+import threading
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+from company_context import CompanyContextBuilder, verified_runtime_file_hashes
+from company_quick_context import build_site_conversation, compact_company_conversation_pack
 from company_context_store import CompanyContextStore, LINK_VERSION, FYDP_PLATFORM_LINKAGE_VERSION
 
 
 class CompanyConversationOverviewTests(unittest.TestCase):
+    def test_verified_runtime_hashes_require_matching_complete_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            source = data / "transactions.parquet"
+            source.write_bytes(b"verified source")
+            expected = hashlib.sha256(source.read_bytes()).hexdigest()
+            manifest = {
+                "release_id": "release-1",
+                "files": [{"local_path": "data/transactions.parquet", "size": source.stat().st_size,
+                           "sha256": expected}],
+            }
+            fingerprint = hashlib.sha256(json.dumps(
+                {"release_id": manifest["release_id"], "files": manifest["files"]},
+                sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+            (root / "runtime_manifest.json").write_text(json.dumps(manifest))
+            marker = {"release_id": "release-1", "manifest_fingerprint": fingerprint}
+            (root / ".verified-release.json").write_text(json.dumps(marker))
+            self.assertEqual(verified_runtime_file_hashes(data), {source.resolve(): expected})
+            source.write_bytes(b"short")
+            self.assertEqual(verified_runtime_file_hashes(data), {})
+            source.write_bytes(b"verified source")
+            marker["manifest_fingerprint"] = "stale"
+            (root / ".verified-release.json").write_text(json.dumps(marker))
+            self.assertEqual(verified_runtime_file_hashes(data), {})
+
+    def test_quick_site_keeps_signed_lanes_and_subcontract_count_separate(self):
+        transactions = [
+            {"source_system": "USA_SPENDING", "award_key": "A1", "transaction_key": "T1",
+             "contract_id": "C1", "action_date": "2026-04-01", "year": 2026,
+             "spend_amount": 100.0, "platform_family": "F-16",
+             "base_award_description": "Radar control", "description": "Radar control"},
+            {"source_system": "USA_SPENDING", "award_key": "A1", "transaction_key": "T2",
+             "contract_id": "C1", "action_date": "2026-05-01", "year": 2026,
+             "spend_amount": -20.0, "platform_family": "F-16",
+             "base_award_description": "Radar control", "description": "Radar control"},
+            {"source_system": "DLA", "award_key": "D1", "transaction_key": "T3",
+             "contract_id": "D1", "action_date": "2026-06-01", "year": 2026,
+             "spend_amount": 30.0, "platform_family": "F-16", "niin": "123456789",
+             "nsn": "1560-00-123-4567", "description": "Power module"},
+        ]
+        network = [
+            {"prime_cage": "22222", "prime_name": "Prime", "contract_id": "P1",
+             "award_key": "PA1", "source_dedup_key": "S1", "subaward_value": 40.0,
+             "subaward_value_raw": 40.0, "action_date": "2026-02-01",
+             "year": 2026, "platform_family": "F-16", "description": "Control unit"},
+            {"prime_cage": "22222", "prime_name": "Prime", "contract_id": "P1",
+             "award_key": "PA1", "source_dedup_key": "S2", "subaward_value": -5.0,
+             "subaward_value_raw": -5.0, "action_date": "2026-03-01",
+             "year": 2026, "platform_family": "F-16", "description": "Control unit"},
+        ]
+        builder = SimpleNamespace(
+            identity={"version": "test", "parents": []},
+            paths={"transactions": Path("transactions.parquet"), "network": Path("network.parquet")},
+            connection=SimpleNamespace(execute=Mock(return_value=object())),
+            _site_identities=Mock(return_value=[{"cage": "45934", "vendor_name": "Example", "city": "Dayton", "state": "OH"}]),
+            _source_manifest=Mock(return_value={"files": {}}),
+            _evidence_index=CompanyContextBuilder._evidence_index,
+        )
+        with patch("company_quick_context.rows_as_dicts", side_effect=[transactions, network]):
+            context = build_site_conversation(builder, "45934", [2026])
+        totals = {row["measure_type"]: row["net_value_usd"] for row in context["observed_financials"]}
+        self.assertEqual(totals, {"prime_obligations": 80.0, "dla_procurement_value": 30.0})
+        sub = next(row for row in context["annual_activity"] if row["measure_type"] == "mimir_modelled_reported_subcontract_value")
+        self.assertEqual(sub["net_value_usd"], 35.0)
+        self.assertEqual(sub["distinct_awards"], 1)
+        self.assertEqual(context["top_awards"][0]["net_prime_obligations_usd"], 80.0)
+        self.assertEqual(context["reported_subcontract_relationships"]["as_subcontractor_to"][0]["mimir_modelled_subcontract_value_usd"], 35.0)
+        model_pack = compact_company_conversation_pack(context)
+        self.assertEqual(model_pack["observed_financials"][0]["net_value_usd"], 80.0)
+        self.assertEqual(model_pack["prime_awards"][0]["contract_id"], "C1")
+        self.assertEqual(model_pack["dla_items"][0]["niin"], "123456789")
+        self.assertEqual(model_pack["reported_subcontract_routes"][0]["mimir_modelled_subcontract_value_usd"], 35.0)
+        self.assertNotIn("evidence_index", model_pack)
+
+    def test_overview_build_skips_unused_dossier_queries(self):
+        builder = CompanyContextBuilder.__new__(CompanyContextBuilder)
+        builder._site_identities = Mock(return_value=[{"cage": "45934"}])
+        builder._source_manifest = Mock(return_value={"files": {}})
+        for name in (
+            "_product_and_part_evidence", "_place_of_performance_activity",
+            "_missile_program_trajectory", "_location_footprint",
+            "_future_demand_context", "_opportunity_candidates", "_quality_summary",
+            "_site_capability_evidence", "_top_awards", "_site_financials",
+            "_customer_context",
+        ):
+            setattr(builder, name, Mock(side_effect=AssertionError(name)))
+        for name in (
+            "_capability_evidence",
+            "_network_context", "_platform_exposure", "_financial_summary",
+            "_annual_activity",
+        ):
+            setattr(builder, name, Mock(return_value=[]))
+        builder._capability_evidence.return_value = {}
+        context = builder._build_context(
+            scope_type="company_site", scope_id="45934", scope_name="Example",
+            cages=["45934"], fiscal_years=[2025, 2026],
+            site_definitions=[], conversation_overview=True,
+        )
+        self.assertEqual(context["scope"]["scope_id"], "45934")
+        self.assertEqual(context["product_and_part_evidence"], {})
+        self.assertEqual(context["platform_exposure"], [])
+        self.assertEqual(context["site_financials"], [])
+
+    def test_overview_cache_cannot_replace_full_dossier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CompanyContextStore.__new__(CompanyContextStore)
+            store.contexts = []
+            store._context_paths = {}
+            store._dynamic_contexts = {}
+            store._dynamic_overviews = {}
+            store._dynamic_groups = {}
+            store._dynamic_lock = threading.Lock()
+            store._directory_search = Mock(return_value=[{"scope_id": "45934"}])
+            store.dynamic_cache_dir = Path(directory)
+            store.data_root = Path(directory)
+            store._dynamic_builder = Mock()
+            store._dynamic_builder.build_site.side_effect = lambda cage, conversation_overview=False: {
+                "scope": {"scope_type": "company_site", "scope_id": cage},
+                "depth": "overview" if conversation_overview else "full",
+            }
+            with patch(
+                "company_quick_context.build_site_conversation",
+                return_value={
+                    "scope": {"scope_type": "company_site", "scope_id": "45934"},
+                    "depth": "overview",
+                },
+            ):
+                overview = store.get_raw("company_site", "45934", conversation_overview=True)
+            full = store.get_raw("company_site", "45934")
+            self.assertEqual(overview["depth"], "overview")
+            self.assertEqual(full["depth"], "full")
+            self.assertTrue((Path(directory) / "company_site-45934-overview.json").exists())
+            self.assertTrue((Path(directory) / "company_site-45934.json").exists())
+
     def test_overview_preserves_financial_summaries_and_labels_omitted_detail(self):
         context = {
             "context_id": "company-test", "evidence_fingerprint": "hash",

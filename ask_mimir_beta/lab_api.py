@@ -171,6 +171,18 @@ CONVERSATION_INSTRUCTIONS = (
     "dimensions supported by the evidence before asking at most one specific "
     "follow-up question. For a narrow question, answer it directly; do not "
     "replace the answer with a topic menu. "
+    "For a broad company overview, lead with the three observed financial lanes "
+    "before any site ranking. Show reported subcontract value alongside the "
+    "separately labelled net prime obligations when the evidence provides them. "
+    "Give two or three leading prime-contractor routes with their reported "
+    "values or supported roles, then at most three representative direct-award "
+    "sites. Do not let a prime-only site table dominate the quick picture. "
+    "Distinguish the company's position as a subcontractor from any reported "
+    "subcontractors beneath its own prime awards. Do not add these measures or "
+    "treat reported subawards as a complete measure of company revenue. "
+    "For company totals, label the range of fiscal years that have numeric "
+    "observations in annual_financial_summary; do not extend a total through "
+    "an empty future fiscal-year row in the scope metadata. "
     "Cite or identify the source basis as the normal workflow requires. If the "
     "question requires complete enumeration or evidence beyond the supplied pack, "
     "say so and offer Deep research. If evidence_scope lists omitted lanes, "
@@ -199,7 +211,11 @@ obligations, supplier relationships and related parts at a useful high level;
 do not imply that selected examples exhaust any lane. For a focused topic,
 answer that topic directly. Aim for a useful, compact conversational answer.
 Give the fiscal-year observation window for financial figures and keep
-completed years distinct from the partial year shown in scope. Distinguish direct
+completed years distinct from the partial year shown in scope. If the partial
+fiscal year has no annual_activity records, it is only a current-year marker:
+do not call that year observed, assign it a value or extend an observed-records
+heading through it. Use actual annual_activity years for the prime/DLA window.
+Distinguish direct
 government award recipients, reported first-tier supplier sites, and wider DLA
 item suppliers. Reported subcontract values are Mimir-modelled from reported
 records; they are not prime obligations or sales. A selected row list is not
@@ -304,6 +320,15 @@ supply chains and adjacent dual-use markets. For a clearly unrelated request, de
 offer a defense-market framing. For an ambiguous company, acronym, platform or geography, ask one
 short clarifying question rather than guessing. Answer dual-use questions when the user establishes
 a defense, aerospace, government-procurement or national-security connection.
+Treat a short, recognizable defense item name as a request for a useful evidence-grounded overview.
+For a stock-number follow-up based only on an item name, check current sources for candidate
+identifiers and distinguish variants if more than one NSN fits. The Mimir item lookup resolves
+exact NSNs, NIINs and part numbers, not free-text descriptions; its lack of a match does not
+mean no such item exists. Do not guess a unique stock number from a broad garment description.
+Only present an exact NSN for a named garment when an official catalog record or retrieved
+Mimir item record supports that identifier and variant. A resale listing or garment label
+alone is insufficient. If the available evidence cannot verify an exact NSN, explain which
+label details or size would resolve it. Do not make a Mimir item link from a web result alone.
 
 Keep these measures distinct:
 - prime obligations;
@@ -321,8 +346,8 @@ supplier-relationship evidence for specific claims.
 Never request or compare a metric without choosing its measure_type. Use prime_obligations for
 prime-contract action value and dla_procurement_value for DLA line economics.
 
-The current evidence covers FY2021-FY2026, with the latest fiscal year subject to normal reporting
-lag. State the observation window whenever it matters. A rank or share is valid
+Use the observation window stated by the retrieved evidence; newer fiscal years may still be
+subject to normal reporting lag. State that window whenever it matters. A rank or share is valid
 only inside its named peer universe. Use positive-value concentration for concentration measures,
 while retaining negative actions separately as de-obligations.
 
@@ -695,14 +720,17 @@ observation window. Do not write phrases such as "not company revenue", "not sit
 "not a general representation" or equivalent generic disclaimers. Describe signed totals simply as net prime
 obligations; explain positive actions and de-obligations only when the user asks about the calculation.
 For a standard company profile, follow the period totals with a compact fiscal-year table using
-annual_financial_summary. Show each available year and the three lanes separately, label FY2026 as
-"FY2026 partial — latest available records", and use "Not observed" for a missing lane rather than zero.
+annual_financial_summary. Show each available fiscal year and the three lanes separately.
+Use the year labels in the evidence. If a year's source coverage is incomplete, call its
+records preliminary or partial, including after that fiscal year has ended. Use
+"Not observed" for a missing lane rather than zero.
 
 For a standard company profile, include a distinct "Platform exposure" section after the financial section
 and before product/NIIN coverage. Build it from platform_exposure_summary.platforms, not the unfiltered raw
-platform_exposure rows. Use a compact table with platform/program, the source-reported capability or role,
-and FY2021-FY2026 historical materiality. For each non-zero evidence lane, show its value and its
-share_of_company_lane_pct, with prime obligations, DLA procurement and reported subcontract value labelled
+platform_exposure rows. Use a compact table with platform/program, the source-reported capability
+or role, and historical materiality for the observation window in the platform scope. For each
+non-zero evidence lane, show its value and its share_of_company_lane_pct, with prime obligations,
+DLA procurement and reported subcontract value labelled
 separately. Put the denominator and fiscal window once in the relevant percentage column heading, using
 share_column_label; cells in that column should contain only the compact percentage, such as "12%". If prose
 is used instead of a table, state the denominator once before the list rather than repeating it after every
@@ -731,7 +759,8 @@ it materially explains competition or the procurement route. Do not append a bla
 about authorization to otherwise useful examples of observed procurement.
 Summarize other active authorized sources where they materially explain competition. Treat broad labels such
 as "COMMON MISSILE SYSTEMS" as a market or system-family grouping, not as a discrete platform. Use fiscal
-years for recency and describe the latest year as the latest FY2026 records rather than "year to date".
+years for recency and describe the latest year as the latest available records rather than
+"year to date" unless the evidence explicitly supports that phrase.
 The third_party_dla_procurement_routes section identifies other CAGE sites that received DLA procurement
 for NIINs referenced to the resolved company. Use it to identify possible distributor, reseller or procurement-
 intermediary routes when the resolved company has design-control or authorized-source evidence. State the
@@ -790,6 +819,35 @@ internal scope methods, file paths, ingestion fields or instructions about what 
 Mention a limitation only when it changes the substantive answer. Keep the answer below 1,300 words.
 """.strip()
 
+COMPANY_CONVERSATION_PROMPT = """
+You are Ask Mimir in Conversation mode. Use the supplied company overview evidence and
+the preceding user messages to answer the latest question directly. A bare CAGE reply
+continues the user's prior question; do not turn it into an unrelated company profile.
+
+Give a concise, evidence-led answer, normally under 220 words. For an opportunity
+question, identify the company and registered location, then give two or three concrete
+lanes supported by its observed prime, DLA, reported subcontract, platform, customer,
+or award evidence. Distinguish these historical positions from currently open notices.
+Never imply that a historical award or a broad NAICS match is an open opportunity.
+Keep prime obligations, DLA procurement and reported subcontract value separate and
+state the observed fiscal-year window for any dollar figures. Call the latest fiscal
+year's data preliminary when the evidence marks it as incomplete. Do not infer total
+company revenue from these lanes. In customer-facing prose, call the subcontract lane
+"reported subcontract value"; avoid "modelled" unless the user asks about its method.
+
+Retain useful identifiers and links: CAGE references use
+https://www.mimiradvisors.org/dashboard?view=COMPANY&cage=<CAGE>, awards use
+https://www.mimiradvisors.org/dashboard?view=AWARDS&award=<AWARD_ID>, platforms use
+https://www.mimiradvisors.org/dashboard?view=PLATFORM&platform=<PLATFORM>, and NSNs use
+https://www.mimiradvisors.org/dashboard?view=PARTS&nsn=<NSN>. Only cite identifiers
+actually present in the evidence. Do not print release IDs, hashes or internal methods.
+If the overview omits a detail, say so briefly and invite a focused follow-up or Deep
+Research. A current-notice search can use Mimir's loaded opportunities; the linked
+government notice should then be checked before pursuit. Do not say a live SAM.gov
+search is required for a useful first answer. End with one natural, context-specific
+follow-up question when it would help narrow the user's next investigation.
+""".strip()
+
 ITEM_DOSSIER_PROMPT = """
 You are Ask Mimir, an evidence-led US defense-market research assistant. The final user message is
 followed by a deterministic NSN/NIIN evidence pack generated by Mimir.
@@ -814,7 +872,10 @@ When an active design-control reference identifies a manufacturer, lead the sour
 that named manufacturer as a recognised item-identifying source. Do not describe the item as
 having no available source solely because a separate DLA procurement-authorization field is
 empty. State that current DLA procurement authorization is unverified when that distinction
-matters to the user's competition or qualification question. Do not turn a design-control
+matters to the user's competition or qualification question, but state it once as a qualification
+to check rather than repeating it in the table, narrative and conclusion. For a question about
+available sources, make the active design-control manufacturer the affirmative source lead;
+do not make an empty procurement-authorization field the headline or bottom line. Do not turn a design-control
 reference into a claim of current delivery capacity or DLA procurement authorization.
 Do not add a paragraph defining snapshot or active-CAGE mechanics unless the user asks about the
 methodology. Do not call every reference manufacturer a qualified or current supply source. Explain
@@ -825,8 +886,9 @@ linked awards provide broader award context for the item. Present them under "Li
 and say that DLA item procurement remains the item-specific measure. Do not discuss adding or not
 adding the figures unless the user asks about methodology. Never copy, allocate or sum value across
 part-number reference rows. A part number may be shown as observed
-on a transaction line, but a reference relationship alone is not a sale. Keep FY2026 partial
-activity separate from the completed FY2021-FY2025 view. Call missing fiscal-year activity "not
+on a transaction line, but a reference relationship alone is not a sale. Keep a year with
+partial source coverage separate from the completed-year view, using the fiscal-year labels and
+coverage supplied in the pack. Call missing fiscal-year activity "not
 observed," not zero.
 
 List every returned platform association when the list is reasonably short. If the item maps to
@@ -864,7 +926,8 @@ or total program value. Show only fiscal years containing reported contract acti
 explicitly asks for the complete annual series. Do not discuss pre-award years merely because they are
 available in the underlying data. Label the total using the first and last fiscal years in
 observed_action_fiscal_years, not the wider available_fiscal_years coverage window; if actions
-occur only in FY2023–FY2026, do not label their sum FY2019–FY2026. FY2026 is partial.
+occur only in FY2023–FY2026, do not label their sum FY2019–FY2026. Treat a reported
+year as preliminary only when its source coverage is incomplete, even if that year has ended.
 
 Present prime obligations and Mimir-modelled reported subcontract value as separately labelled measures
 without adding a routine paragraph explaining that separation. When reported subawards exist, identify the material supplier sites, descriptions and
@@ -1052,8 +1115,9 @@ platform evidence and authoritative current sources. Discuss methodology or data
 user explicitly asks about it.
 
 For platform_overview, use completed_year_net_prime_obligations_usd as the main comparable historical
-baseline and show partial_year_net_prime_obligations_usd separately as FY2026 partial. Do not place the
-cumulative FY2021-FY2026 net_prime_obligations_usd beside the completed-year total as a peer headline;
+baseline and show partial_year_net_prime_obligations_usd separately, labelled with its fiscal
+year and source-coverage status from the evidence. Do not place the all-observed-window
+net_prime_obligations_usd beside the completed-year total as a peer headline;
 that obscures that the two figures differ only because one includes a partial fiscal year. Use the
 all-observed-window total only when the user explicitly asks for it. For supplier
 roles or overview, include financial values only when they help rank or size the reported positions.
@@ -1154,7 +1218,8 @@ broader_related_award_obligations_usd as the total value of wider awards whose d
 the capability, not as the value of the capability itself. Use top_platform_activity to
 identify the platform families carrying the broadest matched item coverage. Then provide a compact
 table containing supplier site, CAGE, city/state, why the organization appears, matching NIIN count,
-example items, associated platforms and FY2021-FY2026 observed procurement value when present. Do
+example items, associated platforms and observed procurement value for the evidence window when
+present. Do
 not claim that there were no matching awards or notices when the structured item, platform, supplier
 or prime-award evidence is populated. Only state that the available evidence is insufficient when all
 of those evidence lanes are empty.
@@ -1281,13 +1346,13 @@ You are Ask Mimir, an evidence-led US defense-market research assistant. The fin
 followed by an answer mode, follow-up status and a state-level defense-industrial-base evidence set.
 
 Follow the supplied ANSWER MODE. For overview, give a commercially useful overview of the named
-state. Lead with the scale of observed activity for FY2021-FY2026, then identify the most important
-company facilities and explain why they matter.
+state. Lead with the scale of observed activity for the fiscal window in the evidence,
+then identify the most important company facilities and explain why they matter.
 Use separate columns for prime obligations, DLA procurement and Mimir-modelled reported subcontract
 value; do not add those lanes together. Include CAGE, city and material mapped platforms or customer
 routes. Importance should reflect financial scale, contract or item breadth, program relevance and
 facility role, rather than company name alone.
-Label historical dollar figures with the FY2021-FY2026 observation window once in their heading or
+Label historical dollar figures with the evidence's observation window once in their heading or
 introductory sentence, including when those figures appear inside a forward-demand answer.
 Use "reported subcontract value", never "modelled reported subcontract value".
 Use https://www.mimiradvisors.org/dashboard?view=COMPANY&cage=<CAGE> for site links and
@@ -1318,10 +1383,11 @@ followed by a defined multi-platform market-segment evidence set.
 Answer at the market level rather than substituting one platform. Start with the programs driving
 the most observed activity, then identify the material prime-recipient and reported supplier sites.
 Keep prime obligations, Mimir-modelled reported subcontract value and DLA procurement as separate
-measures. Every financial figure must include the FY2021-FY2026 observation window.
+measures. Every financial figure must include its observation window from the evidence.
 
-Use annual_activity to describe direction and changing activity across fiscal years. Treat FY2026
-as a partial observed year. Use capability_activity, including PSC/FSC descriptions, to identify
+Use annual_activity to describe direction and changing activity across fiscal years. Describe
+the latest year's source coverage as partial or preliminary only when the evidence supports it.
+Use capability_activity, including PSC/FSC descriptions, to identify
 the technologies and services with the strongest visible activity; do not reduce a broad market to
 one familiar platform or one award.
 
@@ -1353,6 +1419,10 @@ opportunities, show the notice identifier, notice type, customer, response deadl
 PSC description and public notice link. Rank relevance from the actual requirement language and
 classification evidence. Do not imply win probability. Distinguish Sources Sought and RFIs from
 solicitations.
+The scope.search_terms field lists the actual terms used to retrieve records. Where it contains
+capability variants, describe the search as covering those variants rather than an exact-term-only
+search. If the returned candidate set is empty, say only that the release snapshot search returned
+no candidates; do not imply that current SAM.gov has no relevant notices.
 If a specific notice type is requested, do not pad the answer with records of another type merely
 because their text mentions it. Exclude clearly different applications (for example shipboard radar
 for an aircraft-installed avionics request) rather than presenting them as leading matches. A short
@@ -1366,9 +1436,10 @@ identifier, omit this subsection rather than inferring incumbents from a broad P
 The opportunity file is a release snapshot. A future response deadline does not prove that a notice
 is currently open, and notice type inferred from text may be wrong. When scope.status_verification is
 "snapshot_unverified", describe the rows as candidate notices with future deadlines in Mimir's
-release, give scope.release_generated_at as the *release-build* date (not a SAM update time), and
-say current status, notice type, amendments and deadlines have not been checked live. Provide the
-official notice links so the user can confirm them. Never call these rows verified open notices.
+opportunity data. Do not put scope.release_generated_at or the release-build date in the answer
+unless the user asks about data freshness. After the useful results, add one brief note that current
+SAM.gov status, amendments and deadlines have not been checked live; provide the official notice
+links so the user can confirm them. Never call these rows verified open notices.
 When scope.status_verification is "live_sam_required", use the supplied web tool to check the
 strongest candidates against their current official SAM.gov notices before stating that one is open.
 If a current official check fails, fall back to the snapshot-candidate wording.
@@ -2139,7 +2210,7 @@ def explicit_platform_query(
         return mentions[0]
     has_direct_platform_language = bool(
         re.match(
-            r"^(?:tell\s+me\s+(?:everything\s+)?about|give\s+me\s+an?\s+overview\s+of|"
+            r"^(?:(?:now|next|instead|actually)[,\s]+)?(?:tell\s+me\s+(?:everything\s+)?about|give\s+me\s+an?\s+overview\s+of|"
             r"overview\s+of|show\s+(?:me\s+)?(?:topic\s+)?options\s+for|"
             r"(?:and\s+)?what\s+about|explain|map)\b",
             intent,
@@ -2272,8 +2343,9 @@ def company_site_trajectory_cage(messages: List[ChatMessage]) -> str | None:
             "changed",
             "change",
             "since",
-            "exposure",
             "history",
+            "trajectory",
+            "over time",
         )
     ):
         return None
@@ -2325,6 +2397,7 @@ def company_site_dossier_cage(messages: List[ChatMessage]) -> str | None:
             "company profile",
             "site profile",
             "full picture",
+            "quick picture",
             "overview",
             "what does",
         )
@@ -2341,9 +2414,32 @@ def _is_independent_glossary_question(text: str) -> bool:
     ))
 
 
+MILITARY_CLOTHING_PATTERN = (
+    r"(?:M81(?:\s+woodland)?|woodland)\s+"
+    r"(?:(?:camouflage|field)\s+)?(?:jacket|coat|parka|uniform|trousers|pants|shirt)"
+)
+
+
+def _military_clothing_subject(text: str) -> str | None:
+    """Recognize a named garment as an item, not a candidate company name."""
+    value = re.sub(r"\s+", " ", str(text or "").strip(" .?!"))
+    match = re.fullmatch(
+        rf"(?:(?:tell me about|tell me more about|what is|what do you know about|"
+        rf"give me (?:an? )?overview of)\s+)?(?:the\s+)?({MILITARY_CLOTHING_PATTERN})",
+        value, re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
+def _needs_clothing_web_search(text: str) -> bool:
+    return bool(re.search(rf"\b{MILITARY_CLOTHING_PATTERN}\b", str(text or ""), re.IGNORECASE))
+
+
 def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
     text = str(messages[-1].content or "").strip()
-    if _is_independent_glossary_question(text):
+    if _is_independent_glossary_question(text) or _military_clothing_subject(text):
+        return None
+    if re.fullmatch(r"(?:stock\s*(?:no\.?|number)|NSN)\??", text, re.IGNORECASE):
         return None
     if platform_award_follow_up_intent(text):
         return None
@@ -2367,8 +2463,16 @@ def explicit_company_name_query(messages: List[ChatMessage]) -> str | None:
         character.isdigit() for character in text
     ):
         return None
+    # A follow-up about the current company is not a newly named company.
+    if re.match(
+        r"^(?:what|how)\s+about\s+(?:their|them|they|its|it|this\s+company|that\s+company)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return None
     patterns = (
         r"(?:i['’]?m|i\s+am|we['’]?re|we\s+are)\s+(?:assessing|researching|evaluating|looking\s+at)\s+(.+?)\s+as\s+(?:an?\s+)?(?:defense|defence|military)\s+supplier\b",
+        r"(?:give|show)\s+me\s+(?:the\s+)?quick\s+picture\s+(?:on|of)\s+(.+?)\s+as\s+(?:an?\s+)?(?:defense|defence|military)\s+supplier\b",
         r"what\s+does\s+(.+?)\s+(?:actually\s+)?do\s+(?:in|for)\s+(?:the\s+)?(?:us\s+)?(?:defense|defence|military)(?:\s+market)?(?:\?|\.|$)",
         r"(?:build|give|show)\s+me\s+(?:an?\s+)?(?:defense|defence|military)\s+(?:profile|view|footprint)\s+(?:of|for)\s+(.+?)(?:\?|\.|$)",
         r"(?:can\s+u|can\s+you|please)\s+map\s+(.+?)(?:['’]s|s)\s+(?:defense|defence|military)\s+(?:business|footprint|activity)(?:\?|\.|$)",
@@ -3916,8 +4020,10 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
         latest,
         re.IGNORECASE,
     ))
+    competitor_request = is_eaton_competitor_request(request.messages)
     conflicting_entity_route = bool(
         award_id or item_id or product_id or record_search or compared_platforms
+        or competitor_request
         or (platform_id and (not explicit_company_language or company_phrase_is_platform))
         or (state_code and not explicit_company_language)
         or (segment_id and not explicit_company_language)
@@ -3934,7 +4040,7 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
                 "state_market", state_code, source="state_parser", confidence=0.98
             )],
         ))
-    if not record_search and is_eaton_competitor_request(request.messages):
+    if not record_search and competitor_request:
         add(_routing_candidate("competitor_discovery", "recognized_competitor_request", 0.96))
     if not record_search and is_program_momentum_request(request.messages):
         add(_routing_candidate("program_momentum", "program_momentum_language", 0.985))
@@ -4021,15 +4127,29 @@ def _geographic_clarification_question(request: AskRequest) -> str | None:
     return None
 
 
-def _request_with_resolved_geographic_clarification(request: AskRequest) -> AskRequest:
-    question = _geographic_clarification_question(request)
+def _item_clarification_question(request: AskRequest) -> str | None:
+    latest = request.messages[-1].content.strip()
+    if not re.fullmatch(
+        r"(?:stock\s*(?:no\.?|number)|NSN|(?:what(?:'s| is)\s+)?(?:the\s+)?(?:stock\s*(?:no\.?|number)|NSN))\??",
+        latest, re.IGNORECASE,
+    ):
+        return None
+    for message in reversed(request.messages[:-1]):
+        if message.role == "user":
+            subject = _military_clothing_subject(message.content)
+            return f"What is the National Stock Number (NSN) for the {subject}?" if subject else None
+    return None
+
+
+def _request_with_resolved_clarification(request: AskRequest) -> AskRequest:
+    question = _geographic_clarification_question(request) or _item_clarification_question(request)
     if not question:
         return request
     return request.model_copy(update={"messages": [ChatMessage(role="user", content=question)]})
 
 
 def routing_decision_for_request(request: AskRequest) -> RoutingDecision:
-    request = _request_with_resolved_geographic_clarification(request)
+    request = _request_with_resolved_clarification(request)
     candidates = _candidate_workflows(request)
     scope = request.active_scope
     if not candidates:
@@ -4957,7 +5077,6 @@ def company_detail_requested(question: str) -> bool:
         r"parts?|NSNs?|NIINs?)|specific\s+(?:CAGE\s+)?(?:sites?|facilities|"
         r"awards?|parts?|NSNs?|NIINs?)|(?:every|all)\s+(?:sites?|facilities|"
         r"CAGEs?|parts?|NSNs?|NIINs?)|site.by.site|"
-        r"CAGE\s*[:#-]?\s*[A-Z0-9]{5}|"
         r"(?:NSN|NIIN)\s*[:#-]?\s*[A-Z0-9][A-Z0-9-]{4,})\b",
         question, re.IGNORECASE,
     ))
@@ -5157,6 +5276,34 @@ def active_scope_from_result(
             scope_name=" and ".join(platform_ids),
             group_kind="platform_comparison",
             compared_platform_ids=platform_ids,
+        )
+    # The general research tool path can return a single company dossier
+    # without placing it in answer_artifacts. Preserve that resolved subject
+    # for natural follow-ups, but never pick one side of a company comparison.
+    company_packs = {
+        (str(scope.get("scope_type")), str(scope.get("scope_id"))): pack
+        for entry in result.get("tool_trace") or []
+        if entry.get("tool") == "get_company_context"
+        for pack in [entry.get("result") or {}]
+        for scope in [pack.get("scope") or {}]
+        if scope.get("scope_type") in {"company_parent", "company_site"}
+        and scope.get("scope_id")
+    }
+    if len(company_packs) == 1:
+        pack = next(iter(company_packs.values()))
+        scope = pack["scope"]
+        identity = pack.get("identity") or {}
+        is_parent = scope["scope_type"] == "company_parent"
+        return ActiveScope(
+            scope_type=scope["scope_type"],
+            scope_id=str(scope["scope_id"]),
+            scope_name=scope.get("scope_name"),
+            resolved_cages=identity.get("resolved_cages") or [],
+            group_kind=identity.get("scope_kind"),
+            parent_scope_id=(str(scope["scope_id"]) if is_parent else None),
+            parent_scope_name=(scope.get("scope_name") if is_parent else None),
+            parent_resolved_cages=(identity.get("resolved_cages") or [] if is_parent else []),
+            parent_group_kind=(identity.get("scope_kind") if is_parent else None),
         )
     return previous_scope
 
@@ -7013,7 +7160,7 @@ def answer_messages_for_request(
 
 def request_for_execution(request: AskRequest, routing: RoutingDecision) -> AskRequest:
     """Never let historical scope override the authoritative routing decision."""
-    request = _request_with_resolved_geographic_clarification(request)
+    request = _request_with_resolved_clarification(request)
     scope = request.active_scope
     compatible = bool(scope and SCOPE_WORKFLOWS.get(scope.scope_type) == routing.workflow)
     if scope and scope.scope_type in {"company_site", "company_parent"}:
@@ -7362,7 +7509,7 @@ def _generate_answer_impl(
                 )
             if not resolved_company_scope and len(location_parent_matches) == 1:
                 resolved_company_scope = location_parent_matches[0]
-        elif company_wide_intent(latest_question) and len(parent_matches) == 1:
+        elif company_wide_intent(latest_question) and not site_specific and len(parent_matches) == 1:
             resolved_company_scope = parent_matches[0]
         elif len(matches) == 1:
             resolved_company_scope = matches[0]
@@ -8833,6 +8980,17 @@ def _generate_answer_impl(
             pack = None
         if pack:
             emit_progress(progress, "Assembling company evidence", "Loading activity, customers, suppliers, items and locations", 48)
+            model_pack = pack
+            if request.answer_mode == "conversation" and company_focus == "conversation_overview":
+                from company_quick_context import compact_company_conversation_pack
+
+                model_pack = compact_company_conversation_pack(pack)
+            company_prompt = (
+                COMPANY_CONVERSATION_PROMPT
+                if request.answer_mode == "conversation"
+                and company_focus == "conversation_overview"
+                else COMPANY_SITE_DOSSIER_PROMPT
+            )
             trace = [
                 {
                     "tool": "get_company_context",
@@ -8847,14 +9005,14 @@ def _generate_answer_impl(
                         ({"conversation_overview": "MIMIR COMPANY OVERVIEW EVIDENCE\n",
                           "conversation_award_sites": "MIMIR COMPANY AWARD AND SITE EVIDENCE\n"}
                          .get(arguments["focus"], "MIMIR FULL CAGE-SITE DOSSIER\n"))
-                        + json.dumps(pack, default=str)
+                        + json.dumps(model_pack, default=str)
                     ),
                 }
             )
             emit_progress(progress, "Preparing the answer", "Building the site-level commercial picture", 68)
             response = client.responses.create(
                 model=runtime.model,
-                instructions=COMPANY_SITE_DOSSIER_PROMPT,
+                instructions=company_prompt,
                 input=input_items,
                 reasoning={"effort": runtime.reasoning_effort},
                 max_output_tokens=min(runtime.max_output_tokens, 9000),
@@ -8864,7 +9022,7 @@ def _generate_answer_impl(
             response, answer_text = finalize_response(
                 client,
                 response,
-                COMPANY_SITE_DOSSIER_PROMPT,
+                company_prompt,
                 input_items,
                 call_usages,
                 progress,
@@ -9064,8 +9222,9 @@ def _generate_answer_impl(
 
     emit_progress(progress, "Selecting evidence", "Choosing the relevant Mimir calculations and records", 34)
     general_tools = list(TOOLS)
-    if runtime.external_evidence_allowed and is_cross_market_company_request(
-        request.messages[-1].content
+    if runtime.external_evidence_allowed and (
+        is_cross_market_company_request(request.messages[-1].content)
+        or _needs_clothing_web_search(request.messages[-1].content)
     ):
         general_tools.append({"type": "web_search", "search_context_size": "low"})
     response = client.responses.create(

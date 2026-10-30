@@ -81,6 +81,34 @@ def file_sha256(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def verified_runtime_file_hashes(data_root: Path) -> Dict[Path, str]:
+    """Reuse hashes from a complete, bootstrap-verified immutable release."""
+    runtime_root = data_root.resolve().parent
+    try:
+        manifest = json.loads((runtime_root / "runtime_manifest.json").read_text())
+        marker = json.loads((runtime_root / ".verified-release.json").read_text())
+        payload = json.dumps(
+            {"release_id": manifest.get("release_id"), "files": manifest.get("files", [])},
+            sort_keys=True, separators=(",", ":"),
+        ).encode()
+        if (
+            not manifest.get("release_id")
+            or marker.get("release_id") != manifest["release_id"]
+            or marker.get("manifest_fingerprint") != hashlib.sha256(payload).hexdigest()
+        ):
+            return {}
+        hashes: Dict[Path, str] = {}
+        for entry in manifest["files"]:
+            path = (runtime_root / entry["local_path"]).resolve()
+            if runtime_root not in path.parents or path.stat().st_size != int(entry["size"]):
+                return {}
+            if entry.get("sha256"):
+                hashes[path] = str(entry["sha256"])
+        return hashes
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
 def stable_id(prefix: str, *parts: Any) -> str:
     value = "|".join(str(part or "").strip().upper() for part in parts)
     return f"{prefix}_{hashlib.sha256(value.encode()).hexdigest()[:20]}"
@@ -205,6 +233,8 @@ class CompanyContextBuilder:
         self,
         cage: str,
         fiscal_years: Sequence[int] = DEFAULT_FISCAL_YEARS,
+        *,
+        conversation_overview: bool = False,
     ) -> Dict[str, Any]:
         clean = clean_cage(cage)
         parent_match = None
@@ -228,6 +258,7 @@ class CompanyContextBuilder:
             cages=[clean],
             fiscal_years=fiscal_years,
             site_definitions=[site_definition] if site_definition else [],
+            conversation_overview=conversation_overview,
         )
         if parent_match:
             context["identity"]["parent_resolution"] = {
@@ -251,6 +282,7 @@ class CompanyContextBuilder:
         group_kind: str,
         identity_sites: Sequence[Dict[str, Any]] = (),
         fiscal_years: Sequence[int] = DEFAULT_FISCAL_YEARS,
+        conversation_overview: bool = False,
     ) -> Dict[str, Any]:
         clean_cages = sorted({clean_cage(cage) for cage in cages if clean_cage(cage)})
         if not clean_cages:
@@ -262,6 +294,7 @@ class CompanyContextBuilder:
             cages=clean_cages,
             fiscal_years=fiscal_years,
             site_definitions=[],
+            conversation_overview=conversation_overview,
         )
         context["identity"]["scope_kind"] = group_kind
         if identity_sites:
@@ -307,6 +340,7 @@ class CompanyContextBuilder:
         cages: Sequence[str],
         fiscal_years: Sequence[int],
         site_definitions: Sequence[Dict[str, Any] | None],
+        conversation_overview: bool = False,
     ) -> Dict[str, Any]:
         years = sorted({int(year) for year in fiscal_years})
         if not years:
@@ -322,16 +356,31 @@ class CompanyContextBuilder:
         context_id = (
             f"company_context_{evidence_fingerprint[:12]}_{scope_fingerprint}"
         )
-        product_evidence = self._product_and_part_evidence(cages, years)
+        # Conversation reads a bounded overview. Building the detailed part,
+        # location and opportunity sections here delays a cold CAGE lookup even
+        # though none of those sections are supplied to the model.
+        product_evidence = (
+            {} if conversation_overview else self._product_and_part_evidence(cages, years)
+        )
         capability_evidence = self._capability_evidence(cages, years)
-        site_capability_evidence = self._site_capability_evidence(cages, years)
-        top_awards = self._top_awards(cages, years)
+        rapid_site = conversation_overview and scope_type == "company_site"
+        site_capability_evidence = (
+            [] if rapid_site else self._site_capability_evidence(cages, years)
+        )
+        top_awards = [] if rapid_site else self._top_awards(cages, years)
         network_context = self._network_context(cages, years)
         platform_exposure = self._platform_exposure(cages, years)
-        place_of_performance_activity = self._place_of_performance_activity(
-            sites, years
+        place_of_performance_activity = (
+            {} if conversation_overview else self._place_of_performance_activity(sites, years)
         )
-        missile_program_trajectory = self._missile_program_trajectory(cages, years)
+        missile_program_trajectory = (
+            {} if conversation_overview else self._missile_program_trajectory(cages, years)
+        )
+        observed_financials = self._financial_summary(cages, years)
+        site_financials = (
+            [{"cage": cages[0], **row} for row in observed_financials]
+            if rapid_site else self._site_financials(cages, years)
+        )
         return {
             "context_id": context_id,
             "evidence_fingerprint": evidence_fingerprint,
@@ -354,32 +403,43 @@ class CompanyContextBuilder:
                     "place of performance remains a separate award attribute."
                 ),
             },
-            "observed_financials": self._financial_summary(cages, years),
+            "observed_financials": observed_financials,
             "annual_activity": self._annual_activity(cages, years),
-            "site_financials": self._site_financials(cages, years),
+            "site_financials": site_financials,
             "site_capability_evidence": site_capability_evidence,
-            "location_footprint": self._location_footprint(cages, years, sites),
+            "location_footprint": (
+                {} if conversation_overview else self._location_footprint(cages, years, sites)
+            ),
             "place_of_performance_activity": place_of_performance_activity,
             "capability_evidence": capability_evidence,
             "product_and_part_evidence": product_evidence,
             "platform_exposure": platform_exposure,
             "platform_link_version": LINK_VERSION,
             "missile_program_trajectory": missile_program_trajectory,
-            "future_demand_context": self._future_demand_context(
-                platform_exposure,
-                missile_program_trajectory,
+            "future_demand_context": (
+                {} if conversation_overview else self._future_demand_context(
+                    platform_exposure, missile_program_trajectory,
+                )
             ),
-            "customer_context": self._customer_context(cages, years),
+            "customer_context": [] if rapid_site else self._customer_context(cages, years),
             "reported_subcontract_relationships": network_context,
             "top_awards": top_awards,
-            "open_solicitation_candidates": self._opportunity_candidates(cages, years),
+            "open_solicitation_candidates": (
+                {} if conversation_overview else self._opportunity_candidates(cages, years)
+            ),
             "evidence_index": self._evidence_index(
                 sites,
                 top_awards,
                 product_evidence,
                 capability_evidence,
             ),
-            "quality": self._quality_summary(cages, years, sites),
+            "quality": (
+                {"known_limitations": [
+                    "This conversation overview omits detailed item and location evidence.",
+                    "Current opportunity status requires a separate notice search.",
+                ]}
+                if conversation_overview else self._quality_summary(cages, years, sites)
+            ),
             "source_manifest": source_manifest,
         }
 
@@ -2220,6 +2280,17 @@ class CompanyContextBuilder:
                     "supports": "prime award purpose, recipient, actions and prime obligations",
                 }
             )
+        if not top_awards:
+            for award in capability_evidence.get("prime_award_descriptions", []):
+                records.append(
+                    {
+                        "evidence_type": "usaspending_prime_award",
+                        "record_id": award.get("award_key"),
+                        "display_id": award.get("contract_id"),
+                        "title": award.get("base_award_description"),
+                        "supports": "prime award purpose and observed prime obligations",
+                    }
+                )
         for item in product_evidence.get("niin_financial_observations", []):
             records.append(
                 {
@@ -2231,6 +2302,17 @@ class CompanyContextBuilder:
                     "supports": "CAGE/NIIN procurement value and contract history",
                 }
             )
+        if not product_evidence:
+            for item in capability_evidence.get("dla_items", []):
+                records.append(
+                    {
+                        "evidence_type": "dla_procurement_history",
+                        "record_id": item.get("niin"),
+                        "display_id": item.get("nsn") or item.get("niin"),
+                        "title": item.get("description"),
+                        "supports": "observed CAGE/NIIN procurement value",
+                    }
+                )
         for relationship in capability_evidence.get("reported_subaward_descriptions", []):
             records.append(
                 {
@@ -2438,6 +2520,11 @@ class CompanyContextBuilder:
     def _source_manifest(self) -> Dict[str, Any]:
         if self._source_manifest_cache is not None:
             return self._source_manifest_cache
+        runtime_hashes = verified_runtime_file_hashes(self.data_root)
+
+        def source_hash(path: Path) -> str:
+            return runtime_hashes.get(path.resolve()) or file_sha256(path)
+
         self._source_manifest_cache = {
             "generated_on": str(date.today()),
             "identity_definition": {
@@ -2448,7 +2535,7 @@ class CompanyContextBuilder:
             "files": {
                 name: {
                     "path": str(path),
-                    "sha256": file_sha256(path),
+                    "sha256": source_hash(path),
                     "size_bytes": path.stat().st_size,
                 }
                 for name, path in self.paths.items()
@@ -2458,13 +2545,13 @@ class CompanyContextBuilder:
         if self.fydp_budget_path.exists():
             self._source_manifest_cache["fydp_budget"] = {
                 "path": str(self.fydp_budget_path),
-                "sha256": file_sha256(self.fydp_budget_path),
+                "sha256": source_hash(self.fydp_budget_path),
                 "size_bytes": self.fydp_budget_path.stat().st_size,
             }
         if self.dod_budget_path.exists():
             self._source_manifest_cache["dod_budget"] = {
                 "path": str(self.dod_budget_path),
-                "sha256": file_sha256(self.dod_budget_path),
+                "sha256": source_hash(self.dod_budget_path),
                 "size_bytes": self.dod_budget_path.stat().st_size,
             }
         self._source_manifest_cache["fydp_platform_linkages"] = {
