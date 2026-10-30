@@ -1,14 +1,18 @@
 """Authenticated FastAPI adapter for the shared AWS read model.
 The application must inject its existing verified-principal dependency.
 """
-import hashlib,json,re,time
+import contextvars,hashlib,json,re,time
 from pathlib import Path
 from functools import lru_cache
 from .aws import AWS,BUCKET,PREFIX,DATABASE
 from . import rules
+_REQUEST_RELEASE=contextvars.ContextVar("mimir_opportunity_request_release",default=None)
+
 class Repository:
  def __init__(self,aws=None):self.aws=aws or AWS();self._manifest=None;self._expires=0
  def manifest(self):
+  pinned=_REQUEST_RELEASE.get()
+  if pinned and pinned[0] is self:return pinned[1]
   if self._manifest is None or time.monotonic()>=self._expires:
    p=json.loads(self.aws.s3.get_object(Bucket=BUCKET,Key=PREFIX+'/current.json')['Body'].read());key=p['manifest_key']
    if not key.startswith(PREFIX+'/releases/'):raise ValueError('Invalid engine release pointer')
@@ -182,11 +186,20 @@ class Repository:
 def create_router(verify_principal,repository=None):
  if verify_principal is None:raise ValueError('A verified-principal dependency is required; header presence is not authentication')
  from fastapi import APIRouter,Depends,HTTPException,Query
+ from starlette.concurrency import run_in_threadpool
  repo=repository or Repository()
  def require_principal(principal=Depends(verify_principal)):
   if not principal or isinstance(principal,bool):raise HTTPException(status_code=401,detail='Verified principal required')
   return principal
- router=APIRouter(prefix='/opportunity-intelligence',tags=['opportunity-intelligence'],dependencies=[Depends(require_principal)])
+ async def pin_source_release():
+  if not isinstance(repo,Repository):
+   yield;return
+  # Pin metadata for the entire request, including slow Athena reads and the
+  # response release tag. Atomic publication must not mix table generations.
+  manifest=await run_in_threadpool(repo.manifest);token=_REQUEST_RELEASE.set((repo,manifest))
+  try:yield
+  finally:_REQUEST_RELEASE.reset(token)
+ router=APIRouter(prefix='/opportunity-intelligence',tags=['opportunity-intelligence'],dependencies=[Depends(require_principal),Depends(pin_source_release)])
  def call(fn,*args):
   try:return fn(*args)
   except ValueError as e:raise HTTPException(status_code=400,detail=str(e))
@@ -217,16 +230,16 @@ def create_router(verify_principal,repository=None):
  def opportunity(episode_id:str):
   r=call(repo.detail,episode_id)
   if not r:raise HTTPException(status_code=404,detail='Opportunity not found')
-  return r[0]
+  return dict(r[0],release=repo.manifest()['run_id'])
  @router.get('/companies/{cage}/research')
  def research(cage:str,limit:int=Query(20,ge=1,le=100)):return {'awards':call(repo.research,cage,limit),'topic_calls':call(repo.research_calls,cage,limit)}
  @router.get('/opportunities/{episode_id}/supplier-evidence')
  def supplier_evidence(episode_id:str,kind:str='primes',limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   return {'records':call(repo.supplier_evidence,episode_id,kind,limit,offset),'release':repo.manifest()['run_id'],'kind':kind,'interpretation':'Complete source lineage, paginated. Performance locations are not assumed to be procurement or production sites.'}
  @router.get('/opportunities/{episode_id}/price-evidence')
- def prices(episode_id:str):return {'records':call(repo.price_lines,episode_id),'interpretation':'Historical line evidence; no current requirement total or company value is inferred'}
+ def prices(episode_id:str):return {'records':call(repo.price_lines,episode_id),'release':repo.manifest()['run_id'],'interpretation':'Historical line evidence; no current requirement total or company value is inferred'}
  @router.get('/opportunities/{episode_id}/value-evidence')
- def values(episode_id:str):return call(repo.value_evidence,episode_id)
+ def values(episode_id:str):return dict(call(repo.value_evidence,episode_id),release=repo.manifest()['run_id'])
  @router.get('/value-cohorts/{cohort_id}/awards')
  def cohort_awards(cohort_id:str,limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   return {'records':call(repo.cohort_awards,cohort_id,limit,offset),'cohort_id':cohort_id,'release':repo.manifest()['run_id'],'interpretation':'All historical award observations in this comparison group, paginated; no future company revenue is inferred'}
@@ -242,7 +255,7 @@ def create_router(verify_principal,repository=None):
  def company_events(cage:str,episode_id:str=None,limit:int=Query(50,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   return {'records':call(repo.company_events,cage,episode_id,limit,offset),'release':repo.manifest()['run_id'],'availability':'available' if 'company_opportunity_events' in repo.manifest()['tables'] else 'not_published','interpretation':'Source and matching changes, not user-managed sales stages; a missing snapshot is not a lost award'}
  @router.get('/work-evidence/{doc_id}')
- def work_evidence(doc_id:str):return {'records':call(repo.work_evidence,doc_id)}
+ def work_evidence(doc_id:str):return {'records':call(repo.work_evidence,doc_id),'release':repo.manifest()['run_id']}
  @router.get('/work-evidence/{doc_id}/sources')
  def work_sources(doc_id:str,limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   m=repo.manifest()

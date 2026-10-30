@@ -117,6 +117,20 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn('OFFSET 0 LIMIT 25',aws.sql)
         with self.assertRaises(ValueError):repo.work_sources("bad'",25,0)
 
+    def test_one_request_cannot_mix_table_and_response_release_generations(self):
+        old={'run_id':'old','tables':{'opportunities':{'table':'oi_old_opportunities'},'demand_decisions':{'table':'oi_old_decisions'}}}
+        new={'run_id':'new','tables':{'opportunities':{'table':'oi_new_opportunities'},'demand_decisions':{'table':'oi_new_decisions'}}}
+        aws=CaptureAWS();repo=Repository(aws);repo._manifest=old;repo._expires=float('inf')
+        def result(sql):
+            aws.sql=sql;repo._manifest=new;return [],{}
+        aws.result=result
+        app=FastAPI();app.include_router(create_router(verified_application_principal,repo));client=TestClient(app)
+        response=client.get('/opportunity-intelligence/opportunities',headers={'X-Mimir-Export-Key':'test-proxy-secret','X-Mimir-Opportunity-User':'11111111-1111-4111-8111-111111111111'})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json()['release'],'old')
+        self.assertIn('oi_old_opportunities',aws.sql)
+        self.assertEqual(repo.manifest()['run_id'],'new')
+
     def test_invalid_company_or_kind_rejected(self):
         repo = Repository(CaptureAWS()); repo.table = lambda name: 'safe.' + name
         for company, kind in [("CAGE:45934' OR 1=1", 'work'), ('CAGE:45934', 'arbitrary')]:
