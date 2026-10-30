@@ -1,10 +1,10 @@
 {
   "mode": "quality",
-  "version": "0.5.18",
-  "sha256": "6bc2cc042cd3bfeff0a84373f1ae7b6fbdf369dfa1dbad8ff73f7d884986a4d8",
-  "package_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=6bc2cc042cd3bfeff0a84373f1ae7b6fbdf369dfa1dbad8ff73f7d884986a4d8/mimir_opportunity_engine-0.5.18-py3-none-any.whl",
-  "dependency_bundle_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=a8892cf96042e61f1b6e7618730fd2fa30b1b98048375de4294c70dbb54aa472/mimir-0.5.18.gluewheels.zip",
-  "dependency_bundle_sha256": "a8892cf96042e61f1b6e7618730fd2fa30b1b98048375de4294c70dbb54aa472",
+  "version": "0.5.19",
+  "sha256": "d0c49f8cd0fd4578ab089f44a444d6468edd187789682c17229f8d92f8c83aad",
+  "package_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=d0c49f8cd0fd4578ab089f44a444d6468edd187789682c17229f8d92f8c83aad/mimir_opportunity_engine-0.5.19-py3-none-any.whl",
+  "dependency_bundle_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=5e0393076eb51af987b6e826d6ebf6f1f8bfe2ddc4e89dd730ca046e668d25a3/mimir-0.5.19.gluewheels.zip",
+  "dependency_bundle_sha256": "5e0393076eb51af987b6e826d6ebf6f1f8bfe2ddc4e89dd730ca046e668d25a3",
   "dependencies": [
     {
       "file": "beautifulsoup4-4.15.0-py3-none-any.whl",
@@ -73,18 +73,18 @@
       "sha256": "0ed14ccfbf1c30a9072c7ca157e4319b70d65f623e91e7b32fadb2853431016e"
     },
     {
-      "file": "mimir_opportunity_engine-0.5.18-py3-none-any.whl",
+      "file": "mimir_opportunity_engine-0.5.19-py3-none-any.whl",
       "name": "mimir-opportunity-engine",
-      "version": "0.5.18",
-      "sha256": "6bc2cc042cd3bfeff0a84373f1ae7b6fbdf369dfa1dbad8ff73f7d884986a4d8"
+      "version": "0.5.19",
+      "sha256": "d0c49f8cd0fd4578ab089f44a444d6468edd187789682c17229f8d92f8c83aad"
     }
   ],
-  "run_id": "jr_1c418c34aae1d9285d87fb645065fee7cad663bf41f803fac41a140fa8a757e5",
-  "recovery_key": "governance/opportunity_intelligence/sources/recovery_0_5_18/manifest.json",
+  "run_id": "jr_2904bfa5208700bd106b19244a4b154647691ea22fcfd7d7297beaeea01ae4f8",
+  "recovery_key": "governance/opportunity_intelligence/sources/recovery_0_5_19/manifest.json",
   "role_unchanged": true,
   "source_permissions_unchanged": true,
   "schedule": "cron(30 2 * * ? *)",
-  "schedule_temporarily_disabled_until_success": false,
+  "schedule_temporarily_disabled_until_success": true,
   "runtime": {
     "GlueVersion": "5.0",
     "WorkerType": "G.2X",
@@ -119,21 +119,12 @@
     "opportunity_engine/native_sources.py": "535285b0b81878b0f579aa6a889843427d99d693bcdc09a57cb2af392dc64085",
     "opportunity_engine/procurement_rules.json": "457c125f23a01a36ee36e9174ec682849b6c351c285af46c7a6cc0511624603d",
     "opportunity_engine/publish.py": "1842d6be193efc4ba9a6a15b0ea575b85afd4d1e0d8d295d7763bc7ab0ae80da",
-    "opportunity_engine/quality.py": "dbeb8003fdb4014f65bafd6177806ee85359e4a3fed4be7e73ac89fd23da666d",
-    "opportunity_engine/quality_core.py": "52b4df30929f46c1e1311db49c7b247e3376c383a48f7b0e4bab8182c7f6880a",
+    "opportunity_engine/quality.py": "c722ad9befbd444b51f0fca6fe12f3fe823dcec9ec5ebc91442c62ad85c1b8fd",
+    "opportunity_engine/quality_core.py": "4fce72ceb7b8d677874454868015f50c3886fc2d89d0d2dbdb3cd65e99928ff8",
     "opportunity_engine/registry.py": "4372797e5f3a7fec58526caf0450debf5c420dbddcc78d055cd57e536d4a3006",
     "opportunity_engine/rules.py": "829b6268f7aef9ee77e97a2dac1bddefc2328721b725edcb6c5b1119d6732ce7",
     "opportunity_engine/scope_stopwords.json": "1889521d5395576931a3d0872a27eb95cf5a86146a68a1c7efa4aa530d1662cd",
     "opportunity_engine/supplier_demand.py": "0b036835f49a2d97dd6b7c57b18e9a74ff4605ea43adaa94c63ff31bdf710800",
     "opportunity_engine/validate.py": "98b710951bc0a65775772386338dfc0e4db89dec33b5247e3becb95cafa9d2a1"
-  },
-  "published_release": "20261030_065056_1b7027",
-  "worker_status": "SUCCEEDED",
-  "validation_passed": 135,
-  "validation_failed": 0,
-  "tables": 47,
-  "remote_readback_query_id": "67127433-7a9d-4c92-a094-ac382b890380",
-  "trigger_state": "ACTIVATED",
-  "completed_at": "2026-10-30 18:56:19.656000+12:00",
-  "automatic_date_and_native_refresh": true
+  }
 }

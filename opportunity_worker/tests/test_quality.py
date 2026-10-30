@@ -5,9 +5,11 @@ from opportunity_engine.quality import apply
 
 
 def test_rejects_actual_false_positive_history_but_retains_specific_work():
- cases=[('PURCHASE OF MOBILE COMPUTERS','Digital Forensics Examiner Services'),('MODIFICATION TO REDUCE COST','Reusable Illumination System'),('CUSTOM COMPUTER PROGRAMMING SERVICES','Depot Maintenance Applications Consolidated3'),('FORM FIT','M4 Trainer Weapons'),('SUPPLIES/SERVICES, COST REIMBURSEMENT','Coverity Renewal'),('SOFTWARE UPGRADES','Blood bank disease testing'),('PROCUREMENT OF WEST COAST IT SERVICES','Jones Act Tanker Time Charter')]
+ cases=[('BRAGG, NORTH CAROLINA.','Medical training at Fort Bragg North Carolina'),('AND IT EDUCATION AND TRAINING.','Architectural repairs and fire alarm training facilities'),('RESEARCH AND DEVELOPMENT','New optical radar research and development'),('PURCHASE OF MOBILE COMPUTERS','Digital Forensics Examiner Services'),('MODIFICATION TO REDUCE COST','Reusable Illumination System'),('CUSTOM COMPUTER PROGRAMMING SERVICES','Depot Maintenance Applications Consolidated3'),('FORM FIT','M4 Trainer Weapons'),('SUPPLIES/SERVICES, COST REIMBURSEMENT','Coverity Renewal'),('SOFTWARE UPGRADES','Blood bank disease testing'),('PROCUREMENT OF WEST COAST IT SERVICES','Jones Act Tanker Time Charter')]
  for work,title in cases:
   assert q.fit_review(work,title,work,'published_procurement','source_specific_route','sam_notices','45934')[0]=='rejected'
+ assert not q.administrative_scope('WASHER, FL')
+ assert q.administrative_scope('ALEXANDRIA, VA 22314')
  assert q.fit_review('FUEL BOOST PUMP','Repair aircraft fuel boost pump','Seeking sources with pump repair capability','published_procurement','source_specific_route','sam_notices','45934')[0]=='accepted'
  assert q.fit_review('C130 mounting base','Potential supplier package: Mounting base','Current funded scope: C130 mounting base','new_prime_historical_supplier_flow','reported_supplier_relationship','supplier_flow','45934')[0]=='accepted'
 
@@ -45,6 +47,9 @@ def test_quality_pipeline_keeps_evidence_and_filters_serving_edges(tmp_path):
  assert c.execute("SELECT stage FROM read_parquet(?) WHERE episode_id='stale'",[str(tmp_path/'demand_decisions.parquet')]).fetchone()[0]=='evidence_gap'
  assert c.execute("SELECT work_text,verdict FROM read_parquet(?) WHERE episode_id='bad'",[str(tmp_path/'company_match_assessments.parquet')]).fetchone()==('PURCHASE OF MOBILE COMPUTERS','rejected')
  assert c.execute('SELECT count(*) FROM read_parquet(?)',[str(tmp_path/'opportunity_quality_reviews.parquet')]).fetchone()[0]==3
+ assert c.execute("DESCRIBE SELECT body_deadline FROM read_parquet(?)",[str(tmp_path/'opportunity_quality_reviews.parquet')]).fetchone()[1]=='VARCHAR'
+ c.close();apply(tmp_path);c=duckdb.connect()
+ d=json.loads(c.execute("SELECT decision_json FROM read_parquet(?) WHERE episode_id='stale'",[str(tmp_path/'demand_decisions.parquet')]).fetchone()[0]);assert len(d['negative_evidence'])==1
 
 
 def test_exact_source_codes_require_named_part_and_nonconflicting_authorization(tmp_path):

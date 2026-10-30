@@ -9,6 +9,7 @@ import duckdb
 from . import quality_core as q
 from .aws import BUCKET,PREFIX
 from .company_enrichment import nsns
+POLICY_HASH=hashlib.sha256(q.LOGIC_HASH.encode()+Path(__file__).read_bytes()).hexdigest()
 
 
 def apply(directory):
@@ -16,6 +17,10 @@ def apply(directory):
  c.execute("SET temp_directory='"+str(r/'quality_tmp').replace("'","''")+"'")
  for name in ('opportunities','demand_decisions','company_matches','company_work_matches'):
   c.read_parquet(m['tables'][name]['path']).create_view('prior_'+name)
+ if 'opportunity_quality_reviews' in m['tables']:
+  c.read_parquet(m['tables']['opportunity_quality_reviews']['path']).create_view('prior_quality_reviews')
+  c.execute('CREATE TEMP TABLE decision_baselines AS SELECT episode_id,pre_quality_decision_json decision_json FROM prior_quality_reviews')
+ else:c.execute('CREATE TEMP TABLE decision_baselines AS SELECT episode_id,decision_json FROM prior_demand_decisions')
  def output(name,sql):
   c.execute('CREATE OR REPLACE TEMP VIEW result AS '+sql);p=r/(name+'.parquet');tmp=r/(name+'.quality.parquet');c.execute("COPY result TO '"+str(tmp).replace("'","''")+"' (FORMAT PARQUET,COMPRESSION ZSTD)");tmp.replace(p)
   columns=[dict(Name=n,Type='boolean' if t=='BOOLEAN' else 'double' if t in ('FLOAT','DOUBLE') else 'bigint' if t in ('BIGINT','INTEGER') else 'string') for n,t,*_ in c.execute('DESCRIBE result').fetchall()]
@@ -26,11 +31,11 @@ def apply(directory):
  with p.open('w') as f:
   for eid,rh,title,body,end,source,evidence,url in rows:
    v=q.notice_quality(title,body,end,m['as_of'],source)
-   v.update(episode_id=eid,record_hash=rh,source_evidence_id=evidence,source_url=url,nomenclature=q.nomenclature(body),restricted_item=q.restricted_item(body),qualification_invitation=q.explicit_qualification(body),source_cages_json=json.dumps(sorted(q.listed_sources(body))),required_parts_json=json.dumps(sorted(q.required_parts(title,body))),policy_hash=q.LOGIC_HASH)
+   v.update(episode_id=eid,record_hash=rh,source_evidence_id=evidence,source_url=url,nomenclature=q.nomenclature(body),restricted_item=q.restricted_item(body),qualification_invitation=q.explicit_qualification(body),source_cages_json=json.dumps(sorted(q.listed_sources(body))),required_parts_json=json.dumps(sorted(q.required_parts(title,body))),policy_hash=POLICY_HASH)
    f.write(json.dumps(v)+'\n')
  c.read_json(str(p),format='newline_delimited',sample_size=-1).create_view('raw_source_quality')
  c.execute('CREATE TEMP VIEW source_quality AS SELECT * REPLACE(cast(body_deadline AS VARCHAR) AS body_deadline) FROM raw_source_quality')
- output('opportunity_quality_reviews','SELECT q.*,d.decision_json pre_quality_decision_json FROM source_quality q JOIN prior_demand_decisions d USING(episode_id)')
+ output('opportunity_quality_reviews','SELECT q.*,d.decision_json pre_quality_decision_json FROM source_quality q JOIN decision_baselines d USING(episode_id)')
  # Preserve concrete reference codes and row provenance; authorization is not
  # ownership of manufacturing data or a transfer of qualification.
  c.create_function('required_nsns',nsns,['VARCHAR'],duckdb.list_type('VARCHAR'))
@@ -49,12 +54,12 @@ def apply(directory):
   d=json.loads(raw)
   if verdict!='usable' and d['stage']!='resolved_or_elapsed':
    d.update(stage='evidence_gap',participation_route='source_revalidation_required',response_window_verified=False,next_action='Check the agency notice and its amendments to resolve the conflicting source details before treating this as available work.')
-   d.setdefault('negative_evidence',[]).append(dict(reason=reason,source_passages=json.loads(passages),policy_hash=q.LOGIC_HASH))
+   d.setdefault('negative_evidence',[]).append(dict(reason=reason,source_passages=json.loads(passages),policy_hash=POLICY_HASH))
    d.setdefault('unresolved',[]).append(reason)
-  d['source_quality_policy_hash']=q.LOGIC_HASH;d.pop('decision_hash',None);d['decision_hash']=hashlib.sha256(json.dumps(d,sort_keys=True,default=str).encode()).hexdigest()
+  d['source_quality_policy_hash']=POLICY_HASH;d.pop('decision_hash',None);d['decision_hash']=hashlib.sha256(json.dumps(d,sort_keys=True,default=str).encode()).hexdigest()
   return json.dumps(d,sort_keys=True)
  c.create_function('quality_decision',decision,['VARCHAR']*4,'VARCHAR')
- c.execute('CREATE TEMP TABLE reviewed_decisions AS SELECT d.* EXCLUDE(stage,decision_hash,decision_json),quality_decision(d.decision_json,q.verdict,q.reason,q.passages_json) decision_json FROM prior_demand_decisions d JOIN source_quality q USING(episode_id)')
+ c.execute('CREATE TEMP TABLE reviewed_decisions AS SELECT d.* EXCLUDE(stage,decision_hash,decision_json),quality_decision(b.decision_json,q.verdict,q.reason,q.passages_json) decision_json FROM prior_demand_decisions d JOIN source_quality q USING(episode_id) JOIN decision_baselines b USING(episode_id)')
  output('demand_decisions',"SELECT *,json_extract_string(decision_json,'$.stage') stage,json_extract_string(decision_json,'$.decision_hash') decision_hash FROM reviewed_decisions")
  def fit(work,title,named,entry,source,cage,restricted,invitation,cages,authority):
   verdict,reason=q.fit_fields(work,title,named,entry,source,cage,restricted,invitation,json.loads(cages),authority)
@@ -64,17 +69,17 @@ def apply(directory):
  assess_fit(cw.work_text,o.title,q.nomenclature,cw.company_entry_status,o.source_name,substr(cw.company_id,6),q.restricted_item,q.qualification_invitation,q.source_cages_json,coalesce(a.authorized,false)) fit_json
  FROM prior_company_work_matches cw JOIN prior_opportunities o USING(episode_id) JOIN source_quality q USING(episode_id)
  LEFT JOIN (SELECT DISTINCT company_id,episode_id,true authorized FROM quality_company_notice_source_evidence) a ON a.company_id=cw.company_id AND a.episode_id=cw.episode_id""")
- output('company_match_assessments',"SELECT match_id,company_id,episode_id,opportunity_hash,profile_hash,doc_id,work_text,sample_evidence_id,source_verdict,json_extract_string(fit_json,'$.verdict') verdict,json_extract_string(fit_json,'$.reason') reason,'"+q.LOGIC_HASH+"' policy_hash FROM assessed")
+ output('company_match_assessments',"SELECT match_id,company_id,episode_id,opportunity_hash,profile_hash,doc_id,work_text,sample_evidence_id,source_verdict,json_extract_string(fit_json,'$.verdict') verdict,json_extract_string(fit_json,'$.reason') reason,'"+POLICY_HASH+"' policy_hash FROM assessed")
  # Remove only rejected links; access questions remain explicitly review-only.
  # Original work text, identifier and underlying awards are never rewritten.
  cols={n for n,*_ in c.execute('DESCRIBE prior_company_work_matches').fetchall()}
  excluded='review_category,match_hash'+(',fit_verdict,fit_reason' if 'fit_verdict' in cols else '')
- output('company_work_matches',"SELECT * EXCLUDE(fit_json,source_verdict,"+excluded+"),CASE WHEN json_extract_string(fit_json,'$.verdict')='review' THEN 'market_context' ELSE review_category END review_category,sha256(concat_ws('|',match_id,opportunity_hash,profile_hash,doc_id,work_text,'"+q.LOGIC_HASH+"',fit_json)) match_hash,json_extract_string(fit_json,'$.verdict') fit_verdict,json_extract_string(fit_json,'$.reason') fit_reason FROM assessed")
+ output('company_work_matches',"SELECT * EXCLUDE(fit_json,source_verdict,"+excluded+"),CASE WHEN json_extract_string(fit_json,'$.verdict')='review' THEN 'market_context' ELSE review_category END review_category,sha256(concat_ws('|',match_id,opportunity_hash,profile_hash,doc_id,work_text,'"+POLICY_HASH+"',fit_json)) match_hash,json_extract_string(fit_json,'$.verdict') fit_verdict,json_extract_string(fit_json,'$.reason') fit_reason FROM assessed")
  output('company_matches',"""SELECT m.* REPLACE(coalesce(w.match_hash,m.match_hash) AS match_hash)
  FROM prior_company_matches m LEFT JOIN quality_company_work_matches w ON m.company_id=w.company_id AND m.episode_id=w.episode_id
  WHERE w.fit_verdict IS NULL OR w.fit_verdict<>'rejected'""")
- m['source_quality_logic_sha256']=q.LOGIC_HASH;m['quality_policy_version']=q.VERSION
- m['logic_sha256']=hashlib.sha256((m['logic_sha256']+'|'+q.LOGIC_HASH).encode()).hexdigest()
+ m['source_quality_logic_sha256']=POLICY_HASH;m['quality_policy_version']=q.VERSION
+ m['logic_sha256']=hashlib.sha256((m['logic_sha256']+'|'+POLICY_HASH).encode()).hexdigest()
  (r/'manifest.json').write_text(json.dumps(m,indent=2)+'\n');c.close();return m
 
 
