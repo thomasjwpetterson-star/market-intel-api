@@ -38,10 +38,13 @@ class OpportunityPilotTests(unittest.TestCase):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
         repo.manifest = lambda: {'tables': {}}
         repo.opportunities('CAGE:45934', 24, 0, False, 'work')
-        self.assertIn('SELECT q.* FROM (SELECT DISTINCT', aws.sql)
+        self.assertIn('WITH candidates AS (SELECT DISTINCT', aws.sql)
         self.assertIn("o.lane NOT IN ('published_item_procurement','source_item_forecasts')", aws.sql)
         self.assertNotIn('18', aws.sql)
         self.assertNotIn('historical_watch\' THEN', aws.sql)
+        self.assertIn("regexp_replace(upper(c.native_identifier),'-00$','')",aws.sql)
+        self.assertIn('related_source_records_json',aws.sql)
+        self.assertLess(aws.sql.index('q.source_family_rank=1'),aws.sql.index('OFFSET 0 LIMIT 24'))
     def test_price_scenarios_inform_review_order_without_inventing_contract_values(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
         repo.manifest = lambda: {'tables': {'company_item_valuations': {}, 'company_notice_item_prices': {}}}

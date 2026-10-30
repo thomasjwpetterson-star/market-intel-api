@@ -111,7 +111,13 @@ class Repository:
    where+=" AND (o.lane<>'source_item_forecasts' OR fq.niin IS NULL)"
   selected='SELECT DISTINCT o.*,d.stage,d.decision_json'+extra+' FROM '+o+' o JOIN '+d+' d ON o.episode_id=d.episode_id'+join+' WHERE '+where
   ordering=("q.priority_score DESC," if company else '')+"CASE q.stage WHEN 'qualification_opening' THEN 0 WHEN 'teaming_opening' THEN 0 WHEN 'published_requirement' THEN 1 WHEN 'emerging_demand' THEN 2 ELSE 3 END,CASE WHEN q.lane='source_item_forecasts' THEN 1 ELSE 0 END,q.window_end ASC NULLS LAST,q.episode_id"
-  return self.rows('SELECT q.* FROM ('+selected+') q ORDER BY '+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit))
+  # Reposted notices sometimes append -00 to the same procurement identifier.
+  # Collapse only that narrow family with the same buyer and normalized title;
+  # different solicitations for the same item remain separate. Keep every link.
+  family="CASE WHEN c.source_name='sam_notices' AND length(c.native_identifier)>4 THEN concat_ws('|',c.source_name,upper(c.customer_name),regexp_replace(upper(c.native_identifier),'-00$',''),regexp_replace(upper(c.title),'[^A-Z0-9]','')) ELSE c.episode_id END"
+  related="json_format(cast(array_agg(cast(row(c.episode_id,c.native_identifier,c.source_url,c.source_evidence_id,c.notice_posted_date) AS row(episode_id varchar,native_identifier varchar,source_url varchar,source_evidence_id varchar,posted_date varchar))) OVER (PARTITION BY "+family+") AS json)) related_source_records_json"
+  grouped="WITH candidates AS ("+selected+"), families AS (SELECT c.*,row_number() OVER (PARTITION BY "+family+" ORDER BY c.notice_posted_date DESC NULLS LAST,c.episode_id) source_family_rank,"+related+" FROM candidates c) SELECT q.* FROM families q WHERE q.source_family_rank=1 ORDER BY "+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit)
+  return self.rows(grouped)
 
  def detail(self,eid):
   if not re.fullmatch('[a-f0-9]{64}',eid):raise ValueError('Invalid opportunity identifier')
