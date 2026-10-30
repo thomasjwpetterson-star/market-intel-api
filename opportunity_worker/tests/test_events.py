@@ -11,10 +11,10 @@ def test_watch_history_distinguishes_source_resolution_from_missing_snapshot(tmp
         if prior:uris[name+'/part-00000.parquet']=p
     put('opportunities',"SELECT id episode_id,'old-'||id record_hash,'Work '||id title,'https://example.gov/'||id source_url,'source-'||id source_evidence_id,100.0::DOUBLE value_median,'2029-01-01' window_end FROM (VALUES ('resolved'),('missing'),('same')) t(id)",True)
     put('demand_decisions',"SELECT id episode_id,'emerging_demand' stage FROM (VALUES ('resolved'),('missing'),('same')) t(id)",True)
-    put('company_matches',"SELECT 'CAGE:12345' company_id,id episode_id,'old-'||id opportunity_hash FROM (VALUES ('resolved'),('missing'),('same')) t(id)",True)
+    put('company_matches',"SELECT 'CAGE:12345' company_id,id episode_id,'match-'||id match_hash,'old-'||id opportunity_hash FROM (VALUES ('resolved'),('missing'),('same')) t(id)",True)
     put('opportunities',"SELECT id episode_id,CASE WHEN id='same' THEN 'old-same' ELSE 'new-'||id END record_hash,'Work '||id title,'https://example.gov/'||id source_url,'source-'||id source_evidence_id,100.0::DOUBLE value_median,'2029-01-01' window_end FROM (VALUES ('resolved'),('new'),('same')) t(id)")
     put('demand_decisions',"SELECT id episode_id,CASE WHEN id='resolved' THEN 'resolved_or_elapsed' ELSE 'emerging_demand' END stage FROM (VALUES ('resolved'),('new'),('same')) t(id)")
-    put('company_matches',"SELECT 'CAGE:12345' company_id,id episode_id,CASE WHEN id='same' THEN 'old-same' ELSE 'new-'||id END opportunity_hash FROM (VALUES ('new'),('same')) t(id)")
+    put('company_matches',"SELECT 'CAGE:12345' company_id,id episode_id,CASE WHEN id='same' THEN 'changed-match' ELSE 'match-'||id END match_hash,CASE WHEN id='same' THEN 'old-same' ELSE 'new-'||id END opportunity_hash FROM (VALUES ('new'),('same')) t(id)")
     put('published_calls',"SELECT NULL::VARCHAR episode_id,NULL::VARCHAR record_hash,NULL::VARCHAR title,NULL::VARCHAR source_url,NULL::VARCHAR source_evidence_id,NULL::DOUBLE value_median,NULL::VARCHAR window_end,NULL::VARCHAR procurement_state WHERE false")
     (tmp_path/'manifest.json').write_text(json.dumps(dict(run_id='new_release',as_of='2026-10-30',tables=current)))
     class S3:
@@ -22,4 +22,4 @@ def test_watch_history_distinguishes_source_resolution_from_missing_snapshot(tmp
     class AWS:s3=S3()
     result=track(tmp_path,dict(run_id='old_release',tables=old),AWS())
     rows=c.execute('SELECT episode_id,event_type FROM read_parquet(?) ORDER BY episode_id',[result['tables']['company_opportunity_events']['path']]).fetchall()
-    assert rows==[('missing','not_in_latest_snapshot'),('new','first_observed_company_match'),('resolved','resolved_by_source_or_elapsed_window')]
+    assert rows==[('missing','not_in_latest_snapshot'),('new','first_observed_company_match'),('resolved','resolved_by_source_or_elapsed_window'),('same','company_matching_evidence_updated')]

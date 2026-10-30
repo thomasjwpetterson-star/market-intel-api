@@ -10,7 +10,7 @@ def ident():return "CASE WHEN regexp_like(upper(trim(cage_code)),'^[A-Z0-9]{5}$'
 def norm(expr):return "regexp_replace(upper(regexp_replace(coalesce("+expr+",''),'^[0-9]{8,12}!\\s*','')),'[^A-Z0-9]','')"
 def terms(expr):
     aliases='MAP(ARRAY['+','.join(lit(k) for k in ALIASES)+'],ARRAY['+','.join(lit(v) for v in ALIASES.values())+'])'
-    stop='ARRAY['+','.join(lit(s) for s in sorted(STOP))+']'
+    stop='split('+lit('|'.join(sorted(STOP)))+",'|')"
     words="regexp_extract_all(lower(regexp_replace(coalesce("+expr+",''),'<[^>]+>',' ')),'[a-z][a-z0-9]*')"
     ts="array_sort(array_distinct(filter(transform("+words+",w->coalesce(element_at("+aliases+",w),w)),w->length(w)>=3 AND NOT contains("+stop+",w))))"
     return "CASE WHEN length(coalesce("+expr+",''))<=260 AND cardinality("+words+")<=24 AND cardinality("+ts+") BETWEEN 2 AND 12 AND NOT regexp_like(lower(coalesce("+expr+",'')),'awards subcontracts for|may or may not be billed|first article test') THEN array_join("+ts+",'|') ELSE '' END"

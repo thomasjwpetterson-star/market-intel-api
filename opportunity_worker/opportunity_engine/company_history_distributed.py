@@ -20,7 +20,8 @@ def rebuild(sources,folder,as_of):
     outputs['company_award_facts']['profile_observed_net_total']=c.execute('SELECT sum(observed_prime_net_obligations) FROM prime_stats').fetchone()[0]
     output('company_subcontract_facts','SELECT * FROM native_company_subcontracts')
     cols='doc_id,company_id,source_kind,work_text,psc,naics,last_observed,sample_evidence_id,evidence_digest'
-    output('company_work','SELECT '+cols+',source_records,programme_context_json FROM native_company_work UNION ALL SELECT '+cols+",1::BIGINT source_records,NULL::VARCHAR programme_context_json FROM company_work WHERE source_kind NOT IN ('prime_award','latest_prime_action','subaward_report')")
+    native_cols=cols.replace('evidence_digest',"sha256(concat_ws('|',evidence_digest,work_text,programme_context_json,psc,naics,last_observed)) evidence_digest")
+    output('company_work','SELECT '+native_cols+',source_records,programme_context_json FROM native_company_work UNION ALL SELECT '+cols+",1::BIGINT source_records,NULL::VARCHAR programme_context_json FROM company_work WHERE source_kind NOT IN ('prime_award','latest_prime_action','subaward_report')")
     c.execute('CREATE VIEW profile_keys AS SELECT company_id FROM company_profiles UNION SELECT company_id FROM prime_stats UNION SELECT company_id FROM sub_stats')
     values={
     'company_id':'k.company_id','company_name':'coalesce(a.company_name,b.company_name,p.company_name)',

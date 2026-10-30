@@ -28,3 +28,10 @@ def test_parent_program_context_does_not_transfer_work_to_an_incompatible_platfo
     o={'title':'Fuel boost pump package','scope_text':'Fuel boost pump for F-35','lane':'new_prime_historical_supplier_flow'}
     assert not admissible('Fuel boost pump',o,'emerging_demand','["F-16"]')
     assert admissible('Fuel boost pump',o,'emerging_demand','["F-35"]')
+
+
+def test_two_term_supplier_scope_requires_actual_supplier_lineage():
+    opportunity={'title':'Circuit card package','scope_text':'Circuit card for F-35','lane':'new_prime_historical_supplier_flow'}
+    assert not admissible('Circuit card',opportunity,'emerging_demand','["F-35"]')
+    assert admissible('Circuit card',opportunity,'emerging_demand','["F-35"]',True)
+    assert not admissible('Circuit card',opportunity,'emerging_demand','["F-16"]',True)
