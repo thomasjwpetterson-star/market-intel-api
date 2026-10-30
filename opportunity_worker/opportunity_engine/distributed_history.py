@@ -35,6 +35,7 @@ def remote(aws,name,sql,run,as_of,recovered=None):
         cols=source.get('columns') or columns(aws,logical_sql)
         prefix=source['files'][0]['s3_uri'].rsplit('/',1)[0]+'/'
     else:
+        cols=columns(aws,logical_sql)
         prefix='s3://'+BUCKET+'/'+PREFIX+'/sources/'+run+'/'+name+'/'+uuid.uuid4().hex[:10]+'/data/'
         shards=list('0123456789abcdef') if '__SHARD__' in sql else [None]
         files=[];query_ids=[];scanned=0
@@ -53,8 +54,13 @@ def remote(aws,name,sql,run,as_of,recovered=None):
                     for chunk in iter(lambda:body.read(8*1024*1024),b''):sha.update(chunk)
                     files.append(dict(s3_uri='s3://'+BUCKET+'/'+key,sha256=sha.hexdigest(),bytes=obj['Size']))
             if shard is not None:print('Complete work-history shard',shard,flush=True)
-        cols=columns(aws,logical_sql)
-        if not files:raise ValueError('Remote source empty: '+name)
+        if not files:
+            import duckdb,tempfile
+            with tempfile.TemporaryDirectory() as tmp:
+                path=Path(tmp)/'empty.parquet';c=duckdb.connect();types={'string':'VARCHAR','bigint':'BIGINT','double':'DOUBLE','boolean':'BOOLEAN'}
+                c.execute('CREATE TABLE empty_source('+','.join('"'+v['Name'].replace('"','""')+'" '+types[v['Type']] for v in cols)+')')
+                c.execute("COPY empty_source TO '"+str(path)+"' (FORMAT PARQUET)");c.close();key=prefix.split('/',3)[3]+'empty.parquet';aws.upload(path,key)
+                files=[dict(s3_uri='s3://'+BUCKET+'/'+key,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),bytes=path.stat().st_size)]
         source=dict(files=files,query_id=e['QueryExecutionId'],query_ids=query_ids,query_sha256=hashlib.sha256(logical_sql.encode()).hexdigest(),scanned_bytes=scanned,sql=logical_sql)
     signature=hashlib.sha256(json.dumps([(f['s3_uri'],f['sha256']) for f in source['files']],sort_keys=True).encode()).hexdigest()
     table='oi_source_'+signature[:20]+'_'+name
@@ -69,7 +75,7 @@ def refresh(aws,root,as_of,native_queries,previous=None):
     root=Path(root);folder=root/'inputs'/run;folder.mkdir(parents=True,exist_ok=True);sources={}
     for name,sql in native_queries.items():
         prior=(previous or {}).get(name)
-        sources[name]=remote(aws,name,sql,run,as_of,prior if prior and prior.get('as_of')==as_of else None)
+        sources[name]=remote(aws,name,sql,run,as_of,prior if prior and prior.get('as_of')==as_of and prior.get('query_sha256')==hashlib.sha256(sql.encode()).hexdigest() else None)
     p=DATABASE+'.'+sources['native_prime_awards']['table'];s=DATABASE+'.'+sources['native_subcontract_reports']['table']
     def emit(name,sql,download=True):
         prior=(previous or {}).get(name)
@@ -101,9 +107,11 @@ def refresh(aws,root,as_of,native_queries,previous=None):
     to_hex(sha256(to_utf8(array_join(array_sort(array_agg(evidence_id)),'|')))) prime_evidence_digest FROM P WHERE company_id IS NOT NULL GROUP BY company_id""".replace(' P ', ' '+prime+' '))
     emit('native_company_sub_stats',"""SELECT company_id,max_by(sub_name,event_date) company_name,count(*) subcontract_reports,count(DISTINCT coalesce(nullif(prime_uei,''),prime_name)) commercial_customers,max(event_date) last_subcontract_report,
     to_hex(sha256(to_utf8(array_join(array_sort(array_agg(evidence_id)),'|')))) sub_evidence_digest FROM S WHERE company_id IS NOT NULL GROUP BY company_id""".replace(' S ', ' '+sub+' '))
+    from .supplier_demand import platform_designations_sql
+    def programme_context(name,scope):return "concat_ws(' ',"+name+",array_join("+platform_designations_sql(scope)+",' '))"
     raw="""SELECT company_id,'prime_award' source_kind,work_text,psc,naics,latest_action_date last_observed,evidence_id,programme_name FROM P WHERE company_id IS NOT NULL
     UNION ALL SELECT company_id,'latest_prime_action',latest_description,psc,naics,latest_action_date,evidence_id,programme_name FROM P WHERE company_id IS NOT NULL AND N1<>N2
-    UNION ALL SELECT company_id,'subaward_report',work_text,cast(NULL AS varchar),cast(NULL AS varchar),event_date,evidence_id,parent_programme_name FROM S WHERE company_id IS NOT NULL""".replace(' P ', ' '+prime+' ').replace(' S ', ' '+sub+' ').replace('N1',norm('latest_description')).replace('N2',norm('work_text'))
+    UNION ALL SELECT company_id,'subaward_report',work_text,cast(NULL AS varchar),cast(NULL AS varchar),event_date,evidence_id,parent_programme_name FROM S WHERE company_id IS NOT NULL""".replace(' P ', ' '+prime+' ').replace(' S ', ' '+sub+' ').replace('N1',norm('latest_description')).replace('N2',norm('work_text')).replace('evidence_id,programme_name FROM', 'evidence_id,'+programme_context('programme_name','work_text')+' programme_name FROM').replace('evidence_id,parent_programme_name FROM', 'evidence_id,'+programme_context('parent_programme_name','parent_award_scope')+' programme_name FROM')
     # Bounded aggregate fingerprint; full source bytes retain SHA-256 provenance.
     # Aggregating every duplicate identifier into an array exceeds Athena row limits.
     work="""WITH raw AS(RAW),g AS(SELECT company_id,source_kind,NORM scope_key,psc,naics,min(work_text) work_text,max(last_observed) last_observed,min(evidence_id) sample_evidence_id,
@@ -120,6 +128,8 @@ def refresh(aws,root,as_of,native_queries,previous=None):
     UNION ALL SELECT company_id,'government_customer',concat_ws(' / ',buyer_name,buyer_office),count(*),min(evidence_id) FROM P WHERE company_id IS NOT NULL GROUP BY company_id,buyer_name,buyer_office
     UNION ALL SELECT company_id,'programme',programme_name,count(*),min(evidence_id) FROM P WHERE company_id IS NOT NULL AND nullif(programme_name,'') IS NOT NULL AND upper(programme_name) NOT IN ('NONE','NOT APPLICABLE','UNKNOWN') GROUP BY company_id,programme_name
     UNION ALL SELECT company_id,'commercial_customer',prime_name,count(*),min(evidence_id) FROM S WHERE company_id IS NOT NULL GROUP BY company_id,prime_name""".replace(' P ', ' '+prime+' ').replace(' S ', ' '+sub+' ')
+    features+=" UNION ALL SELECT company_id,'platform_text',v,count(*),min(evidence_id) FROM "+prime+" CROSS JOIN UNNEST("+platform_designations_sql("concat_ws(' ',programme_name,work_text)")+") x(v) WHERE company_id IS NOT NULL GROUP BY company_id,v"
+    features+=" UNION ALL SELECT company_id,'platform_text',v,count(*),min(evidence_id) FROM "+sub+" CROSS JOIN UNNEST("+platform_designations_sql("concat_ws(' ',parent_programme_name,parent_award_scope)")+") x(v) WHERE company_id IS NOT NULL GROUP BY company_id,v"
     emit('native_company_features',features)
     keyed="(SELECT *,"+terms("regexp_replace(work_text,'^[0-9]{8,12}!\\s*','')")+" scope_key,"+mode('work_text','psc')+" work_mode FROM "+p+")"
     comparator_row="CAST(ROW(award_key,piid,parent_piid,evidence_id,company_name,cage_code,source_url,work_text,observed_net_obligations,first_action_date,latest_action_date,period_start,period_end,action_count) AS ROW(award_key varchar,piid varchar,parent_piid varchar,evidence_id varchar,company_name varchar,cage_code varchar,source_url varchar,work_text varchar,observed_net_obligations double,first_action_date varchar,latest_action_date varchar,period_start varchar,period_end varchar,action_count bigint))"
@@ -130,35 +140,9 @@ def refresh(aws,root,as_of,native_queries,previous=None):
     # All comparison awards remain in normalized rows. The bounded JSON preview
     # includes recent awards plus both range extrema; it cannot hit a 32MB row.
     preview="array_distinct(concat(max_by("+comparator_row+",concat_ws('|',latest_action_date,award_key),20),ARRAY[min_by("+comparator_row+",observed_net_obligations),max_by("+comparator_row+",observed_net_obligations)]))"
-    emit('contract_value_cohorts',"SELECT cohort_id,"+cohort_dims+",count(*) awards,min(observed_net_obligations) observed_min_usd,approx_percentile(observed_net_obligations,0.5) observed_median_usd,max(observed_net_obligations) observed_max_usd,json_format(cast("+preview+" AS JSON)) comparators_json FROM "+observations+" GROUP BY cohort_id,"+cohort_dims)
-    family=lambda alias:"CASE WHEN nullif("+alias+".parent_piid,'') IS NOT NULL AND upper("+alias+".parent_piid) NOT IN ('-NONE-','NONE') THEN concat_ws('|','vehicle',"+alias+".uei,"+alias+".parent_agency,"+alias+".parent_piid) WHEN nullif("+alias+".programme_code,'') IS NOT NULL AND upper("+alias+".programme_code) NOT IN ('000','0000','NONE','-NONE-','NOT APPLICABLE') THEN concat_ws('|','programme',"+alias+".uei,"+alias+".programme_code) END"
-    preview="CAST(ROW(s.evidence_id,p.evidence_id,s.parent_award_key,s.report_key,s.sub_name,s.company_id,s.reported_amount,s.event_date,s.source_url,s.work_text) AS ROW(report_evidence varchar,parent_evidence varchar,parent_award_key varchar,report_key varchar,supplier varchar,supplier_company_id varchar,reported_amount double,event_date varchar,source_url varchar,work_text varchar))"
-    pull="""WITH canonical_sub AS(SELECT * FROM S QUALIFY_PLACEHOLDER),
-    placements AS(SELECT parent_award_key,PLACEMENT_KEY scope_key,count(*) placed_reports,json_format(cast(array_agg(evidence_id ORDER BY evidence_id) AS JSON)) placement_evidence_ids FROM canonical_sub GROUP BY parent_award_key,PLACEMENT_KEY),
-    hist AS(SELECT s.*,p.evidence_id parent_evidence,FAMILY_HIST family_key,KEY scope_key FROM canonical_sub s JOIN P p ON p.award_key=s.parent_award_key WHERE s.reported_amount>0),
-    new_awards AS(SELECT n.*,FAMILY_NEW family_key FROM P n WHERE try_cast(substr(n.first_action_date,1,10) AS date)>=DATE ASOF-INTERVAL '365' DAY AND try_cast(substr(n.period_end,1,10) AS date)>=DATE ASOF AND n.observed_net_obligations>0),
-    packages AS(SELECT n.award_key,n.evidence_id new_prime_evidence,n.company_name customer_name,n.first_action_date,n.period_end,n.programme_name,n.psc,n.naics,n.source_url,n.piid,n.observed_net_obligations new_prime_observed_net,n.work_text new_prime_scope,
-    s.scope_key,min(s.work_text) work_text,coalesce(max(z.placed_reports),0) placed_reports,max(z.placement_evidence_ids) placement_evidence_ids,count(DISTINCT s.parent_award_key) prior_awards,count(*) source_reports,min(s.reported_amount) value_low,approx_percentile(s.reported_amount,0.5) value_median,max(s.reported_amount) value_high,
-    to_hex(sha256(to_utf8(array_join(array_sort(array_agg(s.evidence_id)),'|')))) support_digest,
-    json_format(cast(array_agg(PREVIEW_ROW ORDER BY s.evidence_id) AS JSON)) preview
-    FROM new_awards n JOIN hist s ON s.family_key=n.family_key AND s.prime_uei=n.uei AND s.parent_award_key<>n.award_key
-    JOIN P p ON p.award_key=s.parent_award_key LEFT JOIN placements z ON z.parent_award_key=n.award_key AND z.scope_key=s.scope_key
-    WHERE s.scope_key<>'' AND (s.parent_psc=n.psc OR (nullif(s.parent_programme_code,'') IS NOT NULL AND s.parent_programme_code=n.programme_code AND s.parent_programme_code NOT IN ('000','0000','NONE','-NONE-'))) AND try_cast(substr(s.event_date,1,10) AS date)<try_cast(substr(n.first_action_date,1,10) AS date) AND try_cast(substr(s.event_date,1,10) AS date)>=try_cast(substr(n.first_action_date,1,10) AS date)-INTERVAL '5' YEAR
-    GROUP BY n.award_key,n.evidence_id,n.company_name,n.first_action_date,n.period_end,n.programme_name,n.psc,n.naics,n.source_url,n.piid,n.observed_net_obligations,n.work_text,s.scope_key)
-    SELECT lower(to_hex(sha256(to_utf8('native-prime-pull-v1|'||award_key||'|'||scope_key)))) episode_id,lower(to_hex(sha256(to_utf8(concat_ws('|',new_prime_evidence,support_digest))))) record_hash,
-    'new_prime_historical_supplier_flow' lane,'Potential supplier package: '||work_text title,work_text||' New prime scope: '||coalesce(new_prime_scope,'') scope_text,customer_name,nullif(programme_name,'NONE') programme,psc,naics,ASOF window_start,period_end window_end,
-    'Current prime performance period; supplier RFQ date is not announced' date_basis,value_low,value_median,value_high,
-    'historical_same_vehicle_or_programme_subcontract_packages' value_basis,'Historical outsourced package range; potential package size, not prime value or company workshare' value_scope,
-    json_format(cast(ROW_INPUTS AS JSON)) value_inputs_json,
-    'native_awards_and_subcontract_reports' source_name,source_url,new_prime_evidence source_evidence_id,award_key source_locator,piid native_identifier,
-    'new_prime_funded_prior_outsourcing_observed' procurement_state,CASE WHEN placed_reports>0 THEN 'source_confirmed_award' ELSE 'supplier_placement_not_established' END reconciled_state,'Prime supplier entry, configuration and availability require confirmation' access_state,
-    'A newly funded prime award shares an exact parent vehicle or reported program with earlier contracts where this prime outsourced the stated work. Linked reports identify historical suppliers and package amounts.' rationale,
-    'The package may already be placed. Confirm scope, buying site, technical access, qualifications and sourcing timetable. Prime funding is context, not supplier opportunity value.' limitations FROM packages"""
-    # Athena has no QUALIFY; revisions are resolved inside a bounded window.
-    canonical="SELECT * FROM (SELECT *,row_number() OVER(PARTITION BY parent_award_key,sub_uei,subaward_number ORDER BY modified_date DESC NULLS LAST,event_date DESC,evidence_id) revision FROM "+sub+") WHERE revision=1"
-    pull=pull.replace('SELECT * FROM S QUALIFY_PLACEHOLDER',canonical).replace(' P ', ' '+p+' ').replace('FAMILY_HIST',family('p')).replace('FAMILY_NEW',family('n')).replace('PLACEMENT_KEY',terms('work_text')).replace('KEY',terms('s.work_text')).replace('PREVIEW_ROW',preview).replace('ASOF',lit(as_of))
-    inputs="CAST(ROW(new_prime_evidence,award_key,new_prime_observed_net,prior_awards,source_reports,support_digest,first_action_date,json_parse(preview),placed_reports,coalesce(json_parse(placement_evidence_ids),json_parse('[]'))) AS ROW(new_prime_evidence varchar,new_prime_award_key varchar,new_prime_observed_net double,prior_awards bigint,source_reports bigint,support_digest varchar,first_award_date varchar,preview JSON,placed_reports bigint,outcome_evidence_ids JSON))"
-    emit('native_supplier_pull',pull.replace('ROW_INPUTS',inputs))
+    emit('contract_value_cohorts',"SELECT cohort_id,"+cohort_dims+",count(*) awards,min(observed_net_obligations) observed_min_usd,approx_percentile(observed_net_obligations,0.5) observed_median_usd,max(observed_net_obligations) observed_max_usd,to_hex(sha256(checksum(json_format(cast("+comparator_row+" AS JSON))))) evidence_digest,json_format(cast("+preview+" AS JSON)) comparators_json FROM "+observations+" GROUP BY cohort_id,"+cohort_dims)
+    from .supplier_demand import refresh as refresh_supplier_demand
+    refresh_supplier_demand(emit,p,sub,as_of,DATABASE+'.'+sources['native_work_actions']['table'] if 'native_work_actions' in sources else None)
     # Only a compact serving projection is brought into the worker. Raw evidence
     # remains available in the registered complete award and report tables.
     result=dict(run_id=run,as_of=as_of,sources=sources)

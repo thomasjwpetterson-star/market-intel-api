@@ -92,6 +92,15 @@ class Repository:
   o=rows[0]
   return dict(episode_id=episode_id,record_hash=o['record_hash'],value_low=o.get('value_low'),value_median=o.get('value_median'),value_high=o.get('value_high'),value_basis=o.get('value_basis'),value_scope=o.get('value_scope'),inputs=rules.decode(o.get('value_inputs_json')),source_url=o.get('source_url'),source_evidence_id=o.get('source_evidence_id'))
 
+ def supplier_evidence(self,episode_id,kind='primes',limit=25,offset=0):
+  if not re.fullmatch('[a-f0-9]{64}',episode_id):raise ValueError('Invalid opportunity identifier')
+  names={'primes':'supplier_pull_prime_evidence','reports':'supplier_pull_report_evidence','placements':'supplier_pull_placement_evidence'}
+  if kind not in names or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid evidence request')
+  name=names[kind]
+  if name not in self.manifest()['tables']:return []
+  ordering='first_action_date DESC,award_key' if kind=='primes' else 'event_date DESC,evidence_id'
+  return self.rows('SELECT * FROM '+self.table(name)+" WHERE episode_id='"+episode_id+"' ORDER BY "+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit))
+
  def cohort_awards(self,cohort_id,limit=25,offset=0):
   if not re.fullmatch('[a-f0-9]{64}',cohort_id):raise ValueError('Invalid value cohort')
   if not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid pagination')
@@ -159,6 +168,9 @@ def create_router(verify_principal,repository=None):
   return r[0]
  @router.get('/companies/{cage}/research')
  def research(cage:str,limit:int=Query(20,ge=1,le=100)):return {'awards':call(repo.research,cage,limit),'topic_calls':call(repo.research_calls,cage,limit)}
+ @router.get('/opportunities/{episode_id}/supplier-evidence')
+ def supplier_evidence(episode_id:str,kind:str='primes',limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
+  return {'records':call(repo.supplier_evidence,episode_id,kind,limit,offset),'release':repo.manifest()['run_id'],'kind':kind,'interpretation':'Complete source lineage, paginated. Performance locations are not assumed to be procurement or production sites.'}
  @router.get('/opportunities/{episode_id}/price-evidence')
  def prices(episode_id:str):return {'records':call(repo.price_lines,episode_id),'interpretation':'Historical line evidence; no current requirement total or company value is inferred'}
  @router.get('/opportunities/{episode_id}/value-evidence')

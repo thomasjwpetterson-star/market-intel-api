@@ -222,7 +222,7 @@
     },
     {
       "id": "PR10",
-      "label": "New prime/tier-one award \u2192 supplier pull",
+      "label": "Funded prime work with reported outsourcing history",
       "adapter_status": "operational",
       "lanes": [
         "new_prime_historical_supplier_flow"
@@ -233,13 +233,12 @@
         "BS04"
       ],
       "required_evidence": [
-        "New funded parent award",
-        "Earlier distinct parent and comparable outsourced work",
-        "Temporal evidence chain and specific scope",
-        "Unplaced work and supplier access remain checks"
+        "New funded award or positive funding action with explicit new-work, option or production-lot wording",
+        "Earlier reported outsourcing linked by exact vehicle, reported program or explicit platform designation at the same prime",
+        "Consistent work scope and work mode; current placement evidence and source dates"
       ],
-      "next_action": "Validate the new work package with the prime/tier-one supply-chain owner and establish the entry route.",
-      "value_method": "Earlier comparable supplier reports, not a percentage of the prime award.",
+      "next_action": "Use the linked current awards and supplier reports to identify the prime program and buying team. Confirm which work remains to be sourced, the timetable and any technical, qualification or data-access conditions.",
+      "value_method": "Historical reported package range. Current prime funding and work-phase amounts remain separate context; company workshare is unallocated.",
       "disconfirming_evidence": [
         "Work already placed",
         "Different lot/configuration",

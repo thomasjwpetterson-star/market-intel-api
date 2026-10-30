@@ -45,6 +45,18 @@ def queries(as_of):
  FROM actions WHERE revision=1 GROUP BY contract_award_unique_key
  ) SELECT *,to_hex(sha256(to_utf8(concat_ws('|',award_key,latest_transaction_key,cast(action_count AS varchar),cast(observed_net_obligations AS varchar))))) evidence_id
  FROM awards""".replace('ASOF', as_of),
+        'native_work_actions': """WITH revised AS (
+ SELECT contract_transaction_unique_key,contract_award_unique_key,action_date,transaction_description,federal_action_obligation,usaspending_permalink,
+ row_number() OVER(PARTITION BY contract_transaction_unique_key ORDER BY last_modified_date DESC,ingest_ts DESC) revision
+ FROM market_intel_silver.dataset_prime_contracts WHERE contract_transaction_unique_key IS NOT NULL AND contract_award_unique_key IS NOT NULL
+ AND try_cast(action_date AS date)<=DATE 'ASOF' AND try_cast(action_date AS date)>=DATE 'ASOF'-INTERVAL '365' DAY
+ ), eligible AS (
+ SELECT contract_transaction_unique_key transaction_key,contract_award_unique_key award_key,action_date event_date,transaction_description work_text,try_cast(federal_action_obligation AS double) observed_action_obligation,usaspending_permalink source_url
+ FROM revised WHERE revision=1 AND try_cast(federal_action_obligation AS double)>0
+ AND regexp_like(lower(regexp_replace(coalesce(transaction_description,''),'[_!]+',' ')),'\\b(exercis\\w*\\s+(the\\s+)?(contract\\s+)?option|option\\s+(period|year)|additional\\s+(quantity|quantities|aircraft|units|production)|incremental\\s+work|(new|additional)\\s+(task|delivery)\\s+order|(production|procurement)\\s+lot)\\b')
+ AND NOT regexp_like(lower(regexp_replace(coalesce(transaction_description,''),'[_!]+',' ')),'administrative|funding.only|no new work|deobligat|not\\s+(to\\s+)?exercis|will\\s+exercis|may\\s+exercis')
+ ) SELECT *,to_hex(sha256(to_utf8(json_format(cast(ROW(transaction_key,award_key,event_date,work_text,observed_action_obligation,source_url) AS JSON))))) evidence_id,
+ 'Positive obligation with explicit option, lot, additional-quantity or new-work wording' event_basis FROM eligible""".replace('ASOF', as_of),
         'native_subcontract_reports': """WITH reports AS (
  SELECT *,row_number() OVER(PARTITION BY coalesce(nullif(dedup_key,''),concat_ws('|',prime_award_unique_key,subaward_number,subawardee_uei,subaward_action_date,subaward_amount))
  ORDER BY subaward_sam_report_last_modified_date DESC,ingest_ts DESC) revision

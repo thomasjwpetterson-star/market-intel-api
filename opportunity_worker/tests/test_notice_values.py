@@ -13,8 +13,8 @@ def test_notice_comparable_values_are_historical_and_drillable():
     row=dict.fromkeys(fields);row.update(notice_id='notice',solicitation_id='FA123',aac_code='OFFICE',office='Office',sub_tier='Air Force',notice_hash='native-hash',title='Repair fuel boost pump',description='Seeking capability information',psc_code='J016',response_deadline='2026-11-30',notice_type='Sources Sought',posted_at='2026-10-15',source_sha256='raw-source-hash')
     c.execute('INSERT INTO native_notice_heads VALUES('+','.join('?' for n in fields)+')',[row[n] for n in fields])
     comparators=json.dumps([{'award_key':'historical-award','observed_net_obligations':250000,'source_url':'https://example.gov/award'}])
-    c.execute('CREATE TABLE notice_comparators(notice_id VARCHAR,observed_min_usd DOUBLE,observed_median_usd DOUBLE,observed_max_usd DOUBLE,comparators_json VARCHAR,cohort_id VARCHAR,awards BIGINT)')
-    c.execute('INSERT INTO notice_comparators VALUES (?,?,?,?,?,?,?)',['notice',250000,250000,250000,comparators,'cohort-id',1])
+    c.execute('CREATE TABLE notice_comparators(notice_id VARCHAR,observed_min_usd DOUBLE,observed_median_usd DOUBLE,observed_max_usd DOUBLE,comparators_json VARCHAR,cohort_id VARCHAR,awards BIGINT,evidence_digest VARCHAR)')
+    c.execute('INSERT INTO notice_comparators VALUES (?,?,?,?,?,?,?,?)',['notice',250000,250000,250000,comparators,'cohort-id',1,'cohort-v1'])
     c.execute("CREATE MACRO nid(s) AS regexp_replace(upper(coalesce(s,'')),'[^A-Z0-9]','','g')");c.execute("CREATE MACRO dt(s) AS try_cast(substr(s,1,10) AS DATE)")
     q=c.execute(sql);out=dict(zip([x[0] for x in q.description],q.fetchone()))
     assert out['value_median']==250000
@@ -23,5 +23,6 @@ def test_notice_comparable_values_are_historical_and_drillable():
     assert inputs['cohort_id']=='cohort-id' and inputs['comparable_awards']==1
     assert inputs['future_demand_estimate'] is None and inputs['company_addressable_value'] is None
     assert out['record_hash']!='native-hash'
+    previous_hash=out['record_hash'];c.execute("UPDATE notice_comparators SET evidence_digest='cohort-v2'");q=c.execute(sql);updated=dict(zip([x[0] for x in q.description],q.fetchone()));assert updated['record_hash']!=previous_hash
     c.execute('DELETE FROM notice_comparators');q=c.execute(sql);out=dict(zip([x[0] for x in q.description],q.fetchone()))
     assert out['value_median'] is None and out['value_basis']=='no_scoped_comparator_found'

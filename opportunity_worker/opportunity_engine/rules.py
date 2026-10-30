@@ -67,7 +67,7 @@ def evaluate(o,as_of):
  teaming_current=teaming and lane=='published_procurement' and bool(end and end>=today)
  inputs=decode(o.get('value_inputs_json'))
  template=lane=='new_prime_historical_supplier_flow' and bool(inputs.get('new_prime_evidence') and inputs.get('prior_awards',0)>0 and inputs.get('source_reports',0)>0 and inputs.get('support_digest') and day(inputs.get('first_award_date')) and day(inputs['first_award_date'])<=today)
- evidence_ids=list(dict.fromkeys(x for x in [eid,inputs.get('new_prime_evidence')]+[x.get('report_evidence') for x in inputs.get('preview',[])]+[x.get('parent_evidence') for x in inputs.get('preview',[])]+inputs.get('outcome_evidence_ids',[]) if x))
+ evidence_ids=list(dict.fromkeys(x for x in [eid,inputs.get('new_prime_evidence')]+[x.get('report_evidence') for x in inputs.get('preview',[])]+[x.get('parent_evidence') for x in inputs.get('preview',[])]+[x.get('evidence_id') for x in inputs.get('new_prime_preview',[])]+inputs.get('outcome_evidence_ids',[]) if x))
  unknown=[]
  if not source:unknown.append('Native demand evidence is missing')
  if not o.get('customer_name'):unknown.append('Responsible customer is not established')

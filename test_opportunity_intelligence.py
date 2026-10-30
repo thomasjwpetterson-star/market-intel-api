@@ -50,6 +50,15 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn('np.record_hash=o.record_hash', aws.sql)
         self.assertIn('not a win probability or company revenue', aws.sql)
 
+    def test_supplier_lineage_is_scoped_to_the_opportunity(self):
+        aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
+        repo.manifest = lambda: {'tables': {'supplier_pull_prime_evidence': {}}}
+        repo.supplier_evidence('a' * 64, 'primes', 25, 0)
+        self.assertIn("WHERE episode_id='" + 'a' * 64 + "'", aws.sql)
+        self.assertIn('safe.supplier_pull_prime_evidence', aws.sql)
+        with self.assertRaises(ValueError): repo.supplier_evidence('a' * 64, "bad'", 25, 0)
+        with self.assertRaises(ValueError): repo.supplier_evidence("bad'", 'primes', 25, 0)
+
     def test_complete_value_evidence_has_bounded_pagination(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
         repo.manifest = lambda: {'tables': {'contract_value_observations': {}}}
