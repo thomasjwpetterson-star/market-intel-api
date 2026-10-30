@@ -192,11 +192,15 @@ def create_router(verify_principal,repository=None):
   if not principal or isinstance(principal,bool):raise HTTPException(status_code=401,detail='Verified principal required')
   return principal
  async def pin_source_release():
-  if not isinstance(repo,Repository):
+  # The deployed mount defers AWS initialization through LazyRepository. Pin
+  # the concrete instance that its forwarded methods actually read from.
+  resolve=getattr(type(repo),'resolve_repository',None)
+  concrete=await run_in_threadpool(resolve,repo) if callable(resolve) else repo
+  if not isinstance(concrete,Repository):
    yield;return
   # Pin metadata for the entire request, including slow Athena reads and the
   # response release tag. Atomic publication must not mix table generations.
-  manifest=await run_in_threadpool(repo.manifest);token=_REQUEST_RELEASE.set((repo,manifest))
+  manifest=await run_in_threadpool(concrete.manifest);token=_REQUEST_RELEASE.set((concrete,manifest))
   try:yield
   finally:_REQUEST_RELEASE.reset(token)
  router=APIRouter(prefix='/opportunity-intelligence',tags=['opportunity-intelligence'],dependencies=[Depends(require_principal),Depends(pin_source_release)])

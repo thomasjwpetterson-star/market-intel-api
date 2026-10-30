@@ -5,7 +5,7 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opportunity_intelligence.api import Repository, create_router
-from opportunity_intelligence.mount import verified_application_principal
+from opportunity_intelligence.mount import LazyRepository, verified_application_principal
 
 class FakeRepository:
     def companies(self, query, limit):
@@ -135,5 +135,24 @@ class OpportunityPilotTests(unittest.TestCase):
         repo = Repository(CaptureAWS()); repo.table = lambda name: 'safe.' + name
         for company, kind in [("CAGE:45934' OR 1=1", 'work'), ('CAGE:45934', 'arbitrary')]:
             with self.assertRaises(ValueError): repo.opportunities(company, 24, 0, False, kind)
+
+    def test_deployed_lazy_mount_pins_the_concrete_repository_after_authentication(self):
+        old={'run_id':'old','tables':{'opportunities':{'table':'oi_old_opportunities'},'demand_decisions':{'table':'oi_old_decisions'}}}
+        new={'run_id':'new','tables':{'opportunities':{'table':'oi_new_opportunities'},'demand_decisions':{'table':'oi_new_decisions'}}}
+        aws=CaptureAWS();repo=Repository(aws);repo._manifest=old;repo._expires=float('inf')
+        def result(sql):
+            aws.sql=sql;repo._manifest=new;return [],{}
+        aws.result=result
+        lazy=LazyRepository()
+        with patch('opportunity_intelligence.mount.Repository',return_value=repo) as constructor:
+            app=FastAPI();app.include_router(create_router(verified_application_principal,lazy));client=TestClient(app)
+            self.assertEqual(client.get('/opportunity-intelligence/opportunities').status_code,401)
+            constructor.assert_not_called()
+            response=client.get('/opportunity-intelligence/opportunities',headers={'X-Mimir-Export-Key':'test-proxy-secret','X-Mimir-Opportunity-User':'11111111-1111-4111-8111-111111111111'})
+            constructor.assert_called_once_with()
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json()['release'],'old')
+        self.assertIn('oi_old_opportunities',aws.sql)
+        self.assertEqual(repo.manifest()['run_id'],'new')
 
 if __name__ == '__main__': unittest.main()

@@ -30,11 +30,14 @@ class LazyRepository:
         self.repository = None
         self.lock = threading.Lock()
 
-    def __getattr__(self, name):
+    def resolve_repository(self):
         with self.lock:
             if self.repository is None:
                 self.repository = Repository()
-            return getattr(self.repository, name)
+            return self.repository
+
+    def __getattr__(self, name):
+        return getattr(self.resolve_repository(), name)
 
 
 def mount(app):
