@@ -63,7 +63,7 @@ def company_entry_route(work,title,scope,lane,prior_reported_supplier=False):
  return 'entry_route_unestablished'
 
 def augment(directory,skip_work=False,reuse_features=False):
- r=Path(directory);m=json.loads((r/'manifest.json').read_text());c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1500MB';SET preserve_insertion_order=false");c.execute("SET temp_directory='"+str(r/'company_tmp').replace("'","''")+"'");c.execute("SET max_temp_directory_size='8GB'")
+ r=Path(directory);m=json.loads((r/'manifest.json').read_text());c=duckdb.connect();c.execute("SET threads=4;SET memory_limit='8GB';SET preserve_insertion_order=false");c.execute("SET temp_directory='"+str(r/'company_tmp').replace("'","''")+"'");c.execute("SET max_temp_directory_size='40GB'")
  for n in ['company_profiles','opportunities','demand_decisions','company_matches','published_calls','dla_forecasts']:
   if n in m['tables']:c.read_parquet(m['tables'][n]['path']).create_view('base_'+n)
  c.execute('CREATE TEMP TABLE original_match_snapshot AS SELECT m.* FROM base_company_matches m JOIN base_opportunities o ON m.episode_id=o.episode_id AND m.opportunity_hash=o.record_hash JOIN base_company_profiles p ON p.company_id=m.company_id AND p.profile_hash=m.profile_hash');c.execute('DROP VIEW base_company_matches');c.execute('CREATE TEMP VIEW base_company_matches AS SELECT * FROM original_match_snapshot')
@@ -86,7 +86,7 @@ def augment(directory,skip_work=False,reuse_features=False):
    c.read_parquet(str(r/'company_scope_features.parquet')).create_view('saved_features')
    c.execute("CREATE TEMP TABLE scopes AS SELECT * EXCLUDE(terms_json,profile_hash),from_json(terms_json,'[\"VARCHAR\"]') terms FROM saved_features")
   else:
-   c.execute("CREATE TEMP TABLE scopes AS SELECT w.* EXCLUDE(work_text),f.fragment work_text,sha256(w.doc_id||'|'||f.fragment) scope_id,scope_terms(f.fragment) terms FROM retrieval_work w,unnest(scope_fragments(w.work_text)) f(fragment) WHERE substr(last_observed,1,10)<='"+m['as_of']+"'")
+   c.execute("CREATE TEMP TABLE scopes AS SELECT w.* EXCLUDE(work_text),f.fragment work_text,sha256(w.doc_id||'|'||f.fragment) scope_id,scope_terms(f.fragment) terms FROM retrieval_work w,unnest(scope_fragments(w.work_text)) f(fragment) WHERE substr(cast(last_observed AS VARCHAR),1,10)<='"+m['as_of']+"'")
    c.execute("DELETE FROM scopes WHERE len(terms)<2")
   target_query="""CREATE TEMP TABLE targets AS SELECT o.episode_id,o.record_hash,o.lane,o.title,o.customer_name,coalesce(from_json(json_extract(o.value_inputs_json,'$.prior_supplier_company_ids'),'["VARCHAR"]'),list_transform(from_json(json_extract(o.value_inputs_json,'$.preview'),'[{"supplier_company_id":"VARCHAR"}]'),x->x.supplier_company_id),[]::VARCHAR[]) historical_supplier_ids,CASE WHEN o.lane='published_procurement' THEN len(scope_nsns(coalesce(o.scope_text,''))) ELSE 0 END full_nsn_count,substr(o.scope_text,1,12000) scope_text,d.stage,scope_words(concat_ws(' ',o.title,substr(o.scope_text,1,12000))) tokens,scope_words(o.title) title_tokens FROM base_opportunities o JOIN base_demand_decisions d USING(episode_id) WHERE d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context') AND o.lane NOT IN ('source_item_forecasts','published_item_procurement')"""
   if any(n=='programme' for n,*_ in c.execute('DESCRIBE base_opportunities').fetchall()):target_query=target_query.replace('substr(o.scope_text,1,12000) scope_text',"concat_ws(' ',o.programme,substr(o.scope_text,1,12000)) scope_text")
@@ -101,18 +101,27 @@ def augment(directory,skip_work=False,reuse_features=False):
   c.execute("CREATE TEMP TABLE required AS SELECT s.*,t.anchor_token,t.docs FROM scopes s JOIN chosen_terms t USING(scope_id)")
   estimate=c.execute('SELECT sum(w.n*d.n) FROM (SELECT anchor_token token,count(*) n FROM required WHERE docs<=200 OR (len(terms)>=3 AND docs<=2000) GROUP BY anchor_token) w JOIN anchor_counts d USING(token)').fetchone()[0] or 0
   partitions=max(1,(int(estimate)+3999999)//4000000)
+  print('Company retrieval join estimate',estimate,'partitions',partitions,flush=True)
   for partition in range(partitions):
-   c.execute("""CREATE OR REPLACE TEMP TABLE pre_hits AS SELECT w.company_id,w.doc_id,w.work_text,w.source_kind,w.sample_evidence_id,w.evidence_digest,w.last_observed,w.terms,coalesce(w.programme_context_json,'') work_context,o.episode_id,o.record_hash,o.lane,o.stage,o.customer_name,o.title,o.scope_text,list_contains(o.historical_supplier_ids,w.company_id) prior_reported_supplier,company_entry_route(w.work_text,o.title,o.scope_text,o.lane,list_contains(o.historical_supplier_ids,w.company_id)) company_entry_status,
+   # Keep the potentially broad anchor join narrow. Whole target descriptions
+   # are attached only after every scope term and the proximity test pass.
+   c.execute("""CREATE OR REPLACE TEMP TABLE pre_hits AS SELECT w.scope_id,o.episode_id,
+   list_contains(o.historical_supplier_ids,w.company_id) prior_reported_supplier,
    list_max(list_transform(w.terms,t->list_position(o.tokens,t)))-list_min(list_transform(w.terms,t->list_position(o.tokens,t))) span
    FROM required w JOIN target_tokens tok ON tok.token=w.anchor_token JOIN targets o USING(episode_id)
    WHERE (w.docs<=200 OR (len(w.terms)>=3 AND w.docs<=2000)) AND list_has_all(o.tokens,w.terms)
    AND (o.lane<>'published_procurement' OR o.stage='qualification_opening' OR o.full_nsn_count=0)
    AND (o.lane NOT LIKE '%supplier%' OR len(w.terms)>=3 OR list_contains(o.historical_supplier_ids,w.company_id))
-  AND list_max(list_transform(w.terms,t->list_position(o.tokens,t)))-list_min(list_transform(w.terms,t->list_position(o.tokens,t)))<=len(w.terms)+5
-  AND hash(w.company_id)%"""+str(partitions)+'='+str(partition))
-   if partition==0:c.execute('CREATE TEMP TABLE hits AS SELECT * EXCLUDE(title,scope_text) FROM pre_hits WHERE false')
-   c.execute("INSERT INTO hits SELECT * EXCLUDE(title,scope_text) FROM pre_hits WHERE scope_admissible(work_text,title,coalesce(scope_text,''),lane,stage,work_context,prior_reported_supplier) QUALIFY row_number() OVER(PARTITION BY company_id,episode_id ORDER BY len(terms) DESC,last_observed DESC,doc_id)=1")
-   c.execute('DROP TABLE pre_hits')
+   AND list_max(list_transform(w.terms,t->list_position(o.tokens,t)))-list_min(list_transform(w.terms,t->list_position(o.tokens,t)))<=len(w.terms)+5
+   AND hash(w.company_id)%"""+str(partitions)+'='+str(partition))
+   c.execute("""CREATE OR REPLACE TEMP VIEW accepted_hits AS SELECT w.company_id,w.doc_id,w.work_text,w.source_kind,w.sample_evidence_id,w.evidence_digest,w.last_observed,w.terms,coalesce(w.programme_context_json,'') work_context,
+   o.episode_id,o.record_hash,o.lane,o.stage,o.customer_name,k.prior_reported_supplier,
+   company_entry_route(w.work_text,o.title,o.scope_text,o.lane,k.prior_reported_supplier) company_entry_status,k.span
+   FROM pre_hits k JOIN required w ON w.scope_id=k.scope_id JOIN targets o ON o.episode_id=k.episode_id
+   WHERE scope_admissible(w.work_text,o.title,coalesce(o.scope_text,''),o.lane,o.stage,coalesce(w.programme_context_json,''),k.prior_reported_supplier)""")
+   if partition==0:c.execute('CREATE TEMP TABLE hits AS SELECT * FROM accepted_hits WHERE false')
+   c.execute("INSERT INTO hits SELECT * FROM accepted_hits QUALIFY row_number() OVER(PARTITION BY company_id,episode_id ORDER BY len(terms) DESC,last_observed DESC,doc_id)=1")
+   c.execute('DROP VIEW accepted_hits');c.execute('DROP TABLE pre_hits')
    print('Company retrieval partition',partition+1,'/',partitions,flush=True)
   print('Company retrieval join estimate',estimate,flush=True)
   for unused in ('scopes','required','target_tokens','frequency','anchor_counts','chosen_terms','targets'):c.execute('DROP TABLE '+unused)
@@ -145,7 +154,7 @@ def augment(directory,skip_work=False,reuse_features=False):
  source=m['sources'].get('item_reference_facts')
  if source:
   c.read_parquet([f['path'] for f in source['files']]).create_view('raw_item_reference_facts')
-  c.execute("CREATE TEMP VIEW item_reference_facts AS SELECT * REPLACE(CASE WHEN govt_estimated_price>0 THEN govt_estimated_price END AS govt_estimated_price,CASE WHEN supplier_average_price>0 AND (last_sold_date IS NULL OR substr(last_sold_date,1,10)<='"+m['as_of']+"') THEN supplier_average_price END AS supplier_average_price) FROM raw_item_reference_facts")
+  c.execute("CREATE TEMP VIEW item_reference_facts AS SELECT * REPLACE(CASE WHEN govt_estimated_price>0 THEN govt_estimated_price END AS govt_estimated_price,CASE WHEN supplier_average_price>0 AND (last_sold_date IS NULL OR substr(cast(last_sold_date AS VARCHAR),1,10)<='"+m['as_of']+"') THEN supplier_average_price END AS supplier_average_price) FROM raw_item_reference_facts")
   # Exact company/notice item references expose unit evidence even where a
   # capability enquiry publishes no order quantity. No total is inferred.
   c.execute("""CREATE TEMP TABLE notice_item_keys AS SELECT DISTINCT o.episode_id,o.record_hash,n.nsn,right(n.nsn,9) niin
@@ -204,7 +213,7 @@ def augment(directory,skip_work=False,reuse_features=False):
    sql="""WITH f AS(SELECT o.episode_id,o.record_hash,json_extract_string(o.value_inputs_json,'$.niin') niin,o.window_start,o.window_end FROM base_opportunities o SEMI JOIN eligible_forecast_matches e USING(episode_id) WHERE o.lane='source_item_forecasts' AND hash(o.episode_id)%16={bucket})
    SELECT f.episode_id,f.record_hash,f.niin,count(*) month_count,count(DISTINCT d.forecast_month) distinct_months,sum(d.forecast_qty)::BIGINT quantity,min(d.forecast_month) first_month,max(d.forecast_month) last_month,
    to_json(list(struct_pack(month:=d.forecast_month,quantity:=d.forecast_qty,source_release:=d.source_release,source_file:=d.source_file,source_item_id:=d.source_item_id) ORDER BY d.forecast_month)) monthly_evidence_json
-   FROM f JOIN base_dla_forecasts d ON d.niin=f.niin AND try_cast(substr(d.forecast_month,1,10) AS DATE)>=try_cast(substr(f.window_start,1,10) AS DATE) AND try_cast(substr(d.forecast_month,1,10) AS DATE)<=try_cast(substr(f.window_end,1,10) AS DATE) GROUP BY f.episode_id,f.record_hash,f.niin""".format(bucket=bucket)
+   FROM f JOIN base_dla_forecasts d ON d.niin=f.niin AND try_cast(substr(cast(d.forecast_month AS VARCHAR),1,10) AS DATE)>=try_cast(substr(f.window_start,1,10) AS DATE) AND try_cast(substr(cast(d.forecast_month AS VARCHAR),1,10) AS DATE)<=try_cast(substr(f.window_end,1,10) AS DATE) GROUP BY f.episode_id,f.record_hash,f.niin""".format(bucket=bucket)
    p=parts/(str(bucket)+'.parquet');c.execute("COPY ("+sql+") TO '"+str(p).replace("'","''")+"' (FORMAT PARQUET,COMPRESSION ZSTD)")
   c.read_parquet([str(parts/(str(bucket)+'.parquet')) for bucket in range(16)]).create_view('forecast_quantities')
   valuation_parts=r/'company_valuation_parts';valuation_parts.mkdir(exist_ok=True)

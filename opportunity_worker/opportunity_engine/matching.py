@@ -19,7 +19,7 @@ def tokens(s):
 def match_topics(c,topics,out,as_of):
  qs={r['topic_id']:tokens(r['title']) for r in topics};vocab=set().union(*qs.values()) if qs else set();df=collections.Counter();n=0
  # Structured provenance stays attached to each work statement.
- sql="""SELECT doc_id,company_id,source_kind,work_text,last_observed,sample_evidence_id FROM company_work WHERE try_cast(substr(last_observed,1,10) AS DATE)>=DATE '2019-01-01'
+ sql="""SELECT doc_id,company_id,source_kind,work_text,last_observed,sample_evidence_id FROM company_work WHERE try_cast(substr(cast(last_observed AS VARCHAR),1,10) AS DATE)>=DATE '2019-01-01'
  UNION ALL SELECT award_id,company_id,'sbir_award',title||' '||abstract,award_date,award_id FROM oi_research_awards WHERE evidence_state='observed_research_activity' AND try_cast(award_date AS DATE)>=DATE '2019-01-01'"""
  cur=c.execute(sql)
  while True:

@@ -1,18 +1,103 @@
 {
-  "version": "0.5.9",
-  "sha256": "5e7f10e6b4b0d32eaea441e0b62e39b3ac4adafe8c54a4022e634a34d5dff915",
-  "package_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=5e7f10e6b4b0d32eaea441e0b62e39b3ac4adafe8c54a4022e634a34d5dff915/mimir_opportunity_engine-0.5.9-py3-none-any.whl",
-  "run_id": "jr_0f542c64bc54bb36d71934744b78aee5e4c1e2a8213a47b9adbb485b424ca12d",
-  "recovery_key": "governance/opportunity_intelligence/sources/recovery_0_5_9/manifest.json",
+  "version": "0.5.14",
+  "sha256": "65b63234c03c8390e069b610ef4976307e3a77feda5cfc5eaf99f1a893d6e317",
+  "package_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=65b63234c03c8390e069b610ef4976307e3a77feda5cfc5eaf99f1a893d6e317/mimir_opportunity_engine-0.5.14-py3-none-any.whl",
+  "dependency_bundle_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=e16136726b0a89f3dd322c3b95de20163c87b1d8f6f33f8d0bb7e331eaf92360/mimir-0.5.14.gluewheels.zip",
+  "dependency_bundle_sha256": "e16136726b0a89f3dd322c3b95de20163c87b1d8f6f33f8d0bb7e331eaf92360",
+  "dependencies": [
+    {
+      "file": "beautifulsoup4-4.15.0-py3-none-any.whl",
+      "name": "beautifulsoup4",
+      "version": "4.15.0",
+      "sha256": "d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9"
+    },
+    {
+      "file": "boto3-1.40.52-py3-none-any.whl",
+      "name": "boto3",
+      "version": "1.40.52",
+      "sha256": "ecc8c99d3cc96716cdfba62d9c9c6ce0eb98d02494a66690bcc2ec181c1ced67"
+    },
+    {
+      "file": "botocore-1.40.76-py3-none-any.whl",
+      "name": "botocore",
+      "version": "1.40.76",
+      "sha256": "fe425d386e48ac64c81cbb4a7181688d813df2e2b4c78b95ebe833c9e868c6f4"
+    },
+    {
+      "file": "duckdb-1.4.2-cp311-cp311-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl",
+      "name": "duckdb",
+      "version": "1.4.2",
+      "sha256": "0c2315b693f201787c9892f31eb9a0484d3c648edb3578a86dc8c1284dd2873a"
+    },
+    {
+      "file": "jmespath-1.1.0-py3-none-any.whl",
+      "name": "jmespath",
+      "version": "1.1.0",
+      "sha256": "a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64"
+    },
+    {
+      "file": "python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+      "name": "python-dateutil",
+      "version": "2.9.0.post0",
+      "sha256": "a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427"
+    },
+    {
+      "file": "s3transfer-0.14.0-py3-none-any.whl",
+      "name": "s3transfer",
+      "version": "0.14.0",
+      "sha256": "ea3b790c7077558ed1f02a3072fb3cb992bbbd253392f4b6e9e8976941c7d456"
+    },
+    {
+      "file": "six-1.17.0-py2.py3-none-any.whl",
+      "name": "six",
+      "version": "1.17.0",
+      "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274"
+    },
+    {
+      "file": "soupsieve-2.8.4-py3-none-any.whl",
+      "name": "soupsieve",
+      "version": "2.8.4",
+      "sha256": "e7e6b0769c8f51ed59acab6e994b00621096cfb1c640a7509295987388fbaf65"
+    },
+    {
+      "file": "typing_extensions-4.16.0-py3-none-any.whl",
+      "name": "typing_extensions",
+      "version": "4.16.0",
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+    },
+    {
+      "file": "urllib3-1.26.20-py2.py3-none-any.whl",
+      "name": "urllib3",
+      "version": "1.26.20",
+      "sha256": "0ed14ccfbf1c30a9072c7ca157e4319b70d65f623e91e7b32fadb2853431016e"
+    },
+    {
+      "file": "mimir_opportunity_engine-0.5.14-py3-none-any.whl",
+      "name": "mimir-opportunity-engine",
+      "version": "0.5.14",
+      "sha256": "65b63234c03c8390e069b610ef4976307e3a77feda5cfc5eaf99f1a893d6e317"
+    }
+  ],
+  "run_id": "jr_b28eadef63ef7eb1c47da6daa18944145c4bbd6b28998ec4d9f950bd5385fb3f",
+  "recovery_key": "governance/opportunity_intelligence/sources/recovery_0_5_14/manifest.json",
   "role_unchanged": true,
-  "schedule_unchanged": true,
+  "source_permissions_unchanged": true,
+  "schedule": "cron(30 2 * * ? *)",
+  "schedule_temporarily_disabled_until_success": true,
+  "runtime": {
+    "GlueVersion": "5.0",
+    "WorkerType": "G.2X",
+    "NumberOfWorkers": 2,
+    "Timeout": 180,
+    "ExecutionClass": "STANDARD"
+  },
   "code_hashes": {
     "opportunity_engine/__init__.py": "311d2ebdc48d6b5d5ea4c6f48f126b89ab5ac1168003eafac03167866c21a097",
-    "opportunity_engine/__main__.py": "27e5ec9ea9e1b91546220d09d42c34ff3622294e950fa57f4e223ab1dc72d8ed",
+    "opportunity_engine/__main__.py": "2382abec078205165213b574c4109c21355ef9cc418c3005ec883887e5884d57",
     "opportunity_engine/api.py": "fff6cfa99cc1376a5d3750d71d431d066f4e8b20170fb68671cc7767fa955896",
     "opportunity_engine/aws.py": "80bb2737b0566614959a3cc9d44b0f2bd9d3dfcef746327cad5d675fe0c2800a",
-    "opportunity_engine/build.py": "76dc00245d6100cdaf9d772cf8f2fce748813557e1e97fca4bd2cd419b266e09",
-    "opportunity_engine/company_enrichment.py": "3264b535603ca9485d2782e7a1f81da97f55706f5ac01cdd3f71080902556a44",
+    "opportunity_engine/build.py": "068e149a878cb4edcd71259d59bd600f0164701b89ec5af3c228abfa0c2f0756",
+    "opportunity_engine/company_enrichment.py": "c7838ee6b27be0bb7c453fbd85a199a89e9f04fae48ee44cf54abc7022d4b985",
     "opportunity_engine/company_history.py": "a54b45a3a2fcdd4a9f872b6b7407bb3210e51a85c386090697b5a8a66c315fc0",
     "opportunity_engine/company_history_distributed.py": "64bd97042da3d3888437aca49fc09cd54e97ec12d14001aa2196bacef70e2bd0",
     "opportunity_engine/demand_history.py": "62ffe7828be0c90f3a0489459f8584fa93546640c0891456b6d6dfd09a1a2baf",
@@ -28,7 +113,7 @@
     "opportunity_engine/ingestion/refresh_sbir.py": "baf01eb7601d872aa264db00b2cbb2d316f57f630efd9e633fad8229ad28b4ae",
     "opportunity_engine/ingestion/refresh_shared_sources.py": "abae8432931a0190c0287e8c8d4c5b7fb9001e317f8eb06a853d7686fa4b13c9",
     "opportunity_engine/ingestion/refresh_topics.py": "c3e8d0ce5c3c2195ef0ab9547a0f9367d9160af151b2c1c588cb29ffce44999e",
-    "opportunity_engine/matching.py": "8a3e61596a267e2809a548ff6b100769ea9fe81b1ce7ee0c67c69de78ef3e4d7",
+    "opportunity_engine/matching.py": "61f480e9aba28019d030bb87f8f9e46396616b8eabe013cf41ce58811006ecce",
     "opportunity_engine/native_sources.py": "535285b0b81878b0f579aa6a889843427d99d693bcdc09a57cb2af392dc64085",
     "opportunity_engine/procurement_rules.json": "457c125f23a01a36ee36e9174ec682849b6c351c285af46c7a6cc0511624603d",
     "opportunity_engine/publish.py": "327e9601226b3fccb298f6dbb934129c15ea9e0726311c84491830e846d21fbc",

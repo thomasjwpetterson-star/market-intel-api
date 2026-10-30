@@ -10,7 +10,7 @@ def quote(s):return "'"+str(s).replace("'","''")+"'"
 def normalise_phase(s):
  return {'I':'I','II':'II','III':'III','1':'I','2':'II','3':'III'}.get(re.sub(r'(?i)phase|[^A-Z0-9]','',str(s or '').upper()))
 
-def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manifests=(),skip_matching=False):
+def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manifests=(),skip_matching=False,research_only=False):
  out=Path(output);out.mkdir(parents=True,exist_ok=True)
  c=duckdb.connect(str(out/'build.duckdb'));c.execute("SET threads=1;SET memory_limit='1800MB';SET preserve_insertion_order=false")
  c.execute('SET temp_directory='+quote(out/'tmp'));c.execute("SET max_temp_directory_size='3GB'")
@@ -52,6 +52,11 @@ def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manife
    tables[name]=dict(rows=source['rows'],sha256=source['sha256'],columns=source['columns'],remote_binding=True,table=source['table'],s3_uri=source['s3_uri'],source_binding=name,profileable_rows=source.get('profileable_rows'),profile_observed_net_total=source.get('profile_observed_net_total'))
    print('Bound complete distributed source',name,source['rows'],flush=True);return
   if len(source['files'])!=1:raise ValueError('Derived serving source must be consolidated: '+name)
+  # Derived sources can retain native DATE/TIMESTAMP/DECIMAL fields. Publish
+  # their normalized serving copy while preserving the original source hash.
+  description=c.execute('DESCRIBE '+name).fetchall()
+  if any(t in ('DATE','TIMESTAMP','TIMESTAMP WITH TIME ZONE','JSON','HUGEINT','UBIGINT','UINTEGER') or t.startswith('DECIMAL') for _,t,*_ in description):
+   materialise(name,'SELECT * FROM '+name);return
   f=source['files'][0];c.execute('CREATE VIEW oi_'+name+' AS SELECT * FROM '+name)
   types={'VARCHAR':'string','BIGINT':'bigint','INTEGER':'bigint','DOUBLE':'double','FLOAT':'double','BOOLEAN':'boolean'}
   columns=[]
@@ -78,6 +83,10 @@ def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manife
  'Observed research award; non-additive to USAspending, not a forecast Phase III' value_interpretation,
  CASE WHEN variants>1 THEN 'conflicting_native_award' WHEN dt(r.award_date)>DATE '"""+as_of+"""' THEN 'future_dated_award' WHEN dt(r.award_date) IS NULL THEN 'missing_award_date' ELSE 'observed_research_activity' END evidence_state
  FROM uniq r LEFT JOIN research_cage_identity i USING(uei) WHERE rn=1""")
+ if research_only:
+  manifest=dict(run_id=out.name,as_of=as_of,tables=tables)
+  (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');c.close();(out/'build.duckdb').unlink();return manifest
+ c.execute('DROP TABLE raw_research')
  materialise('research_phase_history',"""SELECT b.award_id phase_ii_award_id,b.company_id,b.topic_code,b.branch,b.program_type,b.award_date phase_ii_date,
  min(a.award_date) earliest_phase_i_date,count(*) prior_phase_i_awards,to_json(list(DISTINCT a.award_id ORDER BY a.award_id)) prior_award_ids_json,
  'Same UEI, topic, branch and programme with earlier Phase I; project continuity requires source review' relationship,
@@ -89,10 +98,11 @@ def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manife
  # stay in the ledger, and outrank older positive messages by chronology.
  c.execute("CREATE TABLE native_notice_heads AS WITH keys AS(SELECT *,CASE WHEN nullif(nid(solicitation_id),'') IS NOT NULL THEN coalesce(nullif(aac_code,''),nullif(office,''),nullif(sub_tier,''),notice_id)||'|'||nid(solicitation_id) ELSE 'notice|'||notice_id END chain_key FROM sam_notices) SELECT *,sha256(concat_ws('|',notice_id,selected_notice_version_id,title,description,cast(response_deadline AS VARCHAR))) notice_hash FROM keys QUALIFY row_number() OVER(PARTITION BY chain_key ORDER BY dt(posted_at) DESC,posted_at DESC,notice_id DESC)=1")
  if 'contract_value_cohorts' in sources:
-  c.execute("""CREATE TEMP VIEW notice_comparators AS SELECT n.notice_id,v.* FROM native_notice_heads n JOIN contract_value_cohorts v ON technical_scope_key(n.title)=v.scope_key
+  c.execute("""CREATE TEMP TABLE selected_notice_cohort AS SELECT n.notice_id,v.cohort_id FROM native_notice_heads n JOIN contract_value_cohorts v ON technical_scope_key(n.title)=v.scope_key
   AND work_mode(n.title,coalesce(n.psc_code,''))=v.work_mode AND ((nullif(nid(n.aac_code),'') IS NOT NULL AND nid(n.aac_code)=nid(v.buyer_office_code)) OR nid(n.office)=nid(v.buyer_office))
   AND (nullif(n.psc_code,'') IS NULL OR starts_with(v.psc,n.psc_code))
-  QUALIFY row_number() OVER(PARTITION BY n.notice_id ORDER BY v.awards DESC,v.psc,v.buyer_office_code)=1""")
+  QUALIFY row_number() OVER(PARTITION BY n.notice_id ORDER BY v.awards DESC,v.psc,v.buyer_office_code,v.cohort_id)=1""")
+  c.execute("CREATE TEMP VIEW notice_comparators AS SELECT s.notice_id,v.* FROM selected_notice_cohort s JOIN contract_value_cohorts v USING(cohort_id)")
  else:
   c.execute("CREATE TEMP VIEW notice_comparators AS SELECT NULL::VARCHAR notice_id,NULL::DOUBLE observed_min_usd,NULL::DOUBLE observed_median_usd,NULL::DOUBLE observed_max_usd,NULL::VARCHAR comparators_json,NULL::VARCHAR cohort_id,NULL::BIGINT awards,NULL::VARCHAR evidence_digest WHERE false")
  materialise('published_calls',"""SELECT sha256('sam|'||CASE WHEN nullif(nid(solicitation_id),'') IS NOT NULL THEN coalesce(nullif(aac_code,''),nullif(office,''),nullif(sub_tier,''),notice_id)||'|'||nid(solicitation_id) ELSE 'notice|'||notice_id END) episode_id,

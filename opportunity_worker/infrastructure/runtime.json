@@ -1,0 +1,11 @@
+{
+  "job_name": "mimir-opportunity-evidence-refresh",
+  "role": "arn:aws:iam::868631722720:role/MimirOpportunityEvidenceWorker",
+  "schedule": "cron(30 2 * * ? *)",
+  "log_group_prefix": "/aws-glue/python-jobs",
+  "GlueVersion": "5.0",
+  "WorkerType": "G.2X",
+  "NumberOfWorkers": 2,
+  "Timeout": 180,
+  "ExecutionClass": "STANDARD"
+}

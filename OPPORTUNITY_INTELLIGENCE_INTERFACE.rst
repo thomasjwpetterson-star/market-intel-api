@@ -57,7 +57,7 @@ Value: value_low/median/high, value_basis, value_scope and value_inputs_json; th
 
 Dashboard readiness and remaining work
 -------------------------------------
-Ready for a company feed: authenticated company search, current demand records, separate historical context, provenance drilldown, next actions, source-specific timing and value, pagination, and CSV of loaded records. The opportunity page supports browser-local saves scoped to the account; personal company-home state is owned by the parallel company-home integration. Cross-device watchlists, persisted notifications, change-event delivery and CRM integrations are not implemented by this integration. No CRM stages or dashboard UI are added.
+Ready for a company feed: authenticated company search, current demand records, separate historical context, provenance drilldown, next actions, source-specific timing and value, pagination, and CSV of loaded records. Opportunity-page saves now use the same authenticated owner-only review store as company home, with episode ID, company CAGE, release/hash and saved evidence. Existing notes, decisions and follow-up metadata are preserved on unsave; revision conflicts require explicit reload. Previous browser-only IDs are retained on the device and are not silently assigned to a CAGE. Notification delivery and CRM integrations are not implemented by this engine integration. No CRM stages or dashboard UI are added.
 
 The company_opportunity_events table records release-to-release source, value, timing, fit and resolution changes when present in the published manifest. Missing snapshots are not cancellations. This is not yet a complete per-user notification service or guaranteed forecast-to-notice/award reconciliation. A later consumer can add its own user->episode subscriptions and change-event outbox without migrating these core tables.
 
@@ -101,3 +101,7 @@ GET /companies/<CAGE>/relationships returns bounded parent/child edges from the 
 Source quality: item forecasts containing negative monthly quantities in the future horizon are withheld from actionable read feeds pending reconciliation. Published item purchase requests are separate and remain eligible. Source rows stay retained; no cancellation or negative sale value is inferred.
 
 Read consistency: authenticated requests pin one immutable release for table selection and response metadata. Evidence responses include release; consumers must restart pagination/drilldowns if it changes. This prevents a slow database read from returning prior-generation records labeled with a newly published release.
+
+Runtime capacity
+----------------
+The full-market worker uses the existing Glue job/role with Glue 5.0, two G.2X workers and the same declared source/read and opportunity/output permissions. A frozen wheel bundle includes native Linux CPython 3.11 dependencies. Logs retain the existing authorized /aws-glue/python-jobs prefix. Company matching uses narrow candidate keys, then supporting scope records; compute partitions do not truncate the company or opportunity population. The recurring trigger is restored only after successful end-to-end publication following a runtime change.

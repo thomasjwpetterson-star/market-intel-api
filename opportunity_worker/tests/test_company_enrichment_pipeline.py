@@ -2,9 +2,11 @@
 import datetime,json
 from pathlib import Path
 import duckdb
+import pytest
 from opportunity_engine.company_enrichment import augment
 
-def test_portable_pipeline_preserves_scope_provenance_and_prices_forecast(tmp_path):
+@pytest.mark.parametrize("forecast_type",["VARCHAR","DATE"])
+def test_portable_pipeline_preserves_scope_provenance_and_prices_forecast(tmp_path,forecast_type):
  c=duckdb.connect();tables={};sources={}
  def put(name,sql,source=False):
   p=tmp_path/(name+'.parquet');c.execute("COPY ("+sql+") TO '"+str(p)+"' (FORMAT PARQUET)")
@@ -17,7 +19,7 @@ def test_portable_pipeline_preserves_scope_provenance_and_prices_forecast(tmp_pa
  put('company_matches',"SELECT 'existing' match_id,'CAGE:45934' company_id,'forecast' episode_id,95.0::DOUBLE score,'exact-item' match_route,'012710711' matched_terms,'not an approval' company_evidence_caveat,'reference' sample_evidence_id,'match-hash' match_hash,'forecast-hash' opportunity_hash,'profile-hash' profile_hash")
  put('published_calls',"SELECT 'call' episode_id,'Sources Sought' notice_type")
  put('work',"SELECT 'work-id' doc_id,'CAGE:45934' company_id,'subaward_report' source_kind,'PUMP FUEL BOOST' work_text,NULL::VARCHAR psc,NULL::VARCHAR naics,'2026-06-01' last_observed,'source-report-id' sample_evidence_id,'source-digest' evidence_digest",source=True);sources['company_work']=sources.pop('work')
- put('dla_forecasts',"SELECT n.niin,4::BIGINT forecast_qty,cast(DATE '2026-11-01'+cast(i AS INTEGER)*INTERVAL 1 MONTH AS VARCHAR) forecast_month,'2026-09' source_release,'forecast.txt' source_file,'source-item' source_item_id FROM range(18) t(i) CROSS JOIN (VALUES ('012710711'),('012710712')) n(niin)")
+ put('dla_forecasts',"SELECT n.niin,4::BIGINT forecast_qty,cast(DATE '2026-11-01'+cast(i AS INTEGER)*INTERVAL 1 MONTH AS VARCHAR) forecast_month,'2026-09' source_release,'forecast.txt' source_file,'source-item' source_item_id FROM range(18) t(i) CROSS JOIN (VALUES ('012710711'),('012710712')) n(niin)".replace('AS VARCHAR) forecast_month','AS '+forecast_type+') forecast_month'))
  put('item_reference_facts',"SELECT '45934' cage_code,'012710711' niin,'EA' unit_of_issue,16265.48::DOUBLE govt_estimated_price,8569.59::DOUBLE supplier_average_price,'2024-02-20' last_sold_date,'reference-row-id' evidence_id,'217-21242' part_number,'INDICATOR,PRESSURE' description,'source-snapshot-hash' source_snapshot_sha256,5::BIGINT source_row UNION ALL SELECT '45934','012710712','EA',500.0,250.0,'2024-02-20','second-reference','second-part','SECOND ITEM','source-snapshot-hash',6 UNION ALL SELECT '45934','015312588','EA',400.0,200.0,'2025-02-20','pump-reference','pump-part','PUMP,FUEL BOOST','source-snapshot-hash',8",source=True)
  (tmp_path/'manifest.json').write_text(json.dumps({'tables':tables,'sources':sources,'as_of':'2026-10-30'}));c.close();augment(tmp_path);c=duckdb.connect()
  matches=c.execute('SELECT company_id,episode_id,sample_evidence_id FROM read_parquet(?)',[str(tmp_path/'company_work_matches.parquet')]).fetchall();assert matches==[('CAGE:45934','call','source-report-id')]

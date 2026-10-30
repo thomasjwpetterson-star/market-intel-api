@@ -5,8 +5,11 @@ This is the versioned source of the AWS worker serving the authenticated Mimir
 opportunity page and company home through /opportunity-intelligence. The HTTP
 adapter is ../opportunity_intelligence; worker-only dependencies are isolated.
 
-The existing Glue job mimir-opportunity-evidence-refresh runs daily at 14:30
-Pacific/Fiji. Source tables are read-only. All derived writes remain under the
+The existing Glue job mimir-opportunity-evidence-refresh is configured daily
+at 14:30 Pacific/Fiji. The full-market runtime uses Glue 5.0 with two G.2X
+workers; infrastructure/runtime.json records its configuration. Frozen Linux
+Python 3.11 wheels and their hashes are recorded in RELEASE.json. The trigger
+is paused during runtime changes and restored only after successful validation. Source tables are read-only. All derived writes remain under the
 existing governance/opportunity_intelligence prefix and versioned oi_* tables.
 A release becomes current only after local evidence/financial gates and Athena
 readback. Public publication permission is independent of authenticated access.

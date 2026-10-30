@@ -36,7 +36,7 @@ def main():
  sbir=m['sbir_source'];sbir['path']=download(sbir['source_s3_uri'],sbir['source_sha256'],'.csv')
  if args.refresh:
   prior_bindings=root/'prior_bindings.json';prior_bindings.write_text(json.dumps(m))
-  env=dict(os.environ,MIMIR_OPPORTUNITY_WORKDIR=str(root),MIMIR_OPPORTUNITY_PREVIOUS_MANIFEST=str(prior_bindings),PYTHONDONTWRITEBYTECODE='1')
+  env=dict(os.environ,MIMIR_OPPORTUNITY_WORKDIR=str(root),MIMIR_OPPORTUNITY_PREVIOUS_MANIFEST=str(prior_bindings),PYTHONDONTWRITEBYTECODE='1',PYTHONPATH=os.pathsep.join(str(p) for p in sys.path if p))
   for module in ('refresh_sbir','refresh_topics','refresh_shared_sources','refresh_commercial_sources','refresh_company_registry','refresh_company_history','refresh_innovation'):
    command=[sys.executable,'-m','opportunity_engine.ingestion.'+module]
    if module in ('refresh_shared_sources','refresh_company_history'):command+=['--as-of',args.as_of]
@@ -51,7 +51,7 @@ def main():
  # All bindings are consumed together; source as-of dates are never advanced.
  seed=root/'seed.json';seed.write_text('{}');inputs=root/'inputs.json';inputs.write_text(json.dumps({'sources':sources}));sb=root/'sbir.json';sb.write_text(json.dumps(sbir));out=root/'runs'/(datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6])
  if args.refresh:
-  pre=root/'runs'/(out.name+'_prelinks');build(seed,sb,pre,args.as_of,inputs,skip_matching=True)
+  pre=root/'runs'/(out.name+'_prelinks');build(seed,sb,pre,args.as_of,inputs,skip_matching=True,research_only=True)
   (root/'latest_build.json').write_text(json.dumps(dict(directory=str(pre))))
   subprocess.run([sys.executable,'-m','opportunity_engine.ingestion.connect_cloud_evidence'],env=env,check=True)
   ptr=json.loads((root/'inputs/connections_latest.json').read_text());sources.update(json.loads(Path(ptr['path']).read_text())['sources']);inputs.write_text(json.dumps({'sources':sources}))
