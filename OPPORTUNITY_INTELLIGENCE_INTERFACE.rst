@@ -327,3 +327,27 @@ selected-version ID in this test. This is why candidate quantities/prices must n
 enter opportunity totals unchecked. Reuse the existing extraction stack, but
 prioritise current-document coverage, physical-line deduplication, latest-version
 linkage and real CLIN/scope validation before broader promotion.
+
+Full-market recovery and bounded aggregation (0.5.41)
+----------------------------------------------------
+The native expansion completed all 52 matching partitions: 205,085,071 candidate
+comparisons produced 957,301 selected company/work links and 574,785 item links
+before final source-quality review. These are candidate relationships, not counts
+of accepted commercial opportunities. A late ordered forecast aggregation exceeded
+the driver's memory cap. The completed matching tables and source checksums were
+retained in an unpublished checkpoint rather than discarding the completed work.
+
+Version 0.5.41 partitions forecast and annual evidence aggregation by whole NIIN,
+preserving each item's complete ordered source history. A regression over
+2,021,446 future monthly rows and 106,140 items completed under a 1 GB DuckDB cap
+in 10.56 seconds, with no lost rows, divided item groups or duplicated quantities.
+The worker also accepts an explicit, owned complete-derivation checkpoint through
+the quality/validation path. It verifies the current published parent, required
+matching tables, immutable paths and content hashes, then reruns source-quality,
+valuation, relationship, change tracking and publication gates. Checkpoints are
+never themselves serving releases. Recovery arguments and fixed assessment dates
+must not be persisted in daily job defaults.
+
+At preparation, the recovery is still running; this note does not assert a new
+published release. The release verification report records the actual successful
+release, validation results, representative-company checks and schedule state.

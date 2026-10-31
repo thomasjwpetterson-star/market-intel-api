@@ -117,19 +117,25 @@ def augment(directory):
  FROM (SELECT *,dense_rank() OVER(PARTITION BY niin ORDER BY snapshot_date DESC) latest_rank FROM dla_reorder_points SEMI JOIN wanted_forecast_items USING(niin)) GROUP BY niin""")
  else:c.execute("CREATE TEMP TABLE reorder AS SELECT NULL::VARCHAR niin,NULL::VARCHAR reorder_date,NULL::DOUBLE reorder_point,NULL::DOUBLE reorder_stock,NULL::DOUBLE previous_reorder_gap,NULL::VARCHAR reorder_evidence_json WHERE false")
  # Preserve every monthly row. Conflicts, negatives and unknown units block totals.
- c.execute("""CREATE TEMP TABLE forecast AS SELECT o.episode_id,o.record_hash,o.niin,
+ # Ordered lists retain per-group state that cannot spill. Partition complete
+ # NIIN groups so the all-market rollup stays within the existing worker budget.
+ for partition in range(32):
+  prefix='CREATE TEMP TABLE forecast AS ' if partition==0 else 'INSERT INTO forecast '
+  c.execute(prefix+"""SELECT o.episode_id,o.record_hash,o.niin,
  min(d.forecast_month) first_month,max(d.forecast_month) last_month,count(*) month_count,count(DISTINCT d.forecast_month) distinct_months,
  sum(d.forecast_qty)::BIGINT quantity,count(*) FILTER(WHERE d.forecast_qty<0) negative_months,
  to_json(list(struct_pack(month:=d.forecast_month,quantity:=d.forecast_qty,source_release:=d.source_release,source_file:=d.source_file,source_item_id:=d.source_item_id) ORDER BY d.forecast_month)) monthly_evidence_json
- FROM forecast_keys o JOIN dla_forecasts d ON d.niin=o.niin AND substr(cast(d.forecast_month AS VARCHAR),1,10)>='"""+m['as_of']+"""'
- GROUP BY o.episode_id,o.record_hash,o.niin""")
+ FROM forecast_keys o JOIN dla_forecasts d ON d.niin=o.niin AND substr(cast(d.forecast_month AS VARCHAR),1,10)>='"""+m['as_of']+"' WHERE hash(o.niin)%32="+str(partition)+" GROUP BY o.episode_id,o.record_hash,o.niin")
+  print('Forecast context partition',partition+1,'/ 32',flush=True)
  c.execute("""CREATE TEMP TABLE years AS SELECT f.episode_id,f.record_hash,substr(d.forecast_month,1,4) calendar_year,sum(d.forecast_qty)::BIGINT quantity,
  round(sum(d.forecast_qty)*p.government_reference_unit_price,2) government_reference_scenario,
  round(sum(d.forecast_qty)*p.market_price_median,2) market_price_scenario
  FROM forecast f JOIN dla_forecasts d ON d.niin=f.niin AND d.forecast_month BETWEEN f.first_month AND f.last_month LEFT JOIN item_price_references p ON p.niin=f.niin AND p.unit=p.catalogue_unit
  WHERE f.negative_months=0 AND f.month_count=f.distinct_months AND p.unit='EA'
  GROUP BY f.episode_id,f.record_hash,substr(d.forecast_month,1,4),p.government_reference_unit_price,p.market_price_median""")
- c.execute("""CREATE TEMP TABLE year_json AS SELECT episode_id,record_hash,to_json(list(struct_pack(calendar_year:=calendar_year,quantity:=quantity,government_reference_scenario:=government_reference_scenario,market_price_scenario:=market_price_scenario) ORDER BY calendar_year)) annual_scenarios_json FROM years GROUP BY episode_id,record_hash""")
+ for partition in range(32):
+  prefix='CREATE TEMP TABLE year_json AS ' if partition==0 else 'INSERT INTO year_json '
+  c.execute(prefix+"SELECT episode_id,record_hash,to_json(list(struct_pack(calendar_year:=calendar_year,quantity:=quantity,government_reference_scenario:=government_reference_scenario,market_price_scenario:=market_price_scenario) ORDER BY calendar_year)) annual_scenarios_json FROM years WHERE hash(episode_id)%32="+str(partition)+" GROUP BY episode_id,record_hash")
  emit('item_demand_context',"""SELECT f.*,p.unit catalogue_unit,p.government_reference_unit_price,p.market_price_low,p.market_price_median,p.market_price_high,p.market_observations,p.market_sellers,p.first_price_date,p.latest_price_date,p.price_preview_json,p.sample_reference_evidence,p.source_snapshot_sha256,
  CASE WHEN f.negative_months=0 AND f.month_count=f.distinct_months AND p.unit='EA' THEN round(f.quantity*p.government_reference_unit_price,2) END government_reference_lot_scenario,
  CASE WHEN f.negative_months=0 AND f.month_count=f.distinct_months AND p.unit='EA' THEN round(f.quantity*p.market_price_median,2) END market_price_lot_scenario,

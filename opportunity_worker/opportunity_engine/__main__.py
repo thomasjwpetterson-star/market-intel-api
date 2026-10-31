@@ -10,18 +10,20 @@ from .registry import augment
 from .company_enrichment import augment as augment_companies
 from .company_history import rebuild as rebuild_history
 from .events import track as track_events
-from .checkpoint import archive_failed_attempt
+from .checkpoint import archive_failed_attempt,load_derived_checkpoint
 from .demand_history import rebuild as rebuild_demand,refresh_forecast_episodes
 from .quality import apply as apply_quality,review_current
 
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--from-current',action='store_true',required=True);ap.add_argument('--workdir',required=True);ap.add_argument('--as-of',default=datetime.datetime.now(datetime.timezone.utc).date().isoformat());ap.add_argument('--publish',action='store_true');ap.add_argument('--refresh',action='store_true');ap.add_argument('--review-current',action='store_true');ap.add_argument('--source-bindings-key');args=ap.parse_args();a=AWS();root=Path(args.workdir).resolve();root.mkdir(parents=True,exist_ok=True)
+ ap=argparse.ArgumentParser();ap.add_argument('--from-current',action='store_true',required=True);ap.add_argument('--workdir',required=True);ap.add_argument('--as-of',default=datetime.datetime.now(datetime.timezone.utc).date().isoformat());ap.add_argument('--publish',action='store_true');ap.add_argument('--refresh',action='store_true');ap.add_argument('--review-current',action='store_true');ap.add_argument('--source-bindings-key');ap.add_argument('--resume-derived-checkpoint-key');args=ap.parse_args();a=AWS();root=Path(args.workdir).resolve();root.mkdir(parents=True,exist_ok=True)
  pointer=json.loads(a.s3.get_object(Bucket=BUCKET,Key=PREFIX+'/current.json')['Body'].read());key=pointer['manifest_key']
  if not key.startswith(PREFIX+'/releases/'):raise ValueError('Invalid release pointer')
  m=json.loads(a.s3.get_object(Bucket=BUCKET,Key=key)['Body'].read())
+ if args.resume_derived_checkpoint_key and not args.review_current:raise ValueError('Derived checkpoint recovery requires the quality/validation path')
  if args.review_current:
   if args.refresh or args.source_bindings_key:raise ValueError('Quality review reuses the published source snapshot')
-  out=review_current(m,root,a)
+  review_source=load_derived_checkpoint(a,args.resume_derived_checkpoint_key,m) if args.resume_derived_checkpoint_key else m
+  out=review_current(review_source,root,a);validate_demand_integrity(out)
   from .catalogue_sales import augment as augment_catalogue_sales
   augment_catalogue_sales(out)
   from .item_sources import augment as augment_item_sources

@@ -5,7 +5,7 @@ import duckdb
 from .aws import BUCKET
 
 def track(directory,previous,aws):
-    r=Path(directory);m=json.loads((r/'manifest.json').read_text());prior=r/'previous';prior.mkdir(exist_ok=True);c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1200MB';SET preserve_insertion_order=false")
+    r=Path(directory);m=json.loads((r/'manifest.json').read_text());prior=r/'previous';prior.mkdir(exist_ok=True);c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='3GB';SET preserve_insertion_order=false")
     c.execute("SET temp_directory='"+str(r/'events_tmp').replace("'","''")+"'")
     for name in ('opportunities','demand_decisions','company_matches','published_calls'):
         c.read_parquet(m['tables'][name]['path']).create_view('current_'+name)

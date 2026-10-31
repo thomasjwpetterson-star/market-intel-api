@@ -3,6 +3,19 @@ import json,re
 from pathlib import Path
 from .aws import BUCKET,PREFIX
 
+def load_derived_checkpoint(aws,key,current):
+ """Resume owned, completed derivations; this never promotes a checkpoint."""
+ pattern=re.escape(PREFIX)+r'/operations/checkpoints/[A-Za-z0-9_]+/manifest\.json'
+ if not re.fullmatch(pattern,key):raise ValueError('Invalid derived checkpoint key')
+ m=json.loads(aws.s3.get_object(Bucket=BUCKET,Key=key)['Body'].read())
+ required={'opportunities','demand_decisions','published_calls','company_profiles','company_registry','company_scope_features','company_work_matches','company_item_matches','company_matches','dla_forecasts','dla_inventory'}
+ if m.get('checkpoint_phase')!='unpublished_completed_derivation' or m.get('checkpoint_parent_release')!=current['run_id'] or not required.issubset(m.get('tables',{})):raise ValueError('Checkpoint is not a complete matching derivation of the current release')
+ for name,t in m['tables'].items():
+  if t.get('remote_binding'):continue
+  uri=t.get('recovery_s3_uri') or t.get('s3_uri')
+  if not uri or not uri.startswith('s3://'+BUCKET+'/'+PREFIX+'/') or not re.fullmatch('[a-f0-9]{64}',t.get('sha256','')):raise ValueError('Invalid checkpoint table provenance: '+name)
+ m['resumed_checkpoint_key']=key;return m
+
 def archive_failed_attempt(directory,aws,parent_release):
  r=Path(directory);m=json.loads((r/'manifest.json').read_text())
  if not re.fullmatch('[a-zA-Z0-9_]+',m['run_id']):raise ValueError('Invalid checkpoint identity')

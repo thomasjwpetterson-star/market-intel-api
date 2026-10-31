@@ -107,9 +107,14 @@ def review_current(previous,root,aws):
  """Re-review immutable market-wide outputs without re-extracting native data."""
  import copy
  r=Path(root)/'runs'/(datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6]);r.mkdir(parents=True)
- m=copy.deepcopy(previous);m.update(run_id=r.name,reuse_parent_release=previous['run_id'],refresh_mode='quality_review_of_current_sources')
+ m=copy.deepcopy(previous);checkpoint=previous.get('checkpoint_phase')=='unpublished_completed_derivation'
+ m.update(run_id=r.name,refresh_mode='quality_review_of_current_sources')
+ if checkpoint:
+  m.pop('reuse_parent_release',None);m.pop('checkpoint_phase',None);m.pop('checkpoint_parent_release',None);m['resumed_derivation_run']=previous['run_id']
+ else:m['reuse_parent_release']=previous['run_id']
  for name,t in m['tables'].items():
-  t['reuse_parent_binding']=True
+  if checkpoint:t.pop('reuse_parent_binding',None)
+  else:t['reuse_parent_binding']=True
   if t.get('remote_binding'):
    # Cohort gates inspect every comparator summary locally; the 29m awards
    # and 16m raw observations remain immutable remote bindings.
@@ -118,27 +123,37 @@ def review_current(previous,root,aws):
      path=r/('cohort_source_'+str(index)+'.parquet');aws.s3.download_file(BUCKET,f['s3_uri'].split('/',3)[3],str(path));f['path']=str(path)
      if hashlib.sha256(path.read_bytes()).hexdigest()!=f['sha256']:raise ValueError('Value-cohort source checksum changed')
    continue
-  uri=t['s3_uri']+'part-00000.parquet'
-  if t.get('source_binding'):
-   uri=next(f['s3_uri'] for f in m['sources'][t['source_binding']]['files'] if f['sha256']==t['sha256'])
+  uri=t.get('recovery_s3_uri') if checkpoint else None
+  if not uri:
+   if t.get('source_binding'):uri=next(f['s3_uri'] for f in m['sources'][t['source_binding']]['files'] if f['sha256']==t['sha256'])
+   elif t.get('s3_uri'):uri=t['s3_uri']+'part-00000.parquet'
+  if not uri or not uri.startswith('s3://'+BUCKET+'/'+PREFIX+'/'):raise ValueError('Invalid immutable recovery table binding: '+name)
   path=r/(name+'.parquet');aws.s3.download_file(BUCKET,uri.split('/',3)[3],str(path));t['path']=str(path)
   if hashlib.sha256(path.read_bytes()).hexdigest()!=t['sha256']:raise ValueError('Published table content changed: '+name)
   print('Loaded immutable table',name,t['rows'],flush=True)
  # Only source evidence needed for the precision gates is fetched.
- for source_name in ('item_reference_facts','dla_solicitations','dla_reorder_points'):
+ needed=['item_reference_facts','dla_solicitations','dla_reorder_points','item_price_references','item_market_price_evidence']
+ if not m.get('source_tables'):needed.append('company_work')
+ for source_name in needed:
   s=m['sources'].get(source_name)
   if s:
    for f in s['files']:
     path=r/(source_name+'_'+f['sha256']+'.parquet');aws.s3.download_file(BUCKET,f['s3_uri'].split('/',3)[3],str(path));f['path']=str(path)
     if hashlib.sha256(path.read_bytes()).hexdigest()!=f['sha256']:raise ValueError('Source evidence checksum changed: '+source_name)
  (r/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')
- from .sam_approved import augment as augment_approved_notice_sources
- augment_approved_notice_sources(r)
- from .notice_prices import refresh as refresh_notice_prices
- refresh_notice_prices(r);apply(r)
- from .item_presence import hold as hold_item_presence
- hold_item_presence(r)
- from .item_requests import link as link_item_requests
- from .item_demand import augment as augment_item_demand
- if all(n in m['sources'] for n in ('item_price_references','item_market_price_evidence')):augment_item_demand(r)
- link_item_requests(r);return r
+ try:
+  from .sam_approved import augment as augment_approved_notice_sources
+  augment_approved_notice_sources(r)
+  from .notice_prices import refresh as refresh_notice_prices
+  refresh_notice_prices(r);apply(r)
+  from .item_presence import hold as hold_item_presence
+  hold_item_presence(r)
+  from .item_requests import link as link_item_requests
+  from .item_demand import augment as augment_item_demand
+  if all(n in m['sources'] for n in ('item_price_references','item_market_price_evidence')):augment_item_demand(r)
+  link_item_requests(r);return r
+ except Exception:
+  from .checkpoint import archive_failed_attempt
+  try:archive_failed_attempt(r,aws,previous.get('checkpoint_parent_release',previous['run_id']))
+  except Exception as error:print('Could not preserve reviewed checkpoint:',str(error),flush=True)
+  raise
