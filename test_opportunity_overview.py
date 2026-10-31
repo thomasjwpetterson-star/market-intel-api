@@ -33,4 +33,19 @@ class OverviewTests(unittest.TestCase):
   self.assertEqual(result['overall']['priced_requirement_count'],2)
   self.assertEqual(len(result['overall']['value_components'][0]['related_requirements']),2)
 
+class ForecastOverviewTests(unittest.TestCase):
+ def test_forecast_is_dated_and_separate_from_published_demand(self):
+  row=dict(episode_id='forecast',record_hash='version',title='Matrix',customer_name='DLA',item_demand='true',item_reference_niin='012031861',commercial_value_kind='forecast_scenario',commercial_value='8043027.12',valuation_status='catalogue_EA_assumed_forecast_unit_not_stated',market_price_median='223417.42',window_start='2026-11-01',window_end='2029-10-01',annual_scenarios_json='[{"calendar_year":"2027","market_price_scenario":2681009.04,"government_reference_scenario":5749380}]')
+  result=summary({'items_count':461},[row],'release')
+  self.assertIsNone(result['overall']['priced_demand_total'])
+  self.assertEqual(result['forecast']['estimated_demand_total'],8043027.12)
+  self.assertEqual(result['forecast']['annual_values'][0]['estimated_demand'],2681009.04)
+  row['valuation_status']='forecast_unit_conversion_unverified'
+  self.assertIsNone(summary({},[row],'release')['forecast']['estimated_demand_total'])
+ def test_separate_purchase_requests_for_same_item_are_not_collapsed(self):
+  rows=[OverviewTests().row('one',100,value_inputs_json='{"purchase_request_number":"1"}'),OverviewTests().row('two',200,value_inputs_json='{"purchase_request_number":"2"}')]
+  result=summary({},rows,'release')
+  self.assertEqual(result['overall']['priced_demand_total'],300)
+  self.assertEqual(result['overall']['priced_requirement_count'],2)
+
 if __name__=='__main__':unittest.main()

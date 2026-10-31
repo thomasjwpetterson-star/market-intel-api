@@ -2,7 +2,7 @@
 import json,re
 from decimal import Decimal,InvalidOperation
 
-POLICY='priced-demand-and-materiality-v2'
+POLICY='priced-demand-and-materiality-v3'
 PRICED_KINDS=('item_reference_estimate','historical_unit_price_estimate')
 
 def summary(counts,priced,release):
@@ -24,7 +24,8 @@ def summary(counts,priced,release):
   # Overlapping notice families are already collapsed by the shared feed query.
   # Repeated same-buyer/item requirements contribute only the largest scenario.
   # Unresolved buyer identities stay separate rather than grouping unknowns.
-  key=(category,buyer,niin) if len(niin)==9 and buyer else (category,row['episode_id'])
+  request=inputs.get('purchase_request_number') if isinstance(inputs,dict) else None
+  key=(category,'purchase_request',buyer,str(request),niin) if request and len(niin)==9 and buyer else (category,buyer,niin) if len(niin)==9 and buyer else (category,row['episode_id'])
   result[category]['priced_source_count']+=1
   current=groups.get(key)
   member={k:row.get(k) for k in ('episode_id','record_hash','title','customer_name','source_url','source_evidence_id','commercial_value','commercial_value_kind','notice_item_pricing_json','value_inputs_json','item_reference_niin')}
@@ -42,7 +43,8 @@ def summary(counts,priced,release):
  for category in result.values():
   for component in category['value_components']:
    buyer=re.sub('[^A-Z0-9]','',str(component.get('customer_name') or '').upper());niin=component.get('niin')
-   key=('item',buyer,niin) if buyer and niin else ('episode',component['episode_id'])
+   raw=decode(component.get('value_inputs_json'));request=raw.get('purchase_request_number') if isinstance(raw,dict) else None
+   key=('purchase_request',buyer,str(request),niin) if request and buyer and niin else ('item',buyer,niin) if buyer and niin else ('episode',component['episode_id'])
    previous=combined.get(key)
    if previous is None:combined[key]={**component,'related_requirements':list(component['related_requirements'])}
    else:
@@ -52,4 +54,28 @@ def summary(counts,priced,release):
  components=sorted(combined.values(),key=lambda x:(-x['included_value'],x['episode_id']))
  overall=dict(count=sum(x['count'] for x in result.values()),priced_source_count=sum(x['priced_source_count'] for x in result.values()),priced_requirement_count=len(components),priced_demand_total=float(sum(Decimal(str(x['included_value'])) for x in components)) if components else None,value_components=components)
  scale=float(counts.get('observed_prime_net_obligations') or 0)
- return dict(release=release,policy=POLICY,categories=result,overall=overall,materiality_floor=1000000 if scale>=100000000 else 0,materiality_basis='Default $1m focus for sites with at least $100m lifetime observed prime obligations; editable, not annual revenue or a capability limit.',value_explanation='The headline combines priced contract and item requirements across the complete company feed. It uses stated quantities and exact-item reference or historical unit prices. Repeated requirements for the same buyer and item contribute their largest scenario once, including overlaps between contract and item feeds. Historical contract comparisons, programme totals and forecasts are excluded. Government reference dates may be unknown; prices are not current quotes. Unpriced opportunities are not assumed to be worth zero. These are demand estimates, not expected company revenue.')
+ return dict(release=release,policy=POLICY,forecast=forecast_summary(priced),categories=result,overall=overall,materiality_floor=1000000 if scale>=100000000 else 0,materiality_basis='Default $1m focus for sites with at least $100m lifetime observed prime obligations; editable, not annual revenue or a capability limit.',value_explanation='The headline combines priced contract and item requirements across the complete company feed. It uses stated quantities and exact-item reference or historical unit prices. Repeated requirements for the same buyer and item contribute their largest scenario once, including overlaps between contract and item feeds. Historical contract comparisons, programme totals and forecasts are excluded. Government reference dates may be unknown; prices are not current quotes. Unpriced opportunities are not assumed to be worth zero. These are demand estimates, not expected company revenue.')
+
+
+def forecast_summary(rows):
+ """Forecast scenarios stay separate from published requirements and revenue."""
+ by_item={}
+ for row in rows:
+  if row.get('commercial_value_kind')!='forecast_scenario' or row.get('valuation_status')!='catalogue_EA_assumed_forecast_unit_not_stated':continue
+  try:amount=Decimal(str(row['commercial_value']))
+  except (InvalidOperation,TypeError,ValueError):continue
+  if not amount.is_finite() or amount<=0:continue
+  niin=str(row.get('item_reference_niin') or row['episode_id'])
+  previous=by_item.get(niin)
+  if previous is None or amount>previous[0]:by_item[niin]=(amount,row)
+ years={};components=[]
+ for niin,(amount,row) in by_item.items():
+  try:annual=json.loads(row.get('annual_scenarios_json') or '[]')
+  except (TypeError,ValueError):annual=[]
+  for year in annual:
+   value=year.get('market_price_scenario') if year.get('market_price_scenario') is not None else year.get('government_reference_scenario')
+   if value is None:continue
+   key=str(year['calendar_year']);years[key]=years.get(key,Decimal(0))+Decimal(str(value))
+  components.append({**row,'included_value':float(amount),'niin':niin,'aggregation':'One item forecast across its full stated future period; not added to published requests'})
+ components.sort(key=lambda x:(-x['included_value'],x['episode_id']))
+ return dict(estimated_demand_total=float(sum((v[0] for v in by_item.values()),Decimal(0))) if by_item else None,priced_items=len(by_item),dated_market_price_items=sum(bool(r.get('market_price_median')) for _,r in by_item.values()),first_month=min((str(r.get('window_start')) for _,r in by_item.values() if r.get('window_start')),default=None),last_month=max((str(r.get('window_end')) for _,r in by_item.values() if r.get('window_end')),default=None),annual_values=[dict(calendar_year=y,estimated_demand=float(v)) for y,v in sorted(years.items())],value_components=components,interpretation='DLA forecast quantities priced using recent observed same-item/unit medians, otherwise government references. Catalogue EA is assumed because the forecast source omits units; non-EA conversions and conflicts are excluded. Forecasts can change and may overlap published requirements. These figures are separate from published demand and expected company revenue. Stock and reorder snapshots are context, not a deduction from the source forecast.')
