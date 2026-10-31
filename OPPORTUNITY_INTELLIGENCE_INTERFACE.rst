@@ -379,6 +379,20 @@ snapshot to manufacture a net procurement value. The public planning distinction
 is documented in AFMCI 23-105, chapter 3:
 https://static.e-publishing.af.mil/production/1/afmc/publication/afmci23-105/afmci23-105.pdf
 
+Scope precision follow-up (0.5.44 / scope-and-source-v6)
+------------------------------------------------------
+A full recheck of all 957,301 selected work relationships identified 1,327
+previously accepted and 354 review-only relationships whose selected evidence
+does not establish the named technical scope. General facility-name patterns and
+administrative purchase-order/code-only descriptions no longer count as capability
+evidence. The correction uses no company-specific or hand-written site aliases.
+Specific voice/data services, turboprop-engine supply and identified product/manual
+licensing remain usable scope; a shared site name or a PO number does not.
+The named raw historical relationships remain available for inspection. A
+successful source-backed supplier history is still separate from proof that a
+future package is unplaced. These precision corrections do not increase or pad
+monetary opportunity values.
+
 At preparation, the recovery is still running; this note does not assert a new
 published release. The release verification report records the actual successful
 release, validation results, representative-company checks and schedule state.

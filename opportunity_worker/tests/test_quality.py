@@ -15,6 +15,15 @@ def test_rejects_actual_false_positive_history_but_retains_specific_work():
  assert q.fit_review('C130 mounting base','Potential supplier package: Mounting base','Current funded scope: C130 mounting base','new_prime_historical_supplier_flow','reported_supplier_relationship','supplier_flow','45934')[0]=='accepted'
 
 
+def test_facility_names_and_administrative_order_references_do_not_establish_work_scope():
+ assert q.fit_review('EQUIPMENT AT REDSTONE ARSENAL','Local Voice and Data Circuits for the Redstone Arsenal, AL.','Voice and data circuit services','published_procurement','source_specific_route','sam_notices','OTHER')[0]=='rejected'
+ assert q.fit_review('VOICE AND DATA CIRCUIT SERVICES AT REDSTONE ARSENAL','Local Voice and Data Circuits for the Redstone Arsenal, AL.','Voice and data circuit services','published_procurement','source_specific_route','sam_notices','OTHER')[0]=='accepted'
+ assert q.administrative_scope('13HWPT0015 - CONTRACTOR PO 13HWPT0015 - CRITICAL')
+ assert q.fit_review('13HWPT0015 - CONTRACTOR PO 13HWPT0015 - CRITICAL','Potential supplier package: 13HWPT0015 - CONTRACTOR PO 13HWPT0015 - CRITICAL','Reported supplier relationship','new_prime_historical_supplier_flow','reported_supplier_relationship','supplier_flow','OTHER')[0]=='rejected'
+ assert not q.administrative_scope('PTMS CMM LICENSE FEE')
+ assert not q.administrative_scope('5.000 ENGINE,TURBOPROP,900SHP,UNCERT 3 BOX')
+
+
 def test_notice_coherence_and_body_deadline_do_not_inherit_fresh_posted_date():
  body='NSN: 7HH 5990 017271903 NOM: CIRCUIT CARD ASSEMB P/N: 802-05-0309-02/EB4143-H-02 Approved Design Cage Code: Lockheed Martin Corporation (CAGE 12050). Non-OEM sources must provide traceability information tracing material back to the OEM. Return the completed market survey via email by 2:00 PM EST on 18 August 2025.'
  v=q.notice_quality('59 - ENCODER,SHAFT ANGLE',body,None,'2026-10-30','sam_notices')

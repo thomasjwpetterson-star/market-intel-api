@@ -4,20 +4,25 @@ from pathlib import Path
 from .company_enrichment import STOP,words
 from .delivery_modes import required_mode,mode_fit
 
-VERSION='scope-and-source-v5'
-NOISE=set('form fit function consideration extension extensions extend extended modification modifications modify reduce reduced reduction increase increased decrease funding funded obligation deobligation cost costs reimbursable reimbursement supplies procurement purchase purchased purchasing payment total ceiling administrative contractual west east north south coast seaport nxg'.split())
+VERSION='scope-and-source-v6'
+NOISE=set('form fit function consideration extension extensions extend extended modification modifications modify reduce reduced reduction increase increased decrease funding funded obligation deobligation cost costs reimbursable reimbursement supplies procurement purchase purchased purchasing payment total ceiling administrative contractual west east north south coast seaport nxg arsenal garrison afb'.split())
 GENERAL=set('custom computer computers programming software upgrade upgrades updated update maintenance services emerging threat threats strategic trends initiative requirements requirement support general education training research development engineering technical management professional consulting analysis logistics'.split())
+ADMIN=set('critical contractor contractors contract contracts order orders po clin clins line lines item items number numbers reference references fee fees payment payments quantity quantities award awards option options'.split())
+# A facility name can help identify the customer/site, but cannot establish
+# technical capability. Do not maintain hand-written company/location aliases.
+_FACILITY_LOCATION=re.compile(r"\b[A-Za-z][A-Za-z'-]{1,30}\s+(?:Arsenal|AFB|Air Force Base)\b|\bFort\s+[A-Za-z][A-Za-z'-]{1,30}\b",re.I)
 _STATES='Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming|District of Columbia|AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC'
 _STATE_NAMES,_STATE_CODES=_STATES.split('|AL|',1)
 _POSTAL_SCOPE=re.compile(r"^[a-z][a-z .'-]{0,55},\s*(?:(?:"+_STATE_NAMES+r")(?:[ .,]*\d{5}(?:-\d{4})?)?|(?:AL|"+_STATE_CODES+r")[ ,]+\d{5}(?:-\d{4})?)[ .]*(?:USA|US|United States)?[ .]*$",re.I)
 LOGIC_HASH=hashlib.sha256(Path(__file__).read_bytes()+(Path(__file__).parent/'scope_stopwords.json').read_bytes()+(Path(__file__).parent/'delivery_modes.py').read_bytes()).hexdigest()
 
 def plain(value):return re.sub(r'\s+',' ',re.sub('<[^>]+>',' ',html.unescape(str(value or '')))).strip()
-def terms(value):return set(w for w in words(value) if len(w)>=3 and w not in STOP and w not in NOISE)
+def terms(value):return set(w for w in words(_FACILITY_LOCATION.sub(' ',plain(value))) if len(w)>=3 and w not in STOP and w not in NOISE)
 def administrative_scope(value):
  if _POSTAL_SCOPE.fullmatch(plain(value)):return True
  t=terms(value)
- return not t or t<=GENERAL
+ semantic={w for w in t if not any(ch.isdigit() for ch in w)}
+ return not t or t<=GENERAL or not semantic or semantic<=(GENERAL|ADMIN)
 def title_score(work,title):return len((terms(work)-GENERAL)&terms(re.split(r'(?i)_End_Item_|\bNSN\b',str(title or ''))[0]))
 
 _MONTH=r'(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)'
