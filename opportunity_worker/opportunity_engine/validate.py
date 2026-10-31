@@ -113,6 +113,10 @@ def validate(directory):
  if 'opportunity_quality_reviews' in m['tables']:
   check('source_conflicts_not_actionable',c.execute("SELECT count(*) FROM opportunity_quality_reviews q JOIN demand_decisions d USING(episode_id) WHERE q.verdict='source_review_required' AND d.stage NOT IN ('evidence_gap','resolved_or_elapsed')").fetchone()[0]==0)
   check('source_review_has_quotes',c.execute("SELECT count(*) FROM opportunity_quality_reviews WHERE verdict='source_review_required' AND (nullif(reason,'') IS NULL OR json_array_length(passages_json)=0)").fetchone()[0]==0)
+ if 'opportunity_quality_reviews' in m['tables'] and 'company_match_assessments' in m['tables']:
+  qc={n for n,*_ in c.execute('DESCRIBE opportunity_quality_reviews').fetchall()}
+  if 'scope_has_item_identifier' in qc:
+   check('generic_hardware_family_not_a_qualified_item_route',c.execute("SELECT count(*) FROM company_match_assessments a JOIN opportunities o USING(episode_id) JOIN opportunity_quality_reviews q USING(episode_id) WHERE a.verdict='accepted' AND o.source_name='sam_notices' AND a.required_delivery_mode='component_supply' AND NOT q.scope_has_item_identifier AND NOT q.qualification_invitation AND NOT contains(from_json(q.source_cages_json,'[\"VARCHAR\"]'),substr(a.company_id,6))").fetchone()[0]==0)
  if 'company_notice_source_evidence' in m['tables']:
   check('source_access_not_from_ambiguous_reference_codes',c.execute("SELECT count(*) FROM company_notice_source_evidence WHERE trim(upper(rnsc_codes))<>'A' OR trim(rnvc_codes)<>'2' OR NOT regexp_full_match(trim(rncc_codes),'[35 ,;|/]+')").fetchone()[0]==0)
  if 'item_demand_context' in m['tables']:

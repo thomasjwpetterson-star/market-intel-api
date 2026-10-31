@@ -38,6 +38,7 @@ def apply(directory):
    mode,mode_basis=required_mode(title,body,psc,source in ('sam_notices','agency_acquisition_forecasts'))
    plan_method=json.loads(inputs or '{}').get('source_forecast_row',{}).get('procurement_method','') if source=='agency_acquisition_forecasts' else ''
    v['planned_procurement_method']=plan_method
+   v['scope_has_item_identifier']=bool(nsns((title or '')+' '+(body or '')) or q.required_parts(title,body))
    v.update(required_delivery_mode=mode,delivery_mode_basis=mode_basis,requirement_psc=psc,psc_reference_url=PSC_REFERENCE)
    v.update(episode_id=eid,record_hash=rh,source_evidence_id=evidence,source_url=url,nomenclature=q.nomenclature(body),restricted_item=q.restricted_item(body),qualification_invitation=q.explicit_qualification(body),source_cages_json=json.dumps(sorted(q.listed_sources(body))),required_parts_json=json.dumps(sorted(q.required_parts(title,body))),policy_hash=POLICY_HASH)
    f.write(json.dumps(v)+'\n')
@@ -79,8 +80,10 @@ def apply(directory):
    to_json(list(DISTINCT struct_pack(psc:=f.psc,naics:=f.naics))) work_classification_evidence_json
    FROM scope_features f SEMI JOIN prior_company_work_matches w ON w.company_id=f.company_id AND w.doc_id=f.doc_id GROUP BY f.company_id,f.doc_id""")
  else:c.execute("CREATE TEMP TABLE selected_doc_codings AS SELECT NULL::VARCHAR company_id,NULL::VARCHAR doc_id,NULL::VARCHAR observed_work_psc,NULL::VARCHAR work_classification_evidence_json WHERE false")
- def fit(work,title,named,entry,source,cage,restricted,invitation,cages,authority,delivery,work_psc,plan_method):
+ def fit(work,title,named,entry,source,cage,restricted,invitation,cages,authority,delivery,work_psc,plan_method,item_identified):
   verdict,reason=q.fit_fields(work,title,named,entry,source,cage,restricted,invitation,json.loads(cages),authority,delivery,work_psc)
+  if verdict=='accepted' and q.needs_item_scope_review(source,delivery,item_identified,invitation,cage in json.loads(cages)):
+   verdict,reason='review','The held notice does not identify the requested NSN or part, or a named source route for this site. Comparable hardware descriptions do not establish item configuration, manufacturing rights or qualification; review the complete solicitation and attachments first.'
   if source=='agency_acquisition_forecasts':
    if entry=='documented_incumbent_contract':verdict,reason='accepted','The agency names this exact prior contract, which resolves to one CAGE. This is a documented incumbent-retention route; current scope, acquisition eligibility and capacity remain checks.'
    elif __import__('re').search(r'sole[ -]?source|set[ -]?aside|8\(a\)|seaport',plan_method or '',__import__('re').I):verdict,reason='review','The plan states a sole-source, restricted competition or vehicle route. A comparable capability does not establish access or eligibility for this site.'
@@ -88,11 +91,11 @@ def apply(directory):
   _,observed,mode_reason=mode_fit(work,delivery,work_psc)
   target=q.terms(__import__('re').split(r'(?i)_End_Item_|\bNSN\b',title or '')[0])|q.terms(named)
   return json.dumps(dict(verdict=verdict,reason=reason,observed_delivery_mode=observed,mode_reason=mode_reason,shared_scope_terms=sorted(q.terms(work)&target)))
- c.create_function('assess_fit',fit,['VARCHAR']*6+['BOOLEAN','BOOLEAN','VARCHAR','BOOLEAN','VARCHAR','VARCHAR','VARCHAR'],'VARCHAR',null_handling='special')
+ c.create_function('assess_fit',fit,['VARCHAR']*6+['BOOLEAN','BOOLEAN','VARCHAR','BOOLEAN','VARCHAR','VARCHAR','VARCHAR','BOOLEAN'],'VARCHAR',null_handling='special')
  old_mode_columns=cols&set('required_delivery_mode delivery_mode_basis observed_work_psc observed_delivery_mode work_classification_evidence_json mode_reason shared_scope_terms_json'.split())
  cw_selection='cw.*'+(' EXCLUDE('+','.join(sorted(old_mode_columns))+')' if old_mode_columns else '')
  c.execute("""CREATE TEMP TABLE assessed AS SELECT """+cw_selection+""",q.verdict source_verdict,q.required_delivery_mode,q.delivery_mode_basis,f.observed_work_psc,f.work_classification_evidence_json,
- assess_fit(cw.work_text,o.title,q.nomenclature,cw.company_entry_status,o.source_name,substr(cw.company_id,6),q.restricted_item,q.qualification_invitation,q.source_cages_json,coalesce(a.authorized,false),q.required_delivery_mode,f.observed_work_psc,q.planned_procurement_method) fit_json
+ assess_fit(cw.work_text,o.title,q.nomenclature,cw.company_entry_status,o.source_name,substr(cw.company_id,6),q.restricted_item,q.qualification_invitation,q.source_cages_json,coalesce(a.authorized,false),q.required_delivery_mode,f.observed_work_psc,q.planned_procurement_method,q.scope_has_item_identifier) fit_json
  FROM prior_company_work_matches cw JOIN prior_opportunities o USING(episode_id) JOIN source_quality q USING(episode_id)
  LEFT JOIN selected_doc_codings f ON f.company_id=cw.company_id AND f.doc_id=cw.doc_id
  LEFT JOIN (SELECT DISTINCT company_id,episode_id,true authorized FROM quality_company_notice_source_evidence) a ON a.company_id=cw.company_id AND a.episode_id=cw.episode_id""")

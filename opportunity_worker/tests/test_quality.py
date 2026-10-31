@@ -119,3 +119,14 @@ def test_single_exact_item_qualification_remains_item_demand_without_losing_rout
  assert v['source_entry_kind']=='new_source_qualification'
  v=q.notice_quality('Avionics integration and flight test','Integration includes multiple aircraft systems.','2027-01-01','2026-10-31','sam_notices')
  assert v['category_override'] is None
+
+
+def test_generic_hardware_waiver_needs_item_scope_but_exact_identifiers_and_source_openings_are_distinct():
+ from opportunity_engine.company_enrichment import nsns
+ title='GENERATOR, ALTERNATI';body='Synopsis is hereby waived as this acquisition is not expected to exceed the simplified acquisition threshold.'
+ identified=bool(nsns(title+' '+body) or q.required_parts(title,body))
+ assert not identified and q.needs_item_scope_review('sam_notices','component_supply',identified,False,False)
+ assert not q.needs_item_scope_review('sam_notices','component_supply',True,False,False)
+ assert not q.needs_item_scope_review('sam_notices','component_supply',False,True,False)
+ assert not q.needs_item_scope_review('sam_notices','component_supply',False,False,True)
+ assert not q.needs_item_scope_review('sam_notices','research_development',False,False,False)

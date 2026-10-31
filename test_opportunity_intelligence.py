@@ -72,7 +72,7 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn('np.record_hash=o.record_hash', aws.sql)
         self.assertIn('not a win probability or company revenue', aws.sql)
         self.assertIn('CASE WHEN q.commercial_value>=1000000 THEN 0 ELSE 1 END',aws.sql)
-        self.assertLess(aws.sql.index('$[0].government_reference_lot_scenario'),aws.sql.index(',o.value_median'))
+        self.assertLess(aws.sql.index('$[0].government_reference_lot_scenario'),aws.sql.index('THEN o.value_median'))
 
     def test_size_filter_is_applied_to_the_complete_feed_before_pagination(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name;repo.manifest=lambda:{'as_of':'2026-10-31','tables':{}}
