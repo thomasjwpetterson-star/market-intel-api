@@ -73,3 +73,12 @@ class ReportingLagBenchmarkTests(unittest.TestCase):
   from opportunity_intelligence.overview import coverage_summary
   business=dict(annual_net_obligations=26000000,annual_dod_net_obligations=26000000,lag_adjusted_annual_net_obligations=35000000,lag_adjusted_annual_dod_net_obligations=35000000,lag_adjusted_period_start='2025-08-01',lag_adjusted_period_end='2026-07-31')
   r=coverage_summary(business,{},{});self.assertEqual(r['coverage_benchmark'],105000000);self.assertEqual(r['annual_net_obligations'],26000000);self.assertEqual(r['benchmark_period_end'],'2026-07-31');self.assertEqual(r['benchmark_basis'],'reporting_lag_adjusted_observed_year')
+
+class UnitPriceApplicationTests(unittest.TestCase):
+ def test_purchase_prices_cannot_value_repairs_or_exceed_an_explicit_cap(self):
+  from opportunity_intelligence.notice_facts import price_scenario_fact
+  import json
+  row=dict(title='Generator',notice_quantity=3,notice_quantity_nsn='6115012704801',notice_quantity_unit='EA',notice_item_pricing_json=json.dumps([dict(nsn='6115012704801',catalogue_unit='EA',government_reference_unit_price=100)]))
+  self.assertTrue(price_scenario_fact(row))
+  self.assertEqual(price_scenario_fact(dict(row,title='Repair generator')), {})
+  self.assertEqual(price_scenario_fact(dict(row,notice_aggregate_ceiling_usd=250)), {})

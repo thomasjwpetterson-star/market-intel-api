@@ -132,6 +132,8 @@ def review_current(previous,root,aws):
     path=r/(source_name+'_'+f['sha256']+'.parquet');aws.s3.download_file(BUCKET,f['s3_uri'].split('/',3)[3],str(path));f['path']=str(path)
     if hashlib.sha256(path.read_bytes()).hexdigest()!=f['sha256']:raise ValueError('Source evidence checksum changed: '+source_name)
  (r/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')
+ from .sam_approved import augment as augment_approved_notice_sources
+ augment_approved_notice_sources(r)
  from .notice_prices import refresh as refresh_notice_prices
  refresh_notice_prices(r);apply(r)
  from .item_presence import hold as hold_item_presence

@@ -31,3 +31,22 @@ def test_global_notice_prices_preserve_supplier_provenance_and_suppress_ambiguou
  assert any(row['reference_cage']=='62983' for row in item['catalogue_evidence'])
  assert 'qualification' in row[4] and 'current quotes' in row[4]
  c.close()
+
+@pytest.mark.parametrize('title,psc,body,total',[
+ ('Repair generator','J061','NSN 6115012704801 Quantity Required: 3 EA',None),
+ ('Generator','J061','NSN 6115012704801 Quantity Required: 3 EA',None),
+ ('Generator','6115','Proposed procurement for NSN 6115012704801 Generator: Line 0001 Qty 3 UI EA. Aggregate total of orders reach 250.00.',None),
+ ('Generator','6115','Proposed procurement for NSN 6115012704801 Generator: Line 0001 Qty 3 UI EA.',300),
+])
+def test_new_item_prices_do_not_value_repairs_or_exceed_a_stated_ceiling(title,psc,body,total):
+ c=duckdb.connect();c.create_function('scope_nsns',nsns,['VARCHAR'],duckdb.list_type('VARCHAR'))
+ c.execute('CREATE TEMP TABLE base_opportunities AS SELECT ?::VARCHAR episode_id,?::VARCHAR record_hash,?::VARCHAR lane,?::VARCHAR title,?::VARCHAR psc,?::VARCHAR scope_text',['op','hash','published_procurement',title,psc,body])
+ c.execute("CREATE TEMP TABLE base_demand_decisions AS SELECT 'op' episode_id,'published_requirement' stage")
+ c.execute("CREATE TEMP TABLE matches AS SELECT 'CAGE:45934' company_id,'op' episode_id,'hash' opportunity_hash")
+ c.execute("CREATE TEMP TABLE item_reference_facts AS SELECT '45934' cage_code,'012704801' niin,'EA' unit_of_issue,100.0::DOUBLE govt_estimated_price,NULL::DOUBLE supplier_average_price,NULL::VARCHAR last_sold_date,'source' evidence_id,'part' part_number,'Generator' description,'snapshot' source_snapshot_sha256,1::BIGINT source_row")
+ out={}
+ def output(name,sql):out[name]=c.execute(sql).fetchall()
+ build(c,output,'2026-10-31','matches');item=json.loads(out['company_notice_item_prices'][0][3])[0]
+ assert item['government_reference_unit_price']==100
+ assert item['government_reference_lot_scenario']==total
+ c.close()

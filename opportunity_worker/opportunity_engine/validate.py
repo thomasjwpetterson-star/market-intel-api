@@ -121,6 +121,9 @@ def validate(directory):
   check('item_market_prices_dated_not_future',c.execute("SELECT count(*) FROM item_market_price_evidence WHERE transaction_date>"+"'"+m['as_of']+"' OR nullif(transaction_date,'') IS NULL").fetchone()[0]==0)
   check('item_market_physical_lines_unique',c.execute("SELECT count(*)-count(DISTINCT coalesce(nullif(source_record_id,''),pricing_record_id)) FROM item_market_price_evidence").fetchone()[0]==0)
   check('item_price_key_unique',c.execute('SELECT count(*)-count(DISTINCT (niin,unit)) FROM item_price_references').fetchone()[0]==0)
+ if 'company_approved_notice_sources' in m['tables']:
+  check('agency_approval_exact_part_reference',c.execute("SELECT count(*) FROM company_approved_notice_sources WHERE part_key<>regexp_replace(upper(reference_part_number),'[^A-Z0-9]','','g') OR NOT regexp_full_match(niin,'[0-9]{9}') OR nullif(approval_quote,'') IS NULL").fetchone()[0]==0)
+  check('agency_approval_current_source_versions',c.execute('SELECT count(*) FROM company_approved_notice_sources x LEFT JOIN opportunities o ON o.episode_id=x.episode_id LEFT JOIN opportunities n ON n.episode_id=x.agency_notice_episode_id WHERE x.record_hash IS DISTINCT FROM o.record_hash OR x.agency_notice_record_hash IS DISTINCT FROM n.record_hash').fetchone()[0]==0)
  if 'company_item_reference_evidence' in m['tables']:
   check('company_item_sources_are_selected_cage',c.execute("SELECT count(*) FROM company_item_reference_evidence WHERE cage_code<>substr(company_id,6)").fetchone()[0]==0)
   check('company_item_source_summaries_unique',c.execute('SELECT count(*)-count(DISTINCT (company_id,episode_id)) FROM company_item_reference_summaries').fetchone()[0]==0)

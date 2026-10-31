@@ -4,7 +4,7 @@ from pathlib import Path
 from .company_enrichment import STOP,words
 from .delivery_modes import required_mode,mode_fit
 
-VERSION='scope-and-source-v4'
+VERSION='scope-and-source-v5'
 NOISE=set('form fit function consideration extension extensions extend extended modification modifications modify reduce reduced reduction increase increased decrease funding funded obligation deobligation cost costs reimbursable reimbursement supplies procurement purchase purchased purchasing payment total ceiling administrative contractual west east north south coast seaport nxg'.split())
 GENERAL=set('custom computer computers programming software upgrade upgrades updated update maintenance services emerging threat threats strategic trends initiative requirements requirement support general education training research development engineering technical management professional consulting analysis logistics'.split())
 _STATES='Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming|District of Columbia|AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC'
@@ -67,7 +67,7 @@ def notice_quality(title,body,end,as_of,source):
   # A sourcing invitation for a specified component remains item demand.
   # Its qualification route is preserved separately from its display category.
   title_items=set(re.findall(r'\bNSN\s*[:#]?\s*(\d{4}[- ]?\d{2}[- ]?\d{3}[- ]?\d{4})(?!\d)',str(title or '').replace('_',' '),re.I))
-  if len(title_items)==1:category='items'
+  if len(title_items)==1 or (re.search(r'\bProposed procurement for NSN\s+\d{13}\b',text,re.I) and not re.search(r'\brepair\w*|\boverhaul\w*',str(title or ''),re.I)):category='items'
  if source=='sbir_topics':kind='research_eligibility_check'
  return dict(verdict='source_review_required' if findings else 'usable',reason=' '.join(findings),body_deadline=deadline,passages_json=json.dumps(passages),source_entry_kind=kind,category_override=category)
 

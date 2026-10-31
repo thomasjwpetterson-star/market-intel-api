@@ -81,3 +81,13 @@ twelve-month window ending in the last month before that delay window, with
 its own dates and source transactions. It is not an annualized estimate or a
 certification of complete reporting. Both periods remain inspectable; the
 lag-adjusted year informs Defense company coverage benchmarks and materiality.
+
+Source-stated DLA approved-source tuples are normalized across the full current
+notice population. A direct company link requires the same CAGE, NIIN and part
+in held item references. Named source approval stays separate from manufacturing
+rights. Existing exact RFQ/NIIN DIBBS matches are reused, retaining the SAM
+approval's own notice ID/hash/URL, so it does not add a second prospect. Reposted
+agency versions remain in the evidence ledger. Structured DLA line quantities
+retain their quote and distinguish estimated IDC quantities. New-item reference
+prices do not value repair/services, and scenarios exceeding a stated aggregate
+ceiling are withheld. A ceiling is not substituted as expected demand.

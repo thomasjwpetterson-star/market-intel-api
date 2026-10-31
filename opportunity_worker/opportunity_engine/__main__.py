@@ -89,6 +89,10 @@ def main():
   build(seed,sb,out,args.as_of,inputs);validate_demand_integrity(out);enrich(out,inputs if 'governed_price_lines' in sources else None)
   if 'cage_registry' in sources:augment(out,[inputs])
   if 'company_work' in sources:augment_companies(out)
+  from .sam_approved import augment as augment_approved_notice_sources
+  if 'company_work' in sources and augment_approved_notice_sources(out):
+   from .notice_prices import refresh as refresh_notice_prices
+   refresh_notice_prices(out)
   from .item_demand import augment as augment_item_demand
   if all(n in sources for n in ('item_price_references','item_market_price_evidence')):augment_item_demand(out)
   if 'company_work' in sources:apply_quality(out)
