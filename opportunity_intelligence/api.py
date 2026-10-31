@@ -88,6 +88,8 @@ class Repository:
    if 'company_notice_item_prices' in self.manifest()['tables']:notice_lot="CASE WHEN json_array_length(np.items_json)=1 THEN "+notice_lot+" END"
    request_lot="CASE WHEN o.lane='published_item_procurement' AND try_cast(json_extract_scalar(o.value_inputs_json,'$.quantity') AS double)>0 AND try_cast(json_extract_scalar(o.value_inputs_json,'$.observed_unit_price') AS double)>0 AND nullif(json_extract_scalar(o.value_inputs_json,'$.request_unit'),'') IS NOT NULL THEN try_cast(json_extract_scalar(o.value_inputs_json,'$.quantity') AS double)*try_cast(json_extract_scalar(o.value_inputs_json,'$.observed_unit_price') AS double) END"
    forecast_lot='coalesce(least(v.government_reference_lot_scenario,v.supplier_average_lot_scenario),v.government_reference_lot_scenario,v.supplier_average_lot_scenario)' if 'company_item_valuations' in self.manifest()['tables'] else 'NULL'
+   valuation_columns={x['Name'] for x in self.manifest()['tables'].get('company_item_valuations',{}).get('columns',[])}
+   if 'market_price_lot_scenario' in valuation_columns:forecast_lot='coalesce(v.market_price_lot_scenario,v.government_reference_lot_scenario)'
    ranking_value='coalesce('+notice_lot+','+request_lot+',o.value_median,'+forecast_lot+',0.0)'
    value_kind="CASE WHEN "+notice_lot+">0 THEN 'item_reference_estimate' WHEN "+request_lot+">0 THEN 'historical_unit_price_estimate' WHEN o.lane='source_item_forecasts' AND "+forecast_lot+">0 THEN 'forecast_scenario' WHEN o.value_median>0 THEN 'historical_comparison' ELSE 'unknown' END"
    extra=',m.match_id,m.match_route,m.matched_terms,m.sample_evidence_id,m.company_evidence_caveat,'+ranking_value+' commercial_value,'+value_kind+' commercial_value_kind,'+item_condition+' item_demand'
@@ -108,6 +110,8 @@ class Repository:
    if 'company_item_valuations' in self.manifest()['tables']:
     join+=' LEFT JOIN '+self.table('company_item_valuations')+' v ON v.company_id=m.company_id AND v.episode_id=o.episode_id AND v.record_hash=o.record_hash'
     extra+=',v.quantity forecast_quantity,v.catalogue_unit forecast_catalogue_unit,v.government_reference_unit_price,v.supplier_average_unit_price,v.government_reference_lot_scenario,v.supplier_average_lot_scenario,v.supplier_average_last_sale,v.monthly_evidence_json,v.catalogue_evidence_json'
+    for name in ('market_price_low','market_price_median','market_price_high','market_observations','market_sellers','first_price_date','latest_price_date','market_price_lot_scenario','annual_scenarios_json','valuation_status','inventory_date','stock_on_hand','backorder_quantity','annual_demand_quantity','inventory_signal','reorder_date','reorder_point','reorder_stock','previous_reorder_gap','inventory_evidence_json','reorder_evidence_json'):
+     if name in valuation_columns:extra+=',v.'+name
    if 'company_notice_item_prices' in self.manifest()['tables']:
     join+=' LEFT JOIN '+self.table('company_notice_item_prices')+' np ON np.company_id=m.company_id AND np.episode_id=o.episode_id AND np.record_hash=o.record_hash'
     extra+=',np.items_json notice_item_pricing_json,np.interpretation notice_item_price_interpretation'
@@ -149,11 +153,18 @@ class Repository:
   query=self.opportunities('CAGE:'+cage,kind='all',_query=True)
   scale="(SELECT max(observed_prime_net_obligations) FROM "+self.table('company_history_coverage')+" WHERE company_id='CAGE:"+cage+"')" if 'company_history_coverage' in self.manifest()['tables'] else 'NULL'
   count_sql='SELECT count_if(NOT item_demand) work_count,count_if(item_demand) items_count,count_if(NOT item_demand AND commercial_value>=1000000) work_larger_count,count_if(item_demand AND commercial_value>=1000000) items_larger_count,'+scale+' observed_prime_net_obligations FROM ('+query+')'
-  priced_sql="SELECT episode_id,record_hash,title,customer_name,source_url,source_evidence_id,commercial_value,commercial_value_kind,item_demand,item_reference_niin,notice_item_pricing_json,value_inputs_json FROM ("+query+") WHERE commercial_value_kind IN ('item_reference_estimate','historical_unit_price_estimate') AND commercial_value>0"
+  forecast_columns={x['Name'] for x in self.manifest()['tables'].get('company_item_valuations',{}).get('columns',[])}
+  forecast_extra=','.join(name if name in forecast_columns else 'NULL '+name for name in ('annual_scenarios_json','valuation_status','market_price_median','market_price_lot_scenario','latest_price_date','stock_on_hand','inventory_date','inventory_signal'))
+  priced_sql="SELECT "+forecast_extra+",window_start,window_end,forecast_catalogue_unit,episode_id,record_hash,title,customer_name,source_url,source_evidence_id,commercial_value,commercial_value_kind,item_demand,item_reference_niin,notice_item_pricing_json,value_inputs_json FROM ("+query+") WHERE commercial_value_kind IN ('item_reference_estimate','historical_unit_price_estimate','forecast_scenario') AND commercial_value>0"
   from concurrent.futures import ThreadPoolExecutor
   with ThreadPoolExecutor(max_workers=2) as pool:
    count_task=pool.submit(self.rows,count_sql);price_task=pool.submit(self.rows,priced_sql);counts=count_task.result();priced=price_task.result()
   return dict(summary(counts[0] if counts else {},priced,self.manifest()['run_id']),company_id='CAGE:'+cage,cage_code=cage)
+
+ def item_market_prices(self,eid,limit=25,offset=0):
+  if not re.fullmatch('[a-f0-9]{64}',eid) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid item price request')
+  if 'item_market_price_evidence' not in self.manifest()['tables']:return []
+  return self.rows('SELECT p.* FROM '+self.table('item_market_price_evidence')+' p JOIN '+self.table('opportunities')+" o ON p.niin=coalesce(json_extract_scalar(o.value_inputs_json,'$.niin'),substr(json_extract_scalar(o.value_inputs_json,'$.nsn'),5,9)) WHERE o.episode_id='"+eid+"' ORDER BY p.transaction_date DESC,p.pricing_record_id OFFSET "+str(offset)+' LIMIT '+str(limit))
 
  def detail(self,eid):
   if not re.fullmatch('[a-f0-9]{64}',eid):raise ValueError('Invalid opportunity identifier')
@@ -337,6 +348,9 @@ def create_router(verify_principal,repository=None):
  @router.get('/opportunities/{episode_id}/supplier-evidence')
  def supplier_evidence(episode_id:str,kind:str='primes',limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   return {'records':call(repo.supplier_evidence,episode_id,kind,limit,offset),'release':repo.manifest()['run_id'],'kind':kind,'interpretation':'Complete source lineage, paginated. Role indicators reuse the exact company profile in this release; they are company-level evidence, not proof of manufacturing or approval for this package. Performance locations are not assumed to be procurement or production sites.'}
+ @router.get('/opportunities/{episode_id}/item-market-prices')
+ def item_market_prices(episode_id:str,limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
+  return {'records':call(repo.item_market_prices,episode_id,limit,offset),'release':repo.manifest()['run_id'],'interpretation':'Exact NIIN dated procurement price lines, not manufacturing competitors or current quotes. Physical financial lines are deduplicated; each row retains source identifiers and location.'}
  @router.get('/opportunities/{episode_id}/price-evidence')
  def prices(episode_id:str):return {'records':call(repo.price_lines,episode_id),'release':repo.manifest()['run_id'],'interpretation':'Historical line evidence; no current requirement total or company value is inferred'}
  @router.get('/opportunities/{episode_id}/value-evidence')
