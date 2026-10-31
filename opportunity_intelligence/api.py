@@ -90,6 +90,7 @@ class Repository:
    forecast_lot='coalesce(least(v.government_reference_lot_scenario,v.supplier_average_lot_scenario),v.government_reference_lot_scenario,v.supplier_average_lot_scenario)' if 'company_item_valuations' in self.manifest()['tables'] else 'NULL'
    valuation_columns={x['Name'] for x in self.manifest()['tables'].get('company_item_valuations',{}).get('columns',[])}
    if 'market_price_lot_scenario' in valuation_columns:forecast_lot='coalesce(v.market_price_lot_scenario,v.government_reference_lot_scenario)'
+   if 'company_item_valuations' in self.manifest()['tables']:forecast_lot="CASE WHEN v.catalogue_unit='EA' THEN "+forecast_lot+' END'
    ranking_value='coalesce('+notice_lot+','+request_lot+',o.value_median,'+forecast_lot+',0.0)'
    value_kind="CASE WHEN "+notice_lot+">0 THEN 'item_reference_estimate' WHEN "+request_lot+">0 THEN 'historical_unit_price_estimate' WHEN o.lane='source_item_forecasts' AND "+forecast_lot+">0 THEN 'forecast_scenario' WHEN o.value_median>0 THEN 'historical_comparison' ELSE 'unknown' END"
    extra=',m.match_id,m.match_route,m.matched_terms,m.sample_evidence_id,m.company_evidence_caveat,'+ranking_value+' commercial_value,'+value_kind+' commercial_value_kind,'+item_condition+' item_demand'
