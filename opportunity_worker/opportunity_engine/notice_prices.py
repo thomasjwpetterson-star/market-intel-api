@@ -3,11 +3,13 @@ import hashlib,json
 from pathlib import Path
 import duckdb
 
-VERSION='global-exact-notice-reference-v1'
+VERSION='global-exact-notice-reference-v2'
 INTERPRETATION='Exact notice NIIN across held catalogue references, independent of candidate company. Government reference dates are not retained. A single supplier historical average is shown only where one supplier has one unambiguous price. These are price references, not current quotes or evidence of candidate qualification; engineering costs and company workshare are excluded.'
 
 def build(c,output,as_of,matches):
- c.execute("""CREATE TEMP TABLE notice_item_keys AS SELECT DISTINCT o.episode_id,o.record_hash,n.nsn,right(n.nsn,9) niin
+ from .notice_quantity import quantity_fact
+ c.create_function('notice_quantity_json',lambda title,scope:json.dumps(quantity_fact(dict(source_name='sam_notices',title=title,scope_text=scope))),['VARCHAR']*2,'VARCHAR',null_handling='special')
+ c.execute("""CREATE TEMP TABLE notice_item_keys AS SELECT DISTINCT o.episode_id,o.record_hash,n.nsn,right(n.nsn,9) niin,notice_quantity_json(o.title,o.scope_text) quantity_facts_json
  FROM base_opportunities o JOIN base_demand_decisions d USING(episode_id),unnest(scope_nsns(concat_ws(' ',o.title,o.scope_text))) n(nsn)
  WHERE o.lane='published_procurement' AND d.stage IN ('qualification_opening','published_requirement')""")
  c.execute("""CREATE TEMP TABLE notice_item_references AS SELECT DISTINCT k.episode_id,k.record_hash,k.nsn,i.*
@@ -19,10 +21,14 @@ def build(c,output,as_of,matches):
  max(last_sold_date) FILTER(WHERE supplier_average_price IS NOT NULL) supplier_average_last_sale,count(*) reference_rows,
  to_json(list(DISTINCT struct_pack(evidence_id:=evidence_id,reference_cage:=cage_code,part_number:=part_number,description:=description,source_snapshot_sha256:=source_snapshot_sha256,source_row:=source_row,government_reference_price:=govt_estimated_price,supplier_average_price:=supplier_average_price,unit:=unit_of_issue,last_sale:=last_sold_date))) catalogue_evidence_json
  FROM notice_item_references GROUP BY episode_id,record_hash,nsn""")
- output('company_notice_item_prices',"""SELECT cm.company_id,p.episode_id,p.record_hash,to_json(list(struct_pack(nsn:=p.nsn,price_scope:='global_exact_niin',catalogue_unit:=p.catalogue_unit,government_reference_unit_price:=p.government_reference_unit_price,supplier_average_unit_price:=p.supplier_average_unit_price,supplier_average_last_sale:=p.supplier_average_last_sale,reference_rows:=p.reference_rows,catalogue_evidence:=json(p.catalogue_evidence_json)) ORDER BY p.nsn)) items_json,
+ c.execute("""CREATE TEMP TABLE notice_item_lots AS SELECT p.*,k.quantity_facts_json,
+ CASE WHEN json_extract_string(k.quantity_facts_json,'$.notice_quantity_nsn')=p.nsn AND json_extract_string(k.quantity_facts_json,'$.notice_quantity_unit')=p.catalogue_unit THEN try_cast(json_extract_string(k.quantity_facts_json,'$.notice_quantity') AS BIGINT) END source_quantity,
+ CASE WHEN json_extract_string(k.quantity_facts_json,'$.notice_quantity_nsn')=p.nsn AND json_extract_string(k.quantity_facts_json,'$.notice_quantity_unit')=p.catalogue_unit THEN json_extract_string(k.quantity_facts_json,'$.notice_quantity_evidence') END source_quantity_quote
+ FROM notice_item_prices p JOIN notice_item_keys k USING(episode_id,record_hash,nsn)""")
+ output('company_notice_item_prices',"""SELECT cm.company_id,p.episode_id,p.record_hash,to_json(list(struct_pack(nsn:=p.nsn,price_scope:='global_exact_niin',catalogue_unit:=p.catalogue_unit,source_quantity:=p.source_quantity,source_quantity_quote:=p.source_quantity_quote,government_reference_lot_scenario:=round(p.source_quantity*p.government_reference_unit_price,2),supplier_average_lot_scenario:=round(p.source_quantity*p.supplier_average_unit_price,2),government_reference_unit_price:=p.government_reference_unit_price,supplier_average_unit_price:=p.supplier_average_unit_price,supplier_average_last_sale:=p.supplier_average_last_sale,reference_rows:=p.reference_rows,catalogue_evidence:=json(p.catalogue_evidence_json)) ORDER BY p.nsn)) items_json,
  '"""+INTERPRETATION.replace("'","''")+"""' interpretation
- FROM notice_item_prices p JOIN (SELECT DISTINCT company_id,episode_id,opportunity_hash FROM """+matches+""") cm ON cm.episode_id=p.episode_id AND cm.opportunity_hash=p.record_hash GROUP BY cm.company_id,p.episode_id,p.record_hash""")
- for n in ('notice_item_keys','notice_item_references','notice_item_prices'):c.execute('DROP TABLE '+n)
+ FROM notice_item_lots p JOIN (SELECT DISTINCT company_id,episode_id,opportunity_hash FROM """+matches+""") cm ON cm.episode_id=p.episode_id AND cm.opportunity_hash=p.record_hash GROUP BY cm.company_id,p.episode_id,p.record_hash""")
+ for n in ('notice_item_keys','notice_item_references','notice_item_prices','notice_item_lots'):c.execute('DROP TABLE '+n)
 
 def refresh(directory):
  """Reprice the current release without redoing retrieval or changing any fit edge."""

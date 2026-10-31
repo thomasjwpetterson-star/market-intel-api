@@ -9,6 +9,9 @@ from opportunity_intelligence.api import Repository, create_router
 from opportunity_intelligence.mount import LazyRepository, verified_application_principal
 
 class FakeRepository:
+    def overview(self,cage):
+        if len(cage)!=5:raise ValueError('Invalid CAGE')
+        return {'release':'r','categories':{'work':{'count':203}}}
     def companies(self, query, limit):
         return [{'cage_code': '45934'}]
 
@@ -34,13 +37,19 @@ class OpportunityPilotTests(unittest.TestCase):
         response = self.client.get('/opportunity-intelligence/companies?q=Ontic', headers={'X-Mimir-Export-Key': 'test-proxy-secret', 'X-Mimir-Opportunity-User': '11111111-1111-4111-8111-111111111111'})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['records'][0]['cage_code'], '45934')
+    def test_company_overview_uses_the_same_authentication_boundary(self):
+        path='/opportunity-intelligence/companies/45934/overview'
+        self.assertEqual(self.client.get(path).status_code,401)
+        response=self.client.get(path,headers={'X-Mimir-Export-Key':'test-proxy-secret','X-Mimir-Opportunity-User':'11111111-1111-4111-8111-111111111111'})
+        self.assertEqual(response.status_code,200);self.assertEqual(response.json()['categories']['work']['count'],203)
+
     def test_work_query_has_no_horizon_cutoff_and_uses_outer_sort(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
         repo.manifest = lambda: {'tables': {}}
         repo.opportunities('CAGE:45934', 24, 0, False, 'work')
         self.assertIn('WITH candidates AS (SELECT DISTINCT', aws.sql)
         self.assertIn("o.lane NOT IN ('published_item_procurement','source_item_forecasts')", aws.sql)
-        self.assertNotIn('18', aws.sql)
+        self.assertNotRegex(aws.sql, r"(?i)interval\s+'?18'?\s+month|date_add\('month',\s*18")
         self.assertNotIn('historical_watch\' THEN', aws.sql)
         self.assertIn("regexp_replace(upper(c.native_identifier),'-00$','')",aws.sql)
         self.assertIn('related_source_records_json',aws.sql)
@@ -53,6 +62,14 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn('np.company_id=m.company_id', aws.sql)
         self.assertIn('np.record_hash=o.record_hash', aws.sql)
         self.assertIn('not a win probability or company revenue', aws.sql)
+        self.assertIn('CASE WHEN q.commercial_value>=1000000 THEN 0 ELSE 1 END',aws.sql)
+        self.assertLess(aws.sql.index('$[0].government_reference_lot_scenario'),aws.sql.index(',o.value_median'))
+
+    def test_size_filter_is_applied_to_the_complete_feed_before_pagination(self):
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name;repo.manifest=lambda:{'tables':{}}
+        repo.opportunities('CAGE:45934',3,0,False,'work',5000000)
+        self.assertLess(aws.sql.index('q.commercial_value>=5000000.0'),aws.sql.index('OFFSET 0 LIMIT 3'))
+        with self.assertRaises(ValueError):repo.opportunities('CAGE:45934',minimum_value=float('nan'))
 
     def test_unknown_company_entry_is_context_not_a_ranked_work_opportunity(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name

@@ -1,7 +1,7 @@
 """Authenticated FastAPI adapter for the shared AWS read model.
 The application must inject its existing verified-principal dependency.
 """
-import contextvars,datetime,hashlib,json,re,time
+import contextvars,datetime,hashlib,json,re,time,math
 from pathlib import Path
 from functools import lru_cache
 from .aws import AWS,BUCKET,PREFIX,DATABASE
@@ -72,8 +72,9 @@ class Repository:
  def innovation(self,limit=20):
   if not 1<=limit<=100:raise ValueError('Invalid limit')
   return self.rows('SELECT * FROM '+self.table('innovation_signals')+' ORDER BY posted_date DESC,title LIMIT '+str(limit))
- def opportunities(self,company=None,limit=20,offset=0,monitoring_only=False,kind='all'):
+ def opportunities(self,company=None,limit=20,offset=0,monitoring_only=False,kind='all',minimum_value=0.0,_query=False):
   if not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid pagination')
+  if not math.isfinite(minimum_value) or not 0<=minimum_value<=1000000000000:raise ValueError('Invalid minimum value')
   o=self.table('opportunities');d=self.table('demand_decisions');where="d.stage IN ('historical_watch','repeat_demand_inference')" if monitoring_only else "d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context','historical_watch','repeat_demand_inference')";join='';extra=''
   if kind not in ('all','work','items'):raise ValueError('Invalid opportunity kind')
   if company and not re.fullmatch(r'(?:CAGE:[A-Z0-9]{5}|UEI:[A-Z0-9]{12})',company):raise ValueError('Invalid company identifier')
@@ -83,9 +84,14 @@ class Repository:
   if company:
    if not re.fullmatch(r'(?:CAGE:[A-Z0-9]{5}|UEI:[A-Z0-9]{12})',company):raise ValueError('Invalid company identifier')
    join=' JOIN '+self.table('company_matches')+" m ON m.episode_id=o.episode_id AND m.company_id='"+company+"'";where+=' AND m.opportunity_hash=o.record_hash'
-   ranking_value='coalesce(o.value_median,least(v.government_reference_lot_scenario,v.supplier_average_lot_scenario),v.government_reference_lot_scenario,v.supplier_average_lot_scenario,0.0)' if 'company_item_valuations' in self.manifest()['tables'] else 'coalesce(o.value_median,0.0)'
-   extra=',m.match_id,m.match_route,m.matched_terms,m.sample_evidence_id,m.company_evidence_caveat'
-   extra+=",least(100.0,(CASE d.stage WHEN 'published_requirement' THEN 70 WHEN 'qualification_opening' THEN 65 WHEN 'teaming_opening' THEN 65 WHEN 'emerging_demand' THEN 35 WHEN 'source_forecast' THEN 20 ELSE 10 END)+least(15.0,m.score/6.0)+least(20.0,5.0*ln(1.0+greatest("+ranking_value+",0.0)/100000.0))+(CASE WHEN o.window_end IS NOT NULL THEN 5 ELSE 0 END)) priority_score,'Demand stage, observed company scope fit, supported package benchmarks or item-price scenarios, and dated engagement window; not a win probability or company revenue' priority_basis"
+   notice_lot="coalesce(try_cast(json_extract_scalar(np.items_json,'$[0].government_reference_lot_scenario') AS double),try_cast(json_extract_scalar(np.items_json,'$[0].supplier_average_lot_scenario') AS double))" if 'company_notice_item_prices' in self.manifest()['tables'] else 'NULL'
+   if 'company_notice_item_prices' in self.manifest()['tables']:notice_lot="CASE WHEN json_array_length(np.items_json)=1 THEN "+notice_lot+" END"
+   request_lot="CASE WHEN o.lane='published_item_procurement' AND try_cast(json_extract_scalar(o.value_inputs_json,'$.quantity') AS double)>0 AND try_cast(json_extract_scalar(o.value_inputs_json,'$.observed_unit_price') AS double)>0 AND nullif(json_extract_scalar(o.value_inputs_json,'$.request_unit'),'') IS NOT NULL THEN try_cast(json_extract_scalar(o.value_inputs_json,'$.quantity') AS double)*try_cast(json_extract_scalar(o.value_inputs_json,'$.observed_unit_price') AS double) END"
+   forecast_lot='coalesce(least(v.government_reference_lot_scenario,v.supplier_average_lot_scenario),v.government_reference_lot_scenario,v.supplier_average_lot_scenario)' if 'company_item_valuations' in self.manifest()['tables'] else 'NULL'
+   ranking_value='coalesce('+notice_lot+','+request_lot+',o.value_median,'+forecast_lot+',0.0)'
+   value_kind="CASE WHEN "+notice_lot+">0 THEN 'item_reference_estimate' WHEN "+request_lot+">0 THEN 'historical_unit_price_estimate' WHEN o.lane='source_item_forecasts' AND "+forecast_lot+">0 THEN 'forecast_scenario' WHEN o.value_median>0 THEN 'historical_comparison' ELSE 'unknown' END"
+   extra=',m.match_id,m.match_route,m.matched_terms,m.sample_evidence_id,m.company_evidence_caveat,'+ranking_value+' commercial_value,'+value_kind+' commercial_value_kind,'+item_condition+' item_demand'
+   extra+=",(CASE d.stage WHEN 'published_requirement' THEN 12 WHEN 'qualification_opening' THEN 10 WHEN 'teaming_opening' THEN 10 WHEN 'emerging_demand' THEN 6 WHEN 'source_forecast' THEN 2 ELSE 0 END)+least(20.0,m.score/5.0)+18.0*ln(1.0+greatest("+ranking_value+",0.0)/100000.0)+(CASE WHEN o.window_end IS NOT NULL THEN 3 ELSE 0 END) priority_score,'Commercial size, observed company fit and engagement timing. Exact quantity/price estimates take precedence over historical comparisons; not a win probability or company revenue' priority_basis"
    if 'company_work_matches' in self.manifest()['tables']:
     join+=' LEFT JOIN '+self.table('company_work_matches')+' cw ON cw.company_id=m.company_id AND cw.episode_id=o.episode_id AND cw.opportunity_hash=o.record_hash'
     extra+=',cw.doc_id matched_doc_id,cw.work_text matched_work_text,cw.source_kind matched_source_kind,cw.last_observed matched_work_date,cw.review_category'
@@ -120,17 +126,34 @@ class Repository:
    join+=' LEFT JOIN (SELECT DISTINCT niin FROM '+self.table('dla_forecasts')+" WHERE forecast_qty<0 AND try_cast(substr(cast(forecast_month AS varchar),1,10) AS date)>=DATE '"+asof+"') fq ON fq.niin=json_extract_scalar(o.value_inputs_json,'$.niin')"
    where+=" AND (o.lane<>'source_item_forecasts' OR fq.niin IS NULL)"
   selected='SELECT DISTINCT o.*,d.stage,d.decision_json'+extra+' FROM '+o+' o JOIN '+d+' d ON o.episode_id=d.episode_id'+join+' WHERE '+where
-  ordering=("q.priority_score DESC," if company else '')+"CASE q.stage WHEN 'qualification_opening' THEN 0 WHEN 'teaming_opening' THEN 0 WHEN 'published_requirement' THEN 1 WHEN 'emerging_demand' THEN 2 ELSE 3 END,CASE WHEN q.lane='source_item_forecasts' THEN 1 ELSE 0 END,q.window_end ASC NULLS LAST,q.episode_id"
+  ordering=("CASE WHEN q.commercial_value>=1000000 THEN 0 ELSE 1 END,q.priority_score DESC," if company else '')+"CASE q.stage WHEN 'qualification_opening' THEN 0 WHEN 'teaming_opening' THEN 0 WHEN 'published_requirement' THEN 1 WHEN 'emerging_demand' THEN 2 ELSE 3 END,CASE WHEN q.lane='source_item_forecasts' THEN 1 ELSE 0 END,q.window_end ASC NULLS LAST,q.episode_id"
   # Reposted notices sometimes append -00 to the same procurement identifier.
   # Collapse only that narrow family with the same buyer and normalized title;
   # different solicitations for the same item remain separate. Keep every link.
   family="CASE WHEN c.source_name='sam_notices' AND length(c.native_identifier)>4 THEN concat_ws('|',c.source_name,upper(c.customer_name),regexp_replace(upper(c.native_identifier),'-00$',''),regexp_replace(upper(c.title),'[^A-Z0-9]','')) ELSE c.episode_id END"
   related="json_format(cast(array_agg(cast(row(c.episode_id,c.native_identifier,c.source_url,c.source_evidence_id,c.notice_posted_date) AS row(episode_id varchar,native_identifier varchar,source_url varchar,source_evidence_id varchar,posted_date varchar))) OVER (PARTITION BY "+family+") AS json)) related_source_records_json"
-  grouped="WITH candidates AS ("+selected+"), families AS (SELECT c.*,row_number() OVER (PARTITION BY "+family+" ORDER BY c.notice_posted_date DESC NULLS LAST,c.episode_id) source_family_rank,"+related+" FROM candidates c) SELECT q.* FROM families q WHERE q.source_family_rank=1 ORDER BY "+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit)
+  grouped="WITH candidates AS ("+selected+"), families AS (SELECT c.*,row_number() OVER (PARTITION BY "+family+" ORDER BY c.notice_posted_date DESC NULLS LAST,c.episode_id) source_family_rank,"+related+" FROM candidates c) SELECT q.* FROM families q WHERE q.source_family_rank=1"
+  if minimum_value>0:
+   if not company:raise ValueError('A company is required for commercial-size filtering')
+   grouped+=' AND q.commercial_value>='+str(float(minimum_value))
+  if _query:return grouped
+  grouped+=' ORDER BY '+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit)
   records=self.rows(grouped)
   for record in records:
    record.update(quantity_fact(record));record.update(price_scenario_fact(record))
   return records
+
+ def overview(self,cage):
+  if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
+  from .overview import summary
+  query=self.opportunities('CAGE:'+cage,kind='all',_query=True)
+  scale="(SELECT max(observed_prime_net_obligations) FROM "+self.table('company_history_coverage')+" WHERE company_id='CAGE:"+cage+"')" if 'company_history_coverage' in self.manifest()['tables'] else 'NULL'
+  count_sql='SELECT count_if(NOT item_demand) work_count,count_if(item_demand) items_count,count_if(NOT item_demand AND commercial_value>=1000000) work_larger_count,count_if(item_demand AND commercial_value>=1000000) items_larger_count,'+scale+' observed_prime_net_obligations FROM ('+query+')'
+  priced_sql="SELECT episode_id,record_hash,title,customer_name,source_url,source_evidence_id,commercial_value,commercial_value_kind,item_demand,item_reference_niin,notice_item_pricing_json,value_inputs_json FROM ("+query+") WHERE commercial_value_kind IN ('item_reference_estimate','historical_unit_price_estimate') AND commercial_value>0"
+  from concurrent.futures import ThreadPoolExecutor
+  with ThreadPoolExecutor(max_workers=2) as pool:
+   count_task=pool.submit(self.rows,count_sql);price_task=pool.submit(self.rows,priced_sql);counts=count_task.result();priced=price_task.result()
+  return dict(summary(counts[0] if counts else {},priced,self.manifest()['run_id']),company_id='CAGE:'+cage,cage_code=cage)
 
  def detail(self,eid):
   if not re.fullmatch('[a-f0-9]{64}',eid):raise ValueError('Invalid opportunity identifier')
@@ -282,6 +305,8 @@ def create_router(verify_principal,repository=None):
   records=call(repo.company,cage)
   if not records:raise HTTPException(status_code=404,detail='CAGE not found in the bound sources')
   return records[0]
+ @router.get('/companies/{cage}/overview')
+ def overview(cage:str):return call(repo.overview,cage)
  @router.get('/companies/{cage}/relationships')
  def relationships(cage:str,limit:int=Query(50,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   m=repo.manifest();table=m['tables'].get('company_registry',{})
@@ -294,10 +319,10 @@ def create_router(verify_principal,repository=None):
  def innovation(limit:int=Query(20,ge=1,le=100)):return {'records':call(repo.innovation,limit),'status':'Published agency engagement evidence; no company qualification or award probability inferred'}
  @router.get('/methodology')
  def methodology():
-  m=repo.manifest();return dict(m['rules'],release=m['run_id'],company_matching={'evidence':'Observed award and reported supplier work, exact item references, program/vehicle links and specific technical scope. Classification overlap alone is insufficient.','entry_routes':'Named prior suppliers, defined service work or explicit development/source-opening context take priority. Other hardware similarity is market context until an entry route is evidenced.','qualification':'A company/item association is separate from manufacturing rights, procurement approval, current configuration, eligibility and capacity.'},source_quality={'policy_version':m.get('quality_policy_version'),'policy_hash':m.get('source_quality_logic_sha256'),'source_conflicts':'Conflicting title/nomenclature or past response dates without a current deadline override are held for source review, with quoted passages.','company_scope':'Administrative phrases, postal-location fragments, unspecific labels and a single shared product/work word cannot establish the complete deliverable. Matching words in incidental body text are insufficient.','delivery_mode':'Component supply, repair/overhaul, equipment installation, onsite services and facility construction are assessed separately. Selected delivery statements and their exact document PSC are retained. A manufacturing NAICS or similar product noun does not establish onsite-service capability.','psc_reference':'https://origin-www.acquisition.gov/sites/default/files/manual/PSC%20Manual%20April%202025.pdf','item_access':'Existing-OEM sourcing is distinct from an invitation to qualify a new manufacturer. Exact named part, NIIN and nonconflicting procurement reference codes are retained separately from manufacturing data rights.','research_eligibility':'Research relevance is separate from SBIR/STTR applicant eligibility or a permitted teaming route.','notice_grouping':'The same buyer, complete normalized title and identifier with a trailing -00 variant may be grouped for display. Every notice source is retained; different procurement identifiers remain separate and values are not summed.'},values={'source_quantities':'A quoted explicit quantity is exposed only for a single-item notice with one consistent quantity and unit. Estimates are not orders; ranges, multiple quantities and annual/monthly rates are not collapsed. No total is inferred from a different NSN or part.', 'historical_benchmarks':'Revision-resolved award net obligations and reported outsourced-package amounts. Approximate median and observed range use the complete comparison group; recent/extreme awards form a short preview.','unit_prices':'Exact company/item reference prices are unit evidence. Missing quantities do not produce totals. Forecast quantity × price is an alternative gross scenario, not company revenue.','allocation':'Prime/program funding is context. Company-addressable value remains unallocated without workshare evidence.','source_quality':'Item forecasts with negative future monthly quantities are withheld from actionable feeds until reconciled; published purchase requests remain separate evidence.'})
+  m=repo.manifest();return dict(m['rules'],release=m['run_id'],commercial_ranking={'policy':'commercial-materiality-v1','rule':'Larger supported value estimates or historical size guides are prioritised, with fit and timing. An exact single-item quantity/price estimate takes precedence over a broader historical package. A historical guide is not counted in priced demand totals.','default_size_focus':'Sites with at least $100m lifetime observed prime obligations default to a $1m priority focus; the user can change it. This is not an annual-revenue or eligibility classification.'},company_matching={'evidence':'Observed award and reported supplier work, exact item references, program/vehicle links and specific technical scope. Classification overlap alone is insufficient.','entry_routes':'Named prior suppliers, defined service work or explicit development/source-opening context take priority. Other hardware similarity is market context until an entry route is evidenced.','qualification':'A company/item association is separate from manufacturing rights, procurement approval, current configuration, eligibility and capacity.'},source_quality={'policy_version':m.get('quality_policy_version'),'policy_hash':m.get('source_quality_logic_sha256'),'source_conflicts':'Conflicting title/nomenclature or past response dates without a current deadline override are held for source review, with quoted passages.','company_scope':'Administrative phrases, postal-location fragments, unspecific labels and a single shared product/work word cannot establish the complete deliverable. Matching words in incidental body text are insufficient.','delivery_mode':'Component supply, repair/overhaul, equipment installation, onsite services and facility construction are assessed separately. Selected delivery statements and their exact document PSC are retained. A manufacturing NAICS or similar product noun does not establish onsite-service capability.','psc_reference':'https://origin-www.acquisition.gov/sites/default/files/manual/PSC%20Manual%20April%202025.pdf','item_access':'Existing-OEM sourcing is distinct from an invitation to qualify a new manufacturer. Exact named part, NIIN and nonconflicting procurement reference codes are retained separately from manufacturing data rights.','research_eligibility':'Research relevance is separate from SBIR/STTR applicant eligibility or a permitted teaming route.','notice_grouping':'The same buyer, complete normalized title and identifier with a trailing -00 variant may be grouped for display. Every notice source is retained; different procurement identifiers remain separate and values are not summed.'},values={'source_quantities':'A quoted explicit quantity is exposed only for a single-item notice with one consistent quantity and unit. Estimates are not orders; ranges, multiple quantities and annual/monthly rates are not collapsed. No total is inferred from a different NSN or part.', 'historical_benchmarks':'Revision-resolved award net obligations and reported outsourced-package amounts. Approximate median and observed range use the complete comparison group; recent/extreme awards form a short preview.','unit_prices':'Exact notice/item reference prices can come from another supplier and remain separate from candidate eligibility. Quoted single-item quantities and matching units produce reference demand estimates. Exact company/item reference prices are unit evidence. Missing quantities do not produce totals. Forecast quantity × price is an alternative gross scenario, not company revenue.','allocation':'Prime/program funding is context. Company-addressable value remains unallocated without workshare evidence.','source_quality':'Item forecasts with negative future monthly quantities are withheld from actionable feeds until reconciled; published purchase requests remain separate evidence.'})
  @router.get('/opportunities')
- def opportunities(company:str=None,limit:int=Query(20,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000),kind:str=Query('all',pattern='^(all|work|items)$')):
-  return {'records':call(repo.opportunities,company,limit,offset,False,kind),'release':repo.manifest()['run_id'],'status':'authenticated_evidence_feed','eligibility':'Company fit, access and qualification require evidence; these are not win probabilities.'}
+ def opportunities(company:str=None,limit:int=Query(20,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000),kind:str=Query('all',pattern='^(all|work|items)$'),min_value:float=Query(0,ge=0,le=1000000000000)):
+  return {'records':call(repo.opportunities,company,limit,offset,False,kind,min_value),'release':repo.manifest()['run_id'],'status':'authenticated_evidence_feed','eligibility':'Company fit, access and qualification require evidence; these are not win probabilities.'}
  @router.get('/companies/{cage}/monitoring')
  def monitoring(cage:str,limit:int=Query(20,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise HTTPException(status_code=400,detail='Invalid CAGE')
