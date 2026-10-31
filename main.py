@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from api_traffic_protection import ApiTrafficProtectionMiddleware
+from public_serving_capacity import PublicServingCapacityMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
@@ -230,10 +231,23 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
 
     # Read mode: use pool
     c = None
+    wait_started = time.perf_counter()
     try:
         c = _DUCK_POOL.get(timeout=float(os.getenv("DUCK_POOL_TIMEOUT", "60")))
+        wait_seconds = time.perf_counter() - wait_started
         # Use a cursor for isolation of statement state
-        df = c.cursor().execute(sql, params).fetchdf()
+        query_started = time.perf_counter()
+        cursor = c.cursor()
+        try:
+            df = cursor.execute(sql, params).fetchdf()
+        finally:
+            cursor.close()
+            query_seconds = time.perf_counter() - query_started
+            if wait_seconds >= 1 or query_seconds >= 2:
+                # No SQL parameters, user identities or row contents in logs.
+                logger.warning("Slow DuckDB read query=%s wait_ms=%.1f execute_ms=%.1f pool_available=%s",
+                               hashlib.sha256(sql.encode()).hexdigest()[:12],
+                               wait_seconds * 1000, query_seconds * 1000, _DUCK_POOL.qsize())
         return df_sanitize_for_json(df)
     finally:
         if c is not None:
@@ -544,6 +558,7 @@ if allow_all:
     origins = ["*"]
 
 app.add_middleware(ApiTrafficProtectionMiddleware)
+app.add_middleware(PublicServingCapacityMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -583,7 +598,7 @@ def get_readiness_state() -> Dict[str, Any]:
 
 
 @app.get("/ready")
-def ready_check(response: Response):
+async def ready_check(response: Response):
     s = get_readiness_state()
     # Render must not switch traffic to a replacement instance until the
     # complete cache generation is installed.  A JSON body that says
