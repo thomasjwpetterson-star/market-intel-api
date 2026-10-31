@@ -97,7 +97,10 @@ def coverage_summary(business,published,forecast):
  current=published.get('priced_demand_total');future=forecast.get('estimated_demand_total')
  upper=(current or 0)+(future or 0) if current is not None or future is not None else None
  status='not_measurable' if not target or upper is None else 'below_benchmark_even_before_overlap' if upper<target else 'requires_overlap_and_access_review'
- return dict(**business,target_multiple=3,coverage_benchmark=target,coverage_status=status,
+ context=dict(business)
+ if 'interpretation' in context:context['catalogue_sales_interpretation']=context.pop('interpretation')
+ return dict(**context,target_multiple=3,coverage_benchmark=target,coverage_status=status,
+  dod_coverage_benchmark=3*max(num('annual_dod_net_obligations') or 0,0) if num('annual_dod_net_obligations') is not None else None,
   published_demand_to_annual_ratio=current/annual if annual and annual>0 and current is not None else None,
   full_horizon_forecast_to_annual_ratio=future/annual if annual and annual>0 and future is not None else None,
   interpretation='Three times trailing-year net federal obligations is a coverage benchmark, not a forecast or promised pipeline. Published requirements and full-horizon forecasts remain separate because they may overlap. Unpriced work is unknown, not zero. Reseller product-market sales are historical context and are not added to obligations, manufacturer revenue or future pipeline.')

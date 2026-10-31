@@ -52,12 +52,13 @@ class ForecastOverviewTests(unittest.TestCase):
 class CoverageTests(unittest.TestCase):
  def test_business_benchmark_exposes_gap_without_filling_it_with_reseller_sales(self):
   from opportunity_intelligence.overview import coverage_summary
-  r=coverage_summary({'annual_net_obligations':'100000000','other_seller_item_sales':'500000000'},{'priced_demand_total':10000000},{'estimated_demand_total':60000000})
+  r=coverage_summary({'annual_net_obligations':'100000000','other_seller_item_sales':'500000000','interpretation':'held channel source methodology'},{'priced_demand_total':10000000},{'estimated_demand_total':60000000})
   self.assertEqual(r['coverage_benchmark'],300000000)
   self.assertEqual(r['coverage_status'],'below_benchmark_even_before_overlap')
   self.assertEqual(r['published_demand_to_annual_ratio'],0.1)
   self.assertEqual(r['full_horizon_forecast_to_annual_ratio'],0.6)
   self.assertNotIn('combined_pipeline',r)
+  self.assertEqual(r['catalogue_sales_interpretation'],'held channel source methodology')
  def test_big_full_horizon_forecast_is_retained_but_not_a_qualified_pipeline(self):
   from opportunity_intelligence.overview import coverage_summary
   r=coverage_summary({'annual_net_obligations':1000000},{'priced_demand_total':2000000},{'estimated_demand_total':8000000})
