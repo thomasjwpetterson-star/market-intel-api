@@ -37,3 +37,10 @@ def test_portable_pipeline_preserves_scope_provenance_and_prices_forecast(tmp_pa
  manifest=json.loads((tmp_path/'manifest.json').read_text());manifest['sources']['item_reference_facts']['files'][0]['path']=str(conflict);(tmp_path/'manifest.json').write_text(json.dumps(manifest));augment(tmp_path,skip_work=True);c=duckdb.connect()
  assert c.execute('SELECT count(*) FROM read_parquet(?)',[str(tmp_path/'company_matches.parquet')]).fetchone()[0]==4
  values=c.execute('SELECT niin,supplier_average_unit_price,government_reference_lot_scenario FROM read_parquet(?)',[str(tmp_path/'company_item_valuations.parquet')]).fetchall();assert values==[('012710711',None,1171114.56)]
+ # A retained seed link cannot keep an inactive item-identifying reference in
+ # the actionable item graph when the reference codes are refreshed.
+ c=duckdb.connect();coded=tmp_path/'coded_references.parquet'
+ c.read_parquet(str(original)).create_view('original_references');c.execute("COPY (SELECT *,CASE WHEN niin='012710712' THEN '9' ELSE '2' END rnvc_codes,'D' rnsc_codes FROM original_references) TO ? (FORMAT PARQUET)",[str(coded)]);c.close()
+ manifest=json.loads((tmp_path/'manifest.json').read_text());manifest['sources']['item_reference_facts']['files'][0]['path']=str(coded);(tmp_path/'manifest.json').write_text(json.dumps(manifest));augment(tmp_path,skip_work=True);c=duckdb.connect()
+ assert c.execute("SELECT count(*) FROM read_parquet(?) WHERE niin='012710712'",[str(tmp_path/'company_item_matches.parquet')]).fetchone()[0]==0
+ assert c.execute('SELECT count(*) FROM read_parquet(?)',[str(tmp_path/'company_matches.parquet')]).fetchone()[0]==2

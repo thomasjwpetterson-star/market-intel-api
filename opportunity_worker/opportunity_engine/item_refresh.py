@@ -72,7 +72,7 @@ def refresh(previous,root,aws):
         c.execute('CREATE OR REPLACE TEMP VIEW result AS SELECT '+','.join(cast)+' FROM raw_result');p=r/(name+'.parquet');c.execute('COPY result TO ? (FORMAT PARQUET,COMPRESSION ZSTD,ROW_GROUP_SIZE 2048)',[str(p)])
         cols=[dict(Name=n,Type={'VARCHAR':'string','DOUBLE':'double','BIGINT':'bigint','INTEGER':'bigint','BOOLEAN':'boolean'}[t]) for n,t,*_ in c.execute('DESCRIBE result').fetchall()]
         m['tables'][name]=dict(path=str(p),sha256=hashlib.sha256(p.read_bytes()).hexdigest(),rows=c.execute('SELECT count(*) FROM read_parquet(?)',[str(p)]).fetchone()[0],columns=cols);print('Incremental item output',name,m['tables'][name]['rows'],flush=True)
-    decisions=preserve_nonitem(c,current_opportunities,current_decisions,s['demand_candidates']['path'],m['as_of']);raw=r/'item_decisions.jsonl';raw.write_text(''.join(json.dumps(x)+'\n' for x in decisions));c.read_json(str(raw),columns={n:'VARCHAR' for n in ('episode_id','source_record_hash','rule_id','stage','decision_hash','decision_json')}).create_view('new_item_decisions')
+    decisions=preserve_nonitem(c,current_opportunities,current_decisions,s['demand_candidates']['path'],m['as_of']);raw=r/'item_decisions.jsonl';raw.write_text(''.join(json.dumps(x)+'\n' for x in decisions));del decisions;c.read_json(str(raw),columns={n:'VARCHAR' for n in ('episode_id','source_record_hash','rule_id','stage','decision_hash','decision_json')}).create_view('new_item_decisions')
     emit('opportunities','SELECT * FROM updated_opportunities')
     lanes=','.join("'"+x+"'" for x in ITEMS)
     emit('demand_decisions','SELECT d.* FROM parent_decisions d JOIN parent_opportunities o USING(episode_id) WHERE o.lane NOT IN ('+lanes+') UNION ALL BY NAME SELECT * FROM new_item_decisions')

@@ -25,13 +25,28 @@ def load(aws,root):
 
 
 def install(aws,sources,release,validation):
- from opportunity_engine.raw_archives import bind
- m={'sources':sources};bind(aws,m)
+ m={'sources':sources};seen={}
+ # Validate local bytes before staging them. The consuming worker verifies all
+ # source Parquet hashes and re-reads raw archive SHA256s in-region before its
+ # opportunity release can publish. Avoid downloading large archives back to
+ # the ingestion workstation merely to stage the private source pointer.
+ for source in sources.values():
+  for raw in source.get('raw_archives',[]):
+   sha=raw['sha256'];path=Path(raw['path']);key=PREFIX+'/sources/content/sha256='+sha+'/source.archive'
+   if sha not in seen:
+    if hashlib.sha256(path.read_bytes()).hexdigest()!=sha:raise ValueError('Raw source hash changed')
+    try:exists=aws.s3.head_object(Bucket=BUCKET,Key=key)['ContentLength']==path.stat().st_size
+    except aws.s3.exceptions.ClientError as e:
+     if e.response['Error']['Code'] not in ('404','NoSuchKey','NotFound'):raise
+     exists=False
+    if not exists:aws.upload(path,key)
+    seen[sha]='s3://'+BUCKET+'/'+key
+   raw['s3_uri']=seen[sha]
  for source in sources.values():
   for f in source['files']:
    key=PREFIX+'/sources/content/sha256='+f['sha256']+'/source.parquet';aws.upload(Path(f['path']),key);f['s3_uri']='s3://'+BUCKET+'/'+key
  key=PREFIX+'/sources/dla_monthly/'+release+'/'+hashlib.sha256(json.dumps({n:s['sha256'] for n,s in sources.items()},sort_keys=True).encode()).hexdigest()+'/manifest.json'
- m.update(source_release=release,source_page=PAGE,validation=validation,processing_sha256=hashlib.sha256(Path(__file__).parent.parent.joinpath('dla_monthly.py').read_bytes()).hexdigest())
+ m.update(source_release=release,source_page=PAGE,validation=validation,storage_validation='Local archive and Parquet hashes validated before staging; consuming worker rechecks stored source bytes and raw archive SHA256 before opportunity publication',processing_sha256=hashlib.sha256(Path(__file__).parent.parent.joinpath('dla_monthly.py').read_bytes()).hexdigest())
  aws.put_json(key,m);aws.put_json(POINTER,dict(manifest_key=key,source_release=release));return m
 
 

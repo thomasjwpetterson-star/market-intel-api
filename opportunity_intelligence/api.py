@@ -43,6 +43,16 @@ class Repository:
    # Never expose exception strings, stack traces or infrastructure details.
    return dict(status=status,**{k:value[k] for k in ('started_at','finished_at','refresh_mode') if isinstance(value.get(k),str) and len(value[k])<=128})
   except Exception:return {'status':'unavailable'}
+ def source_status(self):
+  m=self.manifest();result={name:dict(value) for name,value in m.get('source_status',{}).items()}
+  # Preserve edition/health separately from build dates. Never expose source
+  # paths, archive locations or retrieval exception text through this view.
+  for name,source in m.get('sources',{}).items():
+   if name not in result:continue
+   if isinstance(source.get('source_release'),str):result[name]['source_release']=source['source_release'][:128]
+   health=source.get('refresh_health')
+   if isinstance(health,dict):result[name]['refresh_health']={k:health[k][:512] for k in ('status','attempted_at','source_release','interpretation') if isinstance(health.get(k),str)}
+  return result
  def company(self,cage):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
   return self.rows('SELECT * FROM '+self.table('company_registry')+" WHERE cage_code='"+cage+"'")
@@ -450,5 +460,5 @@ def create_router(verify_principal,repository=None):
  def benchmark(topic_id:str):return {'records':call(repo.benchmark,topic_id)}
  @router.get('/sources')
  def sources():
-  m=repo.manifest();return {'release':m['run_id'],'as_of':m['as_of'],'refresh':repo.refresh_status(),'sources':m['source_status'],'limitations':m['limitations']+['Forecasts containing negative future monthly quantities are withheld from actionable feeds pending source reconciliation; positive months are not silently priced alone.']}
+  m=repo.manifest();return {'release':m['run_id'],'as_of':m['as_of'],'refresh':repo.refresh_status(),'sources':repo.source_status(),'limitations':m['limitations']+['Forecasts containing negative future monthly quantities are withheld from actionable feeds pending source reconciliation; positive months are not silently priced alone.']}
  return router
