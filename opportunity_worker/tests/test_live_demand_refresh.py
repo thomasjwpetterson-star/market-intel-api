@@ -12,15 +12,24 @@ def test_full_native_forecast_horizon_and_stable_existing_identity(tmp_path):
     put('dla_forecasts',"""SELECT '012345678' niin,DATE '2026-11-01' forecast_month,10::BIGINT forecast_qty,'release' source_release,'source.txt' source_file,'row-1' source_item_id
     UNION ALL SELECT '012345678',DATE '2030-04-01',20,'release','source.txt','row-2'
     UNION ALL SELECT '012345678',DATE '2026-09-01',100,'release','source.txt','row-3'
+    UNION ALL SELECT '012345678',DATE '2031-05-01',-9,'release','source.txt','later-correction'
     UNION ALL SELECT NULL,DATE '2026-11-01',999,'release','source.txt','unmapped-row'
     UNION ALL SELECT 'invalid',DATE '2026-11-01',999,'release','source.txt','invalid-row'""")
     out=refresh_forecast_episodes(sources,tmp_path/'derived','2026-10-30')
-    row=c.execute('SELECT episode_id,window_start,window_end,value_inputs_json FROM read_parquet(?)',[out['demand_candidates']['path']]).fetchone()
+    row=c.execute('SELECT episode_id,window_start,window_end,value_inputs_json,record_hash FROM read_parquet(?)',[out['demand_candidates']['path']]).fetchone()
     assert row[:3]==('stable-forecast','2026-11-01','2030-04-01')
     assert json.loads(row[3])['forecast_quantity']==30
     assert c.execute('SELECT count(*) FROM read_parquet(?)',[out['demand_candidates']['path']]).fetchone()[0]==1
     assert out['demand_candidates']['forecast_identity_quality']['unmapped_positive_future_rows']==2
-    assert c.execute('SELECT count(*) FROM read_parquet(?)',[sources['dla_forecasts']['files'][0]['path']]).fetchone()[0]==5
+    assert c.execute('SELECT count(*) FROM read_parquet(?)',[sources['dla_forecasts']['files'][0]['path']]).fetchone()[0]==6
+    # A signed correction outside the positive window is still a source change.
+    revised=tmp_path/'revised-forecast.parquet'
+    c.execute("COPY (SELECT * REPLACE(CASE WHEN source_item_id='later-correction' THEN -8 ELSE forecast_qty END AS forecast_qty) FROM read_parquet(?)) TO '"+str(revised).replace("'","''")+"' (FORMAT PARQUET)",[sources['dla_forecasts']['files'][0]['path']])
+    second=dict(sources,dla_forecasts={'files':[{'path':str(revised)}]})
+    updated=refresh_forecast_episodes(second,tmp_path/'derived-revised','2026-10-30')
+    version=c.execute('SELECT episode_id,record_hash,value_inputs_json FROM read_parquet(?)',[updated['demand_candidates']['path']]).fetchone()
+    assert version[0]==row[0] and version[1]!=row[4]
+    assert json.loads(version[2])['forecast_quantity']==30
 
 def test_observed_supplier_placement_resolves_expected_work_with_actual_evidence():
     o={'lane':'new_prime_historical_supplier_flow','source_evidence_id':'new-prime','record_hash':'version','customer_name':'Prime','scope_text':'Fuel boost pump','window_end':'2029-12-31','reconciled_state':'source_confirmed_award','value_inputs_json':json.dumps({'new_prime_evidence':'new-prime','prior_awards':2,'source_reports':3,'support_digest':'support','first_award_date':'2026-05-01','outcome_evidence_ids':['actual-subcontract-report']})}

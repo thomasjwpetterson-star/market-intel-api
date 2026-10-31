@@ -112,9 +112,9 @@ def refresh_forecast_episodes(sources,folder,as_of):
     # by complete NIIN so each item's full horizon and exact digest stay intact.
     for partition in range(16):
         prefix='CREATE TEMP TABLE demand AS ' if partition==0 else 'INSERT INTO demand '
-        c.execute(prefix+"""SELECT niin,min(forecast_month) first_month,max(forecast_month) last_month,sum(forecast_qty) quantity,count(*) month_rows,
+        c.execute(prefix+"""SELECT niin,min(forecast_month) FILTER(WHERE forecast_qty>0) first_month,max(forecast_month) FILTER(WHERE forecast_qty>0) last_month,sum(forecast_qty) FILTER(WHERE forecast_qty>0) quantity,count(*) FILTER(WHERE forecast_qty>0) month_rows,
         min(source_release) source_release,min(source_file) source_file,sha256(string_agg(concat_ws('|',forecast_month,cast(forecast_qty AS VARCHAR),source_release,source_file),'|' ORDER BY forecast_month,source_item_id)) evidence_digest
-        FROM dla_forecasts WHERE regexp_full_match(coalesce(niin,''),'[0-9]{9}') AND try_cast(substr(cast(forecast_month AS VARCHAR),1,10) AS DATE)>=DATE '"""+as_of+"""' AND forecast_qty>0 AND hash(niin)%16="""+str(partition)+" GROUP BY niin")
+        FROM dla_forecasts WHERE regexp_full_match(coalesce(niin,''),'[0-9]{9}') AND try_cast(substr(cast(forecast_month AS VARCHAR),1,10) AS DATE)>=DATE '"""+as_of+"""' AND hash(niin)%16="""+str(partition)+" GROUP BY niin HAVING count_if(forecast_qty>0)>0")
     expressions={
     'episode_id':"coalesce(p.episode_id,sha256('native-dla-forecast-v1|'||d.niin))",'record_hash':"sha256(concat_ws('|','native-dla-forecast-v1',d.niin,d.evidence_digest))",'lane':"'source_item_forecasts'",
     'title':"'DLA forecast demand — NIIN '||d.niin",'scope_text':"'DLA source forecast for this NIIN, across the full source-stated future period. No order or technical source approval is inferred.'",'customer_name':"'Defense Logistics Agency'",

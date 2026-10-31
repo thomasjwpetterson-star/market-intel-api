@@ -1,5 +1,6 @@
 import hashlib,json
 import duckdb
+import pytest
 from opportunity_engine.item_demand import prepare,augment
 
 def test_full_dibbs_refresh_reuses_ids_and_prices_exact_unit_from_dated_lines(tmp_path):
@@ -27,17 +28,18 @@ def test_full_dibbs_refresh_reuses_ids_and_prices_exact_unit_from_dated_lines(tm
  assert price==('EA',300,'2026-09-01')
  c.close()
 
-def test_forecast_years_prices_stock_and_unverified_pack_units_remain_separate(tmp_path):
+@pytest.mark.parametrize('correction_month',[None,'2026-11-01','2027-03-01'])
+def test_forecast_years_prices_stock_and_unverified_pack_units_remain_separate(tmp_path,correction_month):
  c=duckdb.connect();tables={};sources={}
  def put(n,q,source=False):
   p=tmp_path/(n+'.parquet');c.execute("COPY ("+q+") TO '"+str(p)+"' (FORMAT PARQUET)")
   sha=hashlib.sha256(p.read_bytes()).hexdigest()
   if source:sources[n]={'files':[{'path':str(p),'sha256':sha}]}
   else:tables[n]={'path':str(p),'sha256':sha}
- put('opportunities',"SELECT 'op' episode_id,'hash' record_hash,'source_item_forecasts' lane,'{\"niin\":\"003538074\"}' value_inputs_json,'2026-11-01' window_start,'2027-01-01' window_end UNION ALL SELECT 'pack','h','source_item_forecasts','{\"niin\":\"001671344\"}','2026-11-01','2027-01-01'")
+ put('opportunities',"SELECT 'op' episode_id,'hash' record_hash,'source_item_forecasts' lane,'{\"niin\":\"003538074\"}' value_inputs_json,'2026-12-01' window_start,'2027-01-01' window_end UNION ALL SELECT 'pack','h','source_item_forecasts','{\"niin\":\"001671344\"}','2026-11-01','2027-01-01'")
  put('company_matches',"SELECT 'CAGE:45934' company_id,'op' episode_id,'hash' opportunity_hash UNION ALL SELECT 'CAGE:45934','pack','h'")
- put('dla_forecasts',"""SELECT '003538074' niin,'2026-11-01' forecast_month,10::BIGINT forecast_qty,'release' source_release,'file' source_file,'1' source_item_id
- UNION ALL SELECT '003538074','2027-01-01',20,'release','file','2' UNION ALL SELECT '001671344','2026-11-01',10000,'release','file','3'""")
+ put('dla_forecasts',"""SELECT '003538074' niin,'2026-12-01' forecast_month,10::BIGINT forecast_qty,'release' source_release,'file' source_file,'1' source_item_id
+ UNION ALL SELECT '003538074','2027-01-01',20,'release','file','2' UNION ALL SELECT '001671344','2026-11-01',10000,'release','file','3'"""+(" UNION ALL SELECT '003538074','"+correction_month+"',-1,'release','file','correction'" if correction_month else ''))
  put('dla_inventory',"""SELECT '003538074' niin,'2026-08-31' snapshot_date,'7' total_stock,'2' backorder_qty,'30' annual_demand_quantity,'A' condition_code,'release' source_release,'stock-file' source_file,TRUE public_release_eligible
  UNION ALL SELECT '003538074','2026-07-31','40','0','30','A','release','old-file',TRUE""")
  put('dla_reorder_points',"""SELECT '003538074' niin,'2026-08-31' snapshot_date,7.0 total_stock,10.0 reorder_point,'A' condition_code,'release' source_release,'file' source_file
@@ -50,7 +52,18 @@ def test_forecast_years_prices_stock_and_unverified_pack_units_remain_separate(t
  rows=c.execute('SELECT niin,quantity,government_reference_lot_scenario,market_price_lot_scenario,stock_on_hand,inventory_signal,annual_scenarios_json,valuation_status FROM read_parquet(?) ORDER BY niin',[m['tables']['company_item_valuations']['path']]).fetchall()
  assert rows[0][0]=='001671344' and rows[0][2:4]==(None,None)
  assert rows[0][-1]=='forecast_unit_conversion_unverified'
- assert rows[1][1:6]==(30,30000,9000,7,'crossed_below_reorder_point')
- years=json.loads(rows[1][6]);assert [y['quantity'] for y in years]==[10,20]
- assert sum(y['market_price_scenario'] for y in years)==9000
+ if correction_month:
+  assert rows[1][1:6]==(29,None,None,7,'crossed_below_reorder_point')
+  assert rows[1][-1]=='negative_source_quantity' and rows[1][6] is None
+ else:
+  assert rows[1][1:6]==(30,30000,9000,7,'crossed_below_reorder_point')
+  years=json.loads(rows[1][6]);assert [y['quantity'] for y in years]==[10,20]
+  assert sum(y['market_price_scenario'] for y in years)==9000
+ # A quality pass has downloaded the immutable output tables; source paths
+ # from another worker may no longer exist.
+ for name in ('item_price_references','item_market_price_evidence'):
+  m['sources'][name]['files'][0]['path']=str(tmp_path/'previous-worker-missing.parquet')
+ (tmp_path/'manifest.json').write_text(json.dumps(m));augment(tmp_path)
+ again=c.execute('SELECT market_price_lot_scenario,valuation_status FROM read_parquet(?) WHERE niin=\'003538074\'',[m['tables']['company_item_valuations']['path']]).fetchone()
+ assert again==((None,'negative_source_quantity') if correction_month else (9000,'catalogue_EA_assumed_forecast_unit_not_stated'))
  c.close()

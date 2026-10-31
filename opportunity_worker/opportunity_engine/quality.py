@@ -125,7 +125,7 @@ def review_current(previous,root,aws):
   if hashlib.sha256(path.read_bytes()).hexdigest()!=t['sha256']:raise ValueError('Published table content changed: '+name)
   print('Loaded immutable table',name,t['rows'],flush=True)
  # Only source evidence needed for the precision gates is fetched.
- for source_name in ('item_reference_facts','dla_solicitations'):
+ for source_name in ('item_reference_facts','dla_solicitations','dla_reorder_points'):
   s=m['sources'].get(source_name)
   if s:
    for f in s['files']:
@@ -139,4 +139,6 @@ def review_current(previous,root,aws):
  from .item_presence import hold as hold_item_presence
  hold_item_presence(r)
  from .item_requests import link as link_item_requests
+ from .item_demand import augment as augment_item_demand
+ if all(n in m['sources'] for n in ('item_price_references','item_market_price_evidence')):augment_item_demand(r)
  link_item_requests(r);return r

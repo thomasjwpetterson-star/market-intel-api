@@ -3,7 +3,7 @@ import hashlib,json
 from pathlib import Path
 import duckdb
 
-POLICY='whole-market-item-demand-v1'
+POLICY='whole-market-item-demand-v2'
 
 def prepare(sources,folder,as_of):
  """Refresh DIBBS episodes from the held source and materialise global prices."""
@@ -77,7 +77,11 @@ def augment(directory):
  for n in ('opportunities','company_matches','dla_forecasts','dla_inventory'):
   c.read_parquet(m['tables'][n]['path']).create_view(n)
  for n in ('item_price_references','item_market_price_evidence','dla_reorder_points'):
-  if n in m['sources']:c.read_parquet([f['path'] for f in m['sources'][n]['files']]).create_view(n)
+  # Quality passes reuse downloaded immutable tables, not paths from the
+  # previous worker's filesystem. Reorder evidence is a retained source.
+  table=m['tables'].get(n,{})
+  if table.get('path') and Path(table['path']).is_file():c.read_parquet(table['path']).create_view(n)
+  elif n in m['sources']:c.read_parquet([f['path'] for f in m['sources'][n]['files']]).create_view(n)
  def emit(n,sql):
   p=r/(n+'.parquet');tmp=r/(n+'.expanded.parquet');c.execute('CREATE OR REPLACE TEMP VIEW raw_result AS '+sql)
   portable=[]
@@ -117,7 +121,7 @@ def augment(directory):
  min(d.forecast_month) first_month,max(d.forecast_month) last_month,count(*) month_count,count(DISTINCT d.forecast_month) distinct_months,
  sum(d.forecast_qty)::BIGINT quantity,count(*) FILTER(WHERE d.forecast_qty<0) negative_months,
  to_json(list(struct_pack(month:=d.forecast_month,quantity:=d.forecast_qty,source_release:=d.source_release,source_file:=d.source_file,source_item_id:=d.source_item_id) ORDER BY d.forecast_month)) monthly_evidence_json
- FROM forecast_keys o JOIN dla_forecasts d ON d.niin=o.niin AND substr(cast(d.forecast_month AS VARCHAR),1,10)>=o.window_start AND substr(cast(d.forecast_month AS VARCHAR),1,10)<=o.window_end
+ FROM forecast_keys o JOIN dla_forecasts d ON d.niin=o.niin AND substr(cast(d.forecast_month AS VARCHAR),1,10)>='"""+m['as_of']+"""'
  GROUP BY o.episode_id,o.record_hash,o.niin""")
  c.execute("""CREATE TEMP TABLE years AS SELECT f.episode_id,f.record_hash,substr(d.forecast_month,1,4) calendar_year,sum(d.forecast_qty)::BIGINT quantity,
  round(sum(d.forecast_qty)*p.government_reference_unit_price,2) government_reference_scenario,

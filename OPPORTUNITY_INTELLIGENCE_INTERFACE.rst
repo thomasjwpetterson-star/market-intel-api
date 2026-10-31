@@ -234,6 +234,18 @@ quote and price evidence remain inspectable. The methodology endpoint includes
 producer hashes and the source-approval/reporting-lag policies. Availability is
 manifest-driven; consumers must preserve missing optional fields on older releases.
 
+Forecast correction consistency (producer 0.5.40)
+-------------------------------------------------
+The whole-market-item-demand-v2 policy inspects every retained future monthly row,
+including corrections before the first positive month or after the last positive
+month. Any negative future quantity or duplicate monthly source row blocks a
+price scenario. Quality refreshes rebuild the same valuation/context tables before
+coverage diagnostics, using downloaded immutable table paths. A separate release
+gate checks the complete future-month population independently of the positive
+demand window. Native episode fingerprints also include signed and zero source
+rows, preserving the stable item ID while recording corrections as source changes.
+The methodology response exposes item_demand_policy additively.
+
 Early announcement source audit
 --------------------------------
 The existing independently refreshed DoD announcement feed contains 7,552 entries
@@ -247,3 +259,71 @@ because that supplier appears under the same prime contract. Announcement amount
 cumulative ceilings and supplier-addressable work remain separate. This source
 already exists; the missing work is its controlled connection and scope validation
 in the opportunity engine, not a new upstream news ingestion system.
+
+Independent item-source scale check (2026-10-31)
+-----------------------------------------------
+A separate reconciliation of all held future forecast months, exact company/NIIN
+references, consistent EA catalogue units and dated physical procurement lines
+finds 497 Ontic Chatsworth (45934) referenced forecast items. Of these, 444 can be
+priced, giving a gross reference scenario of $68,901,487.30 before company access
+review and overlap with published requests. This is not manufacturer revenue or
+an open-order pipeline. It is independent of the serving release and must be
+reconciled to that release rather than substituted for its totals.
+
+Of that scenario, $37,449,474.19 across 88 items uses dated observed purchase
+medians. The other $31,452,013.11 across 356 items uses government references with
+no retained effective date. Calendar-year amounts are approximately $5.51m in
+November-December 2026, $34.63m in 2027, $20.54m in 2028, $6.83m in 2029,
+$1.38m in 2030 and $17,896 in 2031. The last observed month is July 2031;
+the far end does not imply uniform forecast coverage through that year.
+
+The same calculation gives only $3.79m for GE CAGE 07639, $7.61m for Raytheon
+CAGE 15090 and $411.98m for Boeing CAGE 81205. Compared with those sites' observed
+contract activity, this demonstrates why NSN demand cannot establish adequate
+prime/integration/service coverage. Contract, current-notice and supplier-work
+lanes must be assessed separately. Company scale is a coverage diagnostic, never
+a justification for adding programme ceilings, reseller turnover or unplaced
+supplier work without evidence.
+
+The held canonical SAM source also contains 18,658 Defense Award Notices posted
+in August-October 2026; 18,648 carry positive award amounts and every row carries
+an award number, date and recipient name. These are notice amounts, not incremental
+obligations. Existing native notice-chain heads already resolve matching published
+requirements when an award or cancellation supersedes them. Among all 19,670
+recent notices carrying award numbers (including justifications and consolidation
+notices), 726 have an unambiguous historical PIID link and 595 have an award date
+later than the linked retained latest action. Two PIID links are ambiguous and
+18,942 lack a held historical contract link. The normalized award-recipient
+projection has names, not CAGE/UEI fields; do not infer a site from a name match.
+This is a useful additional early-activity connection to develop alongside the
+DoD announcement feed, with separate value semantics and source reconciliation.
+
+Held-document and reference freshness checks
+--------------------------------------------
+The CAGE master contains 4,104,335 distinct codes without duplicate source rows.
+Its held address/status objects were published into this lake on 2026-07-08;
+the most recent parseable company-update field is 2026-01-14. No newer object
+exists in those held prefixes. This does not establish current registration or
+technical approval. The registry also incorporates separately dated SAM and
+observed-work identities; do not present the complete CAGE population as active
+Defense suppliers. A daily consumer rebuild cannot advance an upstream snapshot.
+
+The existing SAM attachment candidate table contains 1,146,531 extracted lines
+from 12,108 notices / 9,931 distinct attachment hashes. Of those lines, 1,140,759
+have untested arithmetic and all retain pending notice/document scope validation.
+The governed price table already used by this engine contains 2,133 accepted
+lines from 113 notices / 107 attachment hashes, linked to 2020-2026 actions.
+The separate structured SAM solicitation-evidence table exposes CAGE/UEI columns
+but currently contains zero records; schema presence is not populated coverage.
+
+An exact-notice join of candidates to active Defense notices with an unexpired
+structured response date found 12 candidate lines under two notices, all from
+one workbook-instruction attachment. The apparent quantities include numbered
+instructions such as "2 Each workbook ...", not purchasing requirements.
+Allowing recent notices without a verified future window increases overlap to
+196 notices / 1,853 lines, largely including elapsed August requirements; it
+does not establish current availability. No candidate shares a populated canonical
+selected-version ID in this test. This is why candidate quantities/prices must not
+enter opportunity totals unchecked. Reuse the existing extraction stack, but
+prioritise current-document coverage, physical-line deduplication, latest-version
+linkage and real CLIN/scope validation before broader promotion.
