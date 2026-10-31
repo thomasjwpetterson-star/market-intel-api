@@ -24,5 +24,13 @@ class OverviewTests(unittest.TestCase):
   self.assertEqual(result['priced_demand_total'],0.3)
   self.assertEqual(result['priced_requirement_count'],2)
   self.assertIsNone(summary({'work_count':'3'},[],'release')['categories']['work']['priced_demand_total'])
+ def test_company_total_combines_categories_without_double_counting_same_requirement(self):
+  rows=[self.row('work',756715.32),{**self.row('item',700000),'item_demand':'true'},self.row('other',500000)]
+  rows[2]['customer_name']='Air Force'
+  result=summary({'work_count':'28','items_count':'474'},rows,'release')
+  self.assertEqual(result['overall']['count'],502)
+  self.assertEqual(result['overall']['priced_demand_total'],1256715.32)
+  self.assertEqual(result['overall']['priced_requirement_count'],2)
+  self.assertEqual(len(result['overall']['value_components'][0]['related_requirements']),2)
 
 if __name__=='__main__':unittest.main()

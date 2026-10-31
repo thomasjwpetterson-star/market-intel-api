@@ -2,7 +2,7 @@
 import json,re
 from decimal import Decimal,InvalidOperation
 
-POLICY='priced-demand-and-materiality-v1'
+POLICY='priced-demand-and-materiality-v2'
 PRICED_KINDS=('item_reference_estimate','historical_unit_price_estimate')
 
 def summary(counts,priced,release):
@@ -38,5 +38,18 @@ def summary(counts,priced,release):
   components=category['value_components'];components.sort(key=lambda x:(-x['included_value'],x['episode_id']))
   category['priced_requirement_count']=len(components)
   if components:category['priced_demand_total']=float(sum(Decimal(str(x['included_value'])) for x in components))
+ combined={}
+ for category in result.values():
+  for component in category['value_components']:
+   buyer=re.sub('[^A-Z0-9]','',str(component.get('customer_name') or '').upper());niin=component.get('niin')
+   key=('item',buyer,niin) if buyer and niin else ('episode',component['episode_id'])
+   previous=combined.get(key)
+   if previous is None:combined[key]={**component,'related_requirements':list(component['related_requirements'])}
+   else:
+    related=previous['related_requirements']+component['related_requirements']
+    winner=component if component['included_value']>previous['included_value'] else previous
+    combined[key]={**winner,'related_requirements':related,'aggregation':'Largest priced scenario for this buyer/item across contract and item feeds; related records are not added'}
+ components=sorted(combined.values(),key=lambda x:(-x['included_value'],x['episode_id']))
+ overall=dict(count=sum(x['count'] for x in result.values()),priced_source_count=sum(x['priced_source_count'] for x in result.values()),priced_requirement_count=len(components),priced_demand_total=float(sum(Decimal(str(x['included_value'])) for x in components)) if components else None,value_components=components)
  scale=float(counts.get('observed_prime_net_obligations') or 0)
- return dict(release=release,policy=POLICY,categories=result,materiality_floor=1000000 if scale>=100000000 else 0,materiality_basis='Default $1m focus for sites with at least $100m lifetime observed prime obligations; editable, not annual revenue or a capability limit.',value_explanation='Priced demand uses stated quantities and exact-item reference or historical unit prices. Repeated requirements for the same buyer and item contribute their largest scenario once. Historical contract comparisons, programme totals and overlapping forecasts are excluded. Government reference dates may be unknown; prices are not current quotes. Unpriced opportunities are not assumed to be worth zero. These are demand estimates, not expected company revenue.')
+ return dict(release=release,policy=POLICY,categories=result,overall=overall,materiality_floor=1000000 if scale>=100000000 else 0,materiality_basis='Default $1m focus for sites with at least $100m lifetime observed prime obligations; editable, not annual revenue or a capability limit.',value_explanation='The headline combines priced contract and item requirements across the complete company feed. It uses stated quantities and exact-item reference or historical unit prices. Repeated requirements for the same buyer and item contribute their largest scenario once, including overlaps between contract and item feeds. Historical contract comparisons, programme totals and forecasts are excluded. Government reference dates may be unknown; prices are not current quotes. Unpriced opportunities are not assumed to be worth zero. These are demand estimates, not expected company revenue.')
