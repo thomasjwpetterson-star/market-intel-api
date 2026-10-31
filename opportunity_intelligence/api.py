@@ -92,9 +92,17 @@ class Repository:
    if 'market_price_lot_scenario' in valuation_columns:forecast_lot='coalesce(v.market_price_lot_scenario,v.government_reference_lot_scenario)'
    if 'company_item_valuations' in self.manifest()['tables']:forecast_lot="CASE WHEN v.catalogue_unit='EA' THEN "+forecast_lot+' END'
    ranking_value='coalesce('+notice_lot+','+request_lot+',o.value_median,'+forecast_lot+',0.0)'
+   forecast_year='NULL'
+   if 'company_item_valuations' in self.manifest()['tables']:
+    asof=self.manifest().get('as_of')
+    if not asof or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',asof):raise ValueError('Invalid release as-of date')
+    unit_price='coalesce(v.market_price_median,v.government_reference_unit_price)' if 'market_price_median' in valuation_columns else 'v.government_reference_unit_price'
+    months="reduce(try(cast(json_parse(v.monthly_evidence_json) AS array(json))),cast(0 AS double),(total,x)->total+CASE WHEN try_cast(substr(json_extract_scalar(x,'$.month'),1,10) AS date)>=DATE '"+asof+"' AND try_cast(substr(json_extract_scalar(x,'$.month'),1,10) AS date)<date_add('month',12,DATE '"+asof+"') THEN coalesce(try_cast(json_extract_scalar(x,'$.quantity') AS double),0.0) ELSE 0.0 END,total->total)"
+    forecast_year="CASE WHEN o.lane='source_item_forecasts' AND v.catalogue_unit='EA' AND ("+forecast_lot+")>0 THEN "+months+'*'+unit_price+' END'
+   priority_amount="CASE WHEN o.lane='source_item_forecasts' THEN coalesce("+forecast_year+",0.0) ELSE "+ranking_value+' END'
    value_kind="CASE WHEN "+notice_lot+">0 THEN 'item_reference_estimate' WHEN "+request_lot+">0 THEN 'historical_unit_price_estimate' WHEN o.lane='source_item_forecasts' AND "+forecast_lot+">0 THEN 'forecast_scenario' WHEN o.value_median>0 THEN 'historical_comparison' ELSE 'unknown' END"
-   extra=',m.match_id,m.match_route,m.matched_terms,m.sample_evidence_id,m.company_evidence_caveat,'+ranking_value+' commercial_value,'+value_kind+' commercial_value_kind,'+item_condition+' item_demand'
-   extra+=",(CASE d.stage WHEN 'published_requirement' THEN 12 WHEN 'qualification_opening' THEN 10 WHEN 'teaming_opening' THEN 10 WHEN 'emerging_demand' THEN 6 WHEN 'source_forecast' THEN 2 ELSE 0 END)+least(20.0,m.score/5.0)+18.0*ln(1.0+greatest("+ranking_value+",0.0)/100000.0)+(CASE WHEN o.window_end IS NOT NULL THEN 3 ELSE 0 END) priority_score,'Commercial size, observed company fit and engagement timing. Exact quantity/price estimates take precedence over historical comparisons; not a win probability or company revenue' priority_basis"
+   extra=',m.match_id,m.match_route,m.matched_terms,m.sample_evidence_id,m.company_evidence_caveat,'+ranking_value+' commercial_value,'+value_kind+' commercial_value_kind,'+item_condition+' item_demand,'+forecast_year+' forecast_next_12m_value'
+   extra+=",(CASE d.stage WHEN 'published_requirement' THEN 12 WHEN 'qualification_opening' THEN 10 WHEN 'teaming_opening' THEN 10 WHEN 'emerging_demand' THEN 6 WHEN 'source_forecast' THEN 2 ELSE 0 END)+least(20.0,m.score/5.0)+18.0*ln(1.0+greatest("+priority_amount+",0.0)/100000.0)+(CASE WHEN d.stage='published_requirement' AND try_cast(o.window_end AS date) BETWEEN DATE '"+self.manifest()['as_of']+"' AND date_add('day',30,DATE '"+self.manifest()['as_of']+"') THEN 12 WHEN o.window_end IS NOT NULL THEN 3 ELSE 0 END) priority_score,'Commercial size, observed fit and engagement timing. Forecast priority uses next-12-month priced demand; published requests due within 30 days receive a timing boost. Exact quantity/price estimates precede historical comparisons; not a win probability or company revenue' priority_basis"
    if 'company_work_matches' in self.manifest()['tables']:
     join+=' LEFT JOIN '+self.table('company_work_matches')+' cw ON cw.company_id=m.company_id AND cw.episode_id=o.episode_id AND cw.opportunity_hash=o.record_hash'
     extra+=',cw.doc_id matched_doc_id,cw.work_text matched_work_text,cw.source_kind matched_source_kind,cw.last_observed matched_work_date,cw.review_category'
@@ -111,7 +119,7 @@ class Repository:
    if 'company_item_valuations' in self.manifest()['tables']:
     join+=' LEFT JOIN '+self.table('company_item_valuations')+' v ON v.company_id=m.company_id AND v.episode_id=o.episode_id AND v.record_hash=o.record_hash'
     extra+=',v.quantity forecast_quantity,v.catalogue_unit forecast_catalogue_unit,v.government_reference_unit_price,v.supplier_average_unit_price,v.government_reference_lot_scenario,v.supplier_average_lot_scenario,v.supplier_average_last_sale,v.monthly_evidence_json,v.catalogue_evidence_json'
-    for name in ('market_price_low','market_price_median','market_price_high','market_observations','market_sellers','first_price_date','latest_price_date','market_price_lot_scenario','annual_scenarios_json','valuation_status','inventory_date','stock_on_hand','backorder_quantity','annual_demand_quantity','inventory_signal','reorder_date','reorder_point','reorder_stock','previous_reorder_gap','inventory_evidence_json','reorder_evidence_json'):
+    for name in ('market_price_low','market_price_median','market_price_high','market_observations','market_sellers','first_price_date','latest_price_date','market_price_lot_scenario','annual_scenarios_json','valuation_status','inventory_date','stock_on_hand','backorder_quantity','annual_demand_quantity','inventory_signal','reorder_date','reorder_point','reorder_stock','previous_reorder_gap','inventory_evidence_json','reorder_evidence_json','current_request_count','next_request_deadline','related_requests_json'):
      if name in valuation_columns:extra+=',v.'+name
    if 'company_notice_item_prices' in self.manifest()['tables']:
     join+=' LEFT JOIN '+self.table('company_notice_item_prices')+' np ON np.company_id=m.company_id AND np.episode_id=o.episode_id AND np.record_hash=o.record_hash'
@@ -156,11 +164,35 @@ class Repository:
   count_sql='SELECT count_if(NOT item_demand) work_count,count_if(item_demand) items_count,count_if(NOT item_demand AND commercial_value>=1000000) work_larger_count,count_if(item_demand AND commercial_value>=1000000) items_larger_count,'+scale+' observed_prime_net_obligations FROM ('+query+')'
   forecast_columns={x['Name'] for x in self.manifest()['tables'].get('company_item_valuations',{}).get('columns',[])}
   forecast_extra=','.join(name if name in forecast_columns else 'NULL '+name for name in ('annual_scenarios_json','valuation_status','market_price_median','market_price_lot_scenario','latest_price_date','stock_on_hand','inventory_date','inventory_signal'))
-  priced_sql="SELECT "+forecast_extra+",window_start,window_end,forecast_catalogue_unit,episode_id,record_hash,title,customer_name,source_url,source_evidence_id,commercial_value,commercial_value_kind,item_demand,item_reference_niin,notice_item_pricing_json,value_inputs_json FROM ("+query+") WHERE commercial_value_kind IN ('item_reference_estimate','historical_unit_price_estimate','forecast_scenario') AND commercial_value>0"
+  priced_sql="SELECT "+forecast_extra+",window_start,window_end,forecast_catalogue_unit,episode_id,record_hash,title,customer_name,source_url,source_evidence_id,commercial_value,commercial_value_kind,item_demand,item_reference_niin,notice_item_pricing_json,value_inputs_json,forecast_next_12m_value FROM ("+query+") WHERE commercial_value_kind IN ('item_reference_estimate','historical_unit_price_estimate','forecast_scenario') AND commercial_value>0"
   from concurrent.futures import ThreadPoolExecutor
-  with ThreadPoolExecutor(max_workers=2) as pool:
-   count_task=pool.submit(self.rows,count_sql);price_task=pool.submit(self.rows,priced_sql);counts=count_task.result();priced=price_task.result()
-  return dict(summary(counts[0] if counts else {},priced,self.manifest()['run_id']),company_id='CAGE:'+cage,cage_code=cage)
+  with ThreadPoolExecutor(max_workers=3) as pool:
+   count_task=pool.submit(self.rows,count_sql);price_task=pool.submit(self.rows,priced_sql);business_task=pool.submit(self.business_context,cage);counts=count_task.result();priced=price_task.result();business=business_task.result()
+  return dict(summary(counts[0] if counts else {},priced,self.manifest()['run_id'],business),company_id='CAGE:'+cage,cage_code=cage)
+
+ def business_context(self,cage):
+  if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
+  selects=[];joins=[]
+  for alias,name in [('a','company_activity_baselines'),('c','company_catalogue_sales')]:
+   if name not in self.manifest()['tables']:continue
+   cols=[x['Name'] for x in self.manifest()['tables'][name]['columns'] if x['Name'] not in ('company_id','company_name')]
+   if not all(re.fullmatch('[a-z_0-9]+',x) for x in cols):raise ValueError('Invalid business-context projection')
+   selects.extend(alias+'.'+x for x in cols);joins.append(' LEFT JOIN '+self.table(name)+' '+alias+' ON '+alias+'.company_id=k.company_id')
+  if not selects:return {}
+  rows=self.rows("SELECT "+','.join(selects)+" FROM (SELECT 'CAGE:"+cage+"' company_id) k"+''.join(joins))
+  return rows[0] if rows else {}
+
+ def business_evidence(self,cage,kind='actions',limit=25,offset=0):
+  if not re.fullmatch('[A-Z0-9]{5}',cage) or kind not in ('actions','catalogue-sales') or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid business evidence request')
+  name='company_activity_actions' if kind=='actions' else 'catalogue_sales_evidence'
+  if name not in self.manifest()['tables']:return []
+  order='action_date DESC,transaction_key' if kind=='actions' else 'transaction_date DESC,pricing_record_id'
+  return self.rows('SELECT * FROM '+self.table(name)+" WHERE company_id='CAGE:"+cage+"' ORDER BY "+order+' OFFSET '+str(offset)+' LIMIT '+str(limit))
+
+ def related_item_requests(self,eid,limit=25,offset=0):
+  if not re.fullmatch('[a-f0-9]{64}',eid) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid item request relationship')
+  if 'item_request_progression' not in self.manifest()['tables']:return []
+  return self.rows('SELECT * FROM '+self.table('item_request_progression')+" WHERE forecast_episode_id='"+eid+"' ORDER BY response_deadline,request_episode_id OFFSET "+str(offset)+' LIMIT '+str(limit))
 
  def item_market_prices(self,eid,limit=25,offset=0):
   if not re.fullmatch('[a-f0-9]{64}',eid) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid item price request')
@@ -317,6 +349,8 @@ def create_router(verify_principal,repository=None):
   records=call(repo.company,cage)
   if not records:raise HTTPException(status_code=404,detail='CAGE not found in the bound sources')
   return records[0]
+ @router.get('/companies/{cage}/business-evidence')
+ def business_evidence(cage:str,kind:str='actions',limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):return {'records':call(repo.business_evidence,cage,kind,limit,offset),'release':repo.manifest()['run_id'],'kind':kind,'interpretation':'Observed transactions or physical product-market purchase lines. These historical amounts are not added to opportunity value; exact part references do not prove the delivered manufacturer.'}
  @router.get('/companies/{cage}/overview')
  def overview(cage:str):return call(repo.overview,cage)
  @router.get('/companies/{cage}/relationships')
@@ -349,6 +383,9 @@ def create_router(verify_principal,repository=None):
  @router.get('/opportunities/{episode_id}/supplier-evidence')
  def supplier_evidence(episode_id:str,kind:str='primes',limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   return {'records':call(repo.supplier_evidence,episode_id,kind,limit,offset),'release':repo.manifest()['run_id'],'kind':kind,'interpretation':'Complete source lineage, paginated. Role indicators reuse the exact company profile in this release; they are company-level evidence, not proof of manufacturing or approval for this package. Performance locations are not assumed to be procurement or production sites.'}
+ @router.get('/opportunities/{episode_id}/related-requests')
+ def related_item_requests(episode_id:str,limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
+  return {'records':call(repo.related_item_requests,episode_id,limit,offset),'release':repo.manifest()['run_id'],'interpretation':'Same-item published requests, not proof of forecast conversion, an award or additional additive demand. Each request retains its own deadline, quantity, unit, source and eligibility.'}
  @router.get('/opportunities/{episode_id}/item-market-prices')
  def item_market_prices(episode_id:str,limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   return {'records':call(repo.item_market_prices,episode_id,limit,offset),'release':repo.manifest()['run_id'],'interpretation':'Exact NIIN dated procurement price lines, not manufacturing competitors or current quotes. Physical financial lines are deduplicated; each row retains source identifiers and location.'}

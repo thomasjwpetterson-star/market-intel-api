@@ -45,7 +45,7 @@ class OpportunityPilotTests(unittest.TestCase):
 
     def test_work_query_has_no_horizon_cutoff_and_uses_outer_sort(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
-        repo.manifest = lambda: {'tables': {}}
+        repo.manifest = lambda: {'as_of':'2026-10-31','tables': {}}
         repo.opportunities('CAGE:45934', 24, 0, False, 'work')
         self.assertIn('WITH candidates AS (SELECT DISTINCT', aws.sql)
         self.assertIn("o.lane NOT IN ('published_item_procurement','source_item_forecasts')", aws.sql)
@@ -56,7 +56,7 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertLess(aws.sql.index('q.source_family_rank=1'),aws.sql.index('OFFSET 0 LIMIT 24'))
     def test_price_scenarios_inform_review_order_without_inventing_contract_values(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
-        repo.manifest = lambda: {'tables': {'company_item_valuations': {}, 'company_notice_item_prices': {}}}
+        repo.manifest = lambda: {'as_of':'2026-10-31','tables': {'company_item_valuations': {}, 'company_notice_item_prices': {}}}
         repo.opportunities('CAGE:45934', 24, 0, False, 'items')
         self.assertIn('least(v.government_reference_lot_scenario,v.supplier_average_lot_scenario)', aws.sql)
         self.assertIn('np.company_id=m.company_id', aws.sql)
@@ -66,14 +66,14 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertLess(aws.sql.index('$[0].government_reference_lot_scenario'),aws.sql.index(',o.value_median'))
 
     def test_size_filter_is_applied_to_the_complete_feed_before_pagination(self):
-        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name;repo.manifest=lambda:{'tables':{}}
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name;repo.manifest=lambda:{'as_of':'2026-10-31','tables':{}}
         repo.opportunities('CAGE:45934',3,0,False,'work',5000000)
         self.assertLess(aws.sql.index('q.commercial_value>=5000000.0'),aws.sql.index('OFFSET 0 LIMIT 3'))
         with self.assertRaises(ValueError):repo.opportunities('CAGE:45934',minimum_value=float('nan'))
 
     def test_unknown_company_entry_is_context_not_a_ranked_work_opportunity(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
-        repo.manifest=lambda:{'tables':{'company_work_matches':{'columns':[]}}}
+        repo.manifest=lambda:{'as_of':'2026-10-31','tables':{'company_work_matches':{'columns':[]}}}
         repo.opportunities('CAGE:45934',24,0,False,'work')
         self.assertIn("cw.review_category<>'market_context'",aws.sql)
         repo.opportunities('CAGE:45934',24,0,True)
@@ -81,7 +81,7 @@ class OpportunityPilotTests(unittest.TestCase):
 
     def test_source_quality_category_applies_before_pagination_and_preserves_unknowns(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
-        repo.manifest=lambda:{'tables':{'opportunity_quality_reviews':{},'company_notice_source_evidence':{},'company_work_matches':{'columns':[{'Name':'fit_verdict'}]}}}
+        repo.manifest=lambda:{'as_of':'2026-10-31','tables':{'opportunity_quality_reviews':{},'company_notice_source_evidence':{},'company_work_matches':{'columns':[{'Name':'fit_verdict'}]}}}
         repo.opportunities('CAGE:45934',24,25,False,'work')
         self.assertIn("coalesce(qr.category_override,'')<>'items'",aws.sql)
         self.assertIn('qr.record_hash=o.record_hash',aws.sql)
@@ -114,7 +114,7 @@ class OpportunityPilotTests(unittest.TestCase):
 
     def test_company_match_review_is_exact_versioned_and_retains_rejected_evidence(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
-        repo.manifest=lambda:{'tables':{'company_match_assessments':{}}}
+        repo.manifest=lambda:{'as_of':'2026-10-31','tables':{'company_match_assessments':{}}}
         repo.company_match_review('45934','a'*64)
         self.assertIn("a.company_id='CAGE:45934'",aws.sql)
         self.assertIn("a.episode_id='"+'a'*64+"'",aws.sql)
@@ -124,7 +124,7 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn('LIMIT 1',aws.sql)
         with self.assertRaises(ValueError):repo.company_match_review("45934'",'a'*64)
         with self.assertRaises(ValueError):repo.company_match_review('45934','not-an-id')
-        repo.manifest=lambda:{'tables':{}}
+        repo.manifest=lambda:{'as_of':'2026-10-31','tables':{}}
         self.assertEqual(repo.company_match_review('45934','a'*64),[])
 
     def test_match_review_requires_sign_in_and_does_not_change_personal_qualification(self):
@@ -143,7 +143,7 @@ class OpportunityPilotTests(unittest.TestCase):
 
     def test_supplier_lineage_is_scoped_to_the_opportunity(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
-        repo.manifest = lambda: {'tables': {'supplier_pull_prime_evidence': {}}}
+        repo.manifest = lambda: {'as_of':'2026-10-31','tables': {'supplier_pull_prime_evidence': {}}}
         repo.supplier_evidence('a' * 64, 'primes', 25, 0)
         self.assertIn("WHERE e.episode_id='" + 'a' * 64 + "'", aws.sql)
         self.assertIn('safe.supplier_pull_prime_evidence', aws.sql)
@@ -152,7 +152,7 @@ class OpportunityPilotTests(unittest.TestCase):
 
     def test_complete_value_evidence_has_bounded_pagination(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
-        repo.manifest = lambda: {'tables': {'contract_value_observations': {}}}
+        repo.manifest = lambda: {'as_of':'2026-10-31','tables': {'contract_value_observations': {}}}
         repo.cohort_awards('a' * 64, 25, 25)
         self.assertIn("WHERE cohort_id='" + 'a' * 64 + "'", aws.sql)
         self.assertIn('OFFSET 25 LIMIT 25', aws.sql)
@@ -161,7 +161,7 @@ class OpportunityPilotTests(unittest.TestCase):
 
     def test_supplier_roles_reuse_exact_profile_evidence_without_fuzzy_identity(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
-        repo.manifest=lambda:{'tables':{'supplier_pull_report_evidence':{},'company_profiles':{'columns':[{'Name':n} for n in ['role_assessment','manufacturer_declared_awards','profile_hash']]}}}
+        repo.manifest=lambda:{'as_of':'2026-10-31','tables':{'supplier_pull_report_evidence':{},'company_profiles':{'columns':[{'Name':n} for n in ['role_assessment','manufacturer_declared_awards','profile_hash']]}}}
         repo.supplier_evidence('a'*64,'reports',25,0)
         self.assertIn('p.company_id=e.supplier_company_id',aws.sql)
         self.assertIn('p.role_assessment supplier_role_assessment',aws.sql)
@@ -171,7 +171,7 @@ class OpportunityPilotTests(unittest.TestCase):
 
     def test_event_history_is_scoped_and_identifiers_are_validated(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
-        repo.manifest = lambda: {'tables': {'company_opportunity_events': {}}}
+        repo.manifest = lambda: {'as_of':'2026-10-31','tables': {'company_opportunity_events': {}}}
         repo.company_events('45934', 'a' * 64, 10, 0)
         self.assertIn("company_id='CAGE:45934'", aws.sql)
         self.assertIn("episode_id='" + 'a' * 64 + "'", aws.sql)
@@ -189,7 +189,7 @@ class OpportunityPilotTests(unittest.TestCase):
 
     def test_registry_relationships_are_exact_and_distinguish_replacements(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
-        repo.manifest=lambda:{'tables':{'company_registry':{}}}
+        repo.manifest=lambda:{'as_of':'2026-10-31','tables':{'company_registry':{}}}
         repo.relationships('45934',25,0)
         self.assertIn("upper(trim(parent_cage))='45934'",aws.sql)
         self.assertIn("'registered_parent_cage' relationship_type",aws.sql)
@@ -201,7 +201,7 @@ class OpportunityPilotTests(unittest.TestCase):
 
     def test_company_scope_drilldown_uses_exact_native_scope_and_company(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
-        repo.manifest=lambda:{'tables':{'company_subcontract_facts':{}}}
+        repo.manifest=lambda:{'as_of':'2026-10-31','tables':{'company_subcontract_facts':{}}}
         repo.work_evidence=lambda doc:[{'company_id':'CAGE:45934','source_kind':'subaward_report','work_text':"PUMP FUEL BOOST"}]
         repo.work_sources('a'*64,25,0)
         self.assertIn("a.company_id='CAGE:45934'",aws.sql)
