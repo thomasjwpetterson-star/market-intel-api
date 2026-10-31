@@ -6,7 +6,7 @@ Available capabilities
 ----------------------
 The actual authenticated opportunity page and company home consume the same versioned AWS read model. There is no separate sampled backend. current.json is authoritative for the published release; a build in progress is not an available capability. Source and derived row counts are recorded in each release manifest and validation report. Candidate links are evidence relationships, not verified sales opportunities or probability estimates.
 
-Company lookup covers 4,140,081 held CAGE identities. Evidence-rich profiles cover a smaller subset; registry presence alone does not create capabilities or recommendations. Exact NSN/catalogue retrieval and technical work-text retrieval both operate across held company evidence. No company-specific seed list or ten-item cap is required.
+Company lookup covers 4,140,108 held CAGE identities. Evidence-rich profiles cover a smaller subset; registry presence alone does not create capabilities or recommendations. Exact NSN/catalogue retrieval and technical work-text retrieval both operate across held company evidence. No company-specific seed list or ten-item cap is required.
 
 Procurement maturity and company access are separate: published requirements, explicit new-source/teaming enquiries, emerging work packages, item forecasts, historical watches, resolved records and evidence gaps. A match does not establish technical qualification, manufacturing source, data rights, set-aside eligibility, or an available subcontract. Direct government procurement and inferred prime supply-chain demand remain distinct lanes.
 
@@ -14,7 +14,7 @@ Storage and refresh
 -------------------
 S3 bucket a-and-d-intel-lake-newaccount, prefix governance/opportunity_intelligence/. current.json points to an immutable releases/<run_id>/manifest.json, rules.json, validation.json and Parquet tables. Glue database market_intel_platform_candidate; table bindings are supplied by the manifest, never hardcoded per release. Key tables: opportunities, demand_decisions, company_registry, company_profiles, company_scope_features, company_work_matches, company_matches, company_item_matches, company_item_valuations, published_calls, research_awards, research_topics_current, notice_price_links, planning_narratives, force_programme_links and programme_funding. Retained company_work evidence has its own manifest source binding.
 
-The existing Glue job mimir-opportunity-evidence-refresh runs daily at 02:30 UTC (14:30 Fiji). It publishes only after validation; failed runs retain the preceding pointer. This refresh does not imply that every upstream producer has refreshed. Native refreshes read the complete award and reported subcontract projections, resolve revisions, and rebuild all 16 work partitions with a complete-source count check. Source dates remain visible; catalogue and some planning/inventory bindings may still precede the current run. The job refresh does not advance those upstream producers.
+The existing Glue job mimir-opportunity-evidence-refresh runs daily at 02:30 UTC (14:30 Fiji). It publishes only after validation; failed runs retain the preceding pointer. This refresh does not imply that every upstream producer has refreshed. Native refreshes read the complete award and reported subcontract projections, resolve revisions, and rebuild all 52 work partitions with a complete-source count check. Source dates remain visible; catalogue and some planning/inventory bindings may still precede the current run. The job refresh does not advance those upstream producers.
 
 HTTP interface
 --------------
@@ -393,6 +393,45 @@ successful source-backed supplier history is still separate from proof that a
 future package is unplaced. These precision corrections do not increase or pad
 monetary opportunity values.
 
-At preparation, the recovery is still running; this note does not assert a new
-published release. The release verification report records the actual successful
-release, validation results, representative-company checks and schedule state.
+Verified non-item forecast ingestion gap
+---------------------------------------
+The held canonical Defense SAM corpus contains 23 long-range acquisition forecast
+notice rows since 2025, including notice revisions. None joins to an extracted
+pricing-candidate attachment in the current corpus. These cover notices must not
+be counted as 23 independent planned contracts. NAVAIR publishes current
+requirement-level forecasts separately; the opportunity engine does not yet
+explode and version those planned contract rows.
+
+For example, NAWCWD's January 2026 public forecast row 4 identifies F/A-18 sensor
+system support, a $250m-$1bn anticipated total including options, a FY2027 Q4
+solicitation and FY2028 Q3 award, 60 months, and an anticipated sole-source route.
+The named prior contract N6893623D0034 resolves in Mimir to CAGE 4U884 / UEI
+NBSLHP77ZJQ1, rather than every Raytheon site. The underlying IDV has zero direct
+obligations; child orders and the future planning band are distinct evidence.
+This planning example is not connected to serving totals. A future adapter must
+retain fiscal-quarter precision, source value ranges, option/IDIQ semantics,
+incumbent-contract identity, eligibility, latest document hashes and later notice
+resolution. It must not turn an entire forecast document or programme ceiling
+into a company's addressable revenue.
+
+Official forecast:
+https://www.navair.navy.mil/nawcwd/sites/g/files/jejdrs601/files/document/%5Bfilename%5D/NAWCWD%20LRAF%20FY%202026.pdf
+Current NAVAIR forecast index: https://www.navair.navy.mil/osbp/
+
+Publication and evidence retention (0.5.45)
+------------------------------------------
+The full-market release 20261031_143426_2a8e28 is published after all 197 local
+validation gates and complete Athena count readback passed. The approved daily
+trigger is active at 14:30 Fiji, using native refresh with no recovery checkpoint,
+fixed assessment date or auxiliary-retention override in its default arguments.
+
+Publication recovery restores SHA-verified completed tables and re-runs their
+validation; it does not rerun matching or alter monetary calculations. Raw
+archives are content-addressed and checked against their retained SHA-256.
+One standalone innovation feed retains the prior complete archived snapshot with
+its original source dates because the newer DIU detail raw file was unavailable.
+A dependency guard verified that no opportunity or monetary outputs depend on
+that auxiliary feed. The manifest records auxiliary_source_retention and exposes
+its source status; a refresh timestamp must not imply that this source advanced.
+The verification report records representative-company checks and actual serving
+results separately from release gates.
