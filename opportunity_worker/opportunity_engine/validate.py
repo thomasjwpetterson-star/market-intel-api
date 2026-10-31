@@ -35,8 +35,13 @@ def validate(directory):
   check('catalogue_sales_partition_arithmetic',c.execute('SELECT count(*) FROM company_catalogue_sales WHERE abs(observed_catalogue_item_sales-direct_seller_sales-other_seller_item_sales)>0.01 OR single_catalogue_part_other_seller_sales>exact_part_other_seller_sales+0.01 OR exact_part_other_seller_sales>other_seller_item_sales+0.01').fetchone()[0]==0)
  if 'company_pipeline_coverage' in m['tables']:
   check('pipeline_coverage_company_unique',c.execute('SELECT count(*)-count(DISTINCT company_id) FROM company_pipeline_coverage').fetchone()[0]==0)
-  check('pipeline_coverage_benchmark_arithmetic',c.execute('SELECT count(*) FROM company_pipeline_coverage WHERE abs(coverage_benchmark-3*annual_net_obligations)>0.01').fetchone()[0]==0)
+  benchmark_column='benchmark_annual_net_obligations' if any(x[0]=='benchmark_annual_net_obligations' for x in c.execute('DESCRIBE company_pipeline_coverage').fetchall()) else 'annual_net_obligations'
+  check('pipeline_coverage_benchmark_arithmetic',c.execute('SELECT count(*) FROM company_pipeline_coverage WHERE abs(coverage_benchmark-3*'+benchmark_column+')>0.01').fetchone()[0]==0)
   check('pipeline_coverage_counts_reconcile',c.execute('SELECT count(*) FROM company_pipeline_coverage WHERE matched_opportunities<>work_opportunities+item_opportunities').fetchone()[0]==0)
+ if 'company_reporting_lag_baselines' in m['tables']:
+  check('reporting_lag_company_unique',c.execute('SELECT count(*)-count(DISTINCT company_id) FROM company_reporting_lag_baselines').fetchone()[0]==0)
+  check('reporting_lag_evidence_reconciled',bool(m.get('reporting_lag_policy',{}).get('validation_query_id')))
+  check('reporting_lag_period_is_before_recent_delay_window',c.execute('SELECT count(*) FROM company_reporting_lag_baselines WHERE try_cast(lag_adjusted_period_end AS DATE)>cast(? AS DATE)-INTERVAL 90 DAY',[m['as_of']]).fetchone()[0]==0)
  if 'company_activity_baselines' in m['tables']:
   check('activity_company_unique',c.execute('SELECT count(*)-count(DISTINCT company_id) FROM company_activity_baselines').fetchone()[0]==0)
   check('activity_positive_not_below_net',c.execute('SELECT count(*) FROM company_activity_baselines WHERE annual_positive_obligations+0.01<annual_net_obligations OR annual_positive_obligations<0').fetchone()[0]==0)

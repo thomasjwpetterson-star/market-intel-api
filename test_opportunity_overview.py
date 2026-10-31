@@ -66,3 +66,10 @@ class CoverageTests(unittest.TestCase):
   self.assertEqual(r['full_horizon_forecast_to_annual_ratio'],8)
 
 if __name__=='__main__':unittest.main()
+
+
+class ReportingLagBenchmarkTests(unittest.TestCase):
+ def test_defense_scale_uses_observed_lagged_year_without_extrapolating_recent_period(self):
+  from opportunity_intelligence.overview import coverage_summary
+  business=dict(annual_net_obligations=26000000,annual_dod_net_obligations=26000000,lag_adjusted_annual_net_obligations=35000000,lag_adjusted_annual_dod_net_obligations=35000000,lag_adjusted_period_start='2025-08-01',lag_adjusted_period_end='2026-07-31')
+  r=coverage_summary(business,{},{});self.assertEqual(r['coverage_benchmark'],105000000);self.assertEqual(r['annual_net_obligations'],26000000);self.assertEqual(r['benchmark_period_end'],'2026-07-31');self.assertEqual(r['benchmark_basis'],'reporting_lag_adjusted_observed_year')

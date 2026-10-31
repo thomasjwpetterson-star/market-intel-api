@@ -22,3 +22,10 @@ def test_full_market_coverage_does_not_add_duplicate_requests_or_historical_guid
  assert r['priced_published_demand']==1000 and r['full_horizon_forecast_scenario']==5000
  assert r['prospects_with_material_value_guide']==1
  assert r['coverage_status']=='priced_coverage_below_benchmark_before_overlap'
+ # A separate observed lag-adjusted year drives the diagnostic; the recent
+ # reported-year fields remain unchanged and are never annualized.
+ put('company_reporting_lag_baselines',"SELECT 'CAGE:11111' company_id,200000000.0::DOUBLE lag_adjusted_annual_net_obligations,200000000.0::DOUBLE lag_adjusted_annual_dod_net_obligations,'2025-08-01' lag_adjusted_period_start,'2026-07-31' lag_adjusted_period_end")
+ m['tables']['company_reporting_lag_baselines']=tables['company_reporting_lag_baselines'];(tmp_path/'manifest.json').write_text(json.dumps(m))
+ build(tmp_path);m=json.loads((tmp_path/'manifest.json').read_text())
+ r=c.execute('SELECT annual_net_obligations,benchmark_annual_net_obligations,coverage_benchmark,benchmark_period_end FROM read_parquet(?)',[m['tables']['company_pipeline_coverage']['path']]).fetchone()
+ assert r==(100000000,200000000,600000000,'2026-07-31')

@@ -12,8 +12,8 @@ def normalise_phase(s):
 
 def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manifests=(),skip_matching=False,research_only=False):
  out=Path(output);out.mkdir(parents=True,exist_ok=True)
- c=duckdb.connect(str(out/'build.duckdb'));c.execute("SET threads=1;SET memory_limit='1800MB';SET preserve_insertion_order=false")
- c.execute('SET temp_directory='+quote(out/'tmp'));c.execute("SET max_temp_directory_size='3GB'")
+ c=duckdb.connect(str(out/'build.duckdb'));c.execute("SET threads=1;SET memory_limit='8GB';SET preserve_insertion_order=false")
+ c.execute('SET temp_directory='+quote(out/'tmp'));c.execute("SET max_temp_directory_size='40GB'")
  sources=json.loads(Path(seed_manifest).read_text());sbir=json.loads(Path(sbir_manifest).read_text());tables={}
  for name,s in sources.items():
   p=Path(s['path'])

@@ -73,3 +73,11 @@ sources sought and presolicitations. The serving API removes elapsed precise
 response clocks between daily builds. The SQL repair is versioned under
 infrastructure/sam_response_deadline_canonical.sql. Producer module SHA256 hashes
 and methodological policies are included in each release for reproducibility.
+
+Defense annual comparisons also retain company_reporting_lag_actions and
+company_reporting_lag_baselines. The 90-day public reporting delay can make a
+recent trailing-year total incomplete. The alternative is an observed full
+twelve-month window ending in the last month before that delay window, with
+its own dates and source transactions. It is not an annualized estimate or a
+certification of complete reporting. Both periods remain inspectable; the
+lag-adjusted year informs Defense company coverage benchmarks and materiality.

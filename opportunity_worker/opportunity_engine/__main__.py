@@ -28,6 +28,8 @@ def main():
   augment_item_sources(out)
   from .company_activity import refresh as refresh_activity
   refresh_activity(out,a)
+  from .reporting_lag import refresh as refresh_reporting_lag
+  refresh_reporting_lag(out,a)
   from .pipeline_coverage import build as build_coverage
   build_coverage(out)
   from .logic_provenance import record as record_logic
@@ -83,9 +85,9 @@ def main():
   (root/'latest_build.json').write_text(json.dumps(dict(directory=str(pre))))
   subprocess.run([sys.executable,'-m','opportunity_engine.ingestion.connect_cloud_evidence'],env=env,check=True)
   ptr=json.loads((root/'inputs/connections_latest.json').read_text());sources.update(json.loads(Path(ptr['path']).read_text())['sources']);inputs.write_text(json.dumps({'sources':sources}))
- build(seed,sb,out,args.as_of,inputs);validate_demand_integrity(out);enrich(out,inputs if 'governed_price_lines' in sources else None)
- if 'cage_registry' in sources:augment(out,[inputs])
  try:
+  build(seed,sb,out,args.as_of,inputs);validate_demand_integrity(out);enrich(out,inputs if 'governed_price_lines' in sources else None)
+  if 'cage_registry' in sources:augment(out,[inputs])
   if 'company_work' in sources:augment_companies(out)
   from .item_demand import augment as augment_item_demand
   if all(n in sources for n in ('item_price_references','item_market_price_evidence')):augment_item_demand(out)
@@ -100,6 +102,8 @@ def main():
   if 'company_work' in sources:augment_catalogue_sales(out)
   from .company_activity import refresh as refresh_activity
   if 'native_company_identity' in sources:refresh_activity(out,a)
+  from .reporting_lag import refresh as refresh_reporting_lag
+  if 'native_company_identity' in sources:refresh_reporting_lag(out,a)
   from .pipeline_coverage import build as build_coverage
   if 'company_work' in sources:build_coverage(out)
   from .logic_provenance import record as record_logic
@@ -108,6 +112,8 @@ def main():
   v=validate(out)
   if args.publish:publish(out)
  except Exception:
+  if not (out/'manifest.json').exists():
+   out.mkdir(parents=True,exist_ok=True);(out/'manifest.json').write_text(json.dumps(dict(run_id=out.name,as_of=args.as_of,sources=sources,sbir_source=sbir,tables={},checkpoint_phase='unpublished_input_bindings')))
   try:archive_failed_attempt(out,a,m.get('run_id'))
   except Exception as checkpoint_error:print('Could not archive failed derivation:',str(checkpoint_error),flush=True)
   raise

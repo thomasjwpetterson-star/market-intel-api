@@ -56,7 +56,7 @@ def summary(counts,priced,release,business=None):
  scale=float(counts.get('observed_prime_net_obligations') or 0)
  forecast=forecast_summary(priced)
  coverage=coverage_summary(business or {},overall,forecast)
- try:annual_scale=max(float((business or {}).get('annual_net_obligations') or 0),0)
+ try:annual_scale=max(float(coverage.get('benchmark_annual_net_obligations') or 0),0)
  except (ValueError,TypeError):annual_scale=0
  focus=max(1000000,annual_scale*0.01) if annual_scale>=100000000 else 1000000 if scale>=100000000 else 0
  return dict(release=release,policy=POLICY,business_coverage=coverage,forecast=forecast,categories=result,overall=overall,materiality_floor=focus,materiality_basis='Default priority focus scales to 1% of observed annual obligations for sites above $100m annually, with a $1m floor. A $1m focus also applies where lifetime observed obligations exceed $100m. Editable; smaller prospects remain available.',value_explanation='The headline combines priced contract and item requirements across the complete company feed. It uses stated quantities and exact-item reference or historical unit prices. Repeated requirements for the same buyer and item contribute their largest scenario once, including overlaps between contract and item feeds. Historical contract comparisons, programme totals and forecasts are excluded. Government reference dates may be unknown; prices are not current quotes. Unpriced opportunities are not assumed to be worth zero. These are demand estimates, not expected company revenue.')
@@ -93,16 +93,17 @@ def coverage_summary(business,published,forecast):
    v=float(business.get(key))
    return v if v==v and abs(v)!=float('inf') else None
   except (ValueError,TypeError):return None
- annual=num('annual_net_obligations');target=3*max(annual,0) if annual is not None else None
+ use_lag=(num('lag_adjusted_annual_dod_net_obligations') or 0)>0
+ annual=num('lag_adjusted_annual_net_obligations') if use_lag else num('annual_net_obligations');target=3*max(annual,0) if annual is not None else None
  current=published.get('priced_demand_total');future=forecast.get('estimated_demand_total')
  upper=(current or 0)+(future or 0) if current is not None or future is not None else None
  status='not_measurable' if not target or upper is None else 'below_benchmark_even_before_overlap' if upper<target else 'requires_overlap_and_access_review'
  context=dict(business)
  if 'interpretation' in context:context['catalogue_sales_interpretation']=context.pop('interpretation')
- return dict(**context,target_multiple=3,coverage_benchmark=target,coverage_status=status,
-  dod_coverage_benchmark=3*max(num('annual_dod_net_obligations') or 0,0) if num('annual_dod_net_obligations') is not None else None,
-  matched_opportunities_per_annual_award=published.get('count',0)/num('annual_award_count') if num('annual_award_count') else None,
+ return dict(**context,target_multiple=3,coverage_benchmark=target,coverage_status=status,benchmark_annual_net_obligations=annual,benchmark_basis='reporting_lag_adjusted_observed_year' if use_lag else 'recent_reported_year',benchmark_period_start=business.get('lag_adjusted_period_start' if use_lag else 'period_start'),benchmark_period_end=business.get('lag_adjusted_period_end' if use_lag else 'period_end'),
+  dod_coverage_benchmark=3*max(num('lag_adjusted_annual_dod_net_obligations' if use_lag else 'annual_dod_net_obligations') or 0,0) if num('lag_adjusted_annual_dod_net_obligations' if use_lag else 'annual_dod_net_obligations') is not None else None,
+  matched_opportunities_per_annual_award=published.get('count',0)/num('lag_adjusted_annual_award_count' if use_lag else 'annual_award_count') if num('lag_adjusted_annual_award_count' if use_lag else 'annual_award_count') else None,
   prospects_with_value_guide_over_1m=published.get('larger_count'),
   published_demand_to_annual_ratio=current/annual if annual and annual>0 and current is not None else None,
   full_horizon_forecast_to_annual_ratio=future/annual if annual and annual>0 and future is not None else None,
-  interpretation='Three times trailing-year net federal obligations is a coverage benchmark, not a forecast or promised pipeline. Published requirements and full-horizon forecasts remain separate because they may overlap. Unpriced work is unknown, not zero. Reseller product-market sales are historical context and are not added to obligations, manufacturer revenue or future pipeline.')
+  interpretation='Three times observed annual net federal obligations is a coverage benchmark; Defense comparisons use the stated reporting-lag-adjusted year where available, not a forecast or promised pipeline. Published requirements and full-horizon forecasts remain separate because they may overlap. Unpriced work is unknown, not zero. Reseller product-market sales are historical context and are not added to obligations, manufacturer revenue or future pipeline.')
