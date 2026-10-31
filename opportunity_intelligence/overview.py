@@ -52,7 +52,7 @@ def summary(counts,priced,release,business=None):
     winner=component if component['included_value']>previous['included_value'] else previous
     combined[key]={**winner,'related_requirements':related,'aggregation':'Largest priced scenario for this buyer/item across contract and item feeds; related records are not added'}
  components=sorted(combined.values(),key=lambda x:(-x['included_value'],x['episode_id']))
- overall=dict(count=sum(x['count'] for x in result.values()),priced_source_count=sum(x['priced_source_count'] for x in result.values()),priced_requirement_count=len(components),priced_demand_total=float(sum(Decimal(str(x['included_value'])) for x in components)) if components else None,value_components=components)
+ overall=dict(count=sum(x['count'] for x in result.values()),larger_count=sum(x['larger_count'] for x in result.values()),priced_source_count=sum(x['priced_source_count'] for x in result.values()),priced_requirement_count=len(components),priced_demand_total=float(sum(Decimal(str(x['included_value'])) for x in components)) if components else None,value_components=components)
  scale=float(counts.get('observed_prime_net_obligations') or 0)
  forecast=forecast_summary(priced)
  coverage=coverage_summary(business or {},overall,forecast)
@@ -101,6 +101,8 @@ def coverage_summary(business,published,forecast):
  if 'interpretation' in context:context['catalogue_sales_interpretation']=context.pop('interpretation')
  return dict(**context,target_multiple=3,coverage_benchmark=target,coverage_status=status,
   dod_coverage_benchmark=3*max(num('annual_dod_net_obligations') or 0,0) if num('annual_dod_net_obligations') is not None else None,
+  matched_opportunities_per_annual_award=published.get('count',0)/num('annual_award_count') if num('annual_award_count') else None,
+  prospects_with_value_guide_over_1m=published.get('larger_count'),
   published_demand_to_annual_ratio=current/annual if annual and annual>0 and current is not None else None,
   full_horizon_forecast_to_annual_ratio=future/annual if annual and annual>0 and future is not None else None,
   interpretation='Three times trailing-year net federal obligations is a coverage benchmark, not a forecast or promised pipeline. Published requirements and full-horizon forecasts remain separate because they may overlap. Unpriced work is unknown, not zero. Reseller product-market sales are historical context and are not added to obligations, manufacturer revenue or future pipeline.')
