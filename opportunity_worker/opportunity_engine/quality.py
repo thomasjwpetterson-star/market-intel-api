@@ -20,7 +20,10 @@ def apply(directory):
   c.read_parquet(m['tables'][name]['path']).create_view('prior_'+name)
  if 'opportunity_quality_reviews' in m['tables']:
   c.read_parquet(m['tables']['opportunity_quality_reviews']['path']).create_view('prior_quality_reviews')
-  c.execute('CREATE TEMP TABLE decision_baselines AS SELECT episode_id,pre_quality_decision_json decision_json FROM prior_quality_reviews UNION ALL SELECT d.episode_id,d.decision_json FROM prior_demand_decisions d ANTI JOIN prior_quality_reviews q USING(episode_id)')
+  # A retained explanation is reusable only for the same source version.
+  # Monthly updates intentionally keep episode IDs while changing quantities,
+  # source hashes and periods. Reusing by episode alone leaks prior evidence.
+  c.execute('CREATE TEMP TABLE decision_baselines AS SELECT q.episode_id,q.pre_quality_decision_json decision_json FROM prior_quality_reviews q JOIN prior_opportunities o USING(episode_id) WHERE q.record_hash=o.record_hash UNION ALL SELECT d.episode_id,d.decision_json FROM prior_demand_decisions d WHERE NOT EXISTS(SELECT 1 FROM prior_quality_reviews q WHERE q.episode_id=d.episode_id AND q.record_hash=d.source_record_hash)')
  else:c.execute('CREATE TEMP TABLE decision_baselines AS SELECT episode_id,decision_json FROM prior_demand_decisions')
  def output(name,sql):
   c.execute('CREATE OR REPLACE TEMP VIEW result AS '+sql);p=r/(name+'.parquet');tmp=r/(name+'.quality.parquet');c.execute("COPY result TO '"+str(tmp).replace("'","''")+"' (FORMAT PARQUET,COMPRESSION ZSTD)");tmp.replace(p)

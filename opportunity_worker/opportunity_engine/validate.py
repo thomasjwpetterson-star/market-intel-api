@@ -53,6 +53,7 @@ def validate(directory):
  check('opportunity_ids_routable',c.execute("SELECT count(*) FROM opportunities WHERE NOT coalesce(regexp_full_match(episode_id,'[a-f0-9]{64}'),false)").fetchone()[0]==0)
  check('decision_population',c.execute('SELECT count(*) FROM opportunities o ANTI JOIN demand_decisions d USING(episode_id)').fetchone()[0]==0)
  check('decision_record_version',c.execute('SELECT count(*) FROM opportunities o JOIN demand_decisions d USING(episode_id) WHERE o.record_hash<>d.source_record_hash').fetchone()[0]==0)
+ check('decision_explanation_source_version',c.execute("SELECT count(*) FROM demand_decisions WHERE json_extract_string(decision_json,'$.source_basis.source_record_hash') IS DISTINCT FROM source_record_hash").fetchone()[0]==0)
  check('decision_hash_matches_document',c.execute("SELECT count(*) FROM demand_decisions WHERE decision_hash IS DISTINCT FROM json_extract_string(decision_json,'$.decision_hash')").fetchone()[0]==0)
  check('no_invented_company_value',c.execute("SELECT count(*) FROM demand_decisions WHERE json_extract_string(decision_json,'$.company_addressable_value') IS NOT NULL").fetchone()[0]==0)
  check('elapsed_not_actionable',c.execute("SELECT count(*) FROM opportunities o JOIN demand_decisions d USING(episode_id) WHERE try_cast(o.window_end AS DATE)<cast(? AS DATE) AND d.stage<>'resolved_or_elapsed'",[m['as_of']]).fetchone()[0]==0)

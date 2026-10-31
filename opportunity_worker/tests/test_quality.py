@@ -62,6 +62,18 @@ def test_quality_pipeline_keeps_evidence_and_filters_serving_edges(tmp_path):
  assert c.execute("DESCRIBE SELECT body_deadline FROM read_parquet(?)",[str(tmp_path/'opportunity_quality_reviews.parquet')]).fetchone()[1]=='VARCHAR'
  c.close();apply(tmp_path);c=duckdb.connect()
  d=json.loads(c.execute("SELECT decision_json FROM read_parquet(?) WHERE episode_id='stale'",[str(tmp_path/'demand_decisions.parquet')]).fetchone()[0]);assert len(d['negative_evidence'])==1
+ # A later source version with the same stable ID must use its new explanation
+ # and period, not the retained old deadline/negative-evidence baseline.
+ fresh=json.dumps(dict(stage='qualification_opening',unresolved=[],negative_evidence=[],source_basis=dict(source_record_hash='h4',evidence_ids=['e4']),source_period=dict(end='2027-01-01')))
+ for name,projection in (
+  ('opportunities',"* REPLACE(CASE WHEN episode_id='stale' THEN 'h4' ELSE record_hash END AS record_hash,CASE WHEN episode_id='stale' THEN 'Current source invitation' ELSE scope_text END AS scope_text,CASE WHEN episode_id='stale' THEN '2027-01-01' ELSE window_end END AS window_end)"),
+  ('demand_decisions',"* REPLACE(CASE WHEN episode_id='stale' THEN 'h4' ELSE source_record_hash END AS source_record_hash,CASE WHEN episode_id='stale' THEN '"+fresh.replace("'","''")+"' ELSE decision_json END AS decision_json)"),
+  ('company_matches',"* REPLACE(CASE WHEN episode_id='stale' THEN 'h4' ELSE opportunity_hash END AS opportunity_hash)"),
+  ('company_work_matches',"* REPLACE(CASE WHEN episode_id='stale' THEN 'h4' ELSE opportunity_hash END AS opportunity_hash)")):
+  p=tmp_path/(name+'.parquet');temporary=tmp_path/(name+'.replacement.parquet');c.read_parquet(str(p)).create_view('source_to_update',replace=True);c.execute('COPY (SELECT '+projection+' FROM source_to_update) TO ? (FORMAT PARQUET)',[str(temporary)]);c.execute('DROP VIEW source_to_update');temporary.replace(p)
+ c.close();apply(tmp_path);c=duckdb.connect();d=json.loads(c.execute("SELECT decision_json FROM read_parquet(?) WHERE episode_id='stale'",[str(tmp_path/'demand_decisions.parquet')]).fetchone()[0])
+ assert d['stage']=='qualification_opening' and d['source_basis']['source_record_hash']=='h4'
+ assert d['source_period']['end']=='2027-01-01' and not d['negative_evidence']
 
 
 def test_exact_source_codes_require_named_part_and_nonconflicting_authorization(tmp_path):
