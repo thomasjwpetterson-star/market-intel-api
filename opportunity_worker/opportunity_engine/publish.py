@@ -47,12 +47,8 @@ def publish(directory):
  if m.get('reuse_parent_release'):
   parent_key=PREFIX+'/releases/'+m['reuse_parent_release']+'/manifest.json'
   parent=json.loads(a.s3.get_object(Bucket=BUCKET,Key=parent_key)['Body'].read())
- for source in m['sources'].values():
-  for raw in source.get('raw_archives',[]):
-   if raw.get('s3_uri'):continue
-   p=Path(raw['path']);sha=hashlib.sha256(p.read_bytes()).hexdigest()
-   if sha!=raw['sha256']:raise ValueError('Raw source changed')
-   key=PREFIX+'/sources/content/sha256='+sha+'/source.archive';a.upload(p,key);raw['s3_uri']='s3://'+BUCKET+'/'+key
+ from .raw_archives import bind as bind_raw_archives
+ bind_raw_archives(a,m)
  for name,t in m['tables'].items():
   if t.get('reuse_parent_binding'):
    original=parent['tables'][name] if parent else None

@@ -10,15 +10,19 @@ from .registry import augment
 from .company_enrichment import augment as augment_companies
 from .company_history import rebuild as rebuild_history
 from .events import track as track_events
-from .checkpoint import archive_failed_attempt,load_derived_checkpoint
+from .checkpoint import archive_failed_attempt,load_derived_checkpoint,restore_validated_checkpoint
 from .demand_history import rebuild as rebuild_demand,refresh_forecast_episodes
 from .quality import apply as apply_quality,review_current
 
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--from-current',action='store_true',required=True);ap.add_argument('--workdir',required=True);ap.add_argument('--as-of',default=datetime.datetime.now(datetime.timezone.utc).date().isoformat());ap.add_argument('--publish',action='store_true');ap.add_argument('--refresh',action='store_true');ap.add_argument('--review-current',action='store_true');ap.add_argument('--source-bindings-key');ap.add_argument('--resume-derived-checkpoint-key');args=ap.parse_args();a=AWS();root=Path(args.workdir).resolve();root.mkdir(parents=True,exist_ok=True)
+ ap=argparse.ArgumentParser();ap.add_argument('--from-current',action='store_true',required=True);ap.add_argument('--workdir',required=True);ap.add_argument('--as-of',default=datetime.datetime.now(datetime.timezone.utc).date().isoformat());ap.add_argument('--publish',action='store_true');ap.add_argument('--refresh',action='store_true');ap.add_argument('--review-current',action='store_true');ap.add_argument('--source-bindings-key');ap.add_argument('--resume-derived-checkpoint-key');ap.add_argument('--publish-validated-checkpoint-key');ap.add_argument('--retain-prior-unreferenced-innovation',action='store_true');args=ap.parse_args();a=AWS();root=Path(args.workdir).resolve();root.mkdir(parents=True,exist_ok=True)
  pointer=json.loads(a.s3.get_object(Bucket=BUCKET,Key=PREFIX+'/current.json')['Body'].read());key=pointer['manifest_key']
  if not key.startswith(PREFIX+'/releases/'):raise ValueError('Invalid release pointer')
  m=json.loads(a.s3.get_object(Bucket=BUCKET,Key=key)['Body'].read())
+ if args.publish_validated_checkpoint_key:
+  if not args.publish or args.review_current or args.refresh or args.source_bindings_key or args.resume_derived_checkpoint_key:raise ValueError('Validated publication is an exclusive publish operation')
+  out=restore_validated_checkpoint(a,args.publish_validated_checkpoint_key,m,root,retain_prior_innovation=args.retain_prior_unreferenced_innovation);publish(out);print(json.dumps(dict(directory=str(out),published=True,mode='validated_checkpoint_publication')));return
+ if args.retain_prior_unreferenced_innovation:raise ValueError('Auxiliary source retention requires validated checkpoint publication')
  if args.resume_derived_checkpoint_key and not args.review_current:raise ValueError('Derived checkpoint recovery requires the quality/validation path')
  if args.review_current:
   if args.refresh or args.source_bindings_key:raise ValueError('Quality review reuses the published source snapshot')

@@ -29,6 +29,27 @@ def test_recovery_rejects_foreign_or_unfingerprinted_output_objects():
  m=checkpoint();m['tables']['opportunities']['sha256']='missing'
  with pytest.raises(ValueError):load_derived_checkpoint(aws,KEY,dict(run_id='live'))
 
+
+@pytest.mark.parametrize('corrupt',[False,True])
+def test_validated_restore_requires_all_gates_and_exact_table_bytes(tmp_path,monkeypatch,corrupt):
+ m=checkpoint();blob=b'immutable output';sha=hashlib.sha256(blob).hexdigest();m.update(sources={},logic_sha256='logic')
+ for t in m['tables'].values():t['sha256']=sha
+ names={'opportunities_unique','demand_decisions_unique','company_profiles_unique','decision_population','decision_record_version','no_invented_company_value','public_not_silently_released'}
+ for name in m['tables']:names.update({name+'_content_hash',name+'_count'})
+ v=dict(failed=0,passed=len(names),logic_sha256='logic',checks=[dict(name=name,passed=True) for name in names]);checked=[]
+ class S3:
+  def get_object(self,**kw):return {'Body':io.BytesIO(json.dumps(v if kw['Key'].endswith('/validation.json') else m).encode())}
+  def download_file(self,bucket,key,path):__import__('pathlib').Path(path).write_bytes(b'changed' if corrupt else blob)
+ monkeypatch.setattr(__import__('opportunity_engine.validate',fromlist=['validate']),'validate',lambda directory:checked.append(directory))
+ aws=SimpleNamespace(s3=S3())
+ if corrupt:
+  with pytest.raises(ValueError,match='table changed'):checkpoint_module.restore_validated_checkpoint(aws,KEY,{'run_id':'live'},tmp_path)
+  assert not checked;return
+ out=checkpoint_module.restore_validated_checkpoint(aws,KEY,{'run_id':'live'},tmp_path);saved=json.loads((out/'manifest.json').read_text());assert checked==[out]
+ assert 'checkpoint_phase' not in saved and saved['published_from_validated_checkpoint_key']==KEY
+ v['checks']=v['checks'][:1];v['passed']=1
+ with pytest.raises(ValueError,match='complete matching passed validation'):checkpoint_module.restore_validated_checkpoint(aws,KEY,{'run_id':'live'},tmp_path/'rejected')
+
 @pytest.mark.parametrize('recover',[True,False])
 @pytest.mark.parametrize('fail',[True,False])
 def test_review_downloads_immutable_bindings_without_treating_a_checkpoint_as_published(tmp_path,monkeypatch,recover,fail):
