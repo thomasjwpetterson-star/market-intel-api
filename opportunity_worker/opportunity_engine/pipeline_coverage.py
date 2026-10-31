@@ -12,11 +12,11 @@ def build(directory):
  for n in required:c.read_parquet(m['tables'][n]['path']).create_view(n)
  if 'company_reporting_lag_baselines' in m['tables']:
   c.read_parquet(m['tables']['company_reporting_lag_baselines']['path']).create_view('lag_baselines')
-  c.execute("""CREATE TEMP VIEW benchmark_activity AS SELECT a.*,
+  c.execute("""CREATE TEMP VIEW benchmark_activity AS SELECT coalesce(a.company_id,l.company_id) company_id,a.* EXCLUDE(company_id),
   CASE WHEN l.lag_adjusted_annual_dod_net_obligations>0 THEN l.lag_adjusted_annual_net_obligations ELSE a.annual_net_obligations END benchmark_net,
   CASE WHEN l.lag_adjusted_annual_dod_net_obligations>0 THEN l.lag_adjusted_period_start ELSE a.period_start END benchmark_start,
   CASE WHEN l.lag_adjusted_annual_dod_net_obligations>0 THEN l.lag_adjusted_period_end ELSE a.period_end END benchmark_end
-  FROM company_activity_baselines a LEFT JOIN lag_baselines l USING(company_id)""")
+  FROM company_activity_baselines a FULL JOIN lag_baselines l USING(company_id)""")
  else:c.execute('CREATE TEMP VIEW benchmark_activity AS SELECT *,annual_net_obligations benchmark_net,period_start benchmark_start,period_end benchmark_end FROM company_activity_baselines')
  c.execute("""CREATE TEMP TABLE candidates AS SELECT DISTINCT m.company_id,o.episode_id,o.record_hash,o.lane,o.customer_name,
  (o.lane IN ('published_item_procurement','source_item_forecasts') OR coalesce(q.category_override='items',false)) item_demand,
@@ -44,7 +44,7 @@ def build(directory):
  count(*) FILTER(WHERE coalesce(notice_lot,request_lot,historical_or_source_value,raw_forecast_value,0)>=CASE WHEN a.benchmark_net>=100000000 THEN greatest(1000000,a.benchmark_net*0.01) ELSE 1000000 END)::BIGINT prospects_with_material_value_guide,
  count(*) FILTER(WHERE NOT item_demand AND coalesce(notice_lot,request_lot) IS NULL)::BIGINT work_without_current_price
  FROM candidates c LEFT JOIN benchmark_activity a ON a.company_id=c.company_id GROUP BY c.company_id""")
- sql="""WITH keys AS(SELECT company_id FROM company_profiles UNION SELECT company_id FROM company_activity_baselines)
+ sql="""WITH keys AS(SELECT company_id FROM company_profiles UNION SELECT company_id FROM benchmark_activity)
  SELECT k.company_id,coalesce(p.company_name,a.company_name) company_name,a.annual_net_obligations,a.annual_dod_net_obligations,a.annual_award_count,a.period_start,a.period_end,
  a.benchmark_net benchmark_annual_net_obligations,a.benchmark_start benchmark_period_start,a.benchmark_end benchmark_period_end,
  CASE WHEN a.benchmark_net>0 THEN 3*a.benchmark_net END coverage_benchmark,

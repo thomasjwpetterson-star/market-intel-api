@@ -1,11 +1,11 @@
 {
   "prepared_only": true,
   "mode": "native",
-  "version": "0.5.37",
-  "sha256": "4dad8d31f2cedd408355cd6f43b16723e6d0634338feb28760afb338bcef0289",
-  "package_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=4dad8d31f2cedd408355cd6f43b16723e6d0634338feb28760afb338bcef0289/mimir_opportunity_engine-0.5.37-py3-none-any.whl",
-  "dependency_bundle_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=f35b968dc6d00c288df21e060bf9960e38e46053f08797c3b50c76daa2a15c97/mimir-0.5.37.gluewheels.zip",
-  "dependency_bundle_sha256": "f35b968dc6d00c288df21e060bf9960e38e46053f08797c3b50c76daa2a15c97",
+  "version": "0.5.38",
+  "sha256": "5f2dd6f3c176dfc8c929b6f00967af234dd6d7b680375f982f568e51ef6aeee7",
+  "package_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=5f2dd6f3c176dfc8c929b6f00967af234dd6d7b680375f982f568e51ef6aeee7/mimir_opportunity_engine-0.5.38-py3-none-any.whl",
+  "dependency_bundle_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=31a80cfc90cf6f731ce606dac5d8b6e1609c08ef758ff14fe8105cd4335d0e03/mimir-0.5.38.gluewheels.zip",
+  "dependency_bundle_sha256": "31a80cfc90cf6f731ce606dac5d8b6e1609c08ef758ff14fe8105cd4335d0e03",
   "dependencies": [
     {
       "file": "beautifulsoup4-4.15.0-py3-none-any.whl",
@@ -74,14 +74,14 @@
       "sha256": "0ed14ccfbf1c30a9072c7ca157e4319b70d65f623e91e7b32fadb2853431016e"
     },
     {
-      "file": "mimir_opportunity_engine-0.5.37-py3-none-any.whl",
+      "file": "mimir_opportunity_engine-0.5.38-py3-none-any.whl",
       "name": "mimir-opportunity-engine",
-      "version": "0.5.37",
-      "sha256": "4dad8d31f2cedd408355cd6f43b16723e6d0634338feb28760afb338bcef0289"
+      "version": "0.5.38",
+      "sha256": "5f2dd6f3c176dfc8c929b6f00967af234dd6d7b680375f982f568e51ef6aeee7"
     }
   ],
   "run_id": null,
-  "recovery_key": "governance/opportunity_intelligence/sources/recovery_0_5_37/manifest.json",
+  "recovery_key": "governance/opportunity_intelligence/sources/recovery_0_5_38/manifest.json",
   "role_unchanged": true,
   "source_permissions_unchanged": false,
   "source_read_scope_note": "Four held public-data source tables added; write scope, trust and role unchanged",
@@ -131,7 +131,7 @@
     "opportunity_engine/native_sources.py": "535285b0b81878b0f579aa6a889843427d99d693bcdc09a57cb2af392dc64085",
     "opportunity_engine/notice_prices.py": "cf829bd47a3df629d0d239ecddaf9821ac531474e9ea83901e9903db759a8cba",
     "opportunity_engine/notice_quantity.py": "49e783c6c6b1122f98dc588baba8f6016dc7834b97ae4070a160a07cff341620",
-    "opportunity_engine/pipeline_coverage.py": "6e9db103b656a95de694c8e4b64dd59972a9d5535a1f2ca7eb0c886b81107bbb",
+    "opportunity_engine/pipeline_coverage.py": "e0fd8ba82e21540d36efe8ad1f88f78145702e4bdc3c6270a7662571896d2cea",
     "opportunity_engine/procurement_rules.json": "457c125f23a01a36ee36e9174ec682849b6c351c285af46c7a6cc0511624603d",
     "opportunity_engine/publish.py": "1842d6be193efc4ba9a6a15b0ea575b85afd4d1e0d8d295d7763bc7ab0ae80da",
     "opportunity_engine/quality.py": "76deb19447d13c3d2343a5649bc260f6cdbb1bec55e08d0b34060b304026ad16",
