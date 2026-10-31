@@ -3,6 +3,20 @@ import hashlib,json,re
 from pathlib import Path
 from .aws import AWS,BUCKET,PREFIX,DATABASE
 
+def verify_serving_source(source,table):
+ files=source['files']
+ if len(files)!=1 or files[0]['sha256']!=table['sha256']:raise ValueError('Serving source binding hash mismatch')
+ # Older retained source manifests did not declare rows. Recover the metadata
+ # from the already hash-verified local table, rather than assuming its count.
+ if source.get('rows') is None:
+  import duckdb
+  path=Path(table['path'])
+  if hashlib.sha256(path.read_bytes()).hexdigest()!=table['sha256']:raise ValueError('Serving source content changed')
+  c=duckdb.connect()
+  try:source['rows']=c.execute('SELECT count(*) FROM read_parquet(?)',[str(path)]).fetchone()[0]
+  finally:c.close()
+ if source['rows']!=table['rows']:raise ValueError('Serving source binding count mismatch')
+
 def publish(directory):
  r=Path(directory);m=json.loads((r/'manifest.json').read_text());v=json.loads((r/'validation.json').read_text())
  if v.get('failed') or not v.get('passed'):raise ValueError('Validation must pass before publication')
@@ -60,7 +74,7 @@ def publish(directory):
    print('Reused complete distributed serving table',name,t['rows'],flush=True);continue
   if t.get('source_binding'):
    source=m['sources'][t['source_binding']];files=source['files']
-   if len(files)!=1 or files[0]['sha256']!=t['sha256'] or source['rows']!=t['rows']:raise ValueError('Serving source binding mismatch: '+name)
+   verify_serving_source(source,t)
    t['table']='oi_'+run+'_'+name;t['s3_uri']=files[0]['s3_uri'].rsplit('/',1)[0]+'/'
    a.register(t['table'],t['s3_uri'],t['columns']);print('Registered complete source binding',name,t['rows'],flush=True);continue
   p=Path(t['path'])
