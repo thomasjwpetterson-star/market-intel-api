@@ -54,6 +54,15 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn("regexp_replace(upper(c.native_identifier),'-00$','')",aws.sql)
         self.assertIn('related_source_records_json',aws.sql)
         self.assertLess(aws.sql.index('q.source_family_rank=1'),aws.sql.index('OFFSET 0 LIMIT 24'))
+    def test_live_feed_expires_exact_clocks_without_inventing_date_only_midnight(self):
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name;repo.manifest=lambda:{'as_of':'2026-10-31','tables':{}}
+        repo.opportunities('CAGE:45934',24,0,False,'work')
+        self.assertIn("source_response_deadline_precision'),'')<>'timestamp_utc'",aws.sql)
+        self.assertIn("source_response_deadline_utc')))>=current_timestamp",aws.sql)
+        self.assertNotIn("cast(o.window_end AS timestamp)",aws.sql)
+        repo.opportunities('CAGE:45934',24,0,True,'all')
+        self.assertNotIn('>=current_timestamp',aws.sql)
+
     def test_price_scenarios_inform_review_order_without_inventing_contract_values(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
         repo.manifest = lambda: {'as_of':'2026-10-31','tables': {'company_item_valuations': {}, 'company_notice_item_prices': {}}}
@@ -289,3 +298,11 @@ class NoticeQuantityTests(unittest.TestCase):
         self.assertNotIn('value',result)
         for body in ['NSN 6115012704801 and NSN 6115009468441 Estimated Spares Requirement: 9ea','NSN 6115012704801 Estimated Quantity: 9EA Estimated Quantity: 15EA','NSN 6115012704801 Minimum Quantity Required: 9EA','NSN 6115012704801 Quantity Required: 0EA']:
             self.assertEqual(quantity_fact({**row,'scope_text':body}),{})
+
+class ItemSourceReaderTests(unittest.TestCase):
+ def test_item_sources_are_exact_company_episode_and_paginated(self):
+  aws=CaptureAWS();repo=Repository(aws);repo.table=lambda n:'safe.'+n;repo.manifest=lambda:{'tables':{'company_item_reference_evidence':{}}}
+  repo.item_source_references('45934','a'*64,25,12)
+  self.assertIn("company_id='CAGE:45934'",aws.sql);self.assertIn("episode_id='"+'a'*64+"'",aws.sql);self.assertIn('OFFSET 12 LIMIT 25',aws.sql)
+  with self.assertRaises(ValueError):repo.item_source_references("45934'",'a'*64)
+  with self.assertRaises(ValueError):repo.item_source_references('45934','not-an-id')

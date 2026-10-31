@@ -134,6 +134,11 @@ class Repository:
    join+=' LEFT JOIN '+self.table('opportunity_quality_reviews')+' qr ON qr.episode_id=o.episode_id AND qr.record_hash=o.record_hash'
    extra+=self.quality_projection()
   where+=category_where
+  # Enforce exact source clocks at request time so a daily snapshot cannot keep
+  # expired ISO deadlines open until the next nightly build. Date-only notices
+  # retain calendar precision and do not acquire a midnight deadline.
+  if not monitoring_only:
+   where+=" AND (coalesce(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_precision'),'')<>'timestamp_utc' OR try(from_iso8601_timestamp(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_utc'))) IS NULL OR try(from_iso8601_timestamp(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_utc')))>=current_timestamp)"
   if 'dla_forecasts' in self.manifest()['tables']:
    asof=self.manifest().get('as_of')
    if not asof or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',asof):raise ValueError('Invalid release as-of date')
