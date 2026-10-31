@@ -19,7 +19,7 @@ def build(directory):
   FROM company_activity_baselines a FULL JOIN lag_baselines l USING(company_id)""")
  else:c.execute('CREATE TEMP VIEW benchmark_activity AS SELECT *,annual_net_obligations benchmark_net,period_start benchmark_start,period_end benchmark_end FROM company_activity_baselines')
  candidates_sql="""SELECT DISTINCT m.company_id,o.episode_id,o.record_hash,o.lane,o.customer_name,
- (o.lane IN ('published_item_procurement','source_item_forecasts') OR coalesce(q.category_override='items',false)) item_demand,
+ (o.lane IN ('published_item_procurement','source_item_forecasts','stock_supported_item_demand') OR coalesce(q.category_override='items',false)) item_demand,
  coalesce(json_extract_string(o.value_inputs_json,'$.niin'),right(json_extract_string(o.value_inputs_json,'$.nsn'),9),right(json_extract_string(np.items_json,'$[0].nsn'),9)) niin,
  json_extract_string(o.value_inputs_json,'$.purchase_request_number') purchase_request,
  CASE WHEN json_array_length(np.items_json)=1 THEN coalesce(try_cast(json_extract_string(np.items_json,'$[0].government_reference_lot_scenario') AS DOUBLE),try_cast(json_extract_string(np.items_json,'$[0].supplier_average_lot_scenario') AS DOUBLE)) END notice_lot,

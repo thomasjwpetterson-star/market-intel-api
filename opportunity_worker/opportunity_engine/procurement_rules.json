@@ -55,19 +55,20 @@
       "label": "Item replenishment demand",
       "adapter_status": "operational",
       "lanes": [
-        "source_item_forecasts"
+        "source_item_forecasts",
+        "stock_supported_item_demand"
       ],
       "legacy_families": [
         "BS12",
         "BS19"
       ],
       "required_evidence": [
-        "Dated forecast quantities",
-        "Stock/on-order/backorder coverage where held",
-        "Item source and unit evidence"
+        "Dated source forecast quantities, or recent public reported annual demand with stock/backorder pressure",
+        "Item-identifying reference and consistent catalogue EA for the conditional annual scenario",
+        "Same-item pricing with retained provenance; source forecasts including zero or negative rows take precedence"
       ],
-      "next_action": "Check whether forecast demand is converting into a purchase request.",
-      "value_method": "Forecast \u00d7 reference-price scenario only; no confirmed order.",
+      "next_action": "Check published requests and existing supply coverage, then confirm the exact item configuration, source access and buying timetable.",
+      "value_method": "Source forecast \u00d7 reference price, or separately labelled conditional annual usage \u00d7 exact-item price. Neither establishes net new purchases or company revenue.",
       "disconfirming_evidence": [
         "Inventory or incoming supply meets need",
         "Forecast reduction",

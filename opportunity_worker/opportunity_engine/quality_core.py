@@ -4,7 +4,7 @@ from pathlib import Path
 from .company_enrichment import STOP,words
 from .delivery_modes import required_mode,mode_fit
 
-VERSION='scope-and-source-v6'
+VERSION='scope-and-source-v7'
 NOISE=set('form fit function consideration extension extensions extend extended modification modifications modify reduce reduced reduction increase increased decrease funding funded obligation deobligation cost costs reimbursable reimbursement supplies procurement purchase purchased purchasing payment total ceiling administrative contractual west east north south coast seaport nxg arsenal garrison afb'.split())
 GENERAL=set('custom computer computers programming software upgrade upgrades updated update maintenance services emerging threat threats strategic trends initiative requirements requirement support general education training research development engineering technical management professional consulting analysis logistics'.split())
 ADMIN=set('critical contractor contractors contract contracts order orders po clin clins line lines item items number numbers reference references fee fees payment payments quantity quantities award awards option options'.split())

@@ -94,7 +94,7 @@ def augment(directory,skip_work=False,reuse_features=False):
   else:
    c.execute("CREATE TEMP TABLE scopes AS SELECT w.* EXCLUDE(work_text),f.fragment work_text,sha256(w.doc_id||'|'||f.fragment) scope_id,scope_terms(f.fragment) terms FROM retrieval_work w,unnest(scope_fragments(w.work_text)) f(fragment) WHERE substr(cast(last_observed AS VARCHAR),1,10)<='"+m['as_of']+"'")
    c.execute("DELETE FROM scopes WHERE len(terms)<2")
-  target_query="""CREATE TEMP TABLE targets AS SELECT o.episode_id,o.record_hash,o.lane,o.title,o.customer_name,coalesce(from_json(json_extract(o.value_inputs_json,'$.prior_supplier_company_ids'),'["VARCHAR"]'),list_transform(from_json(json_extract(o.value_inputs_json,'$.preview'),'[{"supplier_company_id":"VARCHAR"}]'),x->x.supplier_company_id),[]::VARCHAR[]) historical_supplier_ids,CASE WHEN o.lane='published_procurement' THEN len(scope_nsns(coalesce(o.scope_text,''))) ELSE 0 END full_nsn_count,substr(o.scope_text,1,12000) scope_text,d.stage,scope_words(concat_ws(' ',o.title,substr(o.scope_text,1,12000))) tokens,scope_words(o.title) title_tokens FROM base_opportunities o JOIN base_demand_decisions d USING(episode_id) WHERE d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context') AND o.lane NOT IN ('source_item_forecasts','published_item_procurement')"""
+  target_query="""CREATE TEMP TABLE targets AS SELECT o.episode_id,o.record_hash,o.lane,o.title,o.customer_name,coalesce(from_json(json_extract(o.value_inputs_json,'$.prior_supplier_company_ids'),'["VARCHAR"]'),list_transform(from_json(json_extract(o.value_inputs_json,'$.preview'),'[{"supplier_company_id":"VARCHAR"}]'),x->x.supplier_company_id),[]::VARCHAR[]) historical_supplier_ids,CASE WHEN o.lane='published_procurement' THEN len(scope_nsns(coalesce(o.scope_text,''))) ELSE 0 END full_nsn_count,substr(o.scope_text,1,12000) scope_text,d.stage,scope_words(concat_ws(' ',o.title,substr(o.scope_text,1,12000))) tokens,scope_words(o.title) title_tokens FROM base_opportunities o JOIN base_demand_decisions d USING(episode_id) WHERE d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context') AND o.lane NOT IN ('source_item_forecasts','published_item_procurement','stock_supported_item_demand')"""
   op_columns={n for n,*_ in c.execute('DESCRIBE base_opportunities').fetchall()}
   target_psc='o.psc' if 'psc' in op_columns else 'NULL::VARCHAR'
   demand_source='o.source_name' if 'source_name' in op_columns else "CASE WHEN o.lane='published_procurement' THEN 'sam_notices' ELSE '' END"
@@ -172,10 +172,12 @@ def augment(directory,skip_work=False,reuse_features=False):
   c.execute("""CREATE TEMP TABLE item_demand_keys AS SELECT o.episode_id,o.record_hash,o.lane,
    coalesce(json_extract_string(o.value_inputs_json,'$.niin'),right(json_extract_string(o.value_inputs_json,'$.nsn'),9),right(nullif(regexp_extract(o.title,'NSN ([0-9]{13})',1),''),9)) niin
    FROM base_opportunities o JOIN base_demand_decisions d USING(episode_id)
-   WHERE o.lane IN ('source_item_forecasts','published_item_procurement') AND d.stage IN ('source_forecast','published_requirement')""")
+   WHERE o.lane IN ('source_item_forecasts','published_item_procurement','stock_supported_item_demand') AND d.stage IN ('source_forecast','published_requirement','emerging_demand')""")
+  reference_columns={n for n,*_ in c.execute('DESCRIBE raw_item_reference_facts').fetchall()}
+  current_reference="k.lane<>'stock_supported_item_demand' OR (trim(i.rnvc_codes)='2'"+(" AND coalesce(trim(i.rnsc_codes),'')<>'B'" if 'rnsc_codes' in reference_columns else '')+")" if 'rnvc_codes' in reference_columns else "k.lane<>'stock_supported_item_demand'"
   c.execute("""CREATE TEMP TABLE exact_item_keys AS SELECT 'CAGE:'||i.cage_code company_id,k.episode_id,k.record_hash,min(i.evidence_id) evidence_id,arg_min(i.description,i.evidence_id) reference_description,arg_min(i.part_number,i.evidence_id) reference_part_number,p.profile_hash,k.niin
    FROM raw_item_reference_facts i JOIN item_demand_keys k USING(niin) JOIN base_company_profiles p ON p.company_id='CAGE:'||i.cage_code
-   GROUP BY i.cage_code,k.episode_id,k.record_hash,p.profile_hash,k.niin""")
+   WHERE """+current_reference+""" GROUP BY i.cage_code,k.episode_id,k.record_hash,p.profile_hash,k.niin""")
   output('company_item_matches',"""SELECT sha256('catalogue-demand-v1|'||company_id||'|'||episode_id) match_id,company_id,episode_id,85.0::DOUBLE score,
    'exact_catalogue_reference-v1' match_route,'exact NIIN '||niin matched_terms,
    'Exact company/item catalogue reference. This does not establish current manufacturing source, configuration, data rights, technical approval or capacity.' company_evidence_caveat,

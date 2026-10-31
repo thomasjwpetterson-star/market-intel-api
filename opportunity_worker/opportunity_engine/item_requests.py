@@ -22,7 +22,7 @@ def link(directory):
  CASE WHEN q.window_end<f.window_start THEN 'Request precedes forecast window; future delivery may overlap' ELSE 'Published request within the forecast horizon' END timing_relationship,
  'Exact NIIN association. This is not proof the request fulfils this forecast, an award, or permission to subtract its quantity. The request is a separate actionable source with its own eligibility.' interpretation
  FROM opportunities f JOIN current_requests q ON q.niin=json_extract_string(f.value_inputs_json,'$.niin')
- WHERE f.lane='source_item_forecasts' AND regexp_full_match(q.niin,'[0-9]{9}') AND q.window_end<=f.window_end""")
+ WHERE f.lane IN ('source_item_forecasts','stock_supported_item_demand') AND regexp_full_match(q.niin,'[0-9]{9}') AND q.window_end<=f.window_end""")
  c.read_parquet(m['tables']['item_request_progression']['path']).create_view('progression')
  c.execute("""CREATE TEMP TABLE request_groups AS SELECT forecast_episode_id,forecast_record_hash,count(*) current_request_count,min(response_deadline) next_request_deadline,
  to_json(list(struct_pack(request_episode_id:=request_episode_id,request_record_hash:=request_record_hash,title:=request_title,native_identifier:=native_identifier,purchase_request_number:=purchase_request_number,quantity:=requested_quantity,unit:=requested_unit,response_deadline:=response_deadline,source_url:=source_url,source_evidence_id:=source_evidence_id,timing_relationship:=timing_relationship) ORDER BY response_deadline,request_episode_id)[:20])::VARCHAR related_requests_json

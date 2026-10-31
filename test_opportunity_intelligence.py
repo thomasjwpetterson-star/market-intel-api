@@ -48,7 +48,7 @@ class OpportunityPilotTests(unittest.TestCase):
         repo.manifest = lambda: {'as_of':'2026-10-31','tables': {}}
         repo.opportunities('CAGE:45934', 24, 0, False, 'work')
         self.assertIn('WITH candidates AS (SELECT DISTINCT', aws.sql)
-        self.assertIn("o.lane NOT IN ('published_item_procurement','source_item_forecasts')", aws.sql)
+        self.assertIn("o.lane NOT IN ('published_item_procurement','source_item_forecasts','stock_supported_item_demand')", aws.sql)
         self.assertNotRegex(aws.sql, r"(?i)interval\s+'?18'?\s+month|date_add\('month',\s*18")
         self.assertNotIn('historical_watch\' THEN', aws.sql)
         self.assertIn("regexp_replace(upper(c.native_identifier),'-00$','')",aws.sql)

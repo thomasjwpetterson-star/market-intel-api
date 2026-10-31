@@ -29,6 +29,8 @@ def validate(directory):
     check(n+'_local_source_hashes',all(hashlib.sha256(Path(f['path']).read_bytes()).hexdigest()==f['sha256'] for f in files));c.read_parquet([f['path'] for f in files]).create_view(n);check(n+'_local_source_count',c.execute('SELECT count(*) FROM '+n).fetchone()[0]==t['rows'])
    continue
   p=Path(t['path']);check(n+'_content_hash',hashlib.sha256(p.read_bytes()).hexdigest()==t['sha256']);c.read_parquet(str(p)).create_view(n);check(n+'_count',c.execute('SELECT count(*) FROM '+n).fetchone()[0]==t['rows'])
+ from .expansion_gates import validate_expansion
+ validate_expansion(c,m,check)
  if 'catalogue_sales_evidence' in m['tables']:
   check('catalogue_sales_physical_line_once_per_company',c.execute("SELECT count(*)-count(DISTINCT (company_id,coalesce(nullif(source_record_id,''),pricing_record_id))) FROM catalogue_sales_evidence").fetchone()[0]==0)
   check('catalogue_sales_unique_company',c.execute('SELECT count(*)-count(DISTINCT company_id) FROM company_catalogue_sales').fetchone()[0]==0)
@@ -106,8 +108,8 @@ def validate(directory):
   check('quality_assessments_unique',c.execute('SELECT count(*)-count(DISTINCT (company_id,episode_id)) FROM company_match_assessments').fetchone()[0]==0)
   columns={n for n,*_ in c.execute('DESCRIBE company_match_assessments').fetchall()}
   if 'observed_delivery_mode' in columns:
-   check('onsite_capability_not_from_component_only_history',c.execute("SELECT count(*) FROM company_match_assessments WHERE verdict='accepted' AND required_delivery_mode='onsite_services' AND observed_delivery_mode<>'onsite_services'").fetchone()[0]==0)
-   check('accepted_scope_not_single_incidental_noun',c.execute("SELECT count(*) FROM company_match_assessments WHERE verdict='accepted' AND company_entry_status<>'reported_supplier_relationship' AND json_array_length(shared_scope_terms_json)<2").fetchone()[0]==0)
+   check('onsite_capability_not_from_component_only_history',c.execute("SELECT count(*) FROM company_match_assessments WHERE verdict='accepted' AND company_entry_status<>'documented_incumbent_contract' AND required_delivery_mode='onsite_services' AND observed_delivery_mode<>'onsite_services'").fetchone()[0]==0)
+   check('accepted_scope_not_single_incidental_noun',c.execute("SELECT count(*) FROM company_match_assessments WHERE verdict='accepted' AND company_entry_status NOT IN ('reported_supplier_relationship','documented_incumbent_contract') AND json_array_length(shared_scope_terms_json)<2").fetchone()[0]==0)
  if 'opportunity_quality_reviews' in m['tables']:
   check('source_conflicts_not_actionable',c.execute("SELECT count(*) FROM opportunity_quality_reviews q JOIN demand_decisions d USING(episode_id) WHERE q.verdict='source_review_required' AND d.stage NOT IN ('evidence_gap','resolved_or_elapsed')").fetchone()[0]==0)
   check('source_review_has_quotes',c.execute("SELECT count(*) FROM opportunity_quality_reviews WHERE verdict='source_review_required' AND (nullif(reason,'') IS NULL OR json_array_length(passages_json)=0)").fetchone()[0]==0)

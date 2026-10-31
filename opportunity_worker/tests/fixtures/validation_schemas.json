@@ -4582,5 +4582,513 @@
       "Name": "estimated_future_award_value",
       "Type": "double"
     }
+  ],
+  "company_product_market_coverage": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "market_period_start",
+      "Type": "string"
+    },
+    {
+      "Name": "market_period_end",
+      "Type": "string"
+    },
+    {
+      "Name": "observed_direct_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "referenced_items",
+      "Type": "bigint"
+    },
+    {
+      "Name": "item_identifying_items",
+      "Type": "bigint"
+    },
+    {
+      "Name": "design_control_items",
+      "Type": "bigint"
+    },
+    {
+      "Name": "procurement_authorized_items",
+      "Type": "bigint"
+    },
+    {
+      "Name": "manufacturer_or_design_control_items",
+      "Type": "bigint"
+    },
+    {
+      "Name": "distributor_reference_items",
+      "Type": "bigint"
+    },
+    {
+      "Name": "only_nonidentifying_or_inactive_items",
+      "Type": "bigint"
+    },
+    {
+      "Name": "market_physical_lines",
+      "Type": "bigint"
+    },
+    {
+      "Name": "purchased_referenced_items",
+      "Type": "bigint"
+    },
+    {
+      "Name": "market_sellers",
+      "Type": "bigint"
+    },
+    {
+      "Name": "market_months_observed",
+      "Type": "bigint"
+    },
+    {
+      "Name": "aligned_referenced_item_purchases",
+      "Type": "double"
+    },
+    {
+      "Name": "aligned_other_seller_item_purchases",
+      "Type": "double"
+    },
+    {
+      "Name": "aligned_other_seller_current_part_purchases",
+      "Type": "double"
+    },
+    {
+      "Name": "aligned_other_seller_design_part_purchases",
+      "Type": "double"
+    },
+    {
+      "Name": "market_first_purchase_date",
+      "Type": "string"
+    },
+    {
+      "Name": "market_last_purchase_date",
+      "Type": "string"
+    },
+    {
+      "Name": "direct_and_linked_part_market_reference",
+      "Type": "double"
+    },
+    {
+      "Name": "linked_market_coverage_reference",
+      "Type": "double"
+    },
+    {
+      "Name": "product_market_policy",
+      "Type": "string"
+    },
+    {
+      "Name": "source_role_dictionary",
+      "Type": "string"
+    },
+    {
+      "Name": "product_market_interpretation",
+      "Type": "string"
+    }
+  ],
+  "item_replenishment_context": [
+    {
+      "Name": "niin",
+      "Type": "string"
+    },
+    {
+      "Name": "inventory_date",
+      "Type": "string"
+    },
+    {
+      "Name": "annual_demand_quantity",
+      "Type": "double"
+    },
+    {
+      "Name": "stock_on_hand",
+      "Type": "double"
+    },
+    {
+      "Name": "backorder_quantity",
+      "Type": "double"
+    },
+    {
+      "Name": "inventory_evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "item_name",
+      "Type": "string"
+    },
+    {
+      "Name": "nsn",
+      "Type": "string"
+    },
+    {
+      "Name": "catalogue_unit",
+      "Type": "string"
+    },
+    {
+      "Name": "government_reference_unit_price",
+      "Type": "double"
+    },
+    {
+      "Name": "market_price_median",
+      "Type": "double"
+    },
+    {
+      "Name": "market_price_low",
+      "Type": "double"
+    },
+    {
+      "Name": "market_price_high",
+      "Type": "double"
+    },
+    {
+      "Name": "market_observations",
+      "Type": "bigint"
+    },
+    {
+      "Name": "market_sellers",
+      "Type": "bigint"
+    },
+    {
+      "Name": "first_price_date",
+      "Type": "string"
+    },
+    {
+      "Name": "latest_price_date",
+      "Type": "string"
+    },
+    {
+      "Name": "price_preview_json",
+      "Type": "string"
+    },
+    {
+      "Name": "sample_reference_evidence",
+      "Type": "string"
+    },
+    {
+      "Name": "source_snapshot_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "government_reference_lot_scenario",
+      "Type": "double"
+    },
+    {
+      "Name": "market_price_lot_scenario",
+      "Type": "double"
+    },
+    {
+      "Name": "inventory_signal",
+      "Type": "string"
+    },
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "window_start",
+      "Type": "string"
+    },
+    {
+      "Name": "window_end",
+      "Type": "string"
+    },
+    {
+      "Name": "valuation_status",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "agency_forecast_incumbents": [
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "forecast_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "award_key",
+      "Type": "string"
+    },
+    {
+      "Name": "piid",
+      "Type": "string"
+    },
+    {
+      "Name": "cage_code",
+      "Type": "string"
+    },
+    {
+      "Name": "uei",
+      "Type": "string"
+    },
+    {
+      "Name": "company_name",
+      "Type": "string"
+    },
+    {
+      "Name": "work_text",
+      "Type": "string"
+    },
+    {
+      "Name": "psc",
+      "Type": "string"
+    },
+    {
+      "Name": "naics",
+      "Type": "string"
+    },
+    {
+      "Name": "latest_action_date",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "link_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "forecast_source_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "forecast_source_url",
+      "Type": "string"
+    }
+  ],
+  "agency_forecast_requirements": [
+    {
+      "Name": "title",
+      "Type": "string"
+    },
+    {
+      "Name": "description",
+      "Type": "string"
+    },
+    {
+      "Name": "programme",
+      "Type": "string"
+    },
+    {
+      "Name": "value_band",
+      "Type": "string"
+    },
+    {
+      "Name": "procurement_method",
+      "Type": "string"
+    },
+    {
+      "Name": "contract_type",
+      "Type": "string"
+    },
+    {
+      "Name": "instrument",
+      "Type": "string"
+    },
+    {
+      "Name": "buying_office",
+      "Type": "string"
+    },
+    {
+      "Name": "solicitation_fy",
+      "Type": "string"
+    },
+    {
+      "Name": "solicitation_quarter",
+      "Type": "string"
+    },
+    {
+      "Name": "award_fy",
+      "Type": "string"
+    },
+    {
+      "Name": "award_quarter",
+      "Type": "string"
+    },
+    {
+      "Name": "period_months",
+      "Type": "string"
+    },
+    {
+      "Name": "follow_on",
+      "Type": "string"
+    },
+    {
+      "Name": "prior_contract",
+      "Type": "string"
+    },
+    {
+      "Name": "incumbent",
+      "Type": "string"
+    },
+    {
+      "Name": "performance_site",
+      "Type": "string"
+    },
+    {
+      "Name": "naics",
+      "Type": "string"
+    },
+    {
+      "Name": "psc",
+      "Type": "string"
+    },
+    {
+      "Name": "contact_name",
+      "Type": "string"
+    },
+    {
+      "Name": "contact_route",
+      "Type": "string"
+    },
+    {
+      "Name": "secondary_contact",
+      "Type": "string"
+    },
+    {
+      "Name": "secondary_route",
+      "Type": "string"
+    },
+    {
+      "Name": "facility_clearance",
+      "Type": "string"
+    },
+    {
+      "Name": "personnel_clearance",
+      "Type": "string"
+    },
+    {
+      "Name": "palt_code",
+      "Type": "string"
+    },
+    {
+      "Name": "sub_palt_code",
+      "Type": "string"
+    },
+    {
+      "Name": "comments",
+      "Type": "string"
+    },
+    {
+      "Name": "native_plan_id",
+      "Type": "string"
+    },
+    {
+      "Name": "detail_url",
+      "Type": "string"
+    },
+    {
+      "Name": "forecast_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_family",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "source_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "source_locator",
+      "Type": "string"
+    },
+    {
+      "Name": "source_observed_at",
+      "Type": "string"
+    },
+    {
+      "Name": "raw_fields_json",
+      "Type": "string"
+    },
+    {
+      "Name": "record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "source_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "solicitation_start",
+      "Type": "string"
+    },
+    {
+      "Name": "solicitation_end",
+      "Type": "string"
+    },
+    {
+      "Name": "solicitation_precision",
+      "Type": "string"
+    },
+    {
+      "Name": "award_start",
+      "Type": "string"
+    },
+    {
+      "Name": "award_end",
+      "Type": "string"
+    },
+    {
+      "Name": "award_precision",
+      "Type": "string"
+    },
+    {
+      "Name": "planned_value_low",
+      "Type": "double"
+    },
+    {
+      "Name": "planned_value_high",
+      "Type": "double"
+    },
+    {
+      "Name": "planned_value_amount",
+      "Type": "double"
+    },
+    {
+      "Name": "planned_value_kind",
+      "Type": "string"
+    },
+    {
+      "Name": "includes_options",
+      "Type": "boolean"
+    },
+    {
+      "Name": "prior_contracts_json",
+      "Type": "string"
+    },
+    {
+      "Name": "status",
+      "Type": "string"
+    },
+    {
+      "Name": "policy_version",
+      "Type": "string"
+    }
   ]
 }

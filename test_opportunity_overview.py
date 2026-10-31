@@ -82,3 +82,13 @@ class UnitPriceApplicationTests(unittest.TestCase):
   self.assertTrue(price_scenario_fact(row))
   self.assertEqual(price_scenario_fact(dict(row,title='Repair generator')), {})
   self.assertEqual(price_scenario_fact(dict(row,notice_aggregate_ceiling_usd=250)), {})
+
+class AdditionalSourceValueTests(unittest.TestCase):
+ def test_usage_and_planned_package_bands_remain_separate_from_published_and_source_forecasts(self):
+  rows=[dict(episode_id='stock',commercial_value_kind='annual_usage_scenario',commercial_value='800',item_reference_niin='000000001'),dict(episode_id='plan',commercial_value_kind='planned_package_reference',commercial_value='250000000',value_low='250000000',value_high='1000000000')]
+  r=summary({},rows,'release')
+  self.assertIsNone(r['overall']['priced_demand_total']);self.assertIsNone(r['forecast']['estimated_demand_total'])
+  self.assertEqual(r['replenishment']['conditional_annual_usage_value'],800)
+  self.assertEqual(r['planned_packages']['planned_package_low'],250000000);self.assertEqual(r['planned_packages']['planned_package_high'],1000000000)
+  rows.append(dict(episode_id='upper-only',commercial_value_kind='planned_package_reference',commercial_value='0',value_low=None,value_high='2000000'))
+  r=summary({},rows,'release');self.assertIsNone(r['planned_packages']['planned_package_low']);self.assertEqual(r['planned_packages']['planned_package_high'],1002000000)

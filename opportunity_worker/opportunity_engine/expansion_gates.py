@@ -1,0 +1,21 @@
+"""Semantic gates for additional market context, annual usage and agency plans."""
+
+def validate_expansion(c,m,check):
+ t=m['tables']
+ if 'company_product_market_coverage' in t:
+  check('product_market_company_unique',c.execute('SELECT count(*)-count(DISTINCT company_id) FROM company_product_market_coverage').fetchone()[0]==0)
+  check('product_market_period_and_part_scope',c.execute('SELECT count(*) FROM company_product_market_coverage WHERE market_last_purchase_date>substr(market_period_end,1,10) OR market_first_purchase_date<substr(market_period_start,1,10) OR aligned_other_seller_design_part_purchases>aligned_other_seller_current_part_purchases+0.01 OR aligned_other_seller_current_part_purchases>aligned_other_seller_item_purchases+0.01 OR aligned_other_seller_item_purchases>aligned_referenced_item_purchases+0.01').fetchone()[0]==0)
+  check('product_market_reference_arithmetic',c.execute('SELECT count(*) FROM company_product_market_coverage WHERE abs(direct_and_linked_part_market_reference-greatest(coalesce(observed_direct_obligations,0),0)-aligned_other_seller_current_part_purchases)>0.01 OR abs(linked_market_coverage_reference-3*direct_and_linked_part_market_reference)>0.01').fetchone()[0]==0)
+ if 'item_replenishment_context' in t:
+  check('annual_usage_one_context_per_item',c.execute('SELECT count(*)-count(DISTINCT niin) FROM item_replenishment_context').fetchone()[0]==0)
+  check('annual_usage_fresh_positive_stock_signal',c.execute("SELECT count(*) FROM item_replenishment_context WHERE try_cast(inventory_date AS DATE) NOT BETWEEN cast(? AS DATE)-INTERVAL 90 DAY AND cast(? AS DATE) OR annual_demand_quantity<=0 OR catalogue_unit<>'EA' OR NOT(backorder_quantity>0 OR stock_on_hand>=0 AND stock_on_hand<annual_demand_quantity)",[m['as_of'],m['as_of']]).fetchone()[0]==0)
+  check('annual_usage_does_not_override_any_future_forecast',c.execute("SELECT count(*) FROM item_replenishment_context x SEMI JOIN dla_forecasts f ON x.niin=f.niin AND substr(cast(f.forecast_month AS VARCHAR),1,10)>=?",[m['as_of']]).fetchone()[0]==0)
+  check('annual_usage_arithmetic',c.execute('SELECT count(*) FROM item_replenishment_context WHERE abs(government_reference_lot_scenario-annual_demand_quantity*government_reference_unit_price)>0.0051 OR abs(market_price_lot_scenario-annual_demand_quantity*market_price_median)>0.0051').fetchone()[0]==0)
+  check('annual_usage_not_addressable_or_source_forecast',c.execute("SELECT count(*) FROM opportunities WHERE lane='stock_supported_item_demand' AND (value_median IS NOT NULL OR json_extract_string(value_inputs_json,'$.company_addressable_value') IS NOT NULL OR json_extract_string(value_inputs_json,'$.source_forecast_present') IS DISTINCT FROM 'false')").fetchone()[0]==0)
+ if 'agency_forecast_requirements' in t:
+  check('agency_source_evidence_retained',c.execute("SELECT count(*) FROM agency_forecast_requirements WHERE nullif(source_sha256,'') IS NULL OR nullif(source_url,'') IS NULL OR nullif(source_locator,'') IS NULL").fetchone()[0]==0)
+  check('agency_bands_not_midpoint_estimates',c.execute("SELECT count(*) FROM opportunities WHERE source_name='agency_acquisition_forecasts' AND (value_low>value_high OR (value_median IS NOT NULL AND NOT(value_median=value_low AND value_low=value_high)))").fetchone()[0]==0)
+  check('agency_planned_period_not_response_deadline',c.execute("SELECT count(*) FROM opportunities o JOIN demand_decisions d USING(episode_id) WHERE o.source_name='agency_acquisition_forecasts' AND coalesce(cast(json_extract_string(d.decision_json,'$.response_window_verified') AS BOOLEAN),false)").fetchone()[0]==0)
+ if 'agency_forecast_incumbents' in t:
+  check('agency_incumbent_unique_site_bridge',c.execute('SELECT count(*) FROM (SELECT episode_id,count(DISTINCT company_id) n FROM agency_forecast_incumbents GROUP BY episode_id HAVING n>1)').fetchone()[0]==0)
+  check('agency_incumbent_links_evidenced',c.execute("SELECT count(*) FROM company_work_matches w JOIN opportunities o USING(episode_id) WHERE w.company_entry_status='documented_incumbent_contract' AND NOT EXISTS(SELECT 1 FROM agency_forecast_incumbents i WHERE i.company_id=w.company_id AND i.episode_id=w.episode_id AND i.evidence_id=w.sample_evidence_id AND i.award_key=w.doc_id)").fetchone()[0]==0)

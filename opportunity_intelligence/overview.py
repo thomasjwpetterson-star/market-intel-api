@@ -2,7 +2,7 @@
 import json,re
 from decimal import Decimal,InvalidOperation
 
-POLICY='priced-demand-business-coverage-v4'
+POLICY='priced-demand-business-coverage-v5'
 PRICED_KINDS=('item_reference_estimate','historical_unit_price_estimate')
 
 def summary(counts,priced,release,business=None):
@@ -56,10 +56,31 @@ def summary(counts,priced,release,business=None):
  scale=float(counts.get('observed_prime_net_obligations') or 0)
  forecast=forecast_summary(priced)
  coverage=coverage_summary(business or {},overall,forecast)
- try:annual_scale=max(float(coverage.get('benchmark_annual_net_obligations') or 0),0)
+ try:annual_scale=max(float(coverage.get('benchmark_annual_net_obligations') or 0),float(coverage.get('direct_and_linked_part_market_reference') or 0),0)
  except (ValueError,TypeError):annual_scale=0
  focus=max(1000000,annual_scale*0.01) if annual_scale>=100000000 else 1000000 if scale>=100000000 else 0
- return dict(release=release,policy=POLICY,business_coverage=coverage,forecast=forecast,categories=result,overall=overall,materiality_floor=focus,materiality_basis='Default priority focus scales to 1% of observed annual obligations for sites above $100m annually, with a $1m floor. A $1m focus also applies where lifetime observed obligations exceed $100m. Editable; smaller prospects remain available.',value_explanation='The headline combines priced contract and item requirements across the complete company feed. It uses stated quantities and exact-item reference or historical unit prices. Repeated requirements for the same buyer and item contribute their largest scenario once, including overlaps between contract and item feeds. Historical contract comparisons, programme totals and forecasts are excluded. Government reference dates may be unknown; prices are not current quotes. Unpriced opportunities are not assumed to be worth zero. These are demand estimates, not expected company revenue.')
+ return dict(release=release,policy=POLICY,business_coverage=coverage,forecast=forecast,replenishment=separate_outlook(priced,'annual_usage_scenario'),planned_packages=separate_outlook(priced,'planned_package_reference'),categories=result,overall=overall,materiality_floor=focus,materiality_basis='Default priority focus scales to 1% of the larger observed annual-obligations or aligned linked-part market reference for sites above $100m, with a $1m floor. The linked market reference includes exact item-identifying part purchases from other sellers and is not manufacturer revenue. A $1m focus also applies where lifetime observed obligations exceed $100m. Editable; smaller prospects remain available.',value_explanation='The headline combines priced contract and item requirements across the complete company feed. It uses stated quantities and exact-item reference or historical unit prices. Repeated requirements for the same buyer and item contribute their largest scenario once, including overlaps between contract and item feeds. Historical comparisons, source forecasts, conditional annual-usage scenarios, planned package bands and programme totals remain separate. Government reference dates may be unknown; prices are not current quotes. Unpriced opportunities are not assumed to be worth zero. These are demand estimates, not expected company revenue.')
+
+
+def separate_outlook(rows,kind):
+ """Expose distinct scenario/band totals without promoting them to requests."""
+ selected={}
+ for row in rows:
+  if row.get('commercial_value_kind')!=kind:continue
+  key=str(row.get('item_reference_niin') or row['episode_id']) if kind=='annual_usage_scenario' else row['episode_id']
+  if key not in selected:selected[key]=row
+ components=list(selected.values())
+ def total(field):
+  values=[]
+  for r in components:
+   try:v=Decimal(str(r.get(field)))
+   except (InvalidOperation,TypeError,ValueError):return None
+   if not v.is_finite():return None
+   values.append(v)
+  return float(sum(values)) if values else None
+ return dict(count=len(components),conditional_annual_usage_value=total('commercial_value') if kind=='annual_usage_scenario' else None,
+  planned_package_low=total('value_low') if kind=='planned_package_reference' else None,planned_package_high=total('value_high') if kind=='planned_package_reference' else None,
+  value_components=components,interpretation='Reported annual demand repeated over twelve months with source stock pressure and exact-item pricing; not a source forecast, net new purchasing or company revenue. Existing future forecast rows are excluded.' if kind=='annual_usage_scenario' else 'Distinct source-planned whole packages including options. Published bands have no invented midpoint, may be one-sided, and are not allocated company revenue or added to published requests.')
 
 
 def forecast_summary(rows):

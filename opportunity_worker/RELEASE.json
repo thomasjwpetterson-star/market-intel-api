@@ -1,11 +1,11 @@
 {
   "prepared_only": false,
   "mode": "native",
-  "version": "0.5.45",
-  "sha256": "af617098b12bf3a386e05670d6668b4c7b07634a558cc1e5b4e13eb2581f2aaa",
-  "package_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=af617098b12bf3a386e05670d6668b4c7b07634a558cc1e5b4e13eb2581f2aaa/mimir_opportunity_engine-0.5.45-py3-none-any.whl",
-  "dependency_bundle_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=ec1bc3276139b7f3930511ea7047669c0af71450d4b2662893b4642b80f59aba/mimir-0.5.45.gluewheels.zip",
-  "dependency_bundle_sha256": "ec1bc3276139b7f3930511ea7047669c0af71450d4b2662893b4642b80f59aba",
+  "version": "0.5.46",
+  "sha256": "3bff979b459fb851464bf9df006777ef251e6a6c98602eeabe016a132237fd5b",
+  "package_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=3bff979b459fb851464bf9df006777ef251e6a6c98602eeabe016a132237fd5b/mimir_opportunity_engine-0.5.46-py3-none-any.whl",
+  "dependency_bundle_uri": "s3://a-and-d-intel-lake-newaccount/governance/opportunity_intelligence/packages/sha256=51dca7c6a29c3e7864e4eef52a3e62db3199f51b17cbc3428976d16f0aeb449c/mimir-0.5.46.gluewheels.zip",
+  "dependency_bundle_sha256": "51dca7c6a29c3e7864e4eef52a3e62db3199f51b17cbc3428976d16f0aeb449c",
   "dependencies": [
     {
       "file": "beautifulsoup4-4.15.0-py3-none-any.whl",
@@ -62,31 +62,79 @@
       "sha256": "e7e6b0769c8f51ed59acab6e994b00621096cfb1c640a7509295987388fbaf65"
     },
     {
-      "file": "typing_extensions-4.16.0-py3-none-any.whl",
-      "name": "typing_extensions",
-      "version": "4.16.0",
-      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
-    },
-    {
       "file": "urllib3-1.26.20-py2.py3-none-any.whl",
       "name": "urllib3",
       "version": "1.26.20",
       "sha256": "0ed14ccfbf1c30a9072c7ca157e4319b70d65f623e91e7b32fadb2853431016e"
     },
     {
-      "file": "mimir_opportunity_engine-0.5.45-py3-none-any.whl",
+      "file": "cffi-2.1.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "name": "cffi",
+      "version": "2.1.1",
+      "sha256": "34e261f78cb6ceaaa36f42f2613f4380d94d9c759a9c73c769ee6e0247364632"
+    },
+    {
+      "file": "charset_normalizer-3.5.2-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "name": "charset-normalizer",
+      "version": "3.5.2",
+      "sha256": "211d5a3eb6af8f513b8d4ca19a8c1b7accab1b5f0d3175f9826b03c1a920dc1f"
+    },
+    {
+      "file": "cryptography-50.0.2-cp311-abi3-manylinux_2_28_x86_64.whl",
+      "name": "cryptography",
+      "version": "50.0.2",
+      "sha256": "4061c0079120205fb760c58acab6443e217307dcf05e3702cf970e0689972856"
+    },
+    {
+      "file": "pdfminer_six-20250506-py3-none-any.whl",
+      "name": "pdfminer.six",
+      "version": "20250506",
+      "sha256": "d81ad173f62e5f841b53a8ba63af1a4a355933cfc0ffabd608e568b9193909e3"
+    },
+    {
+      "file": "pdfplumber-0.11.7-py3-none-any.whl",
+      "name": "pdfplumber",
+      "version": "0.11.7",
+      "sha256": "edd2195cca68bd770da479cf528a737e362968ec2351e62a6c0b71ff612ac25e"
+    },
+    {
+      "file": "pillow-13.0.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "name": "pillow",
+      "version": "13.0.0",
+      "sha256": "a625df9a2a5597fa5e5266e01aefc82604bb85d291e3547981e863560d75da6c"
+    },
+    {
+      "file": "pycparser-3.12-py3-none-any.whl",
+      "name": "pycparser",
+      "version": "3.12",
+      "sha256": "a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e"
+    },
+    {
+      "file": "pypdfium2-5.14.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "name": "pypdfium2",
+      "version": "5.14.0",
+      "sha256": "11f281613fa22313d9c7ab89947665e84eccf8ebe40e1198a84a88352305648d"
+    },
+    {
+      "file": "typing_extensions-4.16.0-py3-none-any.whl",
+      "name": "typing_extensions",
+      "version": "4.16.0",
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+    },
+    {
+      "file": "mimir_opportunity_engine-0.5.46-py3-none-any.whl",
       "name": "mimir-opportunity-engine",
-      "version": "0.5.45",
-      "sha256": "af617098b12bf3a386e05670d6668b4c7b07634a558cc1e5b4e13eb2581f2aaa"
+      "version": "0.5.46",
+      "sha256": "3bff979b459fb851464bf9df006777ef251e6a6c98602eeabe016a132237fd5b"
     }
   ],
-  "run_id": "jr_273fc1e405c92f107f74f05caf121fcbf5b70e2a1e316a550da6210cbc129952",
-  "recovery_key": "governance/opportunity_intelligence/sources/recovery_0_5_45/manifest.json",
+  "run_id": "jr_60f264be0ee3eea93293036d9311c7644d2d074fd3a486866c303534186714f6",
+  "recovery_key": "governance/opportunity_intelligence/sources/recovery_0_5_46/manifest.json",
   "role_unchanged": true,
-  "source_permissions_unchanged": false,
-  "source_read_scope_note": "Four held public-data source tables added; write scope, trust and role unchanged",
+  "source_permissions_unchanged": true,
+  "source_read_scope_note": "No access changes; public forecast HTTP files and existing held source tables",
   "schedule": "cron(30 2 * * ? *)",
-  "schedule_temporarily_disabled_until_success": false,
+  "schedule_temporarily_disabled_until_success": true,
   "runtime": {
     "GlueVersion": "5.0",
     "WorkerType": "G.2X",
@@ -96,14 +144,15 @@
   },
   "code_hashes": {
     "opportunity_engine/__init__.py": "311d2ebdc48d6b5d5ea4c6f48f126b89ab5ac1168003eafac03167866c21a097",
-    "opportunity_engine/__main__.py": "c0979b030f007bbc311fa5d77a996c6485fdc3924cccd4ed0ca3a457f06b03a0",
+    "opportunity_engine/__main__.py": "4a3592afa4990a53d27e6d75db264fac885558f77788cd7db6878d0b807b8113",
+    "opportunity_engine/agency_forecasts.py": "4c14424e4a617815ea80f3a9823654403700df7df95cb7d11eb562d97a34b48a",
     "opportunity_engine/api.py": "fff6cfa99cc1376a5d3750d71d431d066f4e8b20170fb68671cc7767fa955896",
     "opportunity_engine/aws.py": "80bb2737b0566614959a3cc9d44b0f2bd9d3dfcef746327cad5d675fe0c2800a",
-    "opportunity_engine/build.py": "0df72449d13f497f6c2ff9b84fe0491a54c8ad8150c6cfa61ae431c92ab9a7a1",
+    "opportunity_engine/build.py": "078e0b7c59a51162fa97dd5c2b669e293144ece4c087779ace8306323acb3ac4",
     "opportunity_engine/catalogue_sales.py": "970cd58ba537a36b6adda72006f1ebd2a7e994d9b75965b1aef25e966e75872d",
     "opportunity_engine/checkpoint.py": "2fed642b16816404dea50d22b51a43efc6040e516137c290de8b7cb9722acc82",
     "opportunity_engine/company_activity.py": "0a4f60f11bb134212be9c37262930ad6937a7f52bea70fb275c57deb1efadcbe",
-    "opportunity_engine/company_enrichment.py": "97cc1220ac629dca501b0f278b740afa04658d997a56d568d273dd8014c824a6",
+    "opportunity_engine/company_enrichment.py": "36ef5135ab1d859843a4aaeacb4f2b419a07042bda26b0483ddcd61b5474534d",
     "opportunity_engine/company_history.py": "a54b45a3a2fcdd4a9f872b6b7407bb3210e51a85c386090697b5a8a66c315fc0",
     "opportunity_engine/company_history_distributed.py": "64bd97042da3d3888437aca49fc09cd54e97ec12d14001aa2196bacef70e2bd0",
     "opportunity_engine/delivery_modes.py": "c73b33904f8b1fc4fd12d6c8d8daca550fde654e8f37096fd50c934da47739e3",
@@ -111,8 +160,10 @@
     "opportunity_engine/distributed_history.py": "662d0e208a13af144bc4f63bd774ec581b76a9539c50e8c543529c87bdfa32b5",
     "opportunity_engine/enrich.py": "4a80f97932810e7df6b763645ea80ba4b1e708fbefae5cf5528ab7feaeb02da6",
     "opportunity_engine/events.py": "382162db3c26fe5a3e7b78d3b7b936826c4d85ad7b223d4d9520f6520221d77d",
+    "opportunity_engine/expansion_gates.py": "f9dc90cea80f0073e6c007a096c94e3512a144a3c67e8582bfb237418382bbed",
     "opportunity_engine/ingestion/__init__.py": "462387d08b7bd7f2c51da51c8e410c2a206f1ad5bb8863ffbbd6378f361be6a2",
     "opportunity_engine/ingestion/connect_cloud_evidence.py": "cb679740f7ec107de94d78cf8f3d4555046e572c75c152af6add2c0251a0667a",
+    "opportunity_engine/ingestion/refresh_agency_forecasts.py": "aa084726a92fc95bb304a2fde54019b1b33d5ef3085a804ded6d1b713543d3a4",
     "opportunity_engine/ingestion/refresh_commercial_sources.py": "b25fb92853eacd92d5553b78f4d00d4751932e8667b61810e9c897b1758ee510",
     "opportunity_engine/ingestion/refresh_company_history.py": "28918ae0893427a0867cc08ecf838cf01517563b799a1ae471b6a4f9472679e0",
     "opportunity_engine/ingestion/refresh_company_registry.py": "523c9cc180bcf3914aac59fd85e089f0380d5b9338909b24c79ea0fb7c04f4d9",
@@ -121,9 +172,9 @@
     "opportunity_engine/ingestion/refresh_shared_sources.py": "dfeac3115f182d3a8ea26b50e77c378a5c390a66db129901d3d7755cf3ed3ddf",
     "opportunity_engine/ingestion/refresh_topics.py": "ae1f61c8513df3a965098c25bbf093da1a0d6be9aeaa5c517c87a2cf0cb56b0c",
     "opportunity_engine/ingestion/topic_listing.py": "492c44cba1c1d53bc3756a51f08c8dcc1560612404c077218151f251e94ed98f",
-    "opportunity_engine/item_demand.py": "b243f138a8af67cca9ba408ac4d9b6164e9f625ea66bfac2a6eb61a8bbd92167",
+    "opportunity_engine/item_demand.py": "10e5b06674699757e48c0b38ffa700a20d4b75b1ce31faf68492189ab63ed6a7",
     "opportunity_engine/item_presence.py": "e2bc4fb9f5aefb195f0851e4427a140bf9794a4b8caa8acfaad602c55b6eb5b0",
-    "opportunity_engine/item_requests.py": "311704f1920464605196fa18e788afc3f96c65d205628c09b7a7a5ee0ba521db",
+    "opportunity_engine/item_requests.py": "664985a3c575941beac42b3bd237bcc94d8bcb25294a44e44d20975831dc29ff",
     "opportunity_engine/item_source_queries.py": "1034e1e43b58ff9cf28a339942210ba743e58945e83909bc1ffe8fd15a52c7cd",
     "opportunity_engine/item_sources.py": "8186b9682818c2d62ba8f37b978f9601083901d45bd885de74b81b6bfe7179e0",
     "opportunity_engine/logic_provenance.py": "3200361054c792fc303c52a64d08b77a720a8937e4637786bef7f2adaad3bd6c",
@@ -131,30 +182,20 @@
     "opportunity_engine/native_sources.py": "535285b0b81878b0f579aa6a889843427d99d693bcdc09a57cb2af392dc64085",
     "opportunity_engine/notice_prices.py": "fd78a8f12b8d7878f9e64afd74c5db4fee152c3ecb4afbf2be75dc9ea92f4028",
     "opportunity_engine/notice_quantity.py": "68f399d047be99d705bd40ed34a1a7ed363971b08a80433d28b109039de9fc0f",
-    "opportunity_engine/pipeline_coverage.py": "f61bb034b31a83e2b8fa1672b7e34a412305c35876efe7cf509515a031c468d4",
-    "opportunity_engine/procurement_rules.json": "457c125f23a01a36ee36e9174ec682849b6c351c285af46c7a6cc0511624603d",
+    "opportunity_engine/pipeline_coverage.py": "b8f9015612cdc9ba2c15cd2e5162ce2baf4e3d8ee238b6d62f130b5c57f82646",
+    "opportunity_engine/procurement_rules.json": "05d18bd1f3b991d4d5b48dff13cabc4c4fa74d38c33435caa147b7af5e8bb11f",
+    "opportunity_engine/product_market.py": "36d4f69d841b74c7f2f5789ddf8383a23c568a5bd4658ad08419cdf67bb66f13",
     "opportunity_engine/publish.py": "bdca77ba68a4c17e613947b85db0983fa931e06483801bf1341233817f89dd3a",
-    "opportunity_engine/quality.py": "5da97f1619b4b2718abd34d674fba10ecd0911939fbe3715877ab5dcd4a67754",
-    "opportunity_engine/quality_core.py": "3f28b0d6efccb4bf0a681ac82e1d164f184d82d86d593ccfb282fa0de993545f",
+    "opportunity_engine/quality.py": "2733a1cbcf844632970f3230699d1f251d11fa86b5e70c1dbede62fb3f20b6d9",
+    "opportunity_engine/quality_core.py": "22fba8767c5a746013c4daa6c07a0b623f20c07ab430de57659c4798f8f1dae8",
     "opportunity_engine/raw_archives.py": "2ffadbe45cb70852bdc2550293a3d103edd6966b8589a20d20bd3bd85456147a",
     "opportunity_engine/registry.py": "4372797e5f3a7fec58526caf0450debf5c420dbddcc78d055cd57e536d4a3006",
+    "opportunity_engine/replenishment.py": "92a387ffe7b76a455a234b0ff51dbc02860233251cb22e918331ec44d70a5ded",
     "opportunity_engine/reporting_lag.py": "8a85e6736f19c2c3ccd28252b473be970bcabfb0cac584eb9e681ae1aab296bc",
-    "opportunity_engine/rules.py": "829b6268f7aef9ee77e97a2dac1bddefc2328721b725edcb6c5b1119d6732ce7",
+    "opportunity_engine/rules.py": "d8a96c42efbabe32b77e032bd4e46eb2ac3cc9f4e19cead0c936d63c1729d635",
     "opportunity_engine/sam_approved.py": "4e739b46e344e2a6887634d2a0603658bf9c7531f945ebf0f3925fc1fb2b3a6f",
     "opportunity_engine/scope_stopwords.json": "7a64a4fb9886d351ce1b7c903f03e37dbadacd2b150ad865e5d5dd86c6722561",
     "opportunity_engine/supplier_demand.py": "0b036835f49a2d97dd6b7c57b18e9a74ff4605ea43adaa94c63ff31bdf710800",
-    "opportunity_engine/validate.py": "ecae7eb1995ed9df51a66d3f3661e074c799f116c52ed473aa4d176c16a8e680"
-  },
-  "publication_mode": "validated_checkpoint_publication",
-  "run_state": "SUCCEEDED",
-  "published_release": "20261031_143426_2a8e28",
-  "validation_passed": 197,
-  "validation_failed": 0,
-  "schedule_restored": true,
-  "publication_checkpoint_key": "governance/opportunity_intelligence/operations/checkpoints/20261031_143426_2a8e28/manifest.json",
-  "representative_company_qa": "passed",
-  "representative_company_count": 14,
-  "worker_tests_passed": 94,
-  "serving_tests_passed": 38,
-  "publication_evidence_note": "Prior complete auxiliary innovation feed retained with original dates; no opportunity or monetary dependencies. Raw archive checks passed."
+    "opportunity_engine/validate.py": "681077d2c2b90728b61a4390b9143d3a6a3507f02557071b2eeb4953142226b9"
+  }
 }

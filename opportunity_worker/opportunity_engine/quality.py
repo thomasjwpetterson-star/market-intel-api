@@ -30,11 +30,14 @@ def apply(directory):
  p=r/'source_quality.jsonl'
  op_columns={n for n,*_ in c.execute('DESCRIBE prior_opportunities').fetchall()}
  psc_expression='psc' if 'psc' in op_columns else 'NULL::VARCHAR'
- rows=c.execute('SELECT episode_id,record_hash,title,scope_text,window_end,source_name,source_evidence_id,source_url,'+psc_expression+' requirement_psc FROM prior_opportunities').fetchall()
+ input_expression='value_inputs_json' if 'value_inputs_json' in op_columns else 'NULL::VARCHAR'
+ rows=c.execute('SELECT episode_id,record_hash,title,scope_text,window_end,source_name,source_evidence_id,source_url,'+psc_expression+' requirement_psc,'+input_expression+' value_inputs_json FROM prior_opportunities').fetchall()
  with p.open('w') as f:
-  for eid,rh,title,body,end,source,evidence,url,psc in rows:
+  for eid,rh,title,body,end,source,evidence,url,psc,inputs in rows:
    v=q.notice_quality(title,body,end,m['as_of'],source)
-   mode,mode_basis=required_mode(title,body,psc,source=='sam_notices')
+   mode,mode_basis=required_mode(title,body,psc,source in ('sam_notices','agency_acquisition_forecasts'))
+   plan_method=json.loads(inputs or '{}').get('source_forecast_row',{}).get('procurement_method','') if source=='agency_acquisition_forecasts' else ''
+   v['planned_procurement_method']=plan_method
    v.update(required_delivery_mode=mode,delivery_mode_basis=mode_basis,requirement_psc=psc,psc_reference_url=PSC_REFERENCE)
    v.update(episode_id=eid,record_hash=rh,source_evidence_id=evidence,source_url=url,nomenclature=q.nomenclature(body),restricted_item=q.restricted_item(body),qualification_invitation=q.explicit_qualification(body),source_cages_json=json.dumps(sorted(q.listed_sources(body))),required_parts_json=json.dumps(sorted(q.required_parts(title,body))),policy_hash=POLICY_HASH)
    f.write(json.dumps(v)+'\n')
@@ -76,20 +79,24 @@ def apply(directory):
    to_json(list(DISTINCT struct_pack(psc:=f.psc,naics:=f.naics))) work_classification_evidence_json
    FROM scope_features f SEMI JOIN prior_company_work_matches w ON w.company_id=f.company_id AND w.doc_id=f.doc_id GROUP BY f.company_id,f.doc_id""")
  else:c.execute("CREATE TEMP TABLE selected_doc_codings AS SELECT NULL::VARCHAR company_id,NULL::VARCHAR doc_id,NULL::VARCHAR observed_work_psc,NULL::VARCHAR work_classification_evidence_json WHERE false")
- def fit(work,title,named,entry,source,cage,restricted,invitation,cages,authority,delivery,work_psc):
+ def fit(work,title,named,entry,source,cage,restricted,invitation,cages,authority,delivery,work_psc,plan_method):
   verdict,reason=q.fit_fields(work,title,named,entry,source,cage,restricted,invitation,json.loads(cages),authority,delivery,work_psc)
+  if source=='agency_acquisition_forecasts':
+   if entry=='documented_incumbent_contract':verdict,reason='accepted','The agency names this exact prior contract, which resolves to one CAGE. This is a documented incumbent-retention route; current scope, acquisition eligibility and capacity remain checks.'
+   elif __import__('re').search(r'sole[ -]?source|set[ -]?aside|8\(a\)|seaport',plan_method or '',__import__('re').I):verdict,reason='review','The plan states a sole-source, restricted competition or vehicle route. A comparable capability does not establish access or eligibility for this site.'
+   elif delivery=='component_supply' and verdict=='accepted':verdict,reason='review',"Comparable hardware scope is documented, but the planned package does not establish this site's qualification or an invitation to qualify a new source."
   _,observed,mode_reason=mode_fit(work,delivery,work_psc)
   target=q.terms(__import__('re').split(r'(?i)_End_Item_|\bNSN\b',title or '')[0])|q.terms(named)
   return json.dumps(dict(verdict=verdict,reason=reason,observed_delivery_mode=observed,mode_reason=mode_reason,shared_scope_terms=sorted(q.terms(work)&target)))
- c.create_function('assess_fit',fit,['VARCHAR']*6+['BOOLEAN','BOOLEAN','VARCHAR','BOOLEAN','VARCHAR','VARCHAR'],'VARCHAR',null_handling='special')
+ c.create_function('assess_fit',fit,['VARCHAR']*6+['BOOLEAN','BOOLEAN','VARCHAR','BOOLEAN','VARCHAR','VARCHAR','VARCHAR'],'VARCHAR',null_handling='special')
  old_mode_columns=cols&set('required_delivery_mode delivery_mode_basis observed_work_psc observed_delivery_mode work_classification_evidence_json mode_reason shared_scope_terms_json'.split())
  cw_selection='cw.*'+(' EXCLUDE('+','.join(sorted(old_mode_columns))+')' if old_mode_columns else '')
  c.execute("""CREATE TEMP TABLE assessed AS SELECT """+cw_selection+""",q.verdict source_verdict,q.required_delivery_mode,q.delivery_mode_basis,f.observed_work_psc,f.work_classification_evidence_json,
- assess_fit(cw.work_text,o.title,q.nomenclature,cw.company_entry_status,o.source_name,substr(cw.company_id,6),q.restricted_item,q.qualification_invitation,q.source_cages_json,coalesce(a.authorized,false),q.required_delivery_mode,f.observed_work_psc) fit_json
+ assess_fit(cw.work_text,o.title,q.nomenclature,cw.company_entry_status,o.source_name,substr(cw.company_id,6),q.restricted_item,q.qualification_invitation,q.source_cages_json,coalesce(a.authorized,false),q.required_delivery_mode,f.observed_work_psc,q.planned_procurement_method) fit_json
  FROM prior_company_work_matches cw JOIN prior_opportunities o USING(episode_id) JOIN source_quality q USING(episode_id)
  LEFT JOIN selected_doc_codings f ON f.company_id=cw.company_id AND f.doc_id=cw.doc_id
  LEFT JOIN (SELECT DISTINCT company_id,episode_id,true authorized FROM quality_company_notice_source_evidence) a ON a.company_id=cw.company_id AND a.episode_id=cw.episode_id""")
- original_caveat='pre_quality_company_evidence_caveat' if 'pre_quality_company_evidence_caveat' in cols else 'company_evidence_caveat'
+ original_caveat='coalesce(pre_quality_company_evidence_caveat,company_evidence_caveat)' if 'pre_quality_company_evidence_caveat' in cols else 'company_evidence_caveat'
  output('company_match_assessments',"SELECT match_id,company_id,episode_id,opportunity_hash,profile_hash,doc_id,work_text,sample_evidence_id,source_verdict,company_entry_status,required_delivery_mode,delivery_mode_basis,observed_work_psc,work_classification_evidence_json,"+original_caveat+" original_company_evidence_caveat,json_extract_string(fit_json,'$.observed_delivery_mode') observed_delivery_mode,json_extract_string(fit_json,'$.mode_reason') mode_reason,cast(json_extract(fit_json,'$.shared_scope_terms') AS VARCHAR) shared_scope_terms_json,json_extract_string(fit_json,'$.verdict') verdict,json_extract_string(fit_json,'$.reason') reason,'"+POLICY_HASH+"' policy_hash FROM assessed")
  # All candidates and their prior caveats remain auditable. Serving caveats
  # must not claim proven delivery capability for review-only relationships.
@@ -151,6 +158,8 @@ def review_current(previous,root,aws):
   from .item_requests import link as link_item_requests
   from .item_demand import augment as augment_item_demand
   if all(n in m['sources'] for n in ('item_price_references','item_market_price_evidence')):augment_item_demand(r)
+  from .replenishment import augment as augment_replenishment
+  augment_replenishment(r)
   link_item_requests(r);return r
  except Exception:
   from .checkpoint import archive_failed_attempt

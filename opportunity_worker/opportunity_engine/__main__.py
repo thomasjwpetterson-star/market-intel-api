@@ -38,6 +38,8 @@ def main():
    refresh_activity(out,a)
    from .reporting_lag import refresh as refresh_reporting_lag
    refresh_reporting_lag(out,a)
+   from .product_market import build as build_product_market
+   build_product_market(out)
    from .pipeline_coverage import build as build_coverage
    build_coverage(out)
    from .logic_provenance import record as record_logic
@@ -71,20 +73,21 @@ def main():
   prior_bindings=root/'prior_bindings.json';prior_bindings.write_text(json.dumps(m))
   env=dict(os.environ,MIMIR_OPPORTUNITY_WORKDIR=str(root),MIMIR_OPPORTUNITY_PREVIOUS_MANIFEST=str(prior_bindings),PYTHONDONTWRITEBYTECODE='1',PYTHONPATH=os.pathsep.join(str(p) for p in sys.path if p))
   if args.source_bindings_key:env['MIMIR_OPPORTUNITY_REUSE_SOURCE_SNAPSHOT']='1'
-  for module in ('refresh_sbir','refresh_topics','refresh_shared_sources','refresh_commercial_sources','refresh_company_registry','refresh_company_history','refresh_innovation'):
+  for module in ('refresh_sbir','refresh_topics','refresh_shared_sources','refresh_commercial_sources','refresh_company_registry','refresh_company_history','refresh_innovation','refresh_agency_forecasts'):
    command=[sys.executable,'-m','opportunity_engine.ingestion.'+module]
    if module in ('refresh_shared_sources','refresh_company_history'):command+=['--as-of',args.as_of]
    try:subprocess.run(command,env=env,check=True)
    except subprocess.CalledProcessError:
     # A partial public topic listing must not erase the last complete snapshot
     # or prevent unrelated DIBBS/pricing/company sources from updating.
-    if module!='refresh_topics' or not sources.get('sbir_topics'):raise
-    retained=dict(sources['sbir_topics'],status='retained_prior_snapshot_refresh_failed',refresh_attempt_as_of=args.as_of,refresh_failure='The current SBA listing failed completeness checks; prior complete source dates and contents are retained.')
-    fallback=root/'inputs/retained_topics.json';fallback.parent.mkdir(exist_ok=True);fallback.write_text(json.dumps({'sources':{'sbir_topics':retained}}))
-    (root/'inputs/topics_latest.json').write_text(json.dumps({'path':str(fallback)}))
-    print('SBA topic refresh failed: preserving prior complete topic snapshot with original source dates; continuing independent data refreshes.',flush=True)
+    source_key,pointer_name=('sbir_topics','topics') if module=='refresh_topics' else ('agency_acquisition_forecasts','agency_forecasts')
+    if module not in ('refresh_topics','refresh_agency_forecasts') or not sources.get(source_key):raise
+    retained=dict(sources[source_key],status='retained_prior_snapshot_refresh_failed',refresh_attempt_as_of=args.as_of,refresh_failure='The public source failed completeness checks; prior complete source dates and contents are retained.')
+    fallback=root/('inputs/retained_'+pointer_name+'.json');fallback.parent.mkdir(exist_ok=True);fallback.write_text(json.dumps({'sources':{source_key:retained}}))
+    (root/('inputs/'+pointer_name+'_latest.json')).write_text(json.dumps({'path':str(fallback)}))
+    print('Public source refresh failed: preserving prior complete snapshot with original source dates:',source_key,flush=True)
   sbir=json.loads((root/'inputs/sbir_source.json').read_text())
-  for name in ('topics','shared_sources','commercial','company_registry','company_history','innovation'):
+  for name in ('topics','shared_sources','commercial','company_registry','company_history','innovation','agency_forecasts'):
    pointer=json.loads((root/('inputs/'+name+'_latest.json')).read_text());sources.update(json.loads(Path(pointer['path']).read_text())['sources'])
  # Rebuild the actual company and derived-demand inputs on every native refresh.
  # Archived native projections also allow deterministic recovery/rebuild runs.
@@ -92,6 +95,10 @@ def main():
   derived=root/'derived'/(args.as_of+'_'+uuid.uuid4().hex[:8]);sources.update(rebuild_history(sources,derived/'company',args.as_of));sources.update(rebuild_demand(sources,derived/'demand',args.as_of));sources.update(refresh_forecast_episodes(sources,derived/'forecasts',args.as_of))
  from .item_demand import prepare as prepare_item_demand
  sources.update(prepare_item_demand(sources,root/'derived'/('items_'+uuid.uuid4().hex[:8]),args.as_of))
+ from .replenishment import prepare as prepare_replenishment
+ sources.update(prepare_replenishment(sources,root/'derived'/('replenishment_'+uuid.uuid4().hex[:8]),args.as_of))
+ from .agency_forecasts import prepare as prepare_agency_forecasts
+ sources.update(prepare_agency_forecasts(sources,root/'derived'/('agency_'+uuid.uuid4().hex[:8]),args.as_of,a))
  # All bindings are consumed together; source as-of dates are never advanced.
  seed=root/'seed.json';seed.write_text('{}');inputs=root/'inputs.json';inputs.write_text(json.dumps({'sources':sources}));sb=root/'sbir.json';sb.write_text(json.dumps(sbir));out=root/'runs'/(datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6])
  if args.refresh:
@@ -103,12 +110,16 @@ def main():
   build(seed,sb,out,args.as_of,inputs);validate_demand_integrity(out);enrich(out,inputs if 'governed_price_lines' in sources else None)
   if 'cage_registry' in sources:augment(out,[inputs])
   if 'company_work' in sources:augment_companies(out)
+  from .agency_forecasts import link_incumbents as link_agency_incumbents
+  if 'agency_forecast_incumbents' in sources:link_agency_incumbents(out)
   from .sam_approved import augment as augment_approved_notice_sources
   if 'company_work' in sources and augment_approved_notice_sources(out):
    from .notice_prices import refresh as refresh_notice_prices
    refresh_notice_prices(out)
   from .item_demand import augment as augment_item_demand
   if all(n in sources for n in ('item_price_references','item_market_price_evidence')):augment_item_demand(out)
+  from .replenishment import augment as augment_replenishment
+  if 'item_replenishment_context' in sources:augment_replenishment(out)
   if 'company_work' in sources:apply_quality(out)
   from .item_presence import hold as hold_item_presence
   if 'company_work' in sources:hold_item_presence(out)
@@ -122,6 +133,8 @@ def main():
   if 'native_company_identity' in sources:refresh_activity(out,a)
   from .reporting_lag import refresh as refresh_reporting_lag
   if 'native_company_identity' in sources:refresh_reporting_lag(out,a)
+  from .product_market import build as build_product_market
+  if 'company_work' in sources:build_product_market(out)
   from .pipeline_coverage import build as build_coverage
   if 'company_work' in sources:build_coverage(out)
   from .logic_provenance import record as record_logic

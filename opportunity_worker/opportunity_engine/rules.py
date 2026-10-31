@@ -76,15 +76,19 @@ def evaluate(o,as_of):
  if 'supplier' in str(lane):unknown.extend(['Package may already be placed','Technical access and the buying site require confirmation'])
  if template:unknown.append('Prior outsourcing supports potential pull, not a forecast supplier RFQ')
  if lane=='source_item_forecasts':unknown.append('Inventory, incoming supply and conversion into procurement remain checks')
+ if lane=='stock_supported_item_demand':unknown.append('Reported annual usage is a conditional repeat-demand scenario, not a source forecast or new order; incoming supply, current contracts and technical access remain checks')
  if lane=='scoped_recurrence':unknown.append('Observed cadence has not been validated as an award forecast')
  if invitation_current and end is None:unknown.append('Recent agency source-interest notice; response deadline is not supplied. Confirm the office still accepts capability information.')
  stage='evidence_gap';route='unestablished';primary=r['id'] if r else None
  if terminal or elapsed:stage='resolved_or_elapsed'
+ elif o.get('source_name')=='agency_acquisition_forecasts' and o.get('procurement_state')=='agency_plan_resolved_to_published_notice':stage='resolved_or_elapsed';route='linked_published_notice'
+ elif o.get('source_name')=='agency_acquisition_forecasts' and o.get('procurement_state')!='agency_planned_requirement':unknown.append('Agency plan has conflicting identity, unresolved timing, an elapsed solicitation estimate, or a newer unparsed office forecast; source revalidation is required')
  elif not source or not o.get('customer_name'):pass
  elif invitation_current:stage='qualification_opening';route='explicit_source_invitation';primary='PR13'
  elif teaming_current:stage='teaming_opening';route='explicit_teaming_invitation';primary='PR07'
  elif lane.startswith('published') and end:stage='published_requirement';route='published_response_route'
  elif lane=='source_item_forecasts':stage='source_forecast';route='item_access_check'
+ elif lane=='stock_supported_item_demand':stage='emerging_demand';route='stock_and_item_access_check'
  elif lane=='explicit_work_package_plan':stage='emerging_demand';route='planned_package_access_check'
  elif lane in ('research_and_facilities_plan','all_service_procurement_plan'):stage='planning_context';route='external_task_not_established'
  elif template:stage='emerging_demand';route='prime_supply_chain_validation'
@@ -96,7 +100,7 @@ def evaluate(o,as_of):
  if hints and stage not in ('teaming_opening','qualification_opening'):unknown.append('Additional source passages are review tags, not validated buying signals')
  rule=BY_ID.get(primary,{})
  basis={'source_name':o.get('source_name'),'evidence_ids':evidence_ids,'source_url':o.get('source_url'),'source_locator':o.get('source_locator'),'source_record_hash':o.get('record_hash')}
- demand_value='programme_funding_context' if lane in ('research_and_facilities_plan','all_service_procurement_plan') else 'historical_comparator' if lane in ('scoped_recurrence','new_prime_historical_supplier_flow','funded_prime_supplier_packages') else 'source_quantity_price_scenario' if lane in ('published_item_procurement','source_item_forecasts') else 'source_planned_package' if lane=='explicit_work_package_plan' else 'notice_or_exact_item_price_evidence'
+ demand_value='conditional_reported_annual_usage_scenario' if lane=='stock_supported_item_demand' else 'programme_funding_context' if lane in ('research_and_facilities_plan','all_service_procurement_plan') else 'historical_comparator' if lane in ('scoped_recurrence','new_prime_historical_supplier_flow','funded_prime_supplier_packages') else 'source_quantity_price_scenario' if lane in ('published_item_procurement','source_item_forecasts') else 'source_planned_package' if lane=='explicit_work_package_plan' else 'notice_or_exact_item_price_evidence'
  out=dict(version=VERSION,logic_sha256=LOGIC_HASH,as_of=str(today),rule_id=primary,reason_title=rule.get('label','Unclassified evidence'),stage=stage,participation_route=route,requires_access_confirmation=True,source_basis=basis,source_passages=hints,unresolved=unknown,negative_evidence=[dict(reason='Source records cancellation/award or retained demand window has elapsed',evidence_id=x) for x in (inputs.get('outcome_evidence_ids') or [eid])] if terminal or elapsed else [],value_interpretation=demand_value,company_addressable_value=None,next_action=rule.get('next_action','Review missing evidence before recommending this work.'),source_period=dict(start=str(start) if start else None,end=str(end) if end else None,basis=o.get('date_basis')),solicitation_date_estimate=None,same_scope_resolution_required=lane in PLANS or 'supplier' in str(lane),template_lineage_present=template)
  mechanisms=[]
  if o.get('source_name')=='sbir_topics':mechanisms.append(dict(rule_id='PR16',label=BY_ID['PR16']['label'],evidence_id=eid,source_wording='Structured SBIR/STTR topic source'))
@@ -110,7 +114,7 @@ def evaluate(o,as_of):
   if code=='PR16':out['unresolved'].append('SBIR/STTR applicant, phase, ownership/size and research-data rights conditions require notice-specific verification; past topic activity is not eligibility')
   if code=='PR18':out['unresolved'].append('Direct task-order access depends on vehicle holder/on-ramp or permitted teaming status')
   if code=='PR19':out['unresolved'].append('FMS approval or programme ceiling does not establish a signed/funded supplier package')
- out['response_window_verified']=bool(end and end>=today and not terminal)
+ out['response_window_verified']=bool(lane.startswith('published') and end and end>=today and not terminal)
  if invitation_current and end is None:out['next_action']='Contact the office in the agency notice to confirm whether capability information is still being accepted, then establish the qualification scope, technical-data access, cost and timetable.'
  out['decision_hash']=hashlib.sha256(json.dumps(out,sort_keys=True,default=str).encode()).hexdigest()
  return out

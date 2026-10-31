@@ -35,7 +35,7 @@ def prepare(sources,folder,as_of):
  c.execute("""CREATE TEMP TABLE catalogue AS SELECT niin,CASE WHEN count(DISTINCT nullif(trim(unit_of_issue),''))=1 THEN min(nullif(trim(unit_of_issue),'')) END catalogue_unit,
  CASE WHEN count(DISTINCT nullif(trim(unit_of_issue),''))=1 AND count(DISTINCT govt_estimated_price) FILTER(WHERE govt_estimated_price>0)=1 AND count(*) FILTER(WHERE govt_estimated_price>0 AND nullif(trim(unit_of_issue),'') IS NULL)=0 THEN min(govt_estimated_price) FILTER(WHERE govt_estimated_price>0) END government_reference_unit_price,
  count(*) reference_rows,min(evidence_id) sample_reference_evidence,min(source_snapshot_sha256) source_snapshot_sha256
- FROM item_reference_facts SEMI JOIN wanted USING(niin) GROUP BY niin""")
+ FROM item_reference_facts GROUP BY niin""")
  emit('item_price_references',"""SELECT coalesce(c.niin,m.niin) niin,coalesce(m.unit,c.catalogue_unit) unit,c.catalogue_unit,c.government_reference_unit_price,
  m.price_low market_price_low,m.price_median market_price_median,m.price_high market_price_high,m.observations market_observations,m.sellers market_sellers,m.first_price_date,m.latest_price_date,m.price_preview_json,
  c.reference_rows,c.sample_reference_evidence,c.source_snapshot_sha256,

@@ -169,6 +169,12 @@ def build(seed_manifest,sbir_manifest,output,as_of,shared=None,additional_manife
  if 'sbir_topics' in sources:
   materialise('research_topics_current','SELECT * FROM sbir_topics')
  materialise('technical_evidence','SELECT * FROM technical_facts')
+ if 'agency_acquisition_forecasts' in sources:materialise('agency_forecast_requirements','SELECT * FROM agency_acquisition_forecasts')
+ if 'agency_forecast_incumbents' in sources:materialise('agency_forecast_incumbents','SELECT * FROM agency_forecast_incumbents')
+ if 'item_replenishment_context' in sources:materialise('item_replenishment_context','SELECT * FROM item_replenishment_context')
+ if 'item_reference_facts' in sources:
+  sources['item_reference_facts']['rows']=c.execute('SELECT count(*) FROM item_reference_facts').fetchone()[0]
+  bind_source('item_reference_facts')
  # Keep the established company-demand population intact. No generic text tags
  # are silently added to its counts as validated opportunities.
  materialise('company_profiles','SELECT * FROM company_profiles')
