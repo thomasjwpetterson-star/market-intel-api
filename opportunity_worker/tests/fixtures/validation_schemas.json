@@ -1,0 +1,4586 @@
+{
+  "budget_revision_signals": [
+    {
+      "Name": "funding_id",
+      "Type": "string"
+    },
+    {
+      "Name": "previous_funding_id",
+      "Type": "string"
+    },
+    {
+      "Name": "component",
+      "Type": "string"
+    },
+    {
+      "Name": "budget_line_item",
+      "Type": "string"
+    },
+    {
+      "Name": "fiscal_year",
+      "Type": "bigint"
+    },
+    {
+      "Name": "measure_type",
+      "Type": "string"
+    },
+    {
+      "Name": "value_kind",
+      "Type": "string"
+    },
+    {
+      "Name": "funding_status",
+      "Type": "string"
+    },
+    {
+      "Name": "previous_funding_status",
+      "Type": "string"
+    },
+    {
+      "Name": "submission_fiscal_year",
+      "Type": "bigint"
+    },
+    {
+      "Name": "previous_submission_fy",
+      "Type": "bigint"
+    },
+    {
+      "Name": "amount_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "previous_amount_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "change_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "catalogue_sales_evidence": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "pricing_record_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_record_id",
+      "Type": "string"
+    },
+    {
+      "Name": "niin",
+      "Type": "string"
+    },
+    {
+      "Name": "nsn",
+      "Type": "string"
+    },
+    {
+      "Name": "part_number",
+      "Type": "string"
+    },
+    {
+      "Name": "item_name",
+      "Type": "string"
+    },
+    {
+      "Name": "supplier_cage",
+      "Type": "string"
+    },
+    {
+      "Name": "supplier_name",
+      "Type": "string"
+    },
+    {
+      "Name": "transaction_date",
+      "Type": "string"
+    },
+    {
+      "Name": "record_amount_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "quantity",
+      "Type": "double"
+    },
+    {
+      "Name": "quantity_unit",
+      "Type": "string"
+    },
+    {
+      "Name": "unit_price_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "direct_seller",
+      "Type": "boolean"
+    },
+    {
+      "Name": "exact_part_reference",
+      "Type": "boolean"
+    },
+    {
+      "Name": "exact_part_reference_cages",
+      "Type": "bigint"
+    },
+    {
+      "Name": "sample_reference_evidence",
+      "Type": "string"
+    },
+    {
+      "Name": "source_snapshot_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "source_s3_uri",
+      "Type": "string"
+    },
+    {
+      "Name": "source_row_locator",
+      "Type": "string"
+    },
+    {
+      "Name": "source_sha256",
+      "Type": "string"
+    }
+  ],
+  "company_activity_actions": [
+    {
+      "Name": "transaction_key",
+      "Type": "string"
+    },
+    {
+      "Name": "award_key",
+      "Type": "string"
+    },
+    {
+      "Name": "piid",
+      "Type": "string"
+    },
+    {
+      "Name": "cage_code",
+      "Type": "string"
+    },
+    {
+      "Name": "uei",
+      "Type": "string"
+    },
+    {
+      "Name": "company_name",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "action_date",
+      "Type": "string"
+    },
+    {
+      "Name": "action_obligation",
+      "Type": "double"
+    },
+    {
+      "Name": "awarding_agency_code",
+      "Type": "string"
+    },
+    {
+      "Name": "customer",
+      "Type": "string"
+    },
+    {
+      "Name": "work_text",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_id",
+      "Type": "string"
+    }
+  ],
+  "company_activity_baselines": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_name",
+      "Type": "string"
+    },
+    {
+      "Name": "annual_action_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "annual_award_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "annual_net_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "annual_positive_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "annual_dod_net_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "annual_dod_action_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "source_latest_action",
+      "Type": "string"
+    },
+    {
+      "Name": "source_lag_days",
+      "Type": "bigint"
+    },
+    {
+      "Name": "first_observed_action",
+      "Type": "string"
+    },
+    {
+      "Name": "last_observed_action",
+      "Type": "string"
+    },
+    {
+      "Name": "annual_award_net_median",
+      "Type": "double"
+    },
+    {
+      "Name": "annual_award_net_max",
+      "Type": "double"
+    },
+    {
+      "Name": "period_start",
+      "Type": "string"
+    },
+    {
+      "Name": "period_end",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_digest",
+      "Type": "string"
+    },
+    {
+      "Name": "methodology",
+      "Type": "string"
+    }
+  ],
+  "company_approved_notice_sources": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "niin",
+      "Type": "string"
+    },
+    {
+      "Name": "part_number",
+      "Type": "string"
+    },
+    {
+      "Name": "part_key",
+      "Type": "string"
+    },
+    {
+      "Name": "approval_quote",
+      "Type": "string"
+    },
+    {
+      "Name": "source_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "profile_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "reference_description",
+      "Type": "string"
+    },
+    {
+      "Name": "reference_part_number",
+      "Type": "string"
+    },
+    {
+      "Name": "rncc_codes",
+      "Type": "string"
+    },
+    {
+      "Name": "rnvc_codes",
+      "Type": "string"
+    },
+    {
+      "Name": "rnsc_codes",
+      "Type": "string"
+    },
+    {
+      "Name": "source_snapshot_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "source_row",
+      "Type": "bigint"
+    },
+    {
+      "Name": "agency_notice_episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "agency_notice_record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "policy_version",
+      "Type": "string"
+    }
+  ],
+  "company_award_facts": [
+    {
+      "Name": "award_key",
+      "Type": "string"
+    },
+    {
+      "Name": "piid",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_piid",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_agency",
+      "Type": "string"
+    },
+    {
+      "Name": "cage_code",
+      "Type": "string"
+    },
+    {
+      "Name": "uei",
+      "Type": "string"
+    },
+    {
+      "Name": "company_name",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_uei",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_name",
+      "Type": "string"
+    },
+    {
+      "Name": "first_action_date",
+      "Type": "string"
+    },
+    {
+      "Name": "latest_action_date",
+      "Type": "string"
+    },
+    {
+      "Name": "action_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "observed_net_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "observed_positive_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "reported_ceiling",
+      "Type": "double"
+    },
+    {
+      "Name": "work_text",
+      "Type": "string"
+    },
+    {
+      "Name": "latest_description",
+      "Type": "string"
+    },
+    {
+      "Name": "psc",
+      "Type": "string"
+    },
+    {
+      "Name": "naics",
+      "Type": "string"
+    },
+    {
+      "Name": "programme_code",
+      "Type": "string"
+    },
+    {
+      "Name": "programme_name",
+      "Type": "string"
+    },
+    {
+      "Name": "buyer_office_code",
+      "Type": "string"
+    },
+    {
+      "Name": "buyer_office",
+      "Type": "string"
+    },
+    {
+      "Name": "buyer_name",
+      "Type": "string"
+    },
+    {
+      "Name": "period_start",
+      "Type": "string"
+    },
+    {
+      "Name": "period_end",
+      "Type": "string"
+    },
+    {
+      "Name": "potential_end",
+      "Type": "string"
+    },
+    {
+      "Name": "manufacturer_of_goods",
+      "Type": "string"
+    },
+    {
+      "Name": "offer_count",
+      "Type": "string"
+    },
+    {
+      "Name": "extent_competed",
+      "Type": "string"
+    },
+    {
+      "Name": "set_aside",
+      "Type": "string"
+    },
+    {
+      "Name": "performance_city",
+      "Type": "string"
+    },
+    {
+      "Name": "performance_region",
+      "Type": "string"
+    },
+    {
+      "Name": "latest_transaction_key",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    }
+  ],
+  "company_catalogue_sales": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "physical_price_lines",
+      "Type": "bigint"
+    },
+    {
+      "Name": "observed_catalogue_items",
+      "Type": "bigint"
+    },
+    {
+      "Name": "observed_sellers",
+      "Type": "bigint"
+    },
+    {
+      "Name": "observed_catalogue_item_sales",
+      "Type": "double"
+    },
+    {
+      "Name": "direct_seller_sales",
+      "Type": "double"
+    },
+    {
+      "Name": "other_seller_item_sales",
+      "Type": "double"
+    },
+    {
+      "Name": "exact_part_other_seller_sales",
+      "Type": "double"
+    },
+    {
+      "Name": "single_catalogue_part_other_seller_sales",
+      "Type": "double"
+    },
+    {
+      "Name": "first_sale_date",
+      "Type": "string"
+    },
+    {
+      "Name": "last_sale_date",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "company_declared_capabilities": [
+    {
+      "Name": "cage_code",
+      "Type": "string"
+    },
+    {
+      "Name": "uei",
+      "Type": "string"
+    },
+    {
+      "Name": "legal_business_name",
+      "Type": "string"
+    },
+    {
+      "Name": "dba_name",
+      "Type": "string"
+    },
+    {
+      "Name": "city",
+      "Type": "string"
+    },
+    {
+      "Name": "region",
+      "Type": "string"
+    },
+    {
+      "Name": "country",
+      "Type": "string"
+    },
+    {
+      "Name": "sam_extract_code",
+      "Type": "string"
+    },
+    {
+      "Name": "purpose_of_registration",
+      "Type": "string"
+    },
+    {
+      "Name": "initial_registration_date",
+      "Type": "string"
+    },
+    {
+      "Name": "registration_expiration_date",
+      "Type": "string"
+    },
+    {
+      "Name": "last_update_date",
+      "Type": "string"
+    },
+    {
+      "Name": "activation_date",
+      "Type": "string"
+    },
+    {
+      "Name": "entity_url",
+      "Type": "string"
+    },
+    {
+      "Name": "entity_structure",
+      "Type": "string"
+    },
+    {
+      "Name": "bus_type_string",
+      "Type": "string"
+    },
+    {
+      "Name": "primary_naics",
+      "Type": "string"
+    },
+    {
+      "Name": "naics_code_string",
+      "Type": "string"
+    },
+    {
+      "Name": "psc_code_string",
+      "Type": "string"
+    },
+    {
+      "Name": "source_table",
+      "Type": "string"
+    },
+    {
+      "Name": "declaration_id",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "company_history_coverage": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "prime_awards",
+      "Type": "bigint"
+    },
+    {
+      "Name": "subcontract_reports",
+      "Type": "bigint"
+    },
+    {
+      "Name": "observed_prime_net_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "first_prime_action",
+      "Type": "string"
+    },
+    {
+      "Name": "last_prime_action",
+      "Type": "string"
+    },
+    {
+      "Name": "last_subcontract_report",
+      "Type": "string"
+    },
+    {
+      "Name": "methodology",
+      "Type": "string"
+    },
+    {
+      "Name": "refresh_as_of",
+      "Type": "string"
+    }
+  ],
+  "company_item_matches": [
+    {
+      "Name": "match_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "score",
+      "Type": "double"
+    },
+    {
+      "Name": "match_route",
+      "Type": "string"
+    },
+    {
+      "Name": "matched_terms",
+      "Type": "string"
+    },
+    {
+      "Name": "company_evidence_caveat",
+      "Type": "string"
+    },
+    {
+      "Name": "sample_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "match_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "opportunity_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "profile_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "niin",
+      "Type": "string"
+    },
+    {
+      "Name": "reference_description",
+      "Type": "string"
+    },
+    {
+      "Name": "reference_part_number",
+      "Type": "string"
+    },
+    {
+      "Name": "agency_approval_quote",
+      "Type": "string"
+    },
+    {
+      "Name": "agency_approval_source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "agency_approval_part_number",
+      "Type": "string"
+    },
+    {
+      "Name": "agency_other_sources_json",
+      "Type": "string"
+    }
+  ],
+  "company_item_reference_evidence": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "opportunity_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "niin",
+      "Type": "string"
+    },
+    {
+      "Name": "nsn",
+      "Type": "string"
+    },
+    {
+      "Name": "cage_code",
+      "Type": "string"
+    },
+    {
+      "Name": "part_number",
+      "Type": "string"
+    },
+    {
+      "Name": "rncc_codes",
+      "Type": "string"
+    },
+    {
+      "Name": "rnvc_codes",
+      "Type": "string"
+    },
+    {
+      "Name": "rnsc_codes",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_snapshot_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "source_row",
+      "Type": "bigint"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    },
+    {
+      "Name": "factual_reference_digest",
+      "Type": "string"
+    }
+  ],
+  "company_item_reference_summaries": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "opportunity_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "company_reference_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "company_reference_digest",
+      "Type": "string"
+    },
+    {
+      "Name": "company_reference_preview_json",
+      "Type": "string"
+    }
+  ],
+  "company_item_valuations": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "niin",
+      "Type": "string"
+    },
+    {
+      "Name": "quantity",
+      "Type": "bigint"
+    },
+    {
+      "Name": "catalogue_unit",
+      "Type": "string"
+    },
+    {
+      "Name": "first_month",
+      "Type": "string"
+    },
+    {
+      "Name": "last_month",
+      "Type": "string"
+    },
+    {
+      "Name": "month_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "monthly_evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "government_reference_unit_price",
+      "Type": "double"
+    },
+    {
+      "Name": "supplier_average_unit_price",
+      "Type": "double"
+    },
+    {
+      "Name": "government_reference_lot_scenario",
+      "Type": "double"
+    },
+    {
+      "Name": "supplier_average_lot_scenario",
+      "Type": "double"
+    },
+    {
+      "Name": "supplier_average_last_sale",
+      "Type": "string"
+    },
+    {
+      "Name": "catalogue_evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    },
+    {
+      "Name": "market_price_low",
+      "Type": "double"
+    },
+    {
+      "Name": "market_price_median",
+      "Type": "double"
+    },
+    {
+      "Name": "market_price_high",
+      "Type": "double"
+    },
+    {
+      "Name": "market_observations",
+      "Type": "bigint"
+    },
+    {
+      "Name": "market_sellers",
+      "Type": "bigint"
+    },
+    {
+      "Name": "first_price_date",
+      "Type": "string"
+    },
+    {
+      "Name": "latest_price_date",
+      "Type": "string"
+    },
+    {
+      "Name": "market_price_lot_scenario",
+      "Type": "double"
+    },
+    {
+      "Name": "annual_scenarios_json",
+      "Type": "string"
+    },
+    {
+      "Name": "valuation_status",
+      "Type": "string"
+    },
+    {
+      "Name": "inventory_date",
+      "Type": "string"
+    },
+    {
+      "Name": "stock_on_hand",
+      "Type": "double"
+    },
+    {
+      "Name": "backorder_quantity",
+      "Type": "double"
+    },
+    {
+      "Name": "annual_demand_quantity",
+      "Type": "double"
+    },
+    {
+      "Name": "inventory_signal",
+      "Type": "string"
+    },
+    {
+      "Name": "reorder_date",
+      "Type": "string"
+    },
+    {
+      "Name": "reorder_point",
+      "Type": "double"
+    },
+    {
+      "Name": "reorder_stock",
+      "Type": "double"
+    },
+    {
+      "Name": "previous_reorder_gap",
+      "Type": "double"
+    },
+    {
+      "Name": "inventory_evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "reorder_evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "current_request_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "next_request_deadline",
+      "Type": "string"
+    },
+    {
+      "Name": "related_requests_json",
+      "Type": "string"
+    },
+    {
+      "Name": "company_reference_digest",
+      "Type": "string"
+    }
+  ],
+  "company_match_assessments": [
+    {
+      "Name": "match_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "opportunity_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "profile_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "doc_id",
+      "Type": "string"
+    },
+    {
+      "Name": "work_text",
+      "Type": "string"
+    },
+    {
+      "Name": "sample_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_verdict",
+      "Type": "string"
+    },
+    {
+      "Name": "company_entry_status",
+      "Type": "string"
+    },
+    {
+      "Name": "required_delivery_mode",
+      "Type": "string"
+    },
+    {
+      "Name": "delivery_mode_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "observed_work_psc",
+      "Type": "string"
+    },
+    {
+      "Name": "work_classification_evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "original_company_evidence_caveat",
+      "Type": "string"
+    },
+    {
+      "Name": "observed_delivery_mode",
+      "Type": "string"
+    },
+    {
+      "Name": "mode_reason",
+      "Type": "string"
+    },
+    {
+      "Name": "shared_scope_terms_json",
+      "Type": "string"
+    },
+    {
+      "Name": "verdict",
+      "Type": "string"
+    },
+    {
+      "Name": "reason",
+      "Type": "string"
+    },
+    {
+      "Name": "policy_hash",
+      "Type": "string"
+    }
+  ],
+  "company_matches": [
+    {
+      "Name": "match_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "score",
+      "Type": "double"
+    },
+    {
+      "Name": "match_route",
+      "Type": "string"
+    },
+    {
+      "Name": "matched_terms",
+      "Type": "string"
+    },
+    {
+      "Name": "company_evidence_caveat",
+      "Type": "string"
+    },
+    {
+      "Name": "sample_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "match_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "opportunity_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "profile_hash",
+      "Type": "string"
+    }
+  ],
+  "company_notice_item_prices": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "items_json",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "company_notice_source_evidence": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "niin",
+      "Type": "string"
+    },
+    {
+      "Name": "part_number",
+      "Type": "string"
+    },
+    {
+      "Name": "rncc_codes",
+      "Type": "string"
+    },
+    {
+      "Name": "rnvc_codes",
+      "Type": "string"
+    },
+    {
+      "Name": "rnsc_codes",
+      "Type": "string"
+    },
+    {
+      "Name": "source_snapshot_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "source_row",
+      "Type": "bigint"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "company_observed_features": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "feature_type",
+      "Type": "string"
+    },
+    {
+      "Name": "feature_value",
+      "Type": "string"
+    },
+    {
+      "Name": "supporting_records",
+      "Type": "bigint"
+    },
+    {
+      "Name": "sample_evidence_id",
+      "Type": "string"
+    }
+  ],
+  "company_opportunity_events": [
+    {
+      "Name": "event_id",
+      "Type": "string"
+    },
+    {
+      "Name": "event_date",
+      "Type": "string"
+    },
+    {
+      "Name": "release_id",
+      "Type": "string"
+    },
+    {
+      "Name": "previous_release_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "title",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "previous_record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "current_record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "previous_match_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "current_match_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "previous_stage",
+      "Type": "string"
+    },
+    {
+      "Name": "current_stage",
+      "Type": "string"
+    },
+    {
+      "Name": "previous_source_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "current_source_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "previous_value_median",
+      "Type": "double"
+    },
+    {
+      "Name": "current_value_median",
+      "Type": "double"
+    },
+    {
+      "Name": "previous_window_end",
+      "Type": "string"
+    },
+    {
+      "Name": "current_window_end",
+      "Type": "string"
+    },
+    {
+      "Name": "event_type",
+      "Type": "string"
+    },
+    {
+      "Name": "explanation",
+      "Type": "string"
+    },
+    {
+      "Name": "previous_value_context_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "current_value_context_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "previous_value_context_json",
+      "Type": "string"
+    },
+    {
+      "Name": "current_value_context_json",
+      "Type": "string"
+    }
+  ],
+  "company_pipeline_coverage": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_name",
+      "Type": "string"
+    },
+    {
+      "Name": "annual_net_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "annual_dod_net_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "annual_award_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "period_start",
+      "Type": "string"
+    },
+    {
+      "Name": "period_end",
+      "Type": "string"
+    },
+    {
+      "Name": "benchmark_annual_net_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "benchmark_period_start",
+      "Type": "string"
+    },
+    {
+      "Name": "benchmark_period_end",
+      "Type": "string"
+    },
+    {
+      "Name": "coverage_benchmark",
+      "Type": "double"
+    },
+    {
+      "Name": "matched_opportunities",
+      "Type": "bigint"
+    },
+    {
+      "Name": "work_opportunities",
+      "Type": "bigint"
+    },
+    {
+      "Name": "item_opportunities",
+      "Type": "bigint"
+    },
+    {
+      "Name": "prospects_with_material_value_guide",
+      "Type": "bigint"
+    },
+    {
+      "Name": "work_without_current_price",
+      "Type": "bigint"
+    },
+    {
+      "Name": "priced_published_requirements",
+      "Type": "bigint"
+    },
+    {
+      "Name": "priced_published_demand",
+      "Type": "double"
+    },
+    {
+      "Name": "priced_forecast_items",
+      "Type": "bigint"
+    },
+    {
+      "Name": "full_horizon_forecast_scenario",
+      "Type": "double"
+    },
+    {
+      "Name": "coverage_status",
+      "Type": "string"
+    },
+    {
+      "Name": "review_priority",
+      "Type": "string"
+    },
+    {
+      "Name": "assessed_as_of",
+      "Type": "string"
+    },
+    {
+      "Name": "policy_version",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "company_profiles": [
+    {
+      "Name": "profile_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_name",
+      "Type": "string"
+    },
+    {
+      "Name": "cage_code",
+      "Type": "string"
+    },
+    {
+      "Name": "unresolved_uei",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_key",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_name",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_uei",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_method",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_status",
+      "Type": "string"
+    },
+    {
+      "Name": "prime_awards",
+      "Type": "bigint"
+    },
+    {
+      "Name": "observed_prime_net_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "first_prime_action",
+      "Type": "string"
+    },
+    {
+      "Name": "last_prime_action",
+      "Type": "string"
+    },
+    {
+      "Name": "subcontract_reports",
+      "Type": "bigint"
+    },
+    {
+      "Name": "commercial_customers",
+      "Type": "bigint"
+    },
+    {
+      "Name": "last_subcontract_report",
+      "Type": "string"
+    },
+    {
+      "Name": "referenced_items",
+      "Type": "bigint"
+    },
+    {
+      "Name": "design_control_reference_rows",
+      "Type": "double"
+    },
+    {
+      "Name": "manufacturer_uses_distributors_rows",
+      "Type": "double"
+    },
+    {
+      "Name": "active_authorized_rows",
+      "Type": "double"
+    },
+    {
+      "Name": "manufacturer_declared_awards",
+      "Type": "double"
+    },
+    {
+      "Name": "manufacturing_naics_awards",
+      "Type": "double"
+    },
+    {
+      "Name": "wholesale_naics_awards",
+      "Type": "double"
+    },
+    {
+      "Name": "feature_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "actual_mfg_source_lines",
+      "Type": "bigint"
+    },
+    {
+      "Name": "manufacturing_data_rights",
+      "Type": "string"
+    },
+    {
+      "Name": "sbir_awards",
+      "Type": "double"
+    },
+    {
+      "Name": "research_evidence_digest",
+      "Type": "string"
+    },
+    {
+      "Name": "role_assessment",
+      "Type": "string"
+    },
+    {
+      "Name": "prime_evidence_digest",
+      "Type": "string"
+    },
+    {
+      "Name": "sub_evidence_digest",
+      "Type": "string"
+    },
+    {
+      "Name": "item_evidence_digest",
+      "Type": "string"
+    },
+    {
+      "Name": "feature_digest",
+      "Type": "string"
+    },
+    {
+      "Name": "manufacturing_source_digest",
+      "Type": "string"
+    },
+    {
+      "Name": "public_release_approved",
+      "Type": "boolean"
+    }
+  ],
+  "company_registry": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "cage_code",
+      "Type": "string"
+    },
+    {
+      "Name": "company_name",
+      "Type": "string"
+    },
+    {
+      "Name": "city",
+      "Type": "string"
+    },
+    {
+      "Name": "region",
+      "Type": "string"
+    },
+    {
+      "Name": "country",
+      "Type": "string"
+    },
+    {
+      "Name": "cage_status",
+      "Type": "string"
+    },
+    {
+      "Name": "cage_type",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_cage",
+      "Type": "string"
+    },
+    {
+      "Name": "replacement_cage",
+      "Type": "string"
+    },
+    {
+      "Name": "dla_last_update",
+      "Type": "string"
+    },
+    {
+      "Name": "sam_last_update",
+      "Type": "string"
+    },
+    {
+      "Name": "sam_extract_code",
+      "Type": "string"
+    },
+    {
+      "Name": "registration_expiration_date",
+      "Type": "string"
+    },
+    {
+      "Name": "unique_uei",
+      "Type": "string"
+    },
+    {
+      "Name": "candidate_ueis_json",
+      "Type": "string"
+    },
+    {
+      "Name": "uei_candidates",
+      "Type": "bigint"
+    },
+    {
+      "Name": "primary_naics",
+      "Type": "string"
+    },
+    {
+      "Name": "declared_naics",
+      "Type": "string"
+    },
+    {
+      "Name": "declared_pscs",
+      "Type": "string"
+    },
+    {
+      "Name": "prime_awards",
+      "Type": "bigint"
+    },
+    {
+      "Name": "subcontract_reports",
+      "Type": "bigint"
+    },
+    {
+      "Name": "research_awards",
+      "Type": "bigint"
+    },
+    {
+      "Name": "referenced_items",
+      "Type": "bigint"
+    },
+    {
+      "Name": "coverage_state",
+      "Type": "string"
+    },
+    {
+      "Name": "role_assessment",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_name",
+      "Type": "string"
+    },
+    {
+      "Name": "coverage_note",
+      "Type": "string"
+    },
+    {
+      "Name": "freshness_note",
+      "Type": "string"
+    }
+  ],
+  "company_registry_coverage": [
+    {
+      "Name": "coverage_state",
+      "Type": "string"
+    },
+    {
+      "Name": "records",
+      "Type": "bigint"
+    }
+  ],
+  "company_reporting_lag_actions": [
+    {
+      "Name": "transaction_key",
+      "Type": "string"
+    },
+    {
+      "Name": "award_key",
+      "Type": "string"
+    },
+    {
+      "Name": "piid",
+      "Type": "string"
+    },
+    {
+      "Name": "cage_code",
+      "Type": "string"
+    },
+    {
+      "Name": "uei",
+      "Type": "string"
+    },
+    {
+      "Name": "company_name",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "action_date",
+      "Type": "string"
+    },
+    {
+      "Name": "action_obligation",
+      "Type": "double"
+    },
+    {
+      "Name": "awarding_agency_code",
+      "Type": "string"
+    },
+    {
+      "Name": "customer",
+      "Type": "string"
+    },
+    {
+      "Name": "work_text",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_id",
+      "Type": "string"
+    }
+  ],
+  "company_reporting_lag_baselines": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "lag_adjusted_annual_net_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "lag_adjusted_annual_positive_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "lag_adjusted_annual_dod_net_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "lag_adjusted_annual_action_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "lag_adjusted_annual_award_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "lag_adjusted_first_observed_action",
+      "Type": "string"
+    },
+    {
+      "Name": "lag_adjusted_last_observed_action",
+      "Type": "string"
+    },
+    {
+      "Name": "lag_adjusted_period_start",
+      "Type": "string"
+    },
+    {
+      "Name": "lag_adjusted_period_end",
+      "Type": "string"
+    },
+    {
+      "Name": "lag_adjusted_nominal_reporting_delay_days",
+      "Type": "bigint"
+    },
+    {
+      "Name": "lag_adjusted_evidence_digest",
+      "Type": "string"
+    },
+    {
+      "Name": "lag_adjusted_methodology_source",
+      "Type": "string"
+    },
+    {
+      "Name": "lag_adjusted_methodology",
+      "Type": "string"
+    }
+  ],
+  "company_research_calls": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "notice_id",
+      "Type": "string"
+    },
+    {
+      "Name": "topic_code",
+      "Type": "string"
+    },
+    {
+      "Name": "entry_state",
+      "Type": "string"
+    },
+    {
+      "Name": "notice_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "match_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "applicant_eligibility",
+      "Type": "string"
+    },
+    {
+      "Name": "company_addressable_value",
+      "Type": "double"
+    }
+  ],
+  "company_scope_features": [
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "doc_id",
+      "Type": "string"
+    },
+    {
+      "Name": "scope_id",
+      "Type": "string"
+    },
+    {
+      "Name": "work_text",
+      "Type": "string"
+    },
+    {
+      "Name": "source_kind",
+      "Type": "string"
+    },
+    {
+      "Name": "psc",
+      "Type": "string"
+    },
+    {
+      "Name": "naics",
+      "Type": "string"
+    },
+    {
+      "Name": "last_observed",
+      "Type": "string"
+    },
+    {
+      "Name": "sample_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_digest",
+      "Type": "string"
+    },
+    {
+      "Name": "programme_context_json",
+      "Type": "string"
+    },
+    {
+      "Name": "terms_json",
+      "Type": "string"
+    },
+    {
+      "Name": "profile_hash",
+      "Type": "string"
+    }
+  ],
+  "company_subcontract_facts": [
+    {
+      "Name": "report_key",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_award_key",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_piid",
+      "Type": "string"
+    },
+    {
+      "Name": "vehicle_piid",
+      "Type": "string"
+    },
+    {
+      "Name": "prime_uei",
+      "Type": "string"
+    },
+    {
+      "Name": "prime_name",
+      "Type": "string"
+    },
+    {
+      "Name": "sub_uei",
+      "Type": "string"
+    },
+    {
+      "Name": "sub_name",
+      "Type": "string"
+    },
+    {
+      "Name": "subaward_number",
+      "Type": "string"
+    },
+    {
+      "Name": "subaward_sam_report_id",
+      "Type": "string"
+    },
+    {
+      "Name": "event_date",
+      "Type": "string"
+    },
+    {
+      "Name": "modified_date",
+      "Type": "string"
+    },
+    {
+      "Name": "work_text",
+      "Type": "string"
+    },
+    {
+      "Name": "reported_amount",
+      "Type": "double"
+    },
+    {
+      "Name": "parent_description",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_naics",
+      "Type": "string"
+    },
+    {
+      "Name": "government_customer",
+      "Type": "string"
+    },
+    {
+      "Name": "government_office",
+      "Type": "string"
+    },
+    {
+      "Name": "performance_city",
+      "Type": "string"
+    },
+    {
+      "Name": "performance_region",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "cage_code",
+      "Type": "string"
+    },
+    {
+      "Name": "site_resolution",
+      "Type": "string"
+    },
+    {
+      "Name": "prime_cage",
+      "Type": "string"
+    },
+    {
+      "Name": "prime_site_candidates",
+      "Type": "bigint"
+    },
+    {
+      "Name": "parent_programme_name",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_programme_code",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_psc",
+      "Type": "string"
+    },
+    {
+      "Name": "linked_parent_naics",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_award_scope",
+      "Type": "string"
+    }
+  ],
+  "company_topic_matches": [
+    {
+      "Name": "topic_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "score",
+      "Type": "double"
+    },
+    {
+      "Name": "evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "match_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "applicant_eligibility",
+      "Type": "string"
+    },
+    {
+      "Name": "technical_qualification",
+      "Type": "string"
+    },
+    {
+      "Name": "company_addressable_value",
+      "Type": "double"
+    }
+  ],
+  "company_work_matches": [
+    {
+      "Name": "match_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "score",
+      "Type": "double"
+    },
+    {
+      "Name": "match_route",
+      "Type": "string"
+    },
+    {
+      "Name": "matched_terms",
+      "Type": "string"
+    },
+    {
+      "Name": "sample_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "opportunity_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "profile_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "doc_id",
+      "Type": "string"
+    },
+    {
+      "Name": "work_text",
+      "Type": "string"
+    },
+    {
+      "Name": "source_kind",
+      "Type": "string"
+    },
+    {
+      "Name": "last_observed",
+      "Type": "string"
+    },
+    {
+      "Name": "work_context",
+      "Type": "string"
+    },
+    {
+      "Name": "company_entry_status",
+      "Type": "string"
+    },
+    {
+      "Name": "required_delivery_mode",
+      "Type": "string"
+    },
+    {
+      "Name": "delivery_mode_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "observed_work_psc",
+      "Type": "string"
+    },
+    {
+      "Name": "work_classification_evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "pre_quality_company_evidence_caveat",
+      "Type": "string"
+    },
+    {
+      "Name": "company_evidence_caveat",
+      "Type": "string"
+    },
+    {
+      "Name": "review_category",
+      "Type": "string"
+    },
+    {
+      "Name": "match_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "fit_verdict",
+      "Type": "string"
+    },
+    {
+      "Name": "fit_reason",
+      "Type": "string"
+    },
+    {
+      "Name": "observed_delivery_mode",
+      "Type": "string"
+    },
+    {
+      "Name": "mode_reason",
+      "Type": "string"
+    },
+    {
+      "Name": "shared_scope_terms_json",
+      "Type": "string"
+    }
+  ],
+  "contract_value_cohorts": [
+    {
+      "Name": "cohort_id",
+      "Type": "string"
+    },
+    {
+      "Name": "scope_key",
+      "Type": "string"
+    },
+    {
+      "Name": "work_mode",
+      "Type": "string"
+    },
+    {
+      "Name": "buyer_office_code",
+      "Type": "string"
+    },
+    {
+      "Name": "buyer_name",
+      "Type": "string"
+    },
+    {
+      "Name": "buyer_office",
+      "Type": "string"
+    },
+    {
+      "Name": "psc",
+      "Type": "string"
+    },
+    {
+      "Name": "awards",
+      "Type": "bigint"
+    },
+    {
+      "Name": "observed_min_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "observed_median_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "observed_max_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "evidence_digest",
+      "Type": "string"
+    },
+    {
+      "Name": "comparators_json",
+      "Type": "string"
+    }
+  ],
+  "contract_value_observations": [
+    {
+      "Name": "cohort_id",
+      "Type": "string"
+    },
+    {
+      "Name": "scope_key",
+      "Type": "string"
+    },
+    {
+      "Name": "work_mode",
+      "Type": "string"
+    },
+    {
+      "Name": "buyer_office_code",
+      "Type": "string"
+    },
+    {
+      "Name": "buyer_name",
+      "Type": "string"
+    },
+    {
+      "Name": "buyer_office",
+      "Type": "string"
+    },
+    {
+      "Name": "psc",
+      "Type": "string"
+    },
+    {
+      "Name": "award_key",
+      "Type": "string"
+    },
+    {
+      "Name": "piid",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_piid",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_name",
+      "Type": "string"
+    },
+    {
+      "Name": "cage_code",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "work_text",
+      "Type": "string"
+    },
+    {
+      "Name": "observed_net_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "first_action_date",
+      "Type": "string"
+    },
+    {
+      "Name": "latest_action_date",
+      "Type": "string"
+    },
+    {
+      "Name": "period_start",
+      "Type": "string"
+    },
+    {
+      "Name": "period_end",
+      "Type": "string"
+    },
+    {
+      "Name": "action_count",
+      "Type": "bigint"
+    }
+  ],
+  "demand_decisions": [
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "rule_id",
+      "Type": "string"
+    },
+    {
+      "Name": "decision_json",
+      "Type": "string"
+    },
+    {
+      "Name": "stage",
+      "Type": "string"
+    },
+    {
+      "Name": "decision_hash",
+      "Type": "string"
+    }
+  ],
+  "dla_forecasts": [
+    {
+      "Name": "source_item_id",
+      "Type": "string"
+    },
+    {
+      "Name": "niin",
+      "Type": "string"
+    },
+    {
+      "Name": "identifier_type",
+      "Type": "string"
+    },
+    {
+      "Name": "forecast_qty",
+      "Type": "bigint"
+    },
+    {
+      "Name": "forecast_month",
+      "Type": "string"
+    },
+    {
+      "Name": "security_classification",
+      "Type": "string"
+    },
+    {
+      "Name": "public_release_eligible",
+      "Type": "boolean"
+    },
+    {
+      "Name": "retrieval_date",
+      "Type": "string"
+    },
+    {
+      "Name": "source_release",
+      "Type": "string"
+    },
+    {
+      "Name": "source_file",
+      "Type": "string"
+    }
+  ],
+  "dla_inventory": [
+    {
+      "Name": "nsn",
+      "Type": "string"
+    },
+    {
+      "Name": "fsc",
+      "Type": "string"
+    },
+    {
+      "Name": "niin",
+      "Type": "string"
+    },
+    {
+      "Name": "total_stock",
+      "Type": "string"
+    },
+    {
+      "Name": "security_classification",
+      "Type": "string"
+    },
+    {
+      "Name": "condition_code",
+      "Type": "string"
+    },
+    {
+      "Name": "backorder_qty",
+      "Type": "string"
+    },
+    {
+      "Name": "annual_demand_quantity",
+      "Type": "string"
+    },
+    {
+      "Name": "public_release_eligible",
+      "Type": "boolean"
+    },
+    {
+      "Name": "retrieval_date",
+      "Type": "string"
+    },
+    {
+      "Name": "source_release",
+      "Type": "string"
+    },
+    {
+      "Name": "source_file",
+      "Type": "string"
+    },
+    {
+      "Name": "snapshot_date",
+      "Type": "string"
+    }
+  ],
+  "force_plans": [
+    {
+      "Name": "force_row_id",
+      "Type": "string"
+    },
+    {
+      "Name": "platform_source_label",
+      "Type": "string"
+    },
+    {
+      "Name": "source_json",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "force_programme_links": [
+    {
+      "Name": "force_row_id",
+      "Type": "string"
+    },
+    {
+      "Name": "funding_id",
+      "Type": "string"
+    },
+    {
+      "Name": "platform_source_label",
+      "Type": "string"
+    },
+    {
+      "Name": "variant",
+      "Type": "string"
+    },
+    {
+      "Name": "relationship",
+      "Type": "string"
+    }
+  ],
+  "governed_price_lines": [
+    {
+      "Name": "attachment_notice_version_id",
+      "Type": "string"
+    },
+    {
+      "Name": "pricing_record_id",
+      "Type": "string"
+    },
+    {
+      "Name": "physical_source_line_key",
+      "Type": "string"
+    },
+    {
+      "Name": "line_candidate_id",
+      "Type": "string"
+    },
+    {
+      "Name": "notice_id",
+      "Type": "string"
+    },
+    {
+      "Name": "sam_solicitation_id",
+      "Type": "string"
+    },
+    {
+      "Name": "sam_award_number",
+      "Type": "string"
+    },
+    {
+      "Name": "contract_transaction_unique_key",
+      "Type": "string"
+    },
+    {
+      "Name": "contract_award_unique_key",
+      "Type": "string"
+    },
+    {
+      "Name": "award_id_piid",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_award_id_piid",
+      "Type": "string"
+    },
+    {
+      "Name": "modification_number",
+      "Type": "string"
+    },
+    {
+      "Name": "action_date",
+      "Type": "string"
+    },
+    {
+      "Name": "linked_action_context_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "linked_award_context_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "clin",
+      "Type": "string"
+    },
+    {
+      "Name": "priced_item_name",
+      "Type": "string"
+    },
+    {
+      "Name": "quantity",
+      "Type": "string"
+    },
+    {
+      "Name": "quantity_unit",
+      "Type": "string"
+    },
+    {
+      "Name": "unit_price_usd",
+      "Type": "string"
+    },
+    {
+      "Name": "price_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "line_amount_usd",
+      "Type": "string"
+    },
+    {
+      "Name": "item_class",
+      "Type": "string"
+    },
+    {
+      "Name": "quality_status",
+      "Type": "string"
+    },
+    {
+      "Name": "product_or_service_code",
+      "Type": "string"
+    },
+    {
+      "Name": "product_or_service_code_description",
+      "Type": "string"
+    },
+    {
+      "Name": "awarding_agency_name",
+      "Type": "string"
+    },
+    {
+      "Name": "awarding_sub_agency_name",
+      "Type": "string"
+    },
+    {
+      "Name": "awarding_office_name",
+      "Type": "string"
+    },
+    {
+      "Name": "recipient_name",
+      "Type": "string"
+    },
+    {
+      "Name": "cage_code",
+      "Type": "string"
+    },
+    {
+      "Name": "transaction_description",
+      "Type": "string"
+    },
+    {
+      "Name": "prime_award_base_transaction_description",
+      "Type": "string"
+    },
+    {
+      "Name": "usaspending_permalink",
+      "Type": "string"
+    },
+    {
+      "Name": "attachment_id",
+      "Type": "string"
+    },
+    {
+      "Name": "resource_id",
+      "Type": "string"
+    },
+    {
+      "Name": "attachment_name",
+      "Type": "string"
+    },
+    {
+      "Name": "attachment_s3_uri",
+      "Type": "string"
+    },
+    {
+      "Name": "attachment_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "attachment_source_locator",
+      "Type": "string"
+    },
+    {
+      "Name": "attachment_source_row_text",
+      "Type": "string"
+    },
+    {
+      "Name": "attachment_source_row_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "attachment_parser_version",
+      "Type": "string"
+    },
+    {
+      "Name": "attachment_transform_run_id",
+      "Type": "string"
+    },
+    {
+      "Name": "usaspending_source_s3_uri",
+      "Type": "string"
+    },
+    {
+      "Name": "usaspending_source_s3_version_id",
+      "Type": "string"
+    },
+    {
+      "Name": "usaspending_source_etag",
+      "Type": "string"
+    },
+    {
+      "Name": "usaspending_source_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "usaspending_source_locator",
+      "Type": "string"
+    },
+    {
+      "Name": "provenance_status",
+      "Type": "string"
+    },
+    {
+      "Name": "include_in_mimir_range",
+      "Type": "boolean"
+    },
+    {
+      "Name": "promotion_eligible_without_review",
+      "Type": "boolean"
+    },
+    {
+      "Name": "transform_version",
+      "Type": "string"
+    },
+    {
+      "Name": "pricing_transform_run_id",
+      "Type": "string"
+    },
+    {
+      "Name": "created_at",
+      "Type": "string"
+    },
+    {
+      "Name": "sam_notice_posted_at",
+      "Type": "string"
+    },
+    {
+      "Name": "sam_notice_posted_date",
+      "Type": "string"
+    },
+    {
+      "Name": "sam_notice_date_quality_status",
+      "Type": "string"
+    },
+    {
+      "Name": "sam_notice_record_payload_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "sam_notice_source_occurrence_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "sam_notice_first_ingested_at",
+      "Type": "string"
+    },
+    {
+      "Name": "sam_notice_last_ingested_at",
+      "Type": "string"
+    }
+  ],
+  "innovation_signals": [
+    {
+      "Name": "signal_id",
+      "Type": "string"
+    },
+    {
+      "Name": "native_id",
+      "Type": "string"
+    },
+    {
+      "Name": "title",
+      "Type": "string"
+    },
+    {
+      "Name": "customer",
+      "Type": "string"
+    },
+    {
+      "Name": "scope",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "detail_url",
+      "Type": "string"
+    },
+    {
+      "Name": "posted_date",
+      "Type": "string"
+    },
+    {
+      "Name": "response_deadline",
+      "Type": "string"
+    },
+    {
+      "Name": "stage",
+      "Type": "string"
+    },
+    {
+      "Name": "rule_id",
+      "Type": "string"
+    },
+    {
+      "Name": "next_action",
+      "Type": "string"
+    },
+    {
+      "Name": "eligibility",
+      "Type": "string"
+    },
+    {
+      "Name": "value_context_json",
+      "Type": "string"
+    },
+    {
+      "Name": "source_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "retrieved_at",
+      "Type": "string"
+    },
+    {
+      "Name": "record_hash",
+      "Type": "string"
+    }
+  ],
+  "item_demand_context": [
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "niin",
+      "Type": "string"
+    },
+    {
+      "Name": "first_month",
+      "Type": "string"
+    },
+    {
+      "Name": "last_month",
+      "Type": "string"
+    },
+    {
+      "Name": "month_count",
+      "Type": "bigint"
+    },
+    {
+      "Name": "distinct_months",
+      "Type": "bigint"
+    },
+    {
+      "Name": "quantity",
+      "Type": "bigint"
+    },
+    {
+      "Name": "negative_months",
+      "Type": "bigint"
+    },
+    {
+      "Name": "monthly_evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "catalogue_unit",
+      "Type": "string"
+    },
+    {
+      "Name": "government_reference_unit_price",
+      "Type": "double"
+    },
+    {
+      "Name": "market_price_low",
+      "Type": "double"
+    },
+    {
+      "Name": "market_price_median",
+      "Type": "double"
+    },
+    {
+      "Name": "market_price_high",
+      "Type": "double"
+    },
+    {
+      "Name": "market_observations",
+      "Type": "bigint"
+    },
+    {
+      "Name": "market_sellers",
+      "Type": "bigint"
+    },
+    {
+      "Name": "first_price_date",
+      "Type": "string"
+    },
+    {
+      "Name": "latest_price_date",
+      "Type": "string"
+    },
+    {
+      "Name": "price_preview_json",
+      "Type": "string"
+    },
+    {
+      "Name": "sample_reference_evidence",
+      "Type": "string"
+    },
+    {
+      "Name": "source_snapshot_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "government_reference_lot_scenario",
+      "Type": "double"
+    },
+    {
+      "Name": "market_price_lot_scenario",
+      "Type": "double"
+    },
+    {
+      "Name": "valuation_status",
+      "Type": "string"
+    },
+    {
+      "Name": "annual_scenarios_json",
+      "Type": "string"
+    },
+    {
+      "Name": "inventory_date",
+      "Type": "string"
+    },
+    {
+      "Name": "stock_on_hand",
+      "Type": "double"
+    },
+    {
+      "Name": "backorder_quantity",
+      "Type": "double"
+    },
+    {
+      "Name": "annual_demand_quantity",
+      "Type": "double"
+    },
+    {
+      "Name": "inventory_evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "reorder_date",
+      "Type": "string"
+    },
+    {
+      "Name": "reorder_point",
+      "Type": "double"
+    },
+    {
+      "Name": "reorder_stock",
+      "Type": "double"
+    },
+    {
+      "Name": "previous_reorder_gap",
+      "Type": "double"
+    },
+    {
+      "Name": "reorder_evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "inventory_signal",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "item_market_price_evidence": [
+    {
+      "Name": "pricing_record_id",
+      "Type": "string"
+    },
+    {
+      "Name": "niin",
+      "Type": "string"
+    },
+    {
+      "Name": "nsn",
+      "Type": "string"
+    },
+    {
+      "Name": "part_number",
+      "Type": "string"
+    },
+    {
+      "Name": "item_name",
+      "Type": "string"
+    },
+    {
+      "Name": "quantity_unit",
+      "Type": "string"
+    },
+    {
+      "Name": "quantity",
+      "Type": "double"
+    },
+    {
+      "Name": "unit_price_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "record_amount_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "transaction_date",
+      "Type": "string"
+    },
+    {
+      "Name": "supplier_cage",
+      "Type": "string"
+    },
+    {
+      "Name": "supplier_name",
+      "Type": "string"
+    },
+    {
+      "Name": "source_system",
+      "Type": "string"
+    },
+    {
+      "Name": "price_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "source_record_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_row_locator",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "source_s3_uri",
+      "Type": "string"
+    },
+    {
+      "Name": "source_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "provenance_status",
+      "Type": "string"
+    },
+    {
+      "Name": "include_in_mimir_range",
+      "Type": "boolean"
+    }
+  ],
+  "item_price_references": [
+    {
+      "Name": "niin",
+      "Type": "string"
+    },
+    {
+      "Name": "unit",
+      "Type": "string"
+    },
+    {
+      "Name": "catalogue_unit",
+      "Type": "string"
+    },
+    {
+      "Name": "government_reference_unit_price",
+      "Type": "double"
+    },
+    {
+      "Name": "market_price_low",
+      "Type": "double"
+    },
+    {
+      "Name": "market_price_median",
+      "Type": "double"
+    },
+    {
+      "Name": "market_price_high",
+      "Type": "double"
+    },
+    {
+      "Name": "market_observations",
+      "Type": "bigint"
+    },
+    {
+      "Name": "market_sellers",
+      "Type": "bigint"
+    },
+    {
+      "Name": "first_price_date",
+      "Type": "string"
+    },
+    {
+      "Name": "latest_price_date",
+      "Type": "string"
+    },
+    {
+      "Name": "price_preview_json",
+      "Type": "string"
+    },
+    {
+      "Name": "reference_rows",
+      "Type": "bigint"
+    },
+    {
+      "Name": "sample_reference_evidence",
+      "Type": "string"
+    },
+    {
+      "Name": "source_snapshot_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "item_request_presence": [
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "source_locator",
+      "Type": "string"
+    },
+    {
+      "Name": "present_in_current_unambiguous_extract",
+      "Type": "boolean"
+    },
+    {
+      "Name": "source_snapshot_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "assessed_as_of",
+      "Type": "string"
+    },
+    {
+      "Name": "policy_version",
+      "Type": "string"
+    }
+  ],
+  "item_request_progression": [
+    {
+      "Name": "relationship_id",
+      "Type": "string"
+    },
+    {
+      "Name": "forecast_episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "forecast_record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "request_episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "request_record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "niin",
+      "Type": "string"
+    },
+    {
+      "Name": "request_title",
+      "Type": "string"
+    },
+    {
+      "Name": "native_identifier",
+      "Type": "string"
+    },
+    {
+      "Name": "purchase_request_number",
+      "Type": "string"
+    },
+    {
+      "Name": "requested_quantity",
+      "Type": "bigint"
+    },
+    {
+      "Name": "requested_unit",
+      "Type": "string"
+    },
+    {
+      "Name": "response_deadline",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "source_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_locator",
+      "Type": "string"
+    },
+    {
+      "Name": "forecast_start",
+      "Type": "string"
+    },
+    {
+      "Name": "forecast_end",
+      "Type": "string"
+    },
+    {
+      "Name": "timing_relationship",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "notice_price_links": [
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "notice_record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "pricing_record_id",
+      "Type": "string"
+    },
+    {
+      "Name": "physical_source_line_key",
+      "Type": "string"
+    },
+    {
+      "Name": "notice_id",
+      "Type": "string"
+    },
+    {
+      "Name": "clin",
+      "Type": "string"
+    },
+    {
+      "Name": "priced_item_name",
+      "Type": "string"
+    },
+    {
+      "Name": "quantity",
+      "Type": "string"
+    },
+    {
+      "Name": "quantity_unit",
+      "Type": "string"
+    },
+    {
+      "Name": "unit_price_usd",
+      "Type": "string"
+    },
+    {
+      "Name": "price_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "line_amount_usd",
+      "Type": "string"
+    },
+    {
+      "Name": "quality_status",
+      "Type": "string"
+    },
+    {
+      "Name": "include_in_mimir_range",
+      "Type": "boolean"
+    },
+    {
+      "Name": "promotion_eligible_without_review",
+      "Type": "boolean"
+    },
+    {
+      "Name": "attachment_s3_uri",
+      "Type": "string"
+    },
+    {
+      "Name": "attachment_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "attachment_source_locator",
+      "Type": "string"
+    },
+    {
+      "Name": "attachment_source_row_text",
+      "Type": "string"
+    },
+    {
+      "Name": "action_date",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "opportunities": [
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "lane",
+      "Type": "string"
+    },
+    {
+      "Name": "title",
+      "Type": "string"
+    },
+    {
+      "Name": "scope_text",
+      "Type": "string"
+    },
+    {
+      "Name": "customer_name",
+      "Type": "string"
+    },
+    {
+      "Name": "programme",
+      "Type": "string"
+    },
+    {
+      "Name": "psc",
+      "Type": "string"
+    },
+    {
+      "Name": "naics",
+      "Type": "string"
+    },
+    {
+      "Name": "window_start",
+      "Type": "string"
+    },
+    {
+      "Name": "window_end",
+      "Type": "string"
+    },
+    {
+      "Name": "date_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "value_low",
+      "Type": "double"
+    },
+    {
+      "Name": "value_median",
+      "Type": "double"
+    },
+    {
+      "Name": "value_high",
+      "Type": "double"
+    },
+    {
+      "Name": "value_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "value_scope",
+      "Type": "string"
+    },
+    {
+      "Name": "source_name",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "source_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_locator",
+      "Type": "string"
+    },
+    {
+      "Name": "procurement_state",
+      "Type": "string"
+    },
+    {
+      "Name": "reconciled_state",
+      "Type": "string"
+    },
+    {
+      "Name": "access_state",
+      "Type": "string"
+    },
+    {
+      "Name": "value_inputs_json",
+      "Type": "string"
+    },
+    {
+      "Name": "native_identifier",
+      "Type": "string"
+    },
+    {
+      "Name": "rationale",
+      "Type": "string"
+    },
+    {
+      "Name": "limitations",
+      "Type": "string"
+    },
+    {
+      "Name": "notice_posted_date",
+      "Type": "string"
+    },
+    {
+      "Name": "notice_type",
+      "Type": "string"
+    }
+  ],
+  "opportunity_quality_reviews": [
+    {
+      "Name": "verdict",
+      "Type": "string"
+    },
+    {
+      "Name": "reason",
+      "Type": "string"
+    },
+    {
+      "Name": "body_deadline",
+      "Type": "string"
+    },
+    {
+      "Name": "passages_json",
+      "Type": "string"
+    },
+    {
+      "Name": "source_entry_kind",
+      "Type": "string"
+    },
+    {
+      "Name": "category_override",
+      "Type": "string"
+    },
+    {
+      "Name": "required_delivery_mode",
+      "Type": "string"
+    },
+    {
+      "Name": "delivery_mode_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "requirement_psc",
+      "Type": "string"
+    },
+    {
+      "Name": "psc_reference_url",
+      "Type": "string"
+    },
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "source_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "nomenclature",
+      "Type": "string"
+    },
+    {
+      "Name": "restricted_item",
+      "Type": "boolean"
+    },
+    {
+      "Name": "qualification_invitation",
+      "Type": "boolean"
+    },
+    {
+      "Name": "source_cages_json",
+      "Type": "string"
+    },
+    {
+      "Name": "required_parts_json",
+      "Type": "string"
+    },
+    {
+      "Name": "policy_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "pre_quality_decision_json",
+      "Type": "string"
+    }
+  ],
+  "planning_narratives": [
+    {
+      "Name": "narrative_id",
+      "Type": "string"
+    },
+    {
+      "Name": "submission_fiscal_year",
+      "Type": "bigint"
+    },
+    {
+      "Name": "component",
+      "Type": "string"
+    },
+    {
+      "Name": "budget_line_item",
+      "Type": "string"
+    },
+    {
+      "Name": "budget_line_item_title",
+      "Type": "string"
+    },
+    {
+      "Name": "p1_line_number",
+      "Type": "bigint"
+    },
+    {
+      "Name": "program_elements_json",
+      "Type": "string"
+    },
+    {
+      "Name": "page_text_excerpt",
+      "Type": "string"
+    },
+    {
+      "Name": "source_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_locator",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "source_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "page_text_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "scope_limit",
+      "Type": "string"
+    }
+  ],
+  "programme_funding": [
+    {
+      "Name": "funding_id",
+      "Type": "string"
+    },
+    {
+      "Name": "submission_fiscal_year",
+      "Type": "bigint"
+    },
+    {
+      "Name": "component",
+      "Type": "string"
+    },
+    {
+      "Name": "appropriation_category",
+      "Type": "string"
+    },
+    {
+      "Name": "budget_line_item",
+      "Type": "string"
+    },
+    {
+      "Name": "budget_line_item_title",
+      "Type": "string"
+    },
+    {
+      "Name": "fiscal_year",
+      "Type": "bigint"
+    },
+    {
+      "Name": "funding_status",
+      "Type": "string"
+    },
+    {
+      "Name": "measure_type",
+      "Type": "string"
+    },
+    {
+      "Name": "value_kind",
+      "Type": "string"
+    },
+    {
+      "Name": "amount_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "quantity",
+      "Type": "double"
+    },
+    {
+      "Name": "program_elements_json",
+      "Type": "string"
+    },
+    {
+      "Name": "description_excerpt",
+      "Type": "string"
+    },
+    {
+      "Name": "source_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_locator",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "source_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "value_interpretation",
+      "Type": "string"
+    }
+  ],
+  "published_calls": [
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "lane",
+      "Type": "string"
+    },
+    {
+      "Name": "title",
+      "Type": "string"
+    },
+    {
+      "Name": "scope_text",
+      "Type": "string"
+    },
+    {
+      "Name": "customer_name",
+      "Type": "string"
+    },
+    {
+      "Name": "programme",
+      "Type": "string"
+    },
+    {
+      "Name": "psc",
+      "Type": "string"
+    },
+    {
+      "Name": "naics",
+      "Type": "string"
+    },
+    {
+      "Name": "window_start",
+      "Type": "string"
+    },
+    {
+      "Name": "window_end",
+      "Type": "string"
+    },
+    {
+      "Name": "date_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "value_low",
+      "Type": "double"
+    },
+    {
+      "Name": "value_median",
+      "Type": "double"
+    },
+    {
+      "Name": "value_high",
+      "Type": "double"
+    },
+    {
+      "Name": "value_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "value_scope",
+      "Type": "string"
+    },
+    {
+      "Name": "value_inputs_json",
+      "Type": "string"
+    },
+    {
+      "Name": "source_name",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "source_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_locator",
+      "Type": "string"
+    },
+    {
+      "Name": "procurement_state",
+      "Type": "string"
+    },
+    {
+      "Name": "reconciled_state",
+      "Type": "string"
+    },
+    {
+      "Name": "access_state",
+      "Type": "string"
+    },
+    {
+      "Name": "notice_posted_date",
+      "Type": "string"
+    },
+    {
+      "Name": "notice_type",
+      "Type": "string"
+    },
+    {
+      "Name": "native_identifier",
+      "Type": "string"
+    },
+    {
+      "Name": "rationale",
+      "Type": "string"
+    },
+    {
+      "Name": "limitations",
+      "Type": "string"
+    },
+    {
+      "Name": "source_s3_uri",
+      "Type": "string"
+    },
+    {
+      "Name": "source_s3_version_id",
+      "Type": "string"
+    },
+    {
+      "Name": "source_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "selected_notice_version_id",
+      "Type": "string"
+    }
+  ],
+  "research_awards": [
+    {
+      "Name": "award_id",
+      "Type": "string"
+    },
+    {
+      "Name": "record_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "company_name",
+      "Type": "string"
+    },
+    {
+      "Name": "uei",
+      "Type": "string"
+    },
+    {
+      "Name": "title",
+      "Type": "string"
+    },
+    {
+      "Name": "agency",
+      "Type": "string"
+    },
+    {
+      "Name": "branch",
+      "Type": "string"
+    },
+    {
+      "Name": "phase",
+      "Type": "string"
+    },
+    {
+      "Name": "program_type",
+      "Type": "string"
+    },
+    {
+      "Name": "tracking_number",
+      "Type": "string"
+    },
+    {
+      "Name": "contract",
+      "Type": "string"
+    },
+    {
+      "Name": "contract_key",
+      "Type": "string"
+    },
+    {
+      "Name": "topic_code",
+      "Type": "string"
+    },
+    {
+      "Name": "topic_key",
+      "Type": "string"
+    },
+    {
+      "Name": "award_date",
+      "Type": "string"
+    },
+    {
+      "Name": "end_date",
+      "Type": "string"
+    },
+    {
+      "Name": "observed_research_award_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "abstract",
+      "Type": "string"
+    },
+    {
+      "Name": "source_csv_record_number",
+      "Type": "bigint"
+    },
+    {
+      "Name": "solicitation_number",
+      "Type": "string"
+    },
+    {
+      "Name": "variants",
+      "Type": "bigint"
+    },
+    {
+      "Name": "cage_code",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_link_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "identity_evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "source_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "source_retrieved_at",
+      "Type": "string"
+    },
+    {
+      "Name": "value_interpretation",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_state",
+      "Type": "string"
+    }
+  ],
+  "research_notice_links": [
+    {
+      "Name": "notice_id",
+      "Type": "string"
+    },
+    {
+      "Name": "notice_hash",
+      "Type": "string"
+    },
+    {
+      "Name": "topic_code",
+      "Type": "string"
+    },
+    {
+      "Name": "topic_key",
+      "Type": "string"
+    },
+    {
+      "Name": "title",
+      "Type": "string"
+    },
+    {
+      "Name": "customer",
+      "Type": "string"
+    },
+    {
+      "Name": "office",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "posted_at",
+      "Type": "string"
+    },
+    {
+      "Name": "response_deadline",
+      "Type": "string"
+    },
+    {
+      "Name": "notice_type",
+      "Type": "string"
+    },
+    {
+      "Name": "relationship",
+      "Type": "string"
+    },
+    {
+      "Name": "entry_state",
+      "Type": "string"
+    }
+  ],
+  "research_phase_history": [
+    {
+      "Name": "phase_ii_award_id",
+      "Type": "string"
+    },
+    {
+      "Name": "company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "topic_code",
+      "Type": "string"
+    },
+    {
+      "Name": "branch",
+      "Type": "string"
+    },
+    {
+      "Name": "program_type",
+      "Type": "string"
+    },
+    {
+      "Name": "phase_ii_date",
+      "Type": "string"
+    },
+    {
+      "Name": "earliest_phase_i_date",
+      "Type": "string"
+    },
+    {
+      "Name": "prior_phase_i_awards",
+      "Type": "bigint"
+    },
+    {
+      "Name": "prior_award_ids_json",
+      "Type": "string"
+    },
+    {
+      "Name": "relationship",
+      "Type": "string"
+    },
+    {
+      "Name": "limitation",
+      "Type": "string"
+    }
+  ],
+  "research_platform_links": [
+    {
+      "Name": "award_id",
+      "Type": "string"
+    },
+    {
+      "Name": "contract_award_unique_key",
+      "Type": "string"
+    },
+    {
+      "Name": "prime_cage",
+      "Type": "string"
+    },
+    {
+      "Name": "platform_family",
+      "Type": "string"
+    },
+    {
+      "Name": "clean_variant",
+      "Type": "string"
+    },
+    {
+      "Name": "capability_name",
+      "Type": "string"
+    },
+    {
+      "Name": "market_segment",
+      "Type": "string"
+    },
+    {
+      "Name": "tech_type",
+      "Type": "string"
+    },
+    {
+      "Name": "relationship",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "research_prime_links": [
+    {
+      "Name": "award_id",
+      "Type": "string"
+    },
+    {
+      "Name": "contract_award_unique_key",
+      "Type": "string"
+    },
+    {
+      "Name": "research_company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "uei",
+      "Type": "string"
+    },
+    {
+      "Name": "observed_research_award_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "award_id_piid",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_award_id_piid",
+      "Type": "string"
+    },
+    {
+      "Name": "prime_cage",
+      "Type": "string"
+    },
+    {
+      "Name": "government_customer",
+      "Type": "string"
+    },
+    {
+      "Name": "buying_office",
+      "Type": "string"
+    },
+    {
+      "Name": "first_action_date",
+      "Type": "string"
+    },
+    {
+      "Name": "latest_action_date",
+      "Type": "string"
+    },
+    {
+      "Name": "native_action_rows",
+      "Type": "bigint"
+    },
+    {
+      "Name": "observed_net_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "award_description",
+      "Type": "string"
+    },
+    {
+      "Name": "acquisition_programme_code",
+      "Type": "string"
+    },
+    {
+      "Name": "acquisition_programme_description",
+      "Type": "string"
+    },
+    {
+      "Name": "latest_transaction_key",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "link_status",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    }
+  ],
+  "research_programme_links": [
+    {
+      "Name": "award_id",
+      "Type": "string"
+    },
+    {
+      "Name": "funding_id",
+      "Type": "string"
+    },
+    {
+      "Name": "pe",
+      "Type": "string"
+    },
+    {
+      "Name": "relationship",
+      "Type": "string"
+    }
+  ],
+  "research_topics_current": [
+    {
+      "Name": "topic_id",
+      "Type": "string"
+    },
+    {
+      "Name": "topic_code",
+      "Type": "string"
+    },
+    {
+      "Name": "solicitation_number",
+      "Type": "string"
+    },
+    {
+      "Name": "title",
+      "Type": "string"
+    },
+    {
+      "Name": "agency",
+      "Type": "string"
+    },
+    {
+      "Name": "branch",
+      "Type": "string"
+    },
+    {
+      "Name": "phase_raw",
+      "Type": "string"
+    },
+    {
+      "Name": "program",
+      "Type": "string"
+    },
+    {
+      "Name": "source_status",
+      "Type": "string"
+    },
+    {
+      "Name": "release_date",
+      "Type": "string"
+    },
+    {
+      "Name": "open_date",
+      "Type": "string"
+    },
+    {
+      "Name": "close_date",
+      "Type": "string"
+    },
+    {
+      "Name": "description",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "official_solicitation_url",
+      "Type": "string"
+    },
+    {
+      "Name": "source_sha256",
+      "Type": "string"
+    },
+    {
+      "Name": "retrieved_at",
+      "Type": "string"
+    },
+    {
+      "Name": "source_archive_path",
+      "Type": "string"
+    },
+    {
+      "Name": "source_authority",
+      "Type": "string"
+    }
+  ],
+  "supplier_pull_placement_evidence": [
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_award_key",
+      "Type": "string"
+    },
+    {
+      "Name": "report_key",
+      "Type": "string"
+    },
+    {
+      "Name": "supplier",
+      "Type": "string"
+    },
+    {
+      "Name": "supplier_company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "reported_amount",
+      "Type": "double"
+    },
+    {
+      "Name": "event_date",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "work_text",
+      "Type": "string"
+    }
+  ],
+  "supplier_pull_prime_evidence": [
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "family_key",
+      "Type": "string"
+    },
+    {
+      "Name": "scope_key",
+      "Type": "string"
+    },
+    {
+      "Name": "work_mode",
+      "Type": "string"
+    },
+    {
+      "Name": "award_key",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "customer_name",
+      "Type": "string"
+    },
+    {
+      "Name": "first_action_date",
+      "Type": "string"
+    },
+    {
+      "Name": "signal_date",
+      "Type": "string"
+    },
+    {
+      "Name": "signal_basis",
+      "Type": "string"
+    },
+    {
+      "Name": "signal_obligation",
+      "Type": "double"
+    },
+    {
+      "Name": "contract_evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "period_end",
+      "Type": "string"
+    },
+    {
+      "Name": "programme_name",
+      "Type": "string"
+    },
+    {
+      "Name": "psc",
+      "Type": "string"
+    },
+    {
+      "Name": "naics",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "piid",
+      "Type": "string"
+    },
+    {
+      "Name": "observed_net_obligations",
+      "Type": "double"
+    },
+    {
+      "Name": "work_text",
+      "Type": "string"
+    },
+    {
+      "Name": "government_contracting_office",
+      "Type": "string"
+    },
+    {
+      "Name": "reported_performance_city",
+      "Type": "string"
+    },
+    {
+      "Name": "reported_performance_region",
+      "Type": "string"
+    },
+    {
+      "Name": "placed_reports",
+      "Type": "bigint"
+    },
+    {
+      "Name": "demand_scope_basis",
+      "Type": "string"
+    }
+  ],
+  "supplier_pull_report_evidence": [
+    {
+      "Name": "episode_id",
+      "Type": "string"
+    },
+    {
+      "Name": "family_key",
+      "Type": "string"
+    },
+    {
+      "Name": "scope_key",
+      "Type": "string"
+    },
+    {
+      "Name": "work_mode",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_evidence",
+      "Type": "string"
+    },
+    {
+      "Name": "parent_award_key",
+      "Type": "string"
+    },
+    {
+      "Name": "report_key",
+      "Type": "string"
+    },
+    {
+      "Name": "supplier",
+      "Type": "string"
+    },
+    {
+      "Name": "supplier_company_id",
+      "Type": "string"
+    },
+    {
+      "Name": "reported_amount",
+      "Type": "double"
+    },
+    {
+      "Name": "event_date",
+      "Type": "string"
+    },
+    {
+      "Name": "source_url",
+      "Type": "string"
+    },
+    {
+      "Name": "work_text",
+      "Type": "string"
+    },
+    {
+      "Name": "historical_performance_city",
+      "Type": "string"
+    },
+    {
+      "Name": "historical_performance_region",
+      "Type": "string"
+    }
+  ],
+  "technical_evidence": [
+    {
+      "Name": "fact_id",
+      "Type": "string"
+    },
+    {
+      "Name": "programme_key",
+      "Type": "string"
+    },
+    {
+      "Name": "programme_name",
+      "Type": "string"
+    },
+    {
+      "Name": "report_year",
+      "Type": "bigint"
+    },
+    {
+      "Name": "technical_object",
+      "Type": "string"
+    },
+    {
+      "Name": "observed_state",
+      "Type": "string"
+    },
+    {
+      "Name": "interpretation",
+      "Type": "string"
+    },
+    {
+      "Name": "government_customer",
+      "Type": "string"
+    },
+    {
+      "Name": "commercial_route",
+      "Type": "string"
+    },
+    {
+      "Name": "time_window_from_source",
+      "Type": "string"
+    },
+    {
+      "Name": "source_evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "adverse_evidence_json",
+      "Type": "string"
+    },
+    {
+      "Name": "evidence_id",
+      "Type": "string"
+    },
+    {
+      "Name": "scope_linkage",
+      "Type": "string"
+    },
+    {
+      "Name": "forecast_validation_status",
+      "Type": "string"
+    },
+    {
+      "Name": "historical_first_public_verified",
+      "Type": "boolean"
+    }
+  ],
+  "topic_historical_benchmarks": [
+    {
+      "Name": "topic_id",
+      "Type": "string"
+    },
+    {
+      "Name": "phase",
+      "Type": "string"
+    },
+    {
+      "Name": "comparable_awards",
+      "Type": "bigint"
+    },
+    {
+      "Name": "historical_award_median_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "historical_award_min_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "historical_award_max_usd",
+      "Type": "double"
+    },
+    {
+      "Name": "award_ids_json",
+      "Type": "string"
+    },
+    {
+      "Name": "value_interpretation",
+      "Type": "string"
+    },
+    {
+      "Name": "estimated_future_award_value",
+      "Type": "double"
+    }
+  ]
+}

@@ -30,7 +30,7 @@ def validate(directory):
    continue
   p=Path(t['path']);check(n+'_content_hash',hashlib.sha256(p.read_bytes()).hexdigest()==t['sha256']);c.read_parquet(str(p)).create_view(n);check(n+'_count',c.execute('SELECT count(*) FROM '+n).fetchone()[0]==t['rows'])
  if 'catalogue_sales_evidence' in m['tables']:
-  check('catalogue_sales_physical_line_once_per_company',c.execute('SELECT count(*)-count(DISTINCT (company_id,coalesce(nullif(source_record_id,''),pricing_record_id))) FROM catalogue_sales_evidence').fetchone()[0]==0)
+  check('catalogue_sales_physical_line_once_per_company',c.execute("SELECT count(*)-count(DISTINCT (company_id,coalesce(nullif(source_record_id,''),pricing_record_id))) FROM catalogue_sales_evidence").fetchone()[0]==0)
   check('catalogue_sales_unique_company',c.execute('SELECT count(*)-count(DISTINCT company_id) FROM company_catalogue_sales').fetchone()[0]==0)
   check('catalogue_sales_partition_arithmetic',c.execute('SELECT count(*) FROM company_catalogue_sales WHERE abs(observed_catalogue_item_sales-direct_seller_sales-other_seller_item_sales)>0.01 OR single_catalogue_part_other_seller_sales>exact_part_other_seller_sales+0.01 OR exact_part_other_seller_sales>other_seller_item_sales+0.01').fetchone()[0]==0)
  if 'company_pipeline_coverage' in m['tables']:
@@ -119,7 +119,7 @@ def validate(directory):
   check('conflicting_forecast_rows_not_valued',c.execute('SELECT count(*) FROM item_demand_context WHERE (negative_months>0 OR month_count<>distinct_months) AND (government_reference_lot_scenario IS NOT NULL OR market_price_lot_scenario IS NOT NULL)').fetchone()[0]==0)
   check('negative_months_outside_positive_window_not_valued',c.execute("SELECT count(*) FROM item_demand_context x JOIN dla_forecasts f USING(niin) WHERE f.forecast_qty<0 AND try_cast(substr(cast(f.forecast_month AS VARCHAR),1,10) AS DATE)>=cast(? AS DATE) AND (x.government_reference_lot_scenario IS NOT NULL OR x.market_price_lot_scenario IS NOT NULL)",[m['as_of']]).fetchone()[0]==0)
   check('forecast_market_scenario_reconciles',c.execute('SELECT count(*) FROM item_demand_context WHERE market_price_lot_scenario IS NOT NULL AND abs(market_price_lot_scenario-round(quantity*market_price_median,2))>0.01').fetchone()[0]==0)
-  check('item_market_prices_dated_not_future',c.execute("SELECT count(*) FROM item_market_price_evidence WHERE transaction_date>"+"'"+m['as_of']+"' OR nullif(transaction_date,'') IS NULL").fetchone()[0]==0)
+  check('item_market_prices_dated_not_future',c.execute("SELECT count(*) FROM item_market_price_evidence WHERE try_cast(substr(cast(transaction_date AS VARCHAR),1,10) AS DATE)>cast(? AS DATE) OR try_cast(substr(cast(transaction_date AS VARCHAR),1,10) AS DATE) IS NULL",[m['as_of']]).fetchone()[0]==0)
   check('item_market_physical_lines_unique',c.execute("SELECT count(*)-count(DISTINCT coalesce(nullif(source_record_id,''),pricing_record_id)) FROM item_market_price_evidence").fetchone()[0]==0)
   check('item_price_key_unique',c.execute('SELECT count(*)-count(DISTINCT (niin,unit)) FROM item_price_references').fetchone()[0]==0)
  if 'company_approved_notice_sources' in m['tables']:
