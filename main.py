@@ -467,6 +467,8 @@ app = FastAPI(
 # Additive, sign-in-only pilot; no ingestion or production cache mutation.
 from opportunity_intelligence.mount import mount as mount_opportunity_intelligence
 mount_opportunity_intelligence(app)
+from product_relationships.api import mount as mount_product_relationships
+mount_product_relationships(app)
 
 # ✅ FIX: Add a middleware to catch NaNs in responses or handle it in your dataframes
 # The safest surgical fix without rewriting every endpoint is to enforce simplejson or handle it in the response class.
