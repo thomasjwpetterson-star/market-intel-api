@@ -35,3 +35,41 @@ Tests: PYTHONPATH=opportunity_worker python3 -m pytest opportunity_worker/tests
 Rebuild: python3 -m opportunity_engine --from-current --workdir /tmp/mimir-opportunity-engine --refresh --publish
 Use the existing AWS account and worker scope. Keep daily schedules and trust
 unchanged when updating code. RELEASE.json records the deployed wheel/run.
+
+Business coverage and longer horizons
+------------------------------------
+
+company_activity_actions retains revision-resolved trailing-year transaction
+identifiers and source URLs. company_activity_baselines reports net and positive
+obligations, DoD obligations, award/action counts and the observed source period.
+company_pipeline_coverage assesses every evidence-backed profile and annual
+activity identity. Three times annual obligations is a diagnostic benchmark;
+shortfalls never create demand or loosen eligibility gates. Materiality and
+zero-work flags identify where source coverage still needs investigation.
+
+Published purchase requirements, full-source-horizon DLA forecasts, historical
+contract-size comparisons and catalogue-market seller sales remain separate.
+Forecasts are not capped at eighteen months. Monthly evidence, annual scenarios,
+exact item/unit price observations and inventory/reorder snapshots are retained.
+Only consistent catalogue EA assumptions are priced; other conversions and
+conflicting monthly source quantities are unresolved. Inventory is context and
+is not deducted from a procurement forecast. The source operational snapshot
+remains September 2026 until upstream monthly ingestion supplies a newer release.
+
+catalogue_sales_evidence links physical price rows to a company's NIIN and exact
+part references. company_catalogue_sales splits direct and other sellers and
+records shared-reference ambiguity. Other-seller purchases are product-market
+context, not attributed manufacturer revenue or additional future pipeline.
+company_item_reference_evidence retains selected-CAGE part/RNCC/RNVC/RNSC rows;
+these are inspectable facts, with no blanket transfer of manufacturing rights.
+item_request_progression links forecasts to current exact-NIIN requests without
+claiming fulfilment, an award or an additive value. Stable relationship IDs and
+before/after evidence hashes support subsequent change tracking.
+
+The canonical SAM view normalizes ISO deadlines with offsets to UTC and retains
+raw text and precision. Date-only values never acquire an invented clock.
+Native snapshots retain active/inactive status and include normal solicitations,
+sources sought and presolicitations. The serving API removes elapsed precise
+response clocks between daily builds. The SQL repair is versioned under
+infrastructure/sam_response_deadline_canonical.sql. Producer module SHA256 hashes
+and methodological policies are included in each release for reproducibility.

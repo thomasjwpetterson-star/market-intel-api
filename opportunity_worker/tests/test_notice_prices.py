@@ -28,6 +28,6 @@ def test_global_notice_prices_preserve_supplier_provenance_and_suppress_ambiguou
  assert item['government_reference_lot_scenario']==(round(9*government,2) if government is not None else None)
  assert item['source_quantity']==(9 if unit=='EA' else None)
  assert item['supplier_average_lot_scenario']==(round(9*supplier,2) if supplier is not None else None)
- assert item['catalogue_evidence'][0]['reference_cage']=='62983'
+ assert any(row['reference_cage']=='62983' for row in item['catalogue_evidence'])
  assert 'qualification' in row[4] and 'current quotes' in row[4]
  c.close()

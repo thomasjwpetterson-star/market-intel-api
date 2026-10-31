@@ -103,3 +103,10 @@ def test_single_product_noun_and_reverse_service_to_manufacture_are_not_direct_m
  assert q.fit_review('VALVE, PRESSURE','Hydraulic control valve','Generic valve family','published_procurement','source_specific_route','sam_notices','OTHER')[0]=='rejected'
  assert q.fit_review('REPAIR FUEL BOOST PUMP','Fuel boost pump','New manufacturing of pumps','published_procurement','source_specific_route','sam_notices','OTHER',work_psc='J043',target_psc='2915')[0]=='review'
  assert q.fit_review('FUEL BOOST PUMP','Research prototype for fuel boost pump','New research design','published_procurement','source_specific_route','sam_notices','OTHER',work_psc='2915',target_psc='AC12')[0]=='accepted'
+
+def test_single_exact_item_qualification_remains_item_demand_without_losing_route():
+ v=q.notice_quality('GENERATOR_End_Item_B-1_NSN_6115012704801HY_PN_418446','Source approval requests for alternate manufacturers will be considered.','2027-01-01','2026-10-31','sam_notices')
+ assert v['category_override']=='items'
+ assert v['source_entry_kind']=='new_source_qualification'
+ v=q.notice_quality('Avionics integration and flight test','Integration includes multiple aircraft systems.','2027-01-01','2026-10-31','sam_notices')
+ assert v['category_override'] is None

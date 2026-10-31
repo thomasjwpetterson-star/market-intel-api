@@ -9,6 +9,8 @@ queries={
 'governed_price_lines':'SELECT * FROM market_intel_silver.fact_sam_governed_unit_pricing',
 'dla_forecasts':'SELECT * FROM market_intel_silver.fact_dla_forecast_demand_20260916_candidate',
 'dla_inventory':'SELECT * FROM market_intel_silver.fact_dla_inventory_snapshot_20260916_candidate'}
+from opportunity_engine.item_source_queries import queries as item_queries
+queries.update(item_queries())
 cols=aws.glue.get_table(DatabaseName='market_intel_silver',Name='fact_sam_governed_unit_pricing')['Table']['StorageDescriptor']['Columns']
 def portable(col):
  name='"'+col['Name']+'"';typ=col['Type']

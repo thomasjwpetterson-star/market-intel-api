@@ -29,10 +29,24 @@ def validate(directory):
     check(n+'_local_source_hashes',all(hashlib.sha256(Path(f['path']).read_bytes()).hexdigest()==f['sha256'] for f in files));c.read_parquet([f['path'] for f in files]).create_view(n);check(n+'_local_source_count',c.execute('SELECT count(*) FROM '+n).fetchone()[0]==t['rows'])
    continue
   p=Path(t['path']);check(n+'_content_hash',hashlib.sha256(p.read_bytes()).hexdigest()==t['sha256']);c.read_parquet(str(p)).create_view(n);check(n+'_count',c.execute('SELECT count(*) FROM '+n).fetchone()[0]==t['rows'])
+ if 'catalogue_sales_evidence' in m['tables']:
+  check('catalogue_sales_physical_line_once_per_company',c.execute('SELECT count(*)-count(DISTINCT (company_id,coalesce(nullif(source_record_id,''),pricing_record_id))) FROM catalogue_sales_evidence').fetchone()[0]==0)
+  check('catalogue_sales_unique_company',c.execute('SELECT count(*)-count(DISTINCT company_id) FROM company_catalogue_sales').fetchone()[0]==0)
+  check('catalogue_sales_partition_arithmetic',c.execute('SELECT count(*) FROM company_catalogue_sales WHERE abs(observed_catalogue_item_sales-direct_seller_sales-other_seller_item_sales)>0.01 OR single_catalogue_part_other_seller_sales>exact_part_other_seller_sales+0.01 OR exact_part_other_seller_sales>other_seller_item_sales+0.01').fetchone()[0]==0)
+ if 'company_pipeline_coverage' in m['tables']:
+  check('pipeline_coverage_company_unique',c.execute('SELECT count(*)-count(DISTINCT company_id) FROM company_pipeline_coverage').fetchone()[0]==0)
+  check('pipeline_coverage_benchmark_arithmetic',c.execute('SELECT count(*) FROM company_pipeline_coverage WHERE abs(coverage_benchmark-3*annual_net_obligations)>0.01').fetchone()[0]==0)
+  check('pipeline_coverage_counts_reconcile',c.execute('SELECT count(*) FROM company_pipeline_coverage WHERE matched_opportunities<>work_opportunities+item_opportunities').fetchone()[0]==0)
+ if 'company_activity_baselines' in m['tables']:
+  check('activity_company_unique',c.execute('SELECT count(*)-count(DISTINCT company_id) FROM company_activity_baselines').fetchone()[0]==0)
+  check('activity_positive_not_below_net',c.execute('SELECT count(*) FROM company_activity_baselines WHERE annual_positive_obligations+0.01<annual_net_obligations OR annual_positive_obligations<0').fetchone()[0]==0)
+  check('activity_period_current',c.execute('SELECT count(*) FROM company_activity_baselines WHERE period_end<>?',[m['as_of']]).fetchone()[0]==0)
+  check('activity_remote_evidence_verified',bool(m.get('annual_activity_policy',{}).get('validation_query_id')))
  for n,key in [('research_awards','award_id'),('opportunities','episode_id'),('demand_decisions','episode_id'),('company_profiles','company_id')]:check(n+'_unique',c.execute('SELECT count(*)-count(DISTINCT '+key+') FROM '+n).fetchone()[0]==0)
  check('opportunity_ids_routable',c.execute("SELECT count(*) FROM opportunities WHERE NOT coalesce(regexp_full_match(episode_id,'[a-f0-9]{64}'),false)").fetchone()[0]==0)
  check('decision_population',c.execute('SELECT count(*) FROM opportunities o ANTI JOIN demand_decisions d USING(episode_id)').fetchone()[0]==0)
  check('decision_record_version',c.execute('SELECT count(*) FROM opportunities o JOIN demand_decisions d USING(episode_id) WHERE o.record_hash<>d.source_record_hash').fetchone()[0]==0)
+ check('decision_hash_matches_document',c.execute("SELECT count(*) FROM demand_decisions WHERE decision_hash IS DISTINCT FROM json_extract_string(decision_json,'$.decision_hash')").fetchone()[0]==0)
  check('no_invented_company_value',c.execute("SELECT count(*) FROM demand_decisions WHERE json_extract_string(decision_json,'$.company_addressable_value') IS NOT NULL").fetchone()[0]==0)
  check('elapsed_not_actionable',c.execute("SELECT count(*) FROM opportunities o JOIN demand_decisions d USING(episode_id) WHERE try_cast(o.window_end AS DATE)<cast(? AS DATE) AND d.stage<>'resolved_or_elapsed'",[m['as_of']]).fetchone()[0]==0)
  check('rule_registry',len(m['rules']['rules'])==23)
@@ -94,6 +108,25 @@ def validate(directory):
   check('source_review_has_quotes',c.execute("SELECT count(*) FROM opportunity_quality_reviews WHERE verdict='source_review_required' AND (nullif(reason,'') IS NULL OR json_array_length(passages_json)=0)").fetchone()[0]==0)
  if 'company_notice_source_evidence' in m['tables']:
   check('source_access_not_from_ambiguous_reference_codes',c.execute("SELECT count(*) FROM company_notice_source_evidence WHERE trim(upper(rnsc_codes))<>'A' OR trim(rnvc_codes)<>'2' OR NOT regexp_full_match(trim(rncc_codes),'[35 ,;|/]+')").fetchone()[0]==0)
+ if 'item_demand_context' in m['tables']:
+  check('item_demand_one_context_per_episode',c.execute('SELECT count(*)-count(DISTINCT episode_id) FROM item_demand_context').fetchone()[0]==0)
+  check('unverified_pack_units_not_valued',c.execute("SELECT count(*) FROM item_demand_context WHERE catalogue_unit<>'EA' AND (government_reference_lot_scenario IS NOT NULL OR market_price_lot_scenario IS NOT NULL)").fetchone()[0]==0)
+  check('conflicting_forecast_rows_not_valued',c.execute('SELECT count(*) FROM item_demand_context WHERE (negative_months>0 OR month_count<>distinct_months) AND (government_reference_lot_scenario IS NOT NULL OR market_price_lot_scenario IS NOT NULL)').fetchone()[0]==0)
+  check('forecast_market_scenario_reconciles',c.execute('SELECT count(*) FROM item_demand_context WHERE market_price_lot_scenario IS NOT NULL AND abs(market_price_lot_scenario-round(quantity*market_price_median,2))>0.01').fetchone()[0]==0)
+  check('item_market_prices_dated_not_future',c.execute("SELECT count(*) FROM item_market_price_evidence WHERE transaction_date>"+"'"+m['as_of']+"' OR nullif(transaction_date,'') IS NULL").fetchone()[0]==0)
+  check('item_market_physical_lines_unique',c.execute("SELECT count(*)-count(DISTINCT coalesce(nullif(source_record_id,''),pricing_record_id)) FROM item_market_price_evidence").fetchone()[0]==0)
+  check('item_price_key_unique',c.execute('SELECT count(*)-count(DISTINCT (niin,unit)) FROM item_price_references').fetchone()[0]==0)
+ if 'company_item_reference_evidence' in m['tables']:
+  check('company_item_sources_are_selected_cage',c.execute("SELECT count(*) FROM company_item_reference_evidence WHERE cage_code<>substr(company_id,6)").fetchone()[0]==0)
+  check('company_item_source_summaries_unique',c.execute('SELECT count(*)-count(DISTINCT (company_id,episode_id)) FROM company_item_reference_summaries').fetchone()[0]==0)
+  check('company_item_sources_current_version',c.execute('SELECT count(*) FROM company_item_reference_evidence x LEFT JOIN opportunities o USING(episode_id) WHERE x.opportunity_hash IS DISTINCT FROM o.record_hash').fetchone()[0]==0)
+ if 'item_request_presence' in m['tables']:
+  check('current_item_request_not_served_when_absent_or_conflicting',c.execute("SELECT count(*) FROM item_request_presence p JOIN demand_decisions d USING(episode_id) WHERE NOT p.present_in_current_unambiguous_extract AND d.stage='published_requirement'").fetchone()[0]==0)
+  check('request_presence_unique',c.execute('SELECT count(*)-count(DISTINCT episode_id) FROM item_request_presence').fetchone()[0]==0)
+ if 'item_request_progression' in m['tables']:
+  check('request_progression_unique',c.execute('SELECT count(*)-count(DISTINCT relationship_id) FROM item_request_progression').fetchone()[0]==0)
+  check('request_progression_source_versions',c.execute('SELECT count(*) FROM item_request_progression x LEFT JOIN opportunities f ON f.episode_id=x.forecast_episode_id LEFT JOIN opportunities r ON r.episode_id=x.request_episode_id WHERE f.record_hash IS DISTINCT FROM x.forecast_record_hash OR r.record_hash IS DISTINCT FROM x.request_record_hash').fetchone()[0]==0)
+  check('request_progression_not_elapsed',c.execute("SELECT count(*) FROM item_request_progression WHERE response_deadline<'"+m['as_of']+"'").fetchone()[0]==0)
  check('public_not_silently_released',m['public_release_approved'] is False)
  v=dict(passed=sum(x['passed'] for x in checks),failed=sum(not x['passed'] for x in checks),checks=checks,logic_sha256=m['logic_sha256']);(r/'validation.json').write_text(json.dumps(v,indent=2)+'\n');c.close()
  if v['failed']:raise ValueError('Failed release gates: '+', '.join(x['name'] for x in checks if not x['passed']))

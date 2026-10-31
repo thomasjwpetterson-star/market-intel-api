@@ -15,23 +15,9 @@ def date(s):
  try:return datetime.datetime.strptime(s.strip(),'%B %d, %Y').date().isoformat()
  except ValueError:return None
 url='https://www.sbir.gov/topics?'+urllib.parse.urlencode({'status':'Open','agency[DOD]':'DOD'})
-links=set();pages=[];expected=None
-for i in range(40):
- soup,sha,path=fetch(url);txt=soup.get_text(' ',strip=True);m=re.search(r'Showing\s+[0-9,]+[-–][0-9,]+\s+of\s+([0-9,]+)\s+results',txt)
- if m:expected=int(m.group(1).replace(',',''))
- pages.append(dict(url=url,sha256=sha,path=path,expected_results=expected))
- for h in soup.select('h3 a[href]'):
-  href=h.get('href','')
-  if re.fullmatch(r'/topics/\d+',href):links.add('https://www.sbir.gov'+href)
- nxt=soup.select_one('a[rel="next"]')
- if not nxt:
-  current=soup.select_one('a[aria-current="page"]');number=int(urllib.parse.parse_qs(urllib.parse.urlparse(current['href']).query).get('page',['0'])[0]) if current else i
-  nxt=next((a for a in soup.select('a[href]') if urllib.parse.parse_qs(urllib.parse.urlparse(a['href']).query).get('page')==[str(number+1)]),None)
- if not nxt:break
- url=urllib.parse.urljoin(url,nxt['href'])
-else:raise ValueError('Topic pagination exceeded the source bound')
-print('Topic listing',len(links),'records across',len(pages),'pages; expected',expected,flush=True)
-if expected is None or len(links)!=expected:raise ValueError('Incomplete topic-list coverage')
+from opportunity_engine.ingestion.topic_listing import collect
+links,pages,expected=collect(fetch,url)
+print('Topic listing',len(links),'records across',len(pages),'archived pages; expected',expected,flush=True)
 def topic(url):
  soup,sha,path=fetch(url);main=soup.find('main') or soup;txt=main.get_text('\n',strip=True)
  def capture(pattern):
