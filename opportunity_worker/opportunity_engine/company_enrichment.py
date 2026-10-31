@@ -174,7 +174,7 @@ def augment(directory,skip_work=False,reuse_features=False):
    FROM base_opportunities o JOIN base_demand_decisions d USING(episode_id)
    WHERE o.lane IN ('source_item_forecasts','published_item_procurement','stock_supported_item_demand') AND d.stage IN ('source_forecast','published_requirement','emerging_demand')""")
   reference_columns={n for n,*_ in c.execute('DESCRIBE raw_item_reference_facts').fetchall()}
-  current_reference="k.lane<>'stock_supported_item_demand' OR (trim(i.rnvc_codes)='2'"+(" AND coalesce(trim(i.rnsc_codes),'')<>'B'" if 'rnsc_codes' in reference_columns else '')+")" if 'rnvc_codes' in reference_columns else "k.lane<>'stock_supported_item_demand'"
+  current_reference="trim(i.rnvc_codes)='2'"+(" AND coalesce(trim(i.rnsc_codes),'')<>'B'" if 'rnsc_codes' in reference_columns else '') if 'rnvc_codes' in reference_columns else "k.lane<>'stock_supported_item_demand'"
   c.execute("""CREATE TEMP TABLE exact_item_keys AS SELECT 'CAGE:'||i.cage_code company_id,k.episode_id,k.record_hash,min(i.evidence_id) evidence_id,arg_min(i.description,i.evidence_id) reference_description,arg_min(i.part_number,i.evidence_id) reference_part_number,p.profile_hash,k.niin
    FROM raw_item_reference_facts i JOIN item_demand_keys k USING(niin) JOIN base_company_profiles p ON p.company_id='CAGE:'||i.cage_code
    WHERE """+current_reference+""" GROUP BY i.cage_code,k.episode_id,k.record_hash,p.profile_hash,k.niin""")
@@ -183,7 +183,7 @@ def augment(directory,skip_work=False,reuse_features=False):
    'Exact company/item catalogue reference. This does not establish current manufacturing source, configuration, data rights, technical approval or capacity.' company_evidence_caveat,
    evidence_id sample_evidence_id,sha256(concat_ws('|',company_id,episode_id,record_hash,evidence_id,profile_hash)) match_hash,record_hash opportunity_hash,profile_hash,niin,reference_description,reference_part_number FROM exact_item_keys""")
   prior='oi_company_matches' if not skip_work else 'base_company_matches'
-  c.execute('CREATE TEMP TABLE work_and_prior_matches AS SELECT * FROM '+prior)
+  c.execute("CREATE TEMP TABLE work_and_prior_matches AS SELECT p.* FROM "+prior+" p WHERE NOT EXISTS(SELECT 1 FROM base_opportunities o WHERE o.episode_id=p.episode_id AND o.lane IN ('source_item_forecasts','published_item_procurement','stock_supported_item_demand'))")
   output('company_matches',"""SELECT * FROM work_and_prior_matches UNION ALL SELECT n.match_id,n.company_id,n.episode_id,n.score,n.match_route,n.matched_terms,n.company_evidence_caveat,n.sample_evidence_id,n.match_hash,n.opportunity_hash,n.profile_hash FROM oi_company_item_matches n WHERE NOT EXISTS(SELECT 1 FROM work_and_prior_matches b WHERE b.company_id=n.company_id AND b.episode_id=n.episode_id AND b.opportunity_hash=n.opportunity_hash)""")
   c.execute('DROP VIEW base_company_matches');c.execute('CREATE TEMP VIEW base_company_matches AS SELECT * FROM oi_company_matches')
   for unused in ('work_and_prior_matches','original_match_snapshot','exact_item_keys','item_demand_keys'):c.execute('DROP TABLE '+unused)

@@ -72,7 +72,7 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn('np.record_hash=o.record_hash', aws.sql)
         self.assertIn('not a win probability or company revenue', aws.sql)
         self.assertIn('CASE WHEN q.commercial_value>=1000000 THEN 0 ELSE 1 END',aws.sql)
-        self.assertLess(aws.sql.index('$[0].government_reference_lot_scenario'),aws.sql.index(',o.value_median'))
+        self.assertLess(aws.sql.index('$[0].government_reference_lot_scenario'),aws.sql.index('THEN o.value_median'))
 
     def test_size_filter_is_applied_to_the_complete_feed_before_pagination(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name;repo.manifest=lambda:{'as_of':'2026-10-31','tables':{}}
@@ -264,6 +264,16 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertEqual(repo.refresh_status()['status'],'status_stale')
         aws.s3.value={'status':'running','started_at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
         self.assertEqual(repo.refresh_status()['status'],'running')
+
+    def test_monthly_source_health_retains_edition_without_exposing_private_diagnostics(self):
+        original={'dla_forecasts':{'as_of':'2026-10-31','status':'validated_monthly_source'}}
+        repo=Repository(CaptureAWS());repo.manifest=lambda:{'source_status':original,'sources':{'dla_forecasts':{'source_release':'2026-10-19-0949','path':'private/source/path','refresh_health':{'status':'retained_complete_monthly_snapshot_refresh_failed','source_release':'2026-10-19-0949','attempted_at':'2026-10-31T23:00:00Z','reason':'private exception details','interpretation':'Original business dates remain unchanged.'}}}}
+        result=repo.source_status()['dla_forecasts']
+        self.assertEqual(result['source_release'],'2026-10-19-0949')
+        self.assertEqual(result['as_of'],'2026-10-31')
+        self.assertEqual(result['refresh_health']['status'],'retained_complete_monthly_snapshot_refresh_failed')
+        self.assertNotIn('reason',result['refresh_health']);self.assertNotIn('path',result)
+        self.assertNotIn('refresh_health',original['dla_forecasts'])
 
     def test_deployed_lazy_mount_pins_the_concrete_repository_after_authentication(self):
         old={'run_id':'old','tables':{'opportunities':{'table':'oi_old_opportunities'},'demand_decisions':{'table':'oi_old_decisions'}}}

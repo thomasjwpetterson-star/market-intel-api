@@ -558,7 +558,13 @@ if allow_all:
     origins = ["*"]
 
 app.add_middleware(ApiTrafficProtectionMiddleware)
-app.add_middleware(PublicServingCapacityMiddleware)
+app.add_middleware(
+    PublicServingCapacityMiddleware,
+    cache_generation=lambda: (
+        GLOBAL_CACHE.get("last_loaded"),
+        (GLOBAL_CACHE.get("public_intelligence_release") or {}).get("release_id"),
+    ) if get_readiness_state()["ready"] else None,
+)
 
 app.add_middleware(
     CORSMiddleware,

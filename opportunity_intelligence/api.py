@@ -43,6 +43,16 @@ class Repository:
    # Never expose exception strings, stack traces or infrastructure details.
    return dict(status=status,**{k:value[k] for k in ('started_at','finished_at','refresh_mode') if isinstance(value.get(k),str) and len(value[k])<=128})
   except Exception:return {'status':'unavailable'}
+ def source_status(self):
+  m=self.manifest();result={name:dict(value) for name,value in m.get('source_status',{}).items()}
+  # Preserve edition/health separately from build dates. Never expose source
+  # paths, archive locations or retrieval exception text through this view.
+  for name,source in m.get('sources',{}).items():
+   if name not in result:continue
+   if isinstance(source.get('source_release'),str):result[name]['source_release']=source['source_release'][:128]
+   health=source.get('refresh_health')
+   if isinstance(health,dict):result[name]['refresh_health']={k:health[k][:512] for k in ('status','attempted_at','source_release','interpretation') if isinstance(health.get(k),str)}
+  return result
  def company(self,cage):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
   return self.rows('SELECT * FROM '+self.table('company_registry')+" WHERE cage_code='"+cage+"'")
@@ -95,7 +105,9 @@ class Repository:
    if 'company_item_valuations' in self.manifest()['tables']:forecast_lot="CASE WHEN v.catalogue_unit='EA' THEN "+forecast_lot+' END'
    annual_lot="CASE WHEN o.lane='stock_supported_item_demand' AND v.valuation_status='reported_annual_usage_EA_assumed_not_source_forecast' THEN "+forecast_lot+' END' if 'valuation_status' in valuation_columns else 'NULL'
    plan_value="CASE WHEN o.value_basis='source_planned_package_band_including_options' THEN coalesce(o.value_median,o.value_low) END"
-   ranking_value='coalesce('+notice_lot+','+request_lot+','+annual_lot+','+plan_value+',o.value_median,'+forecast_lot+',0.0)'
+   size_limit="regexp_like(lower(coalesce(o.scope_text,'')),'this\\s+(?:proposed\\s+)?(?:acquisition|requirement|purchase|contract|action)\\s+is\\s+(?:not\\s+expected\\s+to\\s+exceed|below)\\s+(?:the\\s+)?simplified\\s+acquisition\\s+threshold')"
+   comparable="CASE WHEN NOT ("+size_limit+") THEN o.value_median END"
+   ranking_value='coalesce('+notice_lot+','+request_lot+','+annual_lot+','+plan_value+','+comparable+','+forecast_lot+',0.0)'
    forecast_year='NULL';unit_price='NULL'
    if 'company_item_valuations' in self.manifest()['tables']:
     asof=self.manifest().get('as_of')
@@ -106,7 +118,7 @@ class Repository:
    from .priority import inventory_priority
    inventory_points,inventory_basis=inventory_priority(valuation_columns,self.manifest()['as_of'],forecast_year,unit_price)
    priority_amount="CASE WHEN o.lane='source_item_forecasts' THEN coalesce("+forecast_year+",0.0) ELSE "+ranking_value+' END'
-   value_kind="CASE WHEN "+notice_lot+">0 THEN 'item_reference_estimate' WHEN "+request_lot+">0 THEN 'historical_unit_price_estimate' WHEN "+annual_lot+">0 THEN 'annual_usage_scenario' WHEN o.value_basis='source_planned_package_band_including_options' AND coalesce(o.value_median,o.value_low,o.value_high)>0 THEN 'planned_package_reference' WHEN o.lane='source_item_forecasts' AND "+forecast_lot+">0 THEN 'forecast_scenario' WHEN o.value_median>0 THEN 'historical_comparison' ELSE 'unknown' END"
+   value_kind="CASE WHEN "+notice_lot+">0 THEN 'item_reference_estimate' WHEN "+request_lot+">0 THEN 'historical_unit_price_estimate' WHEN "+annual_lot+">0 THEN 'annual_usage_scenario' WHEN o.value_basis='source_planned_package_band_including_options' AND coalesce(o.value_median,o.value_low,o.value_high)>0 THEN 'planned_package_reference' WHEN o.lane='source_item_forecasts' AND "+forecast_lot+">0 THEN 'forecast_scenario' WHEN o.value_median>0 AND ("+size_limit+") THEN 'historical_context_source_limit' WHEN o.value_median>0 THEN 'historical_comparison' ELSE 'unknown' END"
    extra=',m.match_id,m.match_route,m.matched_terms,m.sample_evidence_id,m.company_evidence_caveat,'+ranking_value+' commercial_value,'+value_kind+' commercial_value_kind,'+item_condition+' item_demand,'+forecast_year+' forecast_next_12m_value'
    extra+=','+inventory_points+' inventory_priority_points,'+inventory_basis+' inventory_priority_basis'
    extra+=",(CASE d.stage WHEN 'published_requirement' THEN 12 WHEN 'qualification_opening' THEN 10 WHEN 'teaming_opening' THEN 10 WHEN 'emerging_demand' THEN 6 WHEN 'source_forecast' THEN 2 ELSE 0 END)+least(20.0,m.score/5.0)+18.0*ln(1.0+greatest("+priority_amount+",0.0)/100000.0)+(CASE WHEN d.stage='published_requirement' AND try_cast(o.window_end AS date) BETWEEN DATE '"+self.manifest()['as_of']+"' AND date_add('day',30,DATE '"+self.manifest()['as_of']+"') THEN 12 WHEN o.window_end IS NOT NULL THEN 3 ELSE 0 END)+("+inventory_points+") priority_score,'Ranks by scope fit, commercial size and engagement timing. Forecasts use next-year demand and dated stock context; published requests closing soon receive priority. Historical sizes are comparisons. The score is not a win probability or company revenue' priority_basis"
@@ -147,6 +159,7 @@ class Repository:
   # expired ISO deadlines open until the next nightly build. Date-only notices
   # retain calendar precision and do not acquire a midnight deadline.
   if not monitoring_only:
+   where+=" AND (d.stage NOT IN ('published_requirement','qualification_opening','teaming_opening') OR try_cast(substr(o.window_end,1,10) AS date) IS NULL OR try_cast(substr(o.window_end,1,10) AS date)>=current_date)"
    where+=" AND (coalesce(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_precision'),'')<>'timestamp_utc' OR try(from_iso8601_timestamp(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_utc'))) IS NULL OR try(from_iso8601_timestamp(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_utc')))>=current_timestamp)"
   if 'dla_forecasts' in self.manifest()['tables']:
    asof=self.manifest().get('as_of')
@@ -447,5 +460,5 @@ def create_router(verify_principal,repository=None):
  def benchmark(topic_id:str):return {'records':call(repo.benchmark,topic_id)}
  @router.get('/sources')
  def sources():
-  m=repo.manifest();return {'release':m['run_id'],'as_of':m['as_of'],'refresh':repo.refresh_status(),'sources':m['source_status'],'limitations':m['limitations']+['Forecasts containing negative future monthly quantities are withheld from actionable feeds pending source reconciliation; positive months are not silently priced alone.']}
+  m=repo.manifest();return {'release':m['run_id'],'as_of':m['as_of'],'refresh':repo.refresh_status(),'sources':repo.source_status(),'limitations':m['limitations']+['Forecasts containing negative future monthly quantities are withheld from actionable feeds pending source reconciliation; positive months are not silently priced alone.']}
  return router

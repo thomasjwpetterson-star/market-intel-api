@@ -15,10 +15,16 @@ from .demand_history import rebuild as rebuild_demand,refresh_forecast_episodes
 from .quality import apply as apply_quality,review_current
 
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--from-current',action='store_true',required=True);ap.add_argument('--workdir',required=True);ap.add_argument('--as-of',default=datetime.datetime.now(datetime.timezone.utc).date().isoformat());ap.add_argument('--publish',action='store_true');ap.add_argument('--refresh',action='store_true');ap.add_argument('--review-current',action='store_true');ap.add_argument('--source-bindings-key');ap.add_argument('--resume-derived-checkpoint-key');ap.add_argument('--publish-validated-checkpoint-key');ap.add_argument('--retain-prior-unreferenced-innovation',action='store_true');args=ap.parse_args();a=AWS();root=Path(args.workdir).resolve();root.mkdir(parents=True,exist_ok=True)
+ ap=argparse.ArgumentParser();ap.add_argument('--from-current',action='store_true',required=True);ap.add_argument('--workdir',required=True);ap.add_argument('--as-of',default=datetime.datetime.now(datetime.timezone.utc).date().isoformat());ap.add_argument('--publish',action='store_true');ap.add_argument('--refresh',action='store_true');ap.add_argument('--review-current',action='store_true');ap.add_argument('--refresh-items',action='store_true');ap.add_argument('--source-bindings-key');ap.add_argument('--resume-derived-checkpoint-key');ap.add_argument('--publish-validated-checkpoint-key');ap.add_argument('--retain-prior-unreferenced-innovation',action='store_true');args=ap.parse_args();a=AWS();root=Path(args.workdir).resolve();root.mkdir(parents=True,exist_ok=True)
  pointer=json.loads(a.s3.get_object(Bucket=BUCKET,Key=PREFIX+'/current.json')['Body'].read());key=pointer['manifest_key']
  if not key.startswith(PREFIX+'/releases/'):raise ValueError('Invalid release pointer')
  m=json.loads(a.s3.get_object(Bucket=BUCKET,Key=key)['Body'].read())
+ if args.refresh_items:
+  if args.refresh or args.review_current or args.source_bindings_key or args.resume_derived_checkpoint_key or args.publish_validated_checkpoint_key:raise ValueError('Item refresh is an exclusive operation')
+  from .item_refresh import refresh as refresh_items
+  out=refresh_items(m,root,a)
+  if args.publish:publish(out)
+  print(json.dumps(dict(directory=str(out),published=args.publish,mode='monthly_item_evidence_update')));return
  if args.publish_validated_checkpoint_key:
   if not args.publish or args.review_current or args.refresh or args.source_bindings_key or args.resume_derived_checkpoint_key:raise ValueError('Validated publication is an exclusive publish operation')
   out=restore_validated_checkpoint(a,args.publish_validated_checkpoint_key,m,root,retain_prior_innovation=args.retain_prior_unreferenced_innovation);publish(out);print(json.dumps(dict(directory=str(out),published=True,mode='validated_checkpoint_publication')));return
@@ -73,7 +79,7 @@ def main():
   prior_bindings=root/'prior_bindings.json';prior_bindings.write_text(json.dumps(m))
   env=dict(os.environ,MIMIR_OPPORTUNITY_WORKDIR=str(root),MIMIR_OPPORTUNITY_PREVIOUS_MANIFEST=str(prior_bindings),PYTHONDONTWRITEBYTECODE='1',PYTHONPATH=os.pathsep.join(str(p) for p in sys.path if p))
   if args.source_bindings_key:env['MIMIR_OPPORTUNITY_REUSE_SOURCE_SNAPSHOT']='1'
-  for module in ('refresh_sbir','refresh_topics','refresh_shared_sources','refresh_commercial_sources','refresh_company_registry','refresh_company_history','refresh_innovation','refresh_agency_forecasts'):
+  for module in ('refresh_sbir','refresh_topics','refresh_shared_sources','refresh_dla_monthly','refresh_commercial_sources','refresh_company_registry','refresh_company_history','refresh_innovation','refresh_agency_forecasts'):
    command=[sys.executable,'-m','opportunity_engine.ingestion.'+module]
    if module in ('refresh_shared_sources','refresh_company_history'):command+=['--as-of',args.as_of]
    try:subprocess.run(command,env=env,check=True)
@@ -87,7 +93,7 @@ def main():
     (root/('inputs/'+pointer_name+'_latest.json')).write_text(json.dumps({'path':str(fallback)}))
     print('Public source refresh failed: preserving prior complete snapshot with original source dates:',source_key,flush=True)
   sbir=json.loads((root/'inputs/sbir_source.json').read_text())
-  for name in ('topics','shared_sources','commercial','company_registry','company_history','innovation','agency_forecasts'):
+  for name in ('topics','shared_sources','commercial','dla_monthly','company_registry','company_history','innovation','agency_forecasts'):
    pointer=json.loads((root/('inputs/'+name+'_latest.json')).read_text());sources.update(json.loads(Path(pointer['path']).read_text())['sources'])
  # Rebuild the actual company and derived-demand inputs on every native refresh.
  # Archived native projections also allow deterministic recovery/rebuild runs.

@@ -155,10 +155,8 @@ def build_public_company_profiles(conn) -> None:
                 LIST(
                     STRUCT_PACK(
                         name := ARRAY_TO_STRING(
-                            LIST_TRANSFORM(
-                                STR_SPLIT(LOWER(g.name), ' '),
-                                value -> UPPER(LEFT(value, 1)) || SUBSTR(value, 2)
-                            ),
+                            [UPPER(LEFT(value, 1)) || SUBSTR(value, 2)
+                             FOR value IN STR_SPLIT(LOWER(g.name), ' ')],
                             ' '
                         ),
                         cage := CAST(NULL AS VARCHAR),
@@ -190,10 +188,8 @@ def build_public_company_profiles(conn) -> None:
                 MAX(item_count) AS item_count,
                 LIST(
                     ARRAY_TO_STRING(
-                        LIST_TRANSFORM(
-                            STR_SPLIT(LOWER(name), ' '),
-                            value -> UPPER(LEFT(value, 1)) || SUBSTR(value, 2)
-                        ),
+                        [UPPER(LEFT(value, 1)) || SUBSTR(value, 2)
+                         FOR value IN STR_SPLIT(LOWER(name), ' ')],
                         ' '
                     ) ORDER BY item_rank
                 ) FILTER (WHERE item_rank <= 3) AS items
@@ -281,10 +277,8 @@ def build_public_company_profiles(conn) -> None:
                         "desc" := COALESCE(
                             NULLIF(
                                 ARRAY_TO_STRING(
-                                    LIST_TRANSFORM(
-                                        STR_SPLIT(LOWER(TRIM(CAST(description AS VARCHAR))), ' '),
-                                        value -> UPPER(LEFT(value, 1)) || SUBSTR(value, 2)
-                                    ),
+                                    [UPPER(LEFT(value, 1)) || SUBSTR(value, 2)
+                                     FOR value IN STR_SPLIT(LOWER(TRIM(CAST(description AS VARCHAR))), ' ')],
                                     ' '
                                 ),
                                 ''
@@ -905,10 +899,8 @@ def _build_public_nsn_profiles_monolithic(conn) -> None:
                 platforms := CASE
                     WHEN pr.platform_families IS NULL THEN []::VARCHAR[]
                     ELSE LIST_SLICE(
-                        LIST_TRANSFORM(
-                            LIST_FILTER(STR_SPLIT(pr.platform_families, '|'), value -> TRIM(value) <> ''),
-                            value -> TRIM(value)
-                        ),
+                        [TRIM(value) FOR value IN STR_SPLIT(pr.platform_families, '|')
+                         IF TRIM(value) <> ''],
                         1,
                         2
                     )
@@ -917,10 +909,8 @@ def _build_public_nsn_profiles_monolithic(conn) -> None:
                     COALESCE(pr.platform_count, 0) - CASE
                         WHEN pr.platform_families IS NULL THEN 0
                         ELSE LEN(LIST_SLICE(
-                            LIST_TRANSFORM(
-                                LIST_FILTER(STR_SPLIT(pr.platform_families, '|'), value -> TRIM(value) <> ''),
-                                value -> TRIM(value)
-                            ),
+                            [TRIM(value) FOR value IN STR_SPLIT(pr.platform_families, '|')
+                             IF TRIM(value) <> ''],
                             1,
                             2
                         ))
@@ -1245,10 +1235,8 @@ def build_public_nsn_profiles(conn) -> None:
                 platform_count,
                 CASE
                     WHEN platform_families IS NULL THEN []::VARCHAR[]
-                    ELSE LIST_TRANSFORM(
-                        LIST_FILTER(STR_SPLIT(platform_families, '|'), value -> TRIM(value) <> ''),
-                        value -> TRIM(value)
-                    )
+                    ELSE [TRIM(value) FOR value IN STR_SPLIT(platform_families, '|')
+                          IF TRIM(value) <> '']
                 END AS platforms
             FROM grouped
         )
