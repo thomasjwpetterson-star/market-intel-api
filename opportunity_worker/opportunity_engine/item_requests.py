@@ -6,12 +6,15 @@ import duckdb
 def link(directory):
  r=Path(directory);m=json.loads((r/'manifest.json').read_text())
  if 'company_item_valuations' not in m['tables']:return
- c=duckdb.connect();c.execute("SET threads=2;SET memory_limit='2GB';SET preserve_insertion_order=false")
+ c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='2GB';SET preserve_insertion_order=false")
+ c.execute("SET temp_directory='"+str(r/'request_links_tmp').replace("'","''")+"'")
  for n in ('opportunities','demand_decisions','company_item_valuations'):c.read_parquet(m['tables'][n]['path']).create_view(n)
  def emit(n,sql):
   p=r/(n+'.parquet');tmp=r/(n+'.links.parquet');c.execute('CREATE OR REPLACE TEMP VIEW result AS '+sql)
   types={'VARCHAR':'string','DOUBLE':'double','BIGINT':'bigint','INTEGER':'bigint','BOOLEAN':'boolean'};cols=[dict(Name=name,Type=types[t]) for name,t,*_ in c.execute('DESCRIBE result').fetchall()]
-  c.execute("COPY result TO '"+str(tmp).replace("'","''")+"' (FORMAT PARQUET,COMPRESSION ZSTD)");count=c.execute('SELECT count(*) FROM read_parquet(?)',[str(tmp)]).fetchone()[0];tmp.replace(p)
+  # Each company edge carries the full monthly evidence. Bound the writer's
+  # row group instead of buffering 122,880 copies of these wide JSON fields.
+  c.execute("COPY result TO '"+str(tmp).replace("'","''")+"' (FORMAT PARQUET,COMPRESSION ZSTD,ROW_GROUP_SIZE 2048)");count=c.execute('SELECT count(*) FROM read_parquet(?)',[str(tmp)]).fetchone()[0];tmp.replace(p)
   m['tables'][n]=dict(path=str(p),sha256=hashlib.sha256(p.read_bytes()).hexdigest(),rows=count,columns=cols);print('Item request links',n,count,flush=True)
  c.execute("""CREATE TEMP TABLE current_requests AS SELECT o.*,json_extract_string(o.value_inputs_json,'$.niin') niin,try_cast(json_extract_string(o.value_inputs_json,'$.quantity') AS BIGINT) requested_quantity,json_extract_string(o.value_inputs_json,'$.request_unit') requested_unit,json_extract_string(o.value_inputs_json,'$.purchase_request_number') purchase_request_number
  FROM opportunities o JOIN demand_decisions d USING(episode_id) WHERE o.lane='published_item_procurement' AND d.stage='published_requirement' AND substr(o.window_end,1,10)>='"""+m['as_of']+"'")

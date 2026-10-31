@@ -328,7 +328,7 @@ enter opportunity totals unchecked. Reuse the existing extraction stack, but
 prioritise current-document coverage, physical-line deduplication, latest-version
 linkage and real CLIN/scope validation before broader promotion.
 
-Full-market recovery and bounded aggregation (0.5.41)
+Full-market recovery and bounded aggregation (0.5.42)
 ----------------------------------------------------
 The native expansion completed all 52 matching partitions: 205,085,071 candidate
 comparisons produced 957,301 selected company/work links and 574,785 item links
@@ -347,6 +347,13 @@ matching tables, immutable paths and content hashes, then reruns source-quality,
 valuation, relationship, change tracking and publication gates. Checkpoints are
 never themselves serving releases. Recovery arguments and fixed assessment dates
 must not be persisted in daily job defaults.
+
+The full monthly history occupies approximately 1.62 GB before compression across
+529,406 company/item edges. Downstream relationship/source-evidence rewrites use
+one writer thread and 2,048-row Parquet groups to bound the write buffer. This
+preserves complete evidence rather than shortening each item's history to fit
+the previous default 122,880-row group. The request rewrite retains its 2 GB
+query cap and the company-reference rewrite retains its 3 GB cap.
 
 At preparation, the recovery is still running; this note does not assert a new
 published release. The release verification report records the actual successful
