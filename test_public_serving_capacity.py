@@ -101,20 +101,15 @@ async def test_real_duckdb_waiters_no_longer_starve_customer_or_readiness():
 
 
 @pytest.mark.asyncio
-async def test_capacity_released_after_failure_and_cancellation():
-    entered = asyncio.Event()
+async def test_capacity_released_after_downstream_failure():
     async def downstream(scope, receive, send):
-        entered.set()
-        await asyncio.Event().wait()
+        raise RuntimeError('query failed')
     middleware = PublicServingCapacityMiddleware(downstream)
     scope = {'type':'http','method':'GET','path':'/api/public/intelligence/nsn/123'}
-    task = asyncio.create_task(middleware(scope, None, None))
-    await entered.wait()
-    assert middleware.active == 1
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    with pytest.raises(RuntimeError, match='query failed'):
+        await middleware(scope, None, None)
     assert middleware.active == 0
+    assert not middleware.inflight
 
 
 @pytest.mark.asyncio
@@ -157,3 +152,90 @@ async def test_previous_sync_readiness_queues_behind_real_duck_pool_waiters():
         limiter.total_tokens = old_limit
         for db in dbs:
             db.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_http_request_keeps_capacity_until_sync_worker_finishes():
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    app = FastAPI()
+    @app.get('/api/public/intelligence/awards/{record}')
+    def public(record: str):
+        entered.set()
+        try:
+            release.wait(5)
+            return {'record': record}
+        finally:
+            finished.set()
+    middleware = PublicServingCapacityMiddleware(app)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=middleware), base_url='http://test') as client:
+            request = asyncio.create_task(client.get('/api/public/intelligence/awards/first'))
+            for _ in range(100):
+                if entered.is_set():break
+                await asyncio.sleep(.01)
+            assert entered.is_set()
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):await request
+            assert not finished.is_set()
+            assert middleware.active == 1, 'Cancelled client must not release a still-running sync query slot'
+            rejected = await client.get('/api/public/intelligence/awards/second')
+            assert rejected.status_code == 503
+            release.set()
+            for _ in range(100):
+                if finished.is_set() and middleware.active == 0:break
+                await asyncio.sleep(.01)
+            assert finished.is_set() and middleware.active == 0
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_capacity_cannot_be_bypassed_by_trusted_ssr_and_cors_is_retained(monkeypatch):
+    from api_traffic_protection import ApiTrafficProtectionMiddleware, VerifiedCrawlers
+    from fastapi.middleware.cors import CORSMiddleware
+    entered, release = threading.Event(), threading.Event()
+    app = FastAPI()
+    @app.get('/api/public/intelligence/companies/{record}')
+    def public(record: str):
+        entered.set()
+        release.wait(5)
+        return {'record':record}
+    app.add_middleware(ApiTrafficProtectionMiddleware, crawlers=VerifiedCrawlers(refresh=False))
+    app.add_middleware(PublicServingCapacityMiddleware)
+    app.add_middleware(CORSMiddleware, allow_origins=['https://www.mimiradvisors.org'])
+    monkeypatch.setenv('MIMIR_EXPORT_PROXY_SECRET','trusted-test-key')
+    task=None
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app),base_url='http://test') as client:
+            task=asyncio.create_task(client.get('/api/public/intelligence/companies/FIRST',headers={'X-Mimir-Export-Key':'trusted-test-key'}))
+            for _ in range(100):
+                if entered.is_set():break
+                await asyncio.sleep(.01)
+            assert entered.is_set()
+            response=await client.get('/api/public/intelligence/companies/NEXT',headers={'X-Mimir-Export-Key':'trusted-test-key','Origin':'https://www.mimiradvisors.org'})
+            assert response.status_code==503
+            assert response.headers['access-control-allow-origin']=='https://www.mimiradvisors.org'
+            assert response.headers['cache-control']=='no-store'
+            release.set()
+            assert (await task).status_code==200
+    finally:
+        release.set()
+        if task is not None:await task
+
+
+@pytest.mark.asyncio
+async def test_readiness_stays_unready_for_missing_data_and_duckdb_errors_return_pool_lease():
+    ns=production_functions()
+    app=FastAPI();app.get('/ready')(ns['ready_check'])
+    async with AsyncClient(transport=ASGITransport(app=app),base_url='http://test') as client:
+        assert (await client.get('/ready')).status_code==200
+        ns['DUCK_CONN']=None
+        assert (await client.get('/ready')).status_code==503
+        ns['DUCK_CONN']=object();ns['GLOBAL_CACHE']['profiles_df']=pd.DataFrame()
+        assert (await client.get('/ready')).status_code==503
+    db=duckdb.connect();pool=queue.Queue(maxsize=1);pool.put(db);ns['_DUCK_POOL']=pool
+    try:
+        with pytest.raises(duckdb.Error):ns['duck_fetch_df']('SELECT absent_column')
+        assert pool.qsize()==1
+        assert ns['duck_fetch_df']('SELECT 1 AS value').iloc[0]['value']==1
+    finally:db.close()

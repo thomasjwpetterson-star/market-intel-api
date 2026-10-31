@@ -7,6 +7,7 @@ There is deliberately no pending queue: callers retry using normal HTTP caching.
 from __future__ import annotations
 
 import logging
+import asyncio
 
 logger = logging.getLogger("mimir-api")
 
@@ -17,6 +18,7 @@ class PublicServingCapacityMiddleware:
         self.limit = limit
         self.active = 0
         self.rejected = 0
+        self.inflight = set()
 
     async def __call__(self, scope, receive, send):
         if (scope["type"] != "http" or scope.get("method") not in {"GET", "HEAD"}
@@ -37,7 +39,23 @@ class PublicServingCapacityMiddleware:
             await send({"type": "http.response.body", "body": body})
             return
         self.active += 1
+        # A disconnected/cancelled caller cannot stop a running synchronous
+        # worker. Keep its slot until downstream actually finishes, otherwise
+        # repeated cancellations could admit an unbounded number of queries.
+        task = asyncio.create_task(self._serve(scope, receive, send))
+        self.inflight.add(task)
+        task.add_done_callback(self._finished)
+        await asyncio.shield(task)
+
+    async def _serve(self, scope, receive, send):
         try:
             await self.app(scope, receive, send)
         finally:
             self.active -= 1
+
+    def _finished(self, task):
+        self.inflight.discard(task)
+        # Retrieve exceptions even if the client no longer awaits the result.
+        # Attached callers still receive downstream exceptions through shield.
+        if not task.cancelled():
+            task.exception()
