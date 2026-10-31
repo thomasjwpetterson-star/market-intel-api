@@ -328,7 +328,7 @@ enter opportunity totals unchecked. Reuse the existing extraction stack, but
 prioritise current-document coverage, physical-line deduplication, latest-version
 linkage and real CLIN/scope validation before broader promotion.
 
-Full-market recovery and bounded aggregation (0.5.42)
+Full-market recovery and bounded aggregation (0.5.43)
 ----------------------------------------------------
 The native expansion completed all 52 matching partitions: 205,085,071 candidate
 comparisons produced 957,301 selected company/work links and 574,785 item links
@@ -354,6 +354,30 @@ one writer thread and 2,048-row Parquet groups to bound the write buffer. This
 preserves complete evidence rather than shortening each item's history to fit
 the previous default 122,880-row group. The request rewrite retains its 2 GB
 query cap and the company-reference rewrite retains its 3 GB cap.
+
+Coverage and evidence-change checks also use 32 complete-company partitions under
+their existing 3 GB query caps. Evidence contexts are serialized once and reused
+across partitions. The quality path archives completed reviewed outputs if any
+later coverage, event or validation step fails, preserving the published parent
+without exposing incomplete output. These changes bound memory without reducing
+the company population, shortening histories or creating values to meet a quota.
+
+The serving API adds optional ``inventory_priority_points`` and
+``inventory_priority_basis`` under commercial-materiality-v3. Only source-item
+forecasts are adjusted. A nonfuture snapshot no older than 90 days at assessment
+adds 10 points for reported backorders, otherwise 6 for stock below its stated
+reorder point; stock sufficient for the next twelve-month forecast reduces
+priority by 8. Missing, conflicting, future or older evidence is neutral. These
+are transparent policy weights, not calibrated win probabilities. Monetary values
+are unchanged. The methodology endpoint exposes the policy and implementation
+hash; CSV and the existing rationale drawer retain the row-specific explanation.
+
+Forecast demand does not establish net new buying. Stock allocations, supply
+already on order and existing contract coverage can affect replenishment. The
+engine does not estimate those missing quantities or subtract a dated stock
+snapshot to manufacture a net procurement value. The public planning distinction
+is documented in AFMCI 23-105, chapter 3:
+https://static.e-publishing.af.mil/production/1/afmc/publication/afmci23-105/afmci23-105.pdf
 
 At preparation, the recovery is still running; this note does not assert a new
 published release. The release verification report records the actual successful

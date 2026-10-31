@@ -80,6 +80,20 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertLess(aws.sql.index('q.commercial_value>=5000000.0'),aws.sql.index('OFFSET 0 LIMIT 3'))
         with self.assertRaises(ValueError):repo.opportunities('CAGE:45934',minimum_value=float('nan'))
 
+    def test_inventory_priority_requires_dated_columns_and_preserves_legacy_releases(self):
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
+        repo.manifest=lambda:{'as_of':'2026-10-31','tables':{'company_item_valuations':{'columns':[]}}}
+        repo.opportunities('CAGE:45934')
+        self.assertIn('0.0 inventory_priority_points',aws.sql)
+        self.assertNotIn('v.inventory_date',aws.sql)
+        cols=['inventory_date','stock_on_hand','backorder_quantity']
+        repo.manifest=lambda:{'as_of':'2026-10-31','tables':{'company_item_valuations':{'columns':[{'Name':n} for n in cols]}}}
+        repo.opportunities('CAGE:45934')
+        self.assertIn("BETWEEN date_add('day',-90,DATE '2026-10-31') AND DATE '2026-10-31'",aws.sql)
+        self.assertIn('v.backorder_quantity>0 THEN 10.0',aws.sql)
+        self.assertIn('THEN -8.0',aws.sql)
+        self.assertNotIn('v.reorder_stock',aws.sql)
+
     def test_unknown_company_entry_is_context_not_a_ranked_work_opportunity(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
         repo.manifest=lambda:{'as_of':'2026-10-31','tables':{'company_work_matches':{'columns':[]}}}

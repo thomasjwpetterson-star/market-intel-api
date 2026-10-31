@@ -23,21 +23,29 @@ def main():
  if args.review_current:
   if args.refresh or args.source_bindings_key:raise ValueError('Quality review reuses the published source snapshot')
   review_source=load_derived_checkpoint(a,args.resume_derived_checkpoint_key,m) if args.resume_derived_checkpoint_key else m
-  out=review_current(review_source,root,a);validate_demand_integrity(out)
-  from .catalogue_sales import augment as augment_catalogue_sales
-  augment_catalogue_sales(out)
-  from .item_sources import augment as augment_item_sources
-  augment_item_sources(out)
-  from .company_activity import refresh as refresh_activity
-  refresh_activity(out,a)
-  from .reporting_lag import refresh as refresh_reporting_lag
-  refresh_reporting_lag(out,a)
-  from .pipeline_coverage import build as build_coverage
-  build_coverage(out)
-  from .logic_provenance import record as record_logic
-  record_logic(out);track_events(out,m,a);v=validate(out)
-  if args.publish:publish(out)
-  print(json.dumps(dict(directory=str(out),validation_passed=v['passed'],published=args.publish)));return
+  out=None
+  try:
+   out=review_current(review_source,root,a);validate_demand_integrity(out)
+   from .catalogue_sales import augment as augment_catalogue_sales
+   augment_catalogue_sales(out)
+   from .item_sources import augment as augment_item_sources
+   augment_item_sources(out)
+   from .company_activity import refresh as refresh_activity
+   refresh_activity(out,a)
+   from .reporting_lag import refresh as refresh_reporting_lag
+   refresh_reporting_lag(out,a)
+   from .pipeline_coverage import build as build_coverage
+   build_coverage(out)
+   from .logic_provenance import record as record_logic
+   record_logic(out);track_events(out,m,a);v=validate(out)
+   if args.publish:publish(out)
+   print(json.dumps(dict(directory=str(out),validation_passed=v['passed'],published=args.publish)));return
+  except Exception:
+   if out is not None:
+    try:archive_failed_attempt(out,a,m['run_id'])
+    except Exception as checkpoint_error:print('Could not preserve reviewed outputs:',str(checkpoint_error),flush=True)
+   raise
+
  def download(uri,sha,suffix='.parquet'):
   if not uri.startswith('s3://'+BUCKET+'/'+PREFIX+'/'):raise ValueError('Unexpected source namespace')
   p=root/'sources'/(sha+suffix);p.parent.mkdir(exist_ok=True)

@@ -8,7 +8,7 @@ def build(directory):
  r=Path(directory);m=json.loads((r/'manifest.json').read_text())
  required=('company_profiles','company_activity_baselines','company_matches','opportunities','demand_decisions','company_item_valuations','company_work_matches','opportunity_quality_reviews','company_notice_item_prices')
  if not all(n in m['tables'] for n in required):return
- c=duckdb.connect();c.execute("SET threads=2;SET memory_limit='3GB';SET preserve_insertion_order=false");c.execute("SET temp_directory='"+str(r/'coverage_tmp').replace("'","''")+"'")
+ c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='3GB';SET preserve_insertion_order=false");c.execute("SET temp_directory='"+str(r/'coverage_tmp').replace("'","''")+"'")
  for n in required:c.read_parquet(m['tables'][n]['path']).create_view(n)
  if 'company_reporting_lag_baselines' in m['tables']:
   c.read_parquet(m['tables']['company_reporting_lag_baselines']['path']).create_view('lag_baselines')
@@ -18,7 +18,7 @@ def build(directory):
   CASE WHEN l.lag_adjusted_annual_dod_net_obligations>0 THEN l.lag_adjusted_period_end ELSE a.period_end END benchmark_end
   FROM company_activity_baselines a FULL JOIN lag_baselines l USING(company_id)""")
  else:c.execute('CREATE TEMP VIEW benchmark_activity AS SELECT *,annual_net_obligations benchmark_net,period_start benchmark_start,period_end benchmark_end FROM company_activity_baselines')
- c.execute("""CREATE TEMP TABLE candidates AS SELECT DISTINCT m.company_id,o.episode_id,o.record_hash,o.lane,o.customer_name,
+ candidates_sql="""SELECT DISTINCT m.company_id,o.episode_id,o.record_hash,o.lane,o.customer_name,
  (o.lane IN ('published_item_procurement','source_item_forecasts') OR coalesce(q.category_override='items',false)) item_demand,
  coalesce(json_extract_string(o.value_inputs_json,'$.niin'),right(json_extract_string(o.value_inputs_json,'$.nsn'),9),right(json_extract_string(np.items_json,'$[0].nsn'),9)) niin,
  json_extract_string(o.value_inputs_json,'$.purchase_request_number') purchase_request,
@@ -32,8 +32,13 @@ def build(directory):
  LEFT JOIN opportunity_quality_reviews q ON q.episode_id=o.episode_id AND q.record_hash=o.record_hash
  LEFT JOIN company_item_valuations v ON v.company_id=m.company_id AND v.episode_id=o.episode_id AND v.record_hash=o.record_hash
  LEFT JOIN company_notice_item_prices np ON np.company_id=m.company_id AND np.episode_id=o.episode_id AND np.record_hash=o.record_hash
- WHERE d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context','historical_watch','repeat_demand_inference') AND coalesce(cw.review_category,'')<>'market_context' AND (o.lane<>'source_item_forecasts' OR coalesce(v.valuation_status,'')<>'negative_source_quantity')
- QUALIFY row_number() OVER(PARTITION BY m.company_id,CASE WHEN o.source_name='sam_notices' AND length(o.native_identifier)>4 THEN concat_ws('|',o.source_name,upper(o.customer_name),regexp_replace(upper(o.native_identifier),'-00$',''),regexp_replace(upper(o.title),'[^A-Z0-9]','','g')) ELSE o.episode_id END ORDER BY o.notice_posted_date DESC NULLS LAST,o.episode_id)=1""")
+ WHERE hash(m.company_id)%32=COMPANY_PARTITION AND d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context','historical_watch','repeat_demand_inference') AND coalesce(cw.review_category,'')<>'market_context' AND (o.lane<>'source_item_forecasts' OR coalesce(v.valuation_status,'')<>'negative_source_quantity')
+ QUALIFY row_number() OVER(PARTITION BY m.company_id,CASE WHEN o.source_name='sam_notices' AND length(o.native_identifier)>4 THEN concat_ws('|',o.source_name,upper(o.customer_name),regexp_replace(upper(o.native_identifier),'-00$',''),regexp_replace(upper(o.title),'[^A-Z0-9]','','g')) ELSE o.episode_id END ORDER BY o.notice_posted_date DESC NULLS LAST,o.episode_id)=1"""
+ # Keep each company's full notice families together while bounding the wide
+ # joins/window state. Partitioning never truncates the company universe.
+ for partition in range(32):
+  c.execute(('CREATE TEMP TABLE candidates AS ' if partition==0 else 'INSERT INTO candidates ')+candidates_sql.replace('COMPANY_PARTITION',str(partition)))
+  print('Company coverage partition',partition+1,'/ 32',flush=True)
  c.execute("""CREATE TEMP TABLE request_groups AS SELECT company_id,
  CASE WHEN nullif(purchase_request,'') IS NOT NULL AND regexp_full_match(coalesce(niin,''),'[0-9]{9}') AND nullif(customer_name,'') IS NOT NULL THEN 'pr|'||regexp_replace(upper(customer_name),'[^A-Z0-9]','','g')||'|'||purchase_request||'|'||niin
  WHEN regexp_full_match(coalesce(niin,''),'[0-9]{9}') AND nullif(customer_name,'') IS NOT NULL THEN 'item|'||regexp_replace(upper(customer_name),'[^A-Z0-9]','','g')||'|'||niin ELSE episode_id END requirement_key,
