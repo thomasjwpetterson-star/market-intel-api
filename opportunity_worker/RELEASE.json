@@ -151,5 +151,10 @@
   "validation_passed": 197,
   "validation_failed": 0,
   "schedule_restored": true,
-  "publication_checkpoint_key": "governance/opportunity_intelligence/operations/checkpoints/20261031_143426_2a8e28/manifest.json"
+  "publication_checkpoint_key": "governance/opportunity_intelligence/operations/checkpoints/20261031_143426_2a8e28/manifest.json",
+  "representative_company_qa": "passed",
+  "representative_company_count": 14,
+  "worker_tests_passed": 94,
+  "serving_tests_passed": 38,
+  "publication_evidence_note": "Prior complete auxiliary innovation feed retained with original dates; no opportunity or monetary dependencies. Raw archive checks passed."
 }
