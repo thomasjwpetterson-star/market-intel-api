@@ -161,3 +161,89 @@ Policy scope-and-source-v3 rejects non-lineage matches supported by only one sha
 Source metadata optionally adds required_delivery_mode, delivery_mode_basis, requirement_psc and psc_reference_url. Company lists optionally add observed_delivery_mode, observed_work_psc, work_classification_evidence_json, mode_reason and shared_scope_terms_json. Review-only caveats state the actual gap; the pre-quality caveat remains in the audit data. Rejected candidates use review_category=not_recommended and remain absent from serving edges.
 
 GET /companies/<CAGE>/opportunities/<episode_id>/match-review exposes the current assessment, including rejected candidates, bound to the current source and company-profile hashes. engine_company_fit_status is not_recommended, review_required, source_not_actionable, context_only, not_currently_served or current_scope_match_access_unconfirmed. It does not overwrite private saved qualification or notes. An empty assessment is not a finding that the company lacks a capability; item-reference matching is separate. Consumers can combine this with exact-source detail for a deliberate current-source/current-fit check.
+
+Business coverage, complete horizons and source clocks (31 October 2026)
+------------------------------------------------------------------------
+The additive overview.business_coverage contract exposes the recent reported
+annual_net_obligations/annual_dod_net_obligations, action/award counts and period.
+Separate lag_adjusted_* fields contain an observed full twelve-month comparison
+ending in the last calendar month before the nominal 90-day DoD publication-delay
+window. Neither window is extrapolated or certified complete. Consumers should
+use benchmark_annual_net_obligations, benchmark_basis and benchmark_period_start/
+end to explain coverage_benchmark, rather than recomputing three times the recent
+reported-year field. The current reference window is 2025-08-01 to 2026-07-31.
+The documented source is https://www.usaspending.gov/data/about-the-data-download.pdf.
+GET /companies/<CAGE>/business-evidence accepts kind=actions,
+kind=lag-adjusted-actions and kind=catalogue-sales with bounded limit/offset.
+
+The corresponding normalized stores are company_activity_actions,
+company_activity_baselines, company_reporting_lag_actions,
+company_reporting_lag_baselines, catalogue_sales_evidence,
+company_catalogue_sales and company_pipeline_coverage. The last evaluates the
+whole evidence-backed profile/reference-year population, flags large sites
+without work and material-value gaps, and records a diagnostic benchmark. A
+coverage target never creates an opportunity, increases a price or loosens fit.
+The registry remains searchable even where capability evidence is insufficient.
+
+Published requirements and the full source horizon of DLA forecasts are separate
+headline values. Forecast summaries retain monthly quantities, annual scenarios,
+source period, dated same-item/unit market prices and fallback government
+references. Consistent catalogue EA is an explicit forecast-unit assumption;
+unverified pack conversions and conflicting/negative monthly rows are withheld
+from valued totals. Inventory/reorder snapshots are context, not quantities to
+subtract from a procurement forecast. Source dates are not advanced by a build.
+item_request_progression links a forecast to a current exact-NIIN request with
+stable relationship IDs and both hashes; it does not establish fulfilment, an
+award or permission to add/deduct overlapping quantities. Price and stock changes
+produce before/after evidence events even when a forecast ID is unchanged.
+
+Other-seller item purchases are historical product-market context. Exact part
+references and shared-reference ambiguity remain drillable. They are not added
+to direct obligations, manufacturer revenue or future pipeline. Selected-CAGE
+RNCC/RNVC/RNSC and part records are retained by company_item_reference_evidence
+and summaries; GET /companies/<CAGE>/opportunities/<episode>/item-source-references
+returns the underlying rows. These source facts remain separate from data rights.
+
+The shared canonical SAM response parser now accepts ISO timestamps and offsets.
+Native opportunities retain source_response_deadline_raw, precision and exact UTC
+clock in value_inputs_json. Date-only values do not acquire an invented time.
+The reader expires precise UTC deadlines between daily snapshots. Inactive agency
+flags are retained and tracked distinctly from an inferred cancellation or a
+record simply absent from a subsequent snapshot. The canonical SQL is versioned
+under opportunity_worker/infrastructure/sam_response_deadline_canonical.sql.
+
+Agency-stated item approvals (producer 0.5.39)
+---------------------------------------------
+The producer adds direct item links for structured DLA notices that explicitly
+name an approved CAGE/part and one NSN, corroborated by the exact held catalogue
+tuple. This bypasses missing lexical work matches without transferring approval
+from a different product or site. Current exact RFQ/NIIN DIBBS matches are reused;
+the SAM approval keeps its own notice ID/hash/URL in
+company_approved_notice_sources. Multiple current agency copies remain evidence
+rather than extra company prospects. Additive item fields are agency_approval_quote,
+agency_approval_source_url, agency_approval_part_number and
+agency_other_sources_json. Other named references may be legacy sources; they
+are not confirmed current bidding competitors or proof of corporate independence.
+
+Structured DLA Line/Qty/UI prose supplies quoted single-item quantity facts,
+including notice_quantity_is_estimate and any separately stated aggregate ceiling.
+A minimum, ceiling or recurring rate is not substituted for the requested quantity.
+New-item purchase references do not value repair, installation, facilities or R&D
+work; scenarios above a stated aggregate ceiling are withheld. Both the quantity
+quote and price evidence remain inspectable. The methodology endpoint includes
+producer hashes and the source-approval/reporting-lag policies. Availability is
+manifest-driven; consumers must preserve missing optional fields on older releases.
+
+Early announcement source audit
+--------------------------------
+The existing independently refreshed DoD announcement feed contains 7,552 entries
+through 2026-10-30. In the August-October window, 1,183 announcements include 641
+with explicit funding fields. Exact primary-contract matching found 305 unique
+contract links; 124 have historical supplier reports. The 7,280 observed
+announcement/supplier relationships are candidate account links, not qualified
+work packages. The changed work itself must match the supplier's delivered scope:
+an F-35 assembly-station upgrade does not imply a new turbomachine order merely
+because that supplier appears under the same prime contract. Announcement amounts,
+cumulative ceilings and supplier-addressable work remain separate. This source
+already exists; the missing work is its controlled connection and scope validation
+in the opportunity engine, not a new upstream news ingestion system.
