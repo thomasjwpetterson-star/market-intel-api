@@ -43,6 +43,18 @@ class OpportunityPilotTests(unittest.TestCase):
         response=self.client.get(path,headers={'X-Mimir-Export-Key':'test-proxy-secret','X-Mimir-Opportunity-User':'11111111-1111-4111-8111-111111111111'})
         self.assertEqual(response.status_code,200);self.assertEqual(response.json()['categories']['work']['count'],203)
 
+    def test_methodology_exposes_future_work_assumptions_and_current_policy(self):
+        class MethodsRepository:
+            def manifest(self):
+                return {'rules':{},'run_id':'r','market_demand_policy':{'version':'test'}}
+        app=FastAPI();app.include_router(create_router(lambda: 'user',MethodsRepository()))
+        response=TestClient(app).get('/opportunity-intelligence/methodology')
+        self.assertEqual(response.status_code,200)
+        body=response.json()
+        self.assertEqual(body['market_demand_policy'],{'version':'test'})
+        self.assertIn('not an estimated solicitation date',body['future_work_methods']['contract_follow_on'])
+        self.assertIn('three completed prime packages',body['future_work_methods']['recurring_buying'])
+
     def test_work_query_has_no_horizon_cutoff_and_uses_outer_sort(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
         repo.manifest = lambda: {'as_of':'2026-10-31','tables': {}}

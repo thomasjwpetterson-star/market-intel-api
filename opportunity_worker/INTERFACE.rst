@@ -35,6 +35,10 @@ Tables and identifiers
 The current manifest maps logical names to immutable Glue/S3 tables. Consumers
 must pin one release for the entire request. Never construct table names.
 
+Still-funded older contracts remain included even without a recent action. Buyer
+labels can be resolved from exact held office/UEI references; missing labels do
+not trigger fuzzy corporate assignment. Unsupported source references are held out.
+
 Company identifiers: CAGE:<five uppercase characters>; unresolved UEI identities
 remain UEI:<identifier>. Source attribution stays at site/observed identity level.
 Opportunity episode_id is stable for its customer/work stream and reason;
@@ -46,7 +50,7 @@ company_matching_profiles, company_parent_resolution, company_capability_history
 market_work_history, market_recurring_demand, market_continuation_work,
 market_supplier_history, market_capability_customer_links,
 market_recurrence_training, market_recurrence_validation,
-market_contract_reference_index, market_demand_progression.
+market_contract_reference_index, market_demand_progression, market_customer_references.
 
 API contract
 ------------
@@ -69,6 +73,9 @@ value_inputs_json holds comparator sources, assumptions, cadence, training cutof
 forecast reference month, projected 12/36-month ranges, prior supplier counts and
 linked notices. company_addressable_value remains null without workshare evidence.
 Clock-only daily runs do not rewrite the monthly recurrence projection.
+/methodology exposes the recurrence, subcontract and follow-on assumptions.
+The two-year follow-on engagement lead is illustrative account-planning timing,
+not an estimated solicitation date.
 
 commercial_value_kind adds recurring_demand_scenario and
 historical_package_benchmark. The former is gross multi-year customer buying;
