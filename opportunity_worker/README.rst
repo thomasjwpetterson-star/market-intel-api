@@ -91,3 +91,29 @@ agency versions remain in the evidence ledger. Structured DLA line quantities
 retain their quote and distinguish estimated IDC quantities. New-item reference
 prices do not value repair/services, and scenarios exceeding a stated aggregate
 ceiling are withheld. A ceiling is not substituted as expected demand.
+
+Demand coverage corrections (0.5.51)
+----------------------------------
+
+SAM extraction also retains older postings with a source-stated response date
+at or after the assessment day. Posting age alone cannot close a long-running
+call. Inactive and terminal versions stay in the extraction for existing notice
+chain resolution and source-quality checks; a future deadline is not blanket
+eligibility. DIBBS extraction accepts held non-empty solicitation identifiers
+including SPR, preserving the existing line-conflict and date checks.
+
+Funded work-phase extraction accepts the source's explicit action types G
+(option exercised) and A (additional work under a new agreement), even when
+short descriptions omit those words. B/D or absent action types still require
+explicit phase/work wording. Funding-only, administrative, termination and other
+non-work action codes cannot become new work just because their descriptions
+mention an option. Source action codes, labels and admission reasons are retained.
+These are observed prime events, not predictions of unplaced supplier work.
+Existing functional/programme lineage and company-access checks still apply.
+
+The read API additionally exposes valuation_coverage and a complete-source
+next-twelve-month forecast subtotal. The published headline covers reference-
+priced live requests only. Unpriced published work and historical size guides
+are counted explicitly; they are not silently interpreted as zero demand.
+Open requests, annual historical buying and full-horizon forecasts have different
+time bases and cannot be divided into a meaningful qualified-pipeline ratio.

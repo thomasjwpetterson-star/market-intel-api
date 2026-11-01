@@ -5,7 +5,7 @@ cast(try(date_parse(return_by_date,'%m/%d/%Y')) AS varchar) closing_date,small_b
 try_cast(delivery_days AS bigint) delivery_days,cast(NULL AS varchar) ship_to_dodaac,solicitation_line_number line_item_num,purchase_request_number,fob_point,
 cast(NULL AS varchar) ingestion_date
 FROM market_intel_silver.fact_solicitations
-WHERE try(date_parse(return_by_date,'%m/%d/%Y'))>=current_timestamp-INTERVAL '90' DAY AND solicitation_number LIKE 'SPE%'),
+WHERE try(date_parse(return_by_date,'%m/%d/%Y'))>=current_timestamp-INTERVAL '90' DAY AND nullif(trim(solicitation_number),'') IS NOT NULL),
 checked AS(SELECT *,count(*) OVER(PARTITION BY solicitation_number,line_item_num,nsn) source_variants FROM source_rows),
 names AS(SELECT niin,min(item_name) item_name FROM market_intel_silver.ref_flis_nsn GROUP BY niin)
 SELECT s.solicitation_number,s.nsn,coalesce(n.item_name,'NSN '||s.nsn) nomenclature,s.unit_of_issue,s.quantity,s.closing_date,s.set_aside_code,s.delivery_days,s.ship_to_dodaac,s.line_item_num,s.purchase_request_number,s.fob_point,s.ingestion_date

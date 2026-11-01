@@ -92,3 +92,19 @@ class AdditionalSourceValueTests(unittest.TestCase):
   self.assertEqual(r['planned_packages']['planned_package_low'],250000000);self.assertEqual(r['planned_packages']['planned_package_high'],1000000000)
   rows.append(dict(episode_id='upper-only',commercial_value_kind='planned_package_reference',commercial_value='0',value_low=None,value_high='2000000'))
   r=summary({},rows,'release');self.assertIsNone(r['planned_packages']['planned_package_low']);self.assertEqual(r['planned_packages']['planned_package_high'],1002000000)
+
+class ValuationCoverageTests(unittest.TestCase):
+ def test_unknown_work_is_counted_separately_from_priced_requests_and_historical_guides(self):
+  result=summary({'published_records_count':10,'published_priced_records_count':3,'published_historical_guide_records_count':5,'published_first_deadline':'2026-11-02','published_last_deadline':'2027-04-01'},[],'release')
+  v=result['valuation_coverage']
+  self.assertEqual(v['records_without_request_estimate'],7)
+  self.assertEqual(v['records_without_any_value_guide'],2)
+  self.assertEqual(v['historical_comparison_only_records'],5)
+  self.assertIsNone(result['overall']['priced_demand_total'])
+ def test_next_year_forecast_uses_month_values_not_full_horizon_or_annualization(self):
+  row=dict(episode_id='one',commercial_value_kind='forecast_scenario',commercial_value='800',forecast_next_12m_value='200',valuation_status='catalogue_EA_assumed_forecast_unit_not_stated',item_reference_niin='001234567')
+  result=summary({},[row],'release')
+  self.assertEqual(result['forecast']['estimated_demand_total'],800)
+  self.assertEqual(result['forecast']['next_12_month_estimated_demand'],200)
+  row.pop('forecast_next_12m_value')
+  self.assertIsNone(summary({},[row],'release')['forecast']['next_12_month_estimated_demand'])

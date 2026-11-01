@@ -2,7 +2,7 @@
 import json,re
 from decimal import Decimal,InvalidOperation
 
-POLICY='priced-demand-business-coverage-v5'
+POLICY='priced-demand-business-coverage-v6'
 PRICED_KINDS=('item_reference_estimate','historical_unit_price_estimate')
 
 def summary(counts,priced,release,business=None):
@@ -59,7 +59,7 @@ def summary(counts,priced,release,business=None):
  try:annual_scale=max(float(coverage.get('benchmark_annual_net_obligations') or 0),float(coverage.get('direct_and_linked_part_market_reference') or 0),0)
  except (ValueError,TypeError):annual_scale=0
  focus=max(1000000,annual_scale*0.01) if annual_scale>=100000000 else 1000000 if scale>=100000000 else 0
- return dict(release=release,policy=POLICY,business_coverage=coverage,forecast=forecast,replenishment=separate_outlook(priced,'annual_usage_scenario'),planned_packages=separate_outlook(priced,'planned_package_reference'),categories=result,overall=overall,materiality_floor=focus,materiality_basis='Default priority focus scales to 1% of the larger observed annual-obligations or aligned linked-part market reference for sites above $100m, with a $1m floor. The linked market reference includes exact item-identifying part purchases from other sellers and is not manufacturer revenue. A $1m focus also applies where lifetime observed obligations exceed $100m. Editable; smaller prospects remain available.',value_explanation='The headline combines priced contract and item requirements across the complete company feed. It uses stated quantities and exact-item reference or historical unit prices. Repeated requirements for the same buyer and item contribute their largest scenario once, including overlaps between contract and item feeds. Historical comparisons, source forecasts, conditional annual-usage scenarios, planned package bands and programme totals remain separate. Government reference dates may be unknown; prices are not current quotes. Unpriced opportunities are not assumed to be worth zero. These are demand estimates, not expected company revenue.')
+ return dict(release=release,policy=POLICY,valuation_coverage=valuation_coverage(counts,overall),business_coverage=coverage,forecast=forecast,replenishment=separate_outlook(priced,'annual_usage_scenario'),planned_packages=separate_outlook(priced,'planned_package_reference'),categories=result,overall=overall,materiality_floor=focus,materiality_basis='Default priority focus scales to 1% of the larger observed annual-obligations or aligned linked-part market reference for sites above $100m, with a $1m floor. The linked market reference includes exact item-identifying part purchases from other sellers and is not manufacturer revenue. A $1m focus also applies where lifetime observed obligations exceed $100m. Editable; smaller prospects remain available.',value_explanation='The headline combines priced contract and item requirements across the complete company feed. It uses stated quantities and exact-item reference or historical unit prices. Repeated requirements for the same buyer and item contribute their largest scenario once, including overlaps between contract and item feeds. Historical comparisons, source forecasts, conditional annual-usage scenarios, planned package bands and programme totals remain separate. Government reference dates may be unknown; prices are not current quotes. Unpriced opportunities are not assumed to be worth zero. These are demand estimates, not expected company revenue.')
 
 
 def separate_outlook(rows,kind):
@@ -94,8 +94,12 @@ def forecast_summary(rows):
   niin=str(row.get('item_reference_niin') or row['episode_id'])
   previous=by_item.get(niin)
   if previous is None or amount>previous[0]:by_item[niin]=(amount,row)
- years={};components=[]
+ years={};components=[];next_year=[]
  for niin,(amount,row) in by_item.items():
+  try:
+   next_value=Decimal(str(row.get('forecast_next_12m_value')))
+   if next_value.is_finite() and next_value>=0:next_year.append(next_value)
+  except (InvalidOperation,TypeError,ValueError):pass
   try:annual=json.loads(row.get('annual_scenarios_json') or '[]')
   except (TypeError,ValueError):annual=[]
   for year in annual:
@@ -104,7 +108,7 @@ def forecast_summary(rows):
    key=str(year['calendar_year']);years[key]=years.get(key,Decimal(0))+Decimal(str(value))
   components.append({**row,'included_value':float(amount),'niin':niin,'aggregation':'One item forecast across its full stated future period; not added to published requests'})
  components.sort(key=lambda x:(-x['included_value'],x['episode_id']))
- return dict(estimated_demand_total=float(sum((v[0] for v in by_item.values()),Decimal(0))) if by_item else None,priced_items=len(by_item),dated_market_price_items=sum(bool(r.get('market_price_median')) for _,r in by_item.values()),first_month=min((str(r.get('window_start')) for _,r in by_item.values() if r.get('window_start')),default=None),last_month=max((str(r.get('window_end')) for _,r in by_item.values() if r.get('window_end')),default=None),annual_values=[dict(calendar_year=y,estimated_demand=float(v)) for y,v in sorted(years.items())],value_components=components,interpretation='DLA forecast quantities priced using recent observed same-item/unit medians, otherwise government references. Catalogue EA is assumed because the forecast source omits units; non-EA conversions and conflicts are excluded. Forecasts can change and may overlap published requirements. These figures are separate from published demand and expected company revenue. Stock and reorder snapshots are context, not a deduction from the source forecast.')
+ return dict(next_12_month_estimated_demand=float(sum(next_year,Decimal(0))) if by_item and len(next_year)==len(by_item) else None,next_12_month_priced_items=len(next_year),estimated_demand_total=float(sum((v[0] for v in by_item.values()),Decimal(0))) if by_item else None,priced_items=len(by_item),dated_market_price_items=sum(bool(r.get('market_price_median')) for _,r in by_item.values()),first_month=min((str(r.get('window_start')) for _,r in by_item.values() if r.get('window_start')),default=None),last_month=max((str(r.get('window_end')) for _,r in by_item.values() if r.get('window_end')),default=None),annual_values=[dict(calendar_year=y,estimated_demand=float(v)) for y,v in sorted(years.items())],value_components=components,interpretation='DLA forecast quantities priced using recent observed same-item/unit medians, otherwise government references. Catalogue EA is assumed because the forecast source omits units; non-EA conversions and conflicts are excluded. Forecasts can change and may overlap published requirements. These figures are separate from published demand and expected company revenue. Stock and reorder snapshots are context, not a deduction from the source forecast.')
 
 
 def coverage_summary(business,published,forecast):
@@ -128,3 +132,15 @@ def coverage_summary(business,published,forecast):
   published_demand_to_annual_ratio=current/annual if annual and annual>0 and current is not None else None,
   full_horizon_forecast_to_annual_ratio=future/annual if annual and annual>0 and future is not None else None,
   interpretation='Three times observed annual net federal obligations is a coverage benchmark; Defense comparisons use the stated reporting-lag-adjusted year where available, not a forecast or promised pipeline. Published requirements and full-horizon forecasts remain separate because they may overlap. Unpriced work is unknown, not zero. Reseller product-market sales are historical context and are not added to obligations, manufacturer revenue or future pipeline.')
+
+
+def valuation_coverage(counts,published):
+ """Explain the visible value's exclusions using the complete served feed.
+
+Record counts precede requirement-family aggregation; these are not numbers
+that can be added to the monetary total. Unknown value is never zero demand.
+ """
+ total=int(counts.get('published_records_count') or 0)
+ priced=int(counts.get('published_priced_records_count') or 0)
+ guides=int(counts.get('published_historical_guide_records_count') or 0)
+ return dict(published_records=total,reference_priced_records=priced,records_without_request_estimate=max(total-priced,0),historical_comparison_only_records=guides,records_without_any_value_guide=max(total-priced-guides,0),priced_requirement_groups=published['priced_requirement_count'],first_response_deadline=counts.get('published_first_deadline'),last_response_deadline=counts.get('published_last_deadline'),interpretation='The published headline prices only requests with usable exact-item quantities and unit prices. Other published work remains in the feed but its value is unknown or only a historical comparison. Counts include source inquiries and are not all invitations to bid. Open requests are a point-in-time stock; full-horizon forecasts and annual obligations cover different periods and cannot establish a pipeline coverage ratio.')
