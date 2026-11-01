@@ -117,3 +117,21 @@ priced live requests only. Unpriced published work and historical size guides
 are counted explicitly; they are not silently interpreted as zero demand.
 Open requests, annual historical buying and full-horizon forecasts have different
 time bases and cannot be divided into a meaningful qualified-pipeline ratio.
+
+IDC quantity and source-ceiling integrity (0.5.52)
+------------------------------------------------
+
+DIBBS source projections now retain guaranteed minimum quantity, delivery-order
+minimum, contract maximum and estimated buying frequency. They remain separate
+fields: a monetary maximum is not demand quantity, and buying frequency is not
+multiplied into an already-stated estimated quantity. Each field participates in
+the source version hash. Unknown fields in older source bindings remain unknown.
+
+If quantity times the retained unit price exceeds a held source contract maximum,
+the request stays in the feed with its original price, arithmetic and conflict
+reason, but no usable value is assigned. It is not silently valued at the ceiling.
+The serving API and whole-market coverage calculation share one value guard.
+Two release gates reject priced conflicts and scenarios exceeding source maxima.
+The API distinguishes modern FY2020+ U-type IDC estimates from firm quantities,
+with retained structured fields and a public DLA methodology reference. CSVs
+separate requested and estimated quantities and preserve ordering terms.

@@ -98,7 +98,8 @@ class Repository:
    notice_lot="coalesce(try_cast(json_extract_scalar(np.items_json,'$[0].government_reference_lot_scenario') AS double),try_cast(json_extract_scalar(np.items_json,'$[0].supplier_average_lot_scenario') AS double))" if 'company_notice_item_prices' in self.manifest()['tables'] else 'NULL'
    if 'company_notice_item_prices' in self.manifest()['tables']:notice_lot="CASE WHEN json_array_length(np.items_json)=1 THEN "+notice_lot+" END"
    notice_lot="CASE WHEN NOT regexp_like(lower(coalesce(o.title,'')),'\\b(repair\\w*|overhaul\\w*|remanufactur\\w*)\\b') AND NOT regexp_like(coalesce(o.psc,''),'^[JNYZ]') THEN "+notice_lot+' END'
-   request_lot="CASE WHEN o.lane='published_item_procurement' AND try_cast(json_extract_scalar(o.value_inputs_json,'$.quantity') AS double)>0 AND try_cast(json_extract_scalar(o.value_inputs_json,'$.observed_unit_price') AS double)>0 AND nullif(json_extract_scalar(o.value_inputs_json,'$.request_unit'),'') IS NOT NULL THEN try_cast(json_extract_scalar(o.value_inputs_json,'$.quantity') AS double)*try_cast(json_extract_scalar(o.value_inputs_json,'$.observed_unit_price') AS double) END"
+   from opportunity_worker.opportunity_engine.request_values import reference_request_value_sql
+   request_lot=reference_request_value_sql()
    forecast_lot='coalesce(least(v.government_reference_lot_scenario,v.supplier_average_lot_scenario),v.government_reference_lot_scenario,v.supplier_average_lot_scenario)' if 'company_item_valuations' in self.manifest()['tables'] else 'NULL'
    valuation_columns={x['Name'] for x in self.manifest()['tables'].get('company_item_valuations',{}).get('columns',[])}
    if 'market_price_lot_scenario' in valuation_columns:forecast_lot='coalesce(v.market_price_lot_scenario,v.government_reference_lot_scenario)'

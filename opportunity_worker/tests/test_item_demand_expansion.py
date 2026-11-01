@@ -3,12 +3,13 @@ import duckdb
 import pytest
 from opportunity_engine.item_demand import prepare,augment
 
-def test_full_dibbs_refresh_reuses_ids_and_prices_exact_unit_from_dated_lines(tmp_path):
+@pytest.mark.parametrize('source_maximum',[None,2500,5000])
+def test_full_dibbs_refresh_reuses_ids_and_prices_exact_unit_from_dated_lines(tmp_path,source_maximum):
  c=duckdb.connect();sources={}
  def put(n,q):
   p=tmp_path/(n+'.parquet');c.execute("COPY ("+q+") TO '"+str(p)+"' (FORMAT PARQUET)");sources[n]={'files':[{'path':str(p)}]}
  put('demand_candidates',"""SELECT repeat('a',64) episode_id,'old' record_hash,'published_item_procurement' lane,'old' title,'old' scope_text,'DLA' customer_name,NULL::VARCHAR programme,NULL::VARCHAR psc,NULL::VARCHAR naics,NULL::VARCHAR window_start,'2026-11-20' window_end,'date' date_basis,NULL::DOUBLE value_low,NULL::DOUBLE value_median,NULL::DOUBLE value_high,'unpriced' value_basis,'scope' value_scope,'{}' value_inputs_json,'dla_solicitations' source_name,NULL::VARCHAR source_url,'old' source_evidence_id,'SPE4A727Q0117|0001|2915003538074' source_locator,'SPE4A727Q0117' native_identifier,'procurement_published' procurement_state,'outcome_not_established' reconciled_state,'unknown' access_state,'why' rationale,'limits' limitations""")
- put('dla_solicitations',"""SELECT 'SPE4A727Q0117' solicitation_number,'2915003538074' nsn,'Diaphragm' nomenclature,'EA' unit_of_issue,10::BIGINT quantity,'2026-11-20' closing_date,'N' set_aside_code,190::BIGINT delivery_days,NULL::VARCHAR ship_to_dodaac,'0001' line_item_num,'12345' purchase_request_number,'Origin' fob_point,'2026-10-31' ingestion_date""")
+ put('dla_solicitations',"""SELECT 'SPE4A727Q0117' solicitation_number,'2915003538074' nsn,'Diaphragm' nomenclature,'EA' unit_of_issue,10::BIGINT quantity,'2026-11-20' closing_date,'N' set_aside_code,190::BIGINT delivery_days,NULL::VARCHAR ship_to_dodaac,'0001' line_item_num,'12345' purchase_request_number,'Origin' fob_point,'2026-10-31' ingestion_date"""+(","+str(source_maximum)+"::DOUBLE source_contract_maximum_usd" if source_maximum is not None else ''))
  put('item_reference_facts',"SELECT '003538074' niin,'EA' unit_of_issue,1000.0 govt_estimated_price,'ref' evidence_id,'snapshot' source_snapshot_sha256")
  put('dla_forecasts',"SELECT '003538074' niin,DATE '2026-11-01' forecast_month,10::BIGINT forecast_qty")
  put('item_market_price_lines',"""SELECT 'price1' pricing_record_id,'physical1' source_record_id,'003538074' niin,'EA' quantity_unit,4.0 quantity,200.0 unit_price_usd,TRUE include_in_mimir_range,'2026-08-01' transaction_date,'27541' supplier_cage,'https://example.gov' source_url,'s3://source' source_s3_uri,'line 1' source_row_locator,'hash' source_sha256
@@ -18,10 +19,13 @@ def test_full_dibbs_refresh_reuses_ids_and_prices_exact_unit_from_dated_lines(tm
  out=prepare(sources,tmp_path/'derived','2026-10-31')
  row=c.execute('SELECT episode_id,value_median,value_inputs_json FROM read_parquet(?)',[out['demand_candidates']['path']]).fetchone()
  assert row[0]=='a'*64
- assert row[1]==3000
+ assert row[1]==(None if source_maximum==2500 else 3000)
  data=json.loads(row[2]);assert data['market_observations']==2
  assert data['observed_unit_price']==300
  assert data['quantity']==10 and data['request_unit']=='EA'
+ assert data['reference_lot_scenario']==3000
+ assert data['source_contract_maximum_usd']==source_maximum
+ assert data['pricing_conflict']==(source_maximum==2500)
  assert out['item_market_price_evidence']['rows']==2
  # Same item with wrong unit never borrows the EA price.
  price=c.execute('SELECT unit,market_price_median,latest_price_date FROM read_parquet(?)',[out['item_price_references']['path']]).fetchone()

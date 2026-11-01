@@ -2,6 +2,7 @@
 import hashlib,json
 from pathlib import Path
 import duckdb
+from .request_values import reference_request_value_sql
 POLICY='whole-market-priced-coverage-v1'
 
 def build(directory):
@@ -23,7 +24,7 @@ def build(directory):
  coalesce(json_extract_string(o.value_inputs_json,'$.niin'),right(json_extract_string(o.value_inputs_json,'$.nsn'),9),right(json_extract_string(np.items_json,'$[0].nsn'),9)) niin,
  json_extract_string(o.value_inputs_json,'$.purchase_request_number') purchase_request,
  CASE WHEN json_array_length(np.items_json)=1 THEN coalesce(try_cast(json_extract_string(np.items_json,'$[0].government_reference_lot_scenario') AS DOUBLE),try_cast(json_extract_string(np.items_json,'$[0].supplier_average_lot_scenario') AS DOUBLE)) END notice_lot,
- CASE WHEN o.lane='published_item_procurement' AND try_cast(json_extract_string(o.value_inputs_json,'$.quantity') AS DOUBLE)>0 AND try_cast(json_extract_string(o.value_inputs_json,'$.observed_unit_price') AS DOUBLE)>0 AND nullif(json_extract_string(o.value_inputs_json,'$.request_unit'),'') IS NOT NULL THEN try_cast(json_extract_string(o.value_inputs_json,'$.quantity') AS DOUBLE)*try_cast(json_extract_string(o.value_inputs_json,'$.observed_unit_price') AS DOUBLE) END request_lot,
+ REQUEST_VALUE_SQL request_lot,
  o.value_median historical_or_source_value,
  CASE WHEN v.valuation_status='catalogue_EA_assumed_forecast_unit_not_stated' THEN coalesce(v.market_price_lot_scenario,v.government_reference_lot_scenario) END forecast_lot,
  coalesce(v.market_price_lot_scenario,v.government_reference_lot_scenario) raw_forecast_value
@@ -33,7 +34,7 @@ def build(directory):
  LEFT JOIN company_item_valuations v ON v.company_id=m.company_id AND v.episode_id=o.episode_id AND v.record_hash=o.record_hash
  LEFT JOIN company_notice_item_prices np ON np.company_id=m.company_id AND np.episode_id=o.episode_id AND np.record_hash=o.record_hash
  WHERE hash(m.company_id)%32=COMPANY_PARTITION AND d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context','historical_watch','repeat_demand_inference') AND coalesce(cw.review_category,'')<>'market_context' AND (o.lane<>'source_item_forecasts' OR coalesce(v.valuation_status,'')<>'negative_source_quantity')
- QUALIFY row_number() OVER(PARTITION BY m.company_id,CASE WHEN o.source_name='sam_notices' AND length(o.native_identifier)>4 THEN concat_ws('|',o.source_name,upper(o.customer_name),regexp_replace(upper(o.native_identifier),'-00$',''),regexp_replace(upper(o.title),'[^A-Z0-9]','','g')) ELSE o.episode_id END ORDER BY o.notice_posted_date DESC NULLS LAST,o.episode_id)=1"""
+ QUALIFY row_number() OVER(PARTITION BY m.company_id,CASE WHEN o.source_name='sam_notices' AND length(o.native_identifier)>4 THEN concat_ws('|',o.source_name,upper(o.customer_name),regexp_replace(upper(o.native_identifier),'-00$',''),regexp_replace(upper(o.title),'[^A-Z0-9]','','g')) ELSE o.episode_id END ORDER BY o.notice_posted_date DESC NULLS LAST,o.episode_id)=1""".replace('REQUEST_VALUE_SQL',reference_request_value_sql('json_extract_string'))
  # Keep each company's full notice families together while bounding the wide
  # joins/window state. Partitioning never truncates the company universe.
  for partition in range(32):

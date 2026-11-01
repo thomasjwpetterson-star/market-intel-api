@@ -101,6 +101,8 @@ def validate(directory):
   check('forecast_scenarios_have_all_months',c.execute('SELECT count(*) FROM company_item_valuations WHERE json_array_length(monthly_evidence_json)<>month_count').fetchone()[0]==0)
   check('forecast_scenario_arithmetic',c.execute('SELECT count(*) FROM company_item_valuations WHERE abs(government_reference_lot_scenario-quantity*government_reference_unit_price)>0.005 OR abs(supplier_average_lot_scenario-quantity*supplier_average_unit_price)>0.005').fetchone()[0]==0)
   check('no_future_supplier_average',c.execute("SELECT count(*) FROM company_item_valuations WHERE supplier_average_lot_scenario IS NOT NULL AND substr(supplier_average_last_sale,1,10)>?",[m['as_of']]).fetchone()[0]==0)
+ check('published_item_estimates_respect_source_maximum',c.execute("SELECT count(*) FROM opportunities WHERE lane='published_item_procurement' AND try_cast(json_extract_string(value_inputs_json,'$.source_contract_maximum_usd') AS DOUBLE)>0 AND (value_median>try_cast(json_extract_string(value_inputs_json,'$.source_contract_maximum_usd') AS DOUBLE) OR value_high>try_cast(json_extract_string(value_inputs_json,'$.source_contract_maximum_usd') AS DOUBLE))").fetchone()[0]==0)
+ check('published_item_conflicts_never_valued',c.execute("SELECT count(*) FROM opportunities WHERE lane='published_item_procurement' AND json_extract_string(value_inputs_json,'$.pricing_conflict')='true' AND (value_low IS NOT NULL OR value_median IS NOT NULL OR value_high IS NOT NULL)").fetchone()[0]==0)
  if 'company_opportunity_events' in m['tables']:
   check('company_events_unique',c.execute('SELECT count(*)-count(DISTINCT event_id) FROM company_opportunity_events').fetchone()[0]==0)
  if 'company_match_assessments' in m['tables']:
