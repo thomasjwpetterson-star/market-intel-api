@@ -2,6 +2,7 @@ import asyncio
 import threading
 
 import pytest
+import anyio
 from fastapi import FastAPI, Response
 from httpx import ASGITransport, AsyncClient
 
@@ -9,13 +10,14 @@ from public_serving_capacity import PublicServingCapacityMiddleware
 
 
 def fixture_app(**options):
-    state = {'generation': 1, 'calls': 0, 'now': 0}
+    state = {'generation': 1, 'calls': 0, 'now': 0, 'order': []}
     entered, release = threading.Event(), threading.Event()
     app = FastAPI()
 
     @app.get('/api/public/intelligence/companies/{record}')
     def public(record: str, response: Response):
         state['calls'] += 1
+        state['order'].append(record)
         if record == 'HELD':
             entered.set()
             assert release.wait(5)
@@ -157,3 +159,75 @@ async def test_cancelled_leader_keeps_one_worker_and_followers_receive_public_re
             assert state['calls'] == 1
         finally:
             release.set()
+
+
+@pytest.mark.asyncio
+async def test_cold_fifo_is_bounded_fair_and_does_not_occupy_serving_threads():
+    middleware, state, entered, release = fixture_app(pending_limit=2, pending_timeout=1)
+    async with AsyncClient(transport=ASGITransport(app=middleware), base_url='http://test') as client:
+        first = asyncio.create_task(client.get('/api/public/intelligence/companies/HELD'))
+        tasks = []
+        try:
+            for _ in range(100):
+                if entered.is_set(): break
+                await asyncio.sleep(.005)
+            for record in ['NEXT', 'LAST']:
+                tasks.append(asyncio.create_task(client.get('/api/public/intelligence/companies/' + record)))
+                await asyncio.sleep(.01)
+            assert len(middleware.pending) == 2
+            assert state['order'] == ['HELD']
+            assert middleware.active == 1
+            assert anyio.to_thread.current_default_thread_limiter().borrowed_tokens == 1
+            assert (await client.get('/api/public/intelligence/companies/EXCESS')).status_code == 503
+            assert (await asyncio.wait_for(client.get('/api/customer'), .5)).status_code == 200
+            release.set()
+            assert all(response.status_code == 200 for response in await asyncio.gather(first, *tasks))
+            assert state['order'] == ['HELD', 'NEXT', 'LAST']
+            assert not middleware.pending and middleware.active == 0
+        finally:
+            release.set()
+            await asyncio.gather(first, *tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_queued_timeout_cancellation_and_grant_race_return_capacity():
+    middleware, _, _, _ = fixture_app(pending_limit=2, pending_timeout=.03)
+    assert await middleware._admit()
+    assert not await middleware._admit()
+    assert not middleware.pending and middleware.active == 1
+    cancelled = asyncio.create_task(middleware._admit())
+    await asyncio.sleep(.005)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError): await cancelled
+    assert not middleware.pending and middleware.active == 1
+    raced = asyncio.create_task(middleware._admit())
+    await asyncio.sleep(.005)
+    middleware._release()
+    raced.cancel()
+    with pytest.raises(asyncio.CancelledError): await raced
+    assert not middleware.pending and middleware.active == 0
+    assert await middleware._admit()
+    middleware._release()
+
+
+@pytest.mark.asyncio
+async def test_identical_queued_records_reuse_the_first_queued_result():
+    middleware, state, entered, release = fixture_app(pending_limit=2, pending_timeout=1)
+    async with AsyncClient(transport=ASGITransport(app=middleware), base_url='http://test') as client:
+        first = asyncio.create_task(client.get('/api/public/intelligence/companies/HELD'))
+        followers = []
+        try:
+            for _ in range(100):
+                if entered.is_set(): break
+                await asyncio.sleep(.005)
+            followers = [asyncio.create_task(client.get('/api/public/intelligence/companies/NEXT')) for _ in range(2)]
+            await asyncio.sleep(.02)
+            assert len(middleware.pending) == 2
+            release.set()
+            results = await asyncio.gather(first, *followers)
+            assert all(result.status_code == 200 for result in results)
+            assert state['order'] == ['HELD', 'NEXT']
+            assert not middleware.pending and middleware.active == 0
+        finally:
+            release.set()
+            await asyncio.gather(first, *followers, return_exceptions=True)
