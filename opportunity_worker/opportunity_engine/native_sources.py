@@ -41,7 +41,7 @@ def queries(as_of):
  max_by(manufacturer_of_goods,action_date) manufacturer_of_goods,max_by(number_of_offers_received,action_date) offer_count,
  max_by(extent_competed,action_date) extent_competed,max_by(type_of_set_aside,action_date) set_aside,
  max_by(performance_city,action_date) performance_city,max_by(performance_region,action_date) performance_region,
- max_by(contract_transaction_unique_key,action_date) latest_transaction_key,max_by(usaspending_permalink,action_date) source_url
+ max_by(contract_transaction_unique_key,action_date) latest_transaction_key,max_by(usaspending_permalink,action_date) FILTER(WHERE nullif(trim(usaspending_permalink),'') IS NOT NULL) source_url
  FROM actions WHERE revision=1 GROUP BY contract_award_unique_key
  ) SELECT *,to_hex(sha256(to_utf8(concat_ws('|',award_key,latest_transaction_key,cast(action_count AS varchar),cast(observed_net_obligations AS varchar))))) evidence_id
  FROM awards""".replace('ASOF', as_of),

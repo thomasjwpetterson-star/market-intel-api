@@ -30,7 +30,8 @@ def history_sql(prime,sub,as_of):
     source_url,evidence_id,parent_piid,parent_agency,uei,cast(NULL AS varchar) parent_award_key,
     extent_competed,set_aside,offer_count,performance_city,performance_region,d.defence_award_key IS NOT NULL defence_customer
     FROM {prime} p LEFT JOIN {defence} d ON d.defence_award_key=p.award_key WHERE company_id IS NOT NULL AND observed_net_obligations>0
-    AND try_cast(substr(latest_action_date,1,10) AS date) BETWEEN {end}-INTERVAL '5' YEAR AND {end}
+    AND try_cast(substr(latest_action_date,1,10) AS date)<={end}
+    AND (try_cast(substr(latest_action_date,1,10) AS date)>={end}-INTERVAL '5' YEAR OR try_cast(substr(period_end,1,10) AS date)>={end})
     AND try_cast(substr(first_action_date,1,10) AS date)<={end}
     UNION ALL
     SELECT report_key,company_id,sub_name,'subcontract_report',coalesce(nullif(prime_uei,''),prime_name),prime_name,
@@ -87,7 +88,7 @@ def continuation_sql(history,recurrence,as_of):
     # Existing funded work with a stated end is a follow-on planning prospect,
     # not a claim that a replacement competition will be held or remain open.
     return f"""SELECT h.* FROM {history} h WHERE defence_customer AND source_kind='prime_award' AND technical_terms>=3
-    AND amount>=100000 AND try_cast(substr(last_observed,1,10) AS date)>=DATE {lit(as_of)}-INTERVAL '15' MONTH
+    AND amount>=100000 AND (try_cast(substr(period_end,1,10) AS date)>=DATE {lit(as_of)} OR try_cast(substr(last_observed,1,10) AS date)>=DATE {lit(as_of)}-INTERVAL '15' MONTH)
     AND try_cast(substr(coalesce(nullif(potential_end,''),period_end),1,10) AS date) BETWEEN DATE {lit(as_of)} AND DATE {lit(as_of)}+INTERVAL '10' YEAR
     AND try_cast(substr(period_start,1,10) AS date)<=DATE {lit(as_of)}
     AND NOT EXISTS(SELECT 1 FROM {recurrence} r WHERE r.cohort_id=h.cohort_id)
@@ -97,7 +98,7 @@ def continuation_sql(history,recurrence,as_of):
 def capability_sql(history):
     return f"""SELECT company_id,capability_id,min(source_kind) source_kind,min(scope_key) scope_key,min(work_mode) work_mode,min(psc) psc,min(naics) naics,
     max_by(work_text,event_date) work_text,count(*) observed_records,count(DISTINCT customer_key) customers,
-    min(event_date) first_observed,max(last_observed) last_observed,max_by(evidence_id,event_date) sample_evidence_id,
+    min(event_date) first_observed,max(last_observed) last_observed,max(period_end) latest_funded_performance_end,max_by(evidence_id,event_date) sample_evidence_id,
     lower(to_hex(sha256(checksum(evidence_id)))) evidence_digest,
     json_format(cast(array_sort(array_agg(DISTINCT programme) FILTER(WHERE nullif(programme,'') IS NOT NULL AND upper(programme) NOT IN ('NONE','NOT APPLICABLE','UNKNOWN'))) AS JSON)) programmes_json
     FROM {history} GROUP BY company_id,capability_id"""
@@ -157,7 +158,7 @@ def capability_customer_routes(aws,manifest,root):
     WHERE c.source_kind='prime_award' AND c.observed_records>=2
     AND regexp_like(coalesce(r.psc,''),'^[ADFRSTUV]') AND c.work_mode NOT IN ('repair','supply_or_unspecified')
     AND cardinality(split(r.scope_key,'|'))>=3
-    AND try_cast(substr(c.last_observed,1,10) AS date)>=DATE {lit(as_of)}-INTERVAL '3' YEAR
+    AND (try_cast(substr(c.last_observed,1,10) AS date)>=DATE {lit(as_of)}-INTERVAL '3' YEAR OR try_cast(substr(c.latest_funded_performance_end,1,10) AS date)>=DATE {lit(as_of)})
     AND NOT contains(cast(json_parse(r.supplier_ids_json) AS array(varchar)),c.company_id)
     GROUP BY r.cohort_id,c.company_id,c.capability_id,c.source_kind,c.scope_key,c.work_mode,c.psc,c.work_text,c.last_observed,c.observed_records,c.sample_evidence_id,c.evidence_digest"""
     source=remote(aws,'market_capability_customer_links',sql,'market_customer_routes_'+uuid.uuid4().hex[:8],as_of)
@@ -168,3 +169,24 @@ def capability_customer_routes(aws,manifest,root):
         f['path']=str(dest)
     source.update(remote_only=False,path=source['files'][0]['path']);manifest['sources']['market_capability_customer_links']=source
     return source
+
+
+def customer_references(aws,manifest,root):
+    """Resolve labels by the same buying-office/prime identifier, never by name similarity."""
+    h=DATABASE+'.'+manifest['sources']['market_work_history']['table'];p=DATABASE+'.'+manifest['sources']['native_company_awards']['table']
+    valid="nullif(trim(customer_name),'') IS NOT NULL AND regexp_replace(customer_name,'[\\s/]','')<>''"
+    order="concat_ws('|',last_observed,evidence_id)"
+    sql=f"""WITH customers AS(SELECT source_kind,customer_key,max_by(customer_name,{order}) FILTER(WHERE {valid}) observed_name,
+    max_by(evidence_id,{order}) FILTER(WHERE {valid}) observed_name_evidence FROM {h} GROUP BY source_kind,customer_key),
+    primes AS(SELECT uei,max_by(company_name,concat_ws('|',latest_action_date,evidence_id)) FILTER(WHERE nullif(trim(company_name),'') IS NOT NULL) company_name,
+    max_by(evidence_id,concat_ws('|',latest_action_date,evidence_id)) FILTER(WHERE nullif(trim(company_name),'') IS NOT NULL) evidence_id FROM {p} WHERE nullif(uei,'') IS NOT NULL GROUP BY uei)
+    SELECT c.source_kind,c.customer_key,coalesce(c.observed_name,p.company_name) customer_name,coalesce(c.observed_name_evidence,p.evidence_id) evidence_id,
+    CASE WHEN c.observed_name IS NOT NULL THEN 'same_customer_identifier_in_held_work' WHEN p.company_name IS NOT NULL THEN 'exact_prime_uei_in_held_awards' ELSE 'identifier_only' END name_basis
+    FROM customers c LEFT JOIN primes p ON c.source_kind='subcontract_report' AND p.uei=c.customer_key"""
+    src=remote(aws,'market_customer_references',sql,'market_customer_names_'+uuid.uuid4().hex[:8],manifest['as_of']);root=Path(root);root.mkdir(parents=True,exist_ok=True)
+    for i,f in enumerate(src['files']):
+        dest=root/(str(i)+'.parquet');aws.s3.download_file(BUCKET,f['s3_uri'].split('/',3)[3],str(dest))
+        if hashlib.sha256(dest.read_bytes()).hexdigest()!=f['sha256']:raise ValueError('Customer label source content changed')
+        f['path']=str(dest)
+    src.update(remote_only=False,path=src['files'][0]['path']);manifest['sources']['market_customer_references']=src
+    return src

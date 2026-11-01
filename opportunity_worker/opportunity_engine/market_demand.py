@@ -41,6 +41,11 @@ def scenario(row,as_of):
                 assumptions=['Buying frequency continues at the observed rate over the stated horizon.','Future package mix and completed historical package sizes remain comparable.','No inflation, growth, win probability or supplier workshare is assumed.','Existing contracts, published requirements and this buying stream may overlap; values must not be added until reconciled.'],
                 limitations=['The forecast concerns future customer buying, not a promised solicitation or an award to any company.','Historical amounts use the latest held award revisions; they are not reconstructed point-in-time estimates.','Quantity/configuration and contract duration may differ.'])
 
+def canonical_award_url(identifier):
+    from urllib.parse import quote
+    value=str(identifier or '')
+    return 'https://www.usaspending.gov/award/'+quote(value,safe='') if re.fullmatch(r'CONT_(?:AWD|IDV)_[A-Za-z0-9_-]{5,500}',value) else None
+
 def make_opportunity(row,as_of,continuation=False):
     cohort=row['cohort_id'];scope=clean(row['work_text']);kind=row.get('source_kind');preview=json.loads(row.get('comparators_json') or '[]')
     # Athena CAST(ROW AS JSON) serialises named ROWs as arrays in some engines.
@@ -60,12 +65,16 @@ def make_opportunity(row,as_of,continuation=False):
         lo=s['next_36_month_low'] if s['value_estimate_supported'] else number(row.get('observed_p10'));mid=s['next_36_month_median'] if s['value_estimate_supported'] else number(row.get('observed_median'));hi=s['next_36_month_high'] if s['value_estimate_supported'] else number(row.get('observed_p90'))
         rationale=f"The same customer bought this evidenced work across {row['awards']} historical packages and {row['buying_months']} buying months. Timing uses the observed purchase intervals. Prior suppliers establish company relevance; future work remains conditional."
         timing='Estimated repeat-buying window from observed award cadence, with a 90-day reporting-lag allowance. No solicitation date is announced.'
-    eid=digest({'model':POLICY,'lane':lane,'cohort':cohort});source_evidence=row.get('evidence_digest') or row.get('evidence_id');url=row.get('source_url') or (preview[0].get('source_url') if preview else None)
+    eid=digest({'model':POLICY,'lane':lane,'cohort':cohort});source_evidence=row.get('evidence_digest') or row.get('evidence_id');url=row.get('source_url') or next((p.get('source_url') for p in preview if p.get('source_url')),None) or canonical_award_url(row.get('record_id') if continuation else None) or next((canonical_award_url(p.get('record_id') if kind=='prime_award' else p.get('parent_award_key')) for p in preview if canonical_award_url(p.get('record_id') if kind=='prime_award' else p.get('parent_award_key'))),None)
+    buyer=clean(row.get('customer_name'))
+    if not buyer or not re.sub(r'[\s/]','',buyer):buyer=('Defense buying office ' if kind=='prime_award' else 'Prime contractor UEI ')+str(row.get('customer_key') or '')
+    inputs['customer_name_basis']=row.get('customer_name_basis','original_work_record' if clean(row.get('customer_name')) else 'exact_source_customer_identifier')
+    inputs['customer_name_evidence_id']=row.get('customer_name_evidence_id')
     hardware_family=bool(re.fullmatch(r'[0-9]{4}',str(row.get('psc') or ''))) and not continuation and int(row.get('suppliers') or 0)>1
     exact_item=bool(re.search(r'\b[0-9]{13}\b|\b(?:NSN|NIIN|P/?N|PART(?: NUMBER| NO\.?)?)\s*[:#]?\s*(?=[A-Z0-9/-]*[0-9])[A-Z0-9][A-Z0-9/-]{3,}',scope,re.I))
     inputs['hardware_family_configuration_unresolved']=hardware_family and not exact_item
     inputs.update(source_policy=POLICY,source_kind=kind,capability_id=row.get('capability_id'),scope_key=row.get('scope_key'),work_mode=row.get('work_mode'),overlap_status='requires_notice_and_contract_reconciliation',funded_business_not_unplaced_work=True)
-    base=dict(episode_id=eid,lane=lane,title=title,scope_text=scope,customer_name=row['customer_name'],programme=row.get('programme'),psc=row.get('psc'),naics=row.get('naics'),window_start=start,window_end=end,date_basis=timing,value_low=lo,value_median=mid,value_high=hi,value_basis=basis,value_scope='Conditional gross buying flow over 36 months' if basis=='estimated_recurring_buying_flow_36m' else 'Historical package size guide; future contract amount and company workshare are not established',value_inputs_json=json.dumps(inputs,sort_keys=True,default=str),source_name='market_work_history',source_url=url,source_evidence_id=source_evidence,source_locator=cohort,native_identifier=cohort,procurement_state='future_buying_inferred_from_observed_work',reconciled_state='future_procurement_not_confirmed',access_state='Observed prior supplier relationship; current scope, eligibility, configuration and availability require confirmation',notice_posted_date=None,notice_type=None,rationale=rationale,limitations='Historical demand does not establish unplaced work, a new-source qualification route or a future award to the incumbent. Inspect the linked packages, timing assumptions and successor evidence.')
+    base=dict(episode_id=eid,lane=lane,title=title,scope_text=scope,customer_name=buyer,programme=row.get('programme'),psc=row.get('psc'),naics=row.get('naics'),window_start=start,window_end=end,date_basis=timing,value_low=lo,value_median=mid,value_high=hi,value_basis=basis,value_scope='Conditional gross buying flow over 36 months' if basis=='estimated_recurring_buying_flow_36m' else 'Historical package size guide; future contract amount and company workshare are not established',value_inputs_json=json.dumps(inputs,sort_keys=True,default=str),source_name='market_work_history',source_url=url,source_evidence_id=source_evidence,source_locator=cohort,native_identifier=cohort,procurement_state='future_buying_inferred_from_observed_work',reconciled_state='future_procurement_not_confirmed',access_state='Observed prior supplier relationship; current scope, eligibility, configuration and availability require confirmation',notice_posted_date=None,notice_type=None,rationale=rationale,limitations='Historical demand does not establish unplaced work, a new-source qualification route or a future award to the incumbent. Inspect the linked packages, timing assumptions and successor evidence.')
     base['record_hash']=digest(base);return base
 
 def augment(directory,aws,prepared_key=None):
@@ -74,24 +83,32 @@ def augment(directory,aws,prepared_key=None):
         if not re.fullmatch(re.escape(PREFIX)+r'/sources/[A-Za-z0-9_/-]+/manifest\.json',prepared_key):raise ValueError('Invalid prepared market binding')
         p=json.loads(aws.s3.get_object(Bucket=BUCKET,Key=prepared_key)['Body'].read())
         if p['as_of']!=as_of or p['parent_facts_sha256']!={n:m['tables'][n]['sha256'] for n in ('company_award_facts','company_subcontract_facts')}:raise ValueError('Prepared market inputs do not match the current award/report population')
-        m['sources'].update(p['sources']);m['market_demand_policy']=p['policy']
-        # Reuse source bytes only when the current transformation is identical.
-        # Small changed projections are rebuilt against the same pinned full history.
-        from .market_history import recurrence_sql,continuation_sql
-        from .distributed_history import remote
-        history=DATABASE+'.'+m['sources']['market_work_history']['table']
-        for name,sql in (('market_recurring_demand',recurrence_sql(history,as_of)),('market_continuation_work',continuation_sql(history,DATABASE+'.'+m['sources']['market_recurring_demand']['table'],as_of))):
-            if m['sources'][name].get('query_sha256')!=hashlib.sha256(sql.encode()).hexdigest():
-                m['sources'][name]=remote(aws,name,sql,'market_prepared_refresh_'+uuid.uuid4().hex[:8],as_of)
-        for name in ('market_recurring_demand','market_continuation_work','market_supplier_history'):
-            for i,f in enumerate(m['sources'][name]['files']):
-                dest=r/(name+'_'+str(i)+'.parquet');aws.s3.download_file(BUCKET,f['s3_uri'].split('/',3)[3],str(dest))
-                if hashlib.sha256(dest.read_bytes()).hexdigest()!=f['sha256']:raise ValueError('Prepared market file content changed')
-                f['path']=str(dest)
+        from .market_history import history_sql
+        expected_history=history_sql(DATABASE+'.'+m['sources']['native_company_awards']['table'],DATABASE+'.'+m['sources']['native_company_subcontracts']['table'],as_of)
+        if p['sources']['market_work_history'].get('query_sha256')!=hashlib.sha256(expected_history.encode()).hexdigest():
+            refresh_history(aws,m,r/'market_sources')
+        else:
+            m['sources'].update(p['sources']);m['market_demand_policy']=p['policy']
+            # Reuse source bytes only when the current transformation is identical.
+            # Small changed projections are rebuilt against the same pinned full history.
+            from .market_history import recurrence_sql,continuation_sql
+            from .distributed_history import remote
+            history=DATABASE+'.'+m['sources']['market_work_history']['table']
+            for name,sql in (('market_recurring_demand',recurrence_sql(history,as_of)),('market_continuation_work',continuation_sql(history,DATABASE+'.'+m['sources']['market_recurring_demand']['table'],as_of))):
+                if m['sources'][name].get('query_sha256')!=hashlib.sha256(sql.encode()).hexdigest():
+                    m['sources'][name]=remote(aws,name,sql,'market_prepared_refresh_'+uuid.uuid4().hex[:8],as_of)
+            for name in ('market_recurring_demand','market_continuation_work','market_supplier_history'):
+                for i,f in enumerate(m['sources'][name]['files']):
+                    dest=r/(name+'_'+str(i)+'.parquet');aws.s3.download_file(BUCKET,f['s3_uri'].split('/',3)[3],str(dest))
+                    if hashlib.sha256(dest.read_bytes()).hexdigest()!=f['sha256']:raise ValueError('Prepared market file content changed')
+                    f['path']=str(dest)
     else:refresh_history(aws,m,r/'market_sources')
     from .market_history import capability_customer_routes
     if all(m['sources'].get(n,{}).get('table') for n in ('market_work_history','company_capability_history','market_recurring_demand')) and aws is not None:
         capability_customer_routes(aws,m,r/'market_customer_routes')
+    if aws is not None:
+        from .market_history import customer_references
+        customer_references(aws,m,r/'market_customer_names')
     c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='5GB';SET preserve_insertion_order=false");c.execute("SET temp_directory='"+str(r/'market_tmp').replace("'","''")+"'")
     names=('opportunities','demand_decisions','company_profiles','company_registry','company_matches','company_work_matches','company_match_assessments','opportunity_quality_reviews')
     for n in names:
@@ -100,10 +117,15 @@ def augment(directory,aws,prepared_key=None):
         c.read_parquet([f['path'] for f in m['sources'][name]['files']]).create_view(name)
     if 'market_capability_customer_links' in m['sources']:
         c.read_parquet([f['path'] for f in m['sources']['market_capability_customer_links']['files']]).create_view('market_capability_customer_links')
+    buyer_labels={}
+    if 'market_customer_references' in m['sources']:
+        src=m['sources']['market_customer_references'];c.read_parquet([f['path'] for f in src['files']]).create_view('market_customer_references')
+        buyer_labels={(str(kind),str(key)):(name,evidence,basis) for kind,key,name,evidence,basis in c.execute('SELECT source_kind,customer_key,customer_name,evidence_id,name_basis FROM market_customer_references').fetchall() if name}
     # One planning stream per buyer/scope, with every underlying contract kept
     # in normalized history. Avoid presenting ten active orders as ten recompetes.
     c.execute("CREATE TEMP VIEW continuations AS SELECT * FROM market_continuation_work QUALIFY row_number() OVER(PARTITION BY cohort_id ORDER BY coalesce(nullif(potential_end,''),period_end),last_observed DESC,record_id)=1")
     path=r/'market_opportunities.jsonl';count=0
+    suppressed=[]
     with path.open('w') as f:
         for table,continuation in (('market_recurring_demand',False),('continuations',True)):
             cur=c.execute('SELECT * FROM '+table);keys=[d[0] for d in cur.description]
@@ -112,8 +134,15 @@ def augment(directory,aws,prepared_key=None):
                 if not rows:break
                 for values in rows:
                     row=dict(zip(keys,values))
+                    label=buyer_labels.get((str(row.get('source_kind')),str(row.get('customer_key'))))
+                    if label and (not clean(row.get('customer_name')) or not re.sub(r'[\s/]','',clean(row.get('customer_name')))):row.update(customer_name=label[0],customer_name_evidence_id=label[1],customer_name_basis=label[2])
                     if re.match(r'^[A-Z]',str(row.get('psc') or '')) and len(str(row.get('scope_key') or '').split('|'))<3:continue
-                    o=make_opportunity(row,as_of,continuation);f.write(json.dumps(o,default=str)+'\n');count+=1
+                    o=make_opportunity(row,as_of,continuation)
+                    if not o.get('source_url') or clean(row.get('customer_key')).upper() in ('','NONE','-NONE-','UNKNOWN','NULL','NAN','NOT APPLICABLE','0'):
+                        suppressed.append(dict(cohort_id=row.get('cohort_id'),reason='No external contract/source reference or identifiable customer; evidence remains in market_work_history'));continue
+                    f.write(json.dumps(o,default=str)+'\n');count+=1
+    m['market_demand_policy']['held_for_source_linkage']=len(suppressed)
+    (r/'market_source_linkage_holds.json').write_text(json.dumps(suppressed,indent=2))
     if count==0:raise ValueError('The full-market history produced no demand records')
     c.read_json(str(path),format='newline_delimited',sample_size=-1).create_view('market_opportunities')
     def output(name,sql):
@@ -185,9 +214,12 @@ def augment(directory,aws,prepared_key=None):
     CASE WHEN p.company_id IS NOT NULL THEN 'observed_work_product_or_research' WHEN r.coverage_state='declared_classifications_only' THEN 'declared_only_requires_delivery_evidence' ELSE 'identity_only_requires_enrichment' END matching_readiness,
     'company_capability_history' capability_evidence_table,'"""+as_of+"""' assessed_as_of
     FROM old_company_registry r LEFT JOIN old_company_profiles p ON p.company_id=r.company_id LEFT JOIN new_company_parent_resolution parent ON parent.company_id=r.company_id""")
-    for name in ('market_work_history','company_capability_history','market_recurring_demand','market_continuation_work','market_supplier_history','market_recurrence_training','market_recurrence_validation','market_capability_customer_links'):
+    for name in ('market_work_history','company_capability_history','market_recurring_demand','market_continuation_work','market_supplier_history','market_recurrence_training','market_recurrence_validation','market_capability_customer_links','market_customer_references'):
         if name not in m['sources']:continue
         source=m['sources'][name];m['tables'][name]=dict(rows=source['rows'],sha256=source['sha256'],columns=source['columns'],remote_binding=True,table=source['table'],s3_uri=source['s3_uri'],source_binding=name)
+    (r/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')
+    preflight=c.execute("SELECT o.episode_id,o.customer_name,o.source_url,d.stage FROM new_opportunities o JOIN new_demand_decisions d USING(episode_id) WHERE o.source_name='market_work_history' AND (nullif(trim(o.customer_name),'') IS NULL OR nullif(o.source_url,'') IS NULL OR nullif(o.source_evidence_id,'') IS NULL OR d.stage<>'expected_demand') LIMIT 10").fetchall()
+    if preflight:raise ValueError('Market source/decision preflight failed: '+str(preflight))
     m['rules']=rules.catalogue();m['market_demand_policy']['generated_opportunities']=count;m['market_demand_policy']['company_links']=c.execute('SELECT count(*) FROM market_links').fetchone()[0]
     (r/'manifest.json').write_text(json.dumps(m,indent=2)+'\n');c.close();return m
 
@@ -208,13 +240,19 @@ def refresh_current(previous,root,aws,prepared_key=None):
             if hashlib.sha256(path.read_bytes()).hexdigest()!=f['sha256']:raise ValueError('Comparator hash mismatch')
             f['path']=str(path)
     (r/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')
-    augment(r,aws,prepared_key)
-    from .pipeline_coverage import build
-    build(r)
-    from .logic_provenance import record
-    record(r)
-    from .events import track
-    track(r,previous,aws)
-    from .validate import validate,validate_demand_integrity
-    validate_demand_integrity(r);validate(r)
-    return r
+    try:
+        augment(r,aws,prepared_key)
+        from .pipeline_coverage import build
+        build(r)
+        from .logic_provenance import record
+        record(r)
+        from .events import track
+        track(r,previous,aws)
+        from .validate import validate,validate_demand_integrity
+        validate_demand_integrity(r);validate(r)
+        return r
+    except Exception:
+        from .checkpoint import archive_failed_attempt
+        try:archive_failed_attempt(r,aws,previous['run_id'])
+        except Exception as error:print('Could not archive failed market derivation:',str(error),flush=True)
+        raise

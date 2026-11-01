@@ -102,3 +102,19 @@ def test_clock_only_daily_rebuilds_do_not_rewrite_monthly_forecasts():
     assert scenario(example(),'2026-11-01')['next_36_month_median']==scenario(example(),'2026-11-20')['next_36_month_median']
     assert recurrence_sql('db.history','2026-11-01')==recurrence_sql('db.history','2026-11-20')
     assert make_opportunity(example(),'2026-12-01')['record_hash']!=a['record_hash']
+
+
+def test_missing_labels_and_permalink_use_exact_held_identifiers():
+    r=example(customer_name='',customer_key='W912HQ',comparators_json=json.dumps([dict(record_id='CONT_AWD_W912HQ24C0001_9700_NONE_NONE',evidence_id='d'*64)]))
+    o=make_opportunity(r,'2026-11-01')
+    assert o['customer_name']=='Defense buying office W912HQ'
+    assert o['source_url']=='https://www.usaspending.gov/award/CONT_AWD_W912HQ24C0001_9700_NONE_NONE'
+    assert evaluate(o,'2026-11-01')['stage']=='expected_demand'
+
+
+def test_active_funded_performance_is_not_removed_by_action_recency():
+    from opportunity_engine.market_history import continuation_sql
+    s=continuation_sql('db.history','db.recurring','2026-11-01')
+    assert "try_cast(substr(period_end,1,10) AS date)>=DATE '2026-11-01' OR" in s
+    h=history_sql('db.awards','db.subs','2026-11-01')
+    assert "OR try_cast(substr(period_end,1,10) AS date)>=DATE '2026-11-01'" in h
