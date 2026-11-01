@@ -105,7 +105,8 @@ def test_whole_projection_filters_evidence_and_preserves_original_sources(tmp_pa
     # annotation as VARCHAR. Replacing it must not rebind a stale Parquet view.
     legacy=Path(m['tables']['opportunity_vocabulary']['path']);older=tmp_path/'legacy_vocabulary.parquet'
     migration=duckdb.connect()
-    migration.execute('COPY (SELECT * EXCLUDE(psc_scope,work_psc,parent_prime_psc,parent_prime_psc_label) REPLACE(cast(annotation_json AS VARCHAR) AS annotation_json) FROM read_parquet(?)) TO ? (FORMAT PARQUET)',[str(legacy),str(older)])
+    migration.read_parquet(str(legacy)).create_view('current_source')
+    migration.execute('COPY (SELECT * EXCLUDE(psc_scope,work_psc,parent_prime_psc,parent_prime_psc_label) REPLACE(cast(annotation_json AS VARCHAR) AS annotation_json) FROM current_source) TO ? (FORMAT PARQUET)',[str(older)])
     migration.close();older.replace(legacy)
     m['tables']['opportunity_vocabulary']['sha256']=hashlib.sha256(legacy.read_bytes()).hexdigest()
     m['tables']['opportunity_vocabulary']['columns']=[x for x in m['tables']['opportunity_vocabulary']['columns'] if x['Name'] not in ('psc_scope','work_psc','parent_prime_psc','parent_prime_psc_label')]
