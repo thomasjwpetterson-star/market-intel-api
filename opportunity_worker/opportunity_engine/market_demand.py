@@ -23,7 +23,7 @@ def number(x):
 
 def scenario(row,as_of):
     """Timing and values are explicit steady-buying assumptions, not calibrated probabilities."""
-    today=datetime.date.fromisoformat(as_of);gap=max(1,round(number(row.get('gap_median')) or 365));last=datetime.date.fromisoformat(str(row['last_event'])[:10])
+    today=datetime.date.fromisoformat(as_of).replace(day=1);gap=max(1,round(number(row.get('gap_median')) or 365));last=datetime.date.fromisoformat(str(row['last_event'])[:10])
     cycles=max(1,math.ceil((today-last).days/gap));next_day=last+datetime.timedelta(days=cycles*gap)
     if next_day<today:next_day=today
     rate=number(row.get('annual_award_rate'));completed=int(row.get('completed_awards') or 0)
@@ -33,7 +33,7 @@ def scenario(row,as_of):
     eligible=row['source_kind']=='prime_award' and completed>=3 and rate and rate>0
     values={k:number(row.get('completed_'+k)) for k in ('p10','median','p90')}
     eligible=bool(eligible and all(v and v>0 for v in values.values()))
-    return dict(expected_next_purchase_date=str(next_day),window_start=str(max(today,next_day-datetime.timedelta(days=max(30,gap//2)))),window_end=str(today+datetime.timedelta(days=1096)),
+    return dict(forecast_reference_month=today.isoformat()[:7],expected_next_purchase_date=str(next_day),window_start=str(max(today,next_day-datetime.timedelta(days=max(30,gap//2)))),window_end=str(today+datetime.timedelta(days=1096)),
                 expected_annual_awards=rate,expected_purchase_interval_days=gap,
                 next_12_month_low=rate*values['p10'] if eligible else None,next_12_month_median=rate*values['median'] if eligible else None,next_12_month_high=rate*values['p90'] if eligible else None,
                 next_36_month_low=3*rate*values['p10'] if eligible else None,next_36_month_median=3*rate*values['median'] if eligible else None,next_36_month_high=3*rate*values['p90'] if eligible else None,
@@ -49,13 +49,13 @@ def make_opportunity(row,as_of,continuation=False):
         preview=[dict(zip(keys,p)) for p in preview]
     if continuation:
         lane='funded_contract_follow_on';inputs=dict(cohort_id=cohort,record_id=row['record_id'],incumbent_company_id=row.get('company_id'),historical_package_benchmark=number(row.get('amount')),amount_basis=row.get('amount_basis'),period_start=row.get('period_start'),period_end=row.get('period_end'),potential_end=row.get('potential_end'),comparators=[row],company_addressable_value=None,solicitation_date_estimate=None)
-        end=str(row.get('potential_end') or row.get('period_end'))[:10];start=str(max(datetime.date.fromisoformat(as_of),datetime.date.fromisoformat(end)-datetime.timedelta(days=730)))
+        end=str(row.get('potential_end') or row.get('period_end'))[:10];start=str(max(datetime.date.fromisoformat(as_of).replace(day=1),datetime.date.fromisoformat(end)-datetime.timedelta(days=730)))
         title='Potential follow-on: '+scope[:145];basis='historical_funded_package_benchmark';lo=mid=hi=number(row.get('amount'))
         rationale='This customer has funded the stated work at an identified supplier, and the held contract records a future final performance/option end. This supports account planning for possible follow-on work; a replacement procurement is not confirmed.'
         timing='Planning window up to the stated potential contract end; not a solicitation date. Option exercise, extension, cancellation and successor awards can change it.'
     else:
         lane='recurring_subcontract_work' if kind=='subcontract_report' else 'recurring_government_work';s=scenario(row,as_of)
-        inputs=dict(s,cohort_id=cohort,capability_id=row.get('capability_id'),history_cutoff=row['history_cutoff'],first_observed=row['first_event'],last_observed=row['last_event'],historical_awards=int(row['awards']),historical_buying_months=int(row['buying_months']),historical_suppliers=int(row['suppliers']),completed_historical_awards=int(row.get('completed_awards') or 0),evidence_digest=row['evidence_digest'],comparators=preview,historical_package_low=number(row.get('observed_p10')),historical_package_median=number(row.get('observed_median')),historical_package_high=number(row.get('observed_p90')))
+        inputs=dict(s,cohort_id=cohort,customer_key=row.get('customer_key'),capability_id=row.get('capability_id'),history_cutoff=row['history_cutoff'],first_observed=row['first_event'],last_observed=row['last_event'],historical_awards=int(row['awards']),historical_buying_months=int(row['buying_months']),historical_suppliers=int(row['suppliers']),completed_historical_awards=int(row.get('completed_awards') or 0),evidence_digest=row['evidence_digest'],comparators=preview,historical_package_low=number(row.get('observed_p10')),historical_package_median=number(row.get('observed_median')),historical_package_high=number(row.get('observed_p90')))
         title=('Recurring subcontract demand: ' if kind=='subcontract_report' else 'Expected repeat buying: ')+scope[:145];start=s['window_start'];end=s['window_end'];basis='estimated_recurring_buying_flow_36m' if s['value_estimate_supported'] else 'historical_recurring_package_benchmark'
         lo=s['next_36_month_low'] if s['value_estimate_supported'] else number(row.get('observed_p10'));mid=s['next_36_month_median'] if s['value_estimate_supported'] else number(row.get('observed_median'));hi=s['next_36_month_high'] if s['value_estimate_supported'] else number(row.get('observed_p90'))
         rationale=f"The same customer bought this evidenced work across {row['awards']} historical packages and {row['buying_months']} buying months. Timing uses the observed purchase intervals. Prior suppliers establish company relevance; future work remains conditional."
@@ -75,6 +75,14 @@ def augment(directory,aws,prepared_key=None):
         p=json.loads(aws.s3.get_object(Bucket=BUCKET,Key=prepared_key)['Body'].read())
         if p['as_of']!=as_of or p['parent_facts_sha256']!={n:m['tables'][n]['sha256'] for n in ('company_award_facts','company_subcontract_facts')}:raise ValueError('Prepared market inputs do not match the current award/report population')
         m['sources'].update(p['sources']);m['market_demand_policy']=p['policy']
+        # Reuse source bytes only when the current transformation is identical.
+        # Small changed projections are rebuilt against the same pinned full history.
+        from .market_history import recurrence_sql,continuation_sql
+        from .distributed_history import remote
+        history=DATABASE+'.'+m['sources']['market_work_history']['table']
+        for name,sql in (('market_recurring_demand',recurrence_sql(history,as_of)),('market_continuation_work',continuation_sql(history,DATABASE+'.'+m['sources']['market_recurring_demand']['table'],as_of))):
+            if m['sources'][name].get('query_sha256')!=hashlib.sha256(sql.encode()).hexdigest():
+                m['sources'][name]=remote(aws,name,sql,'market_prepared_refresh_'+uuid.uuid4().hex[:8],as_of)
         for name in ('market_recurring_demand','market_continuation_work','market_supplier_history'):
             for i,f in enumerate(m['sources'][name]['files']):
                 dest=r/(name+'_'+str(i)+'.parquet');aws.s3.download_file(BUCKET,f['s3_uri'].split('/',3)[3],str(dest))
@@ -119,6 +127,8 @@ def augment(directory,aws,prepared_key=None):
         m['tables'][name]=dict(path=str(p),sha256=hashlib.sha256(p.read_bytes()).hexdigest(),rows=n,columns=cols);c.read_parquet(str(p)).create_view('new_'+name,replace=True);print('Market demand output',name,n,flush=True)
     def project(table,expressions):
         return ','.join('cast('+expressions.get(n,'NULL')+' AS '+t+') "'+n+'"' for n,t,*_ in c.execute('DESCRIBE '+table).fetchall())
+    from .demand_progression import prepare as prepare_progression
+    path=prepare_progression(c,m,r,aws,path,output)
     lane_list=','.join("'"+x+"'" for x in LANES)
     cols={n:'x."'+n+'"' for n,*_ in c.execute('DESCRIBE market_opportunities').fetchall()}
     output('opportunities','SELECT * FROM old_opportunities WHERE lane NOT IN ('+lane_list+') UNION ALL SELECT '+project('old_opportunities',cols)+' FROM market_opportunities x')

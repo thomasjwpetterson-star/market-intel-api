@@ -118,6 +118,7 @@ def evaluate(o,as_of):
  if lane in ('recurring_government_work','recurring_subcontract_work','funded_contract_follow_on'):
   out['value_interpretation']='conditional_recurring_buying_scenario' if o.get('value_basis')=='estimated_recurring_buying_flow_36m' else 'historical_package_benchmark'
   out['same_scope_resolution_required']=True
+  out['source_basis']['related_procurement_events']=inputs.get('related_procurement_events',[])
   out['source_basis']['comparator_evidence_ids']=[x.get('evidence_id') for x in inputs.get('comparators',[]) if isinstance(x,dict) and x.get('evidence_id')]
  out['response_window_verified']=bool(lane.startswith('published') and end and end>=today and not terminal)
  if invitation_current and end is None:out['next_action']='Contact the office in the agency notice to confirm whether capability information is still being accepted, then establish the qualification scope, technical-data access, cost and timetable.'

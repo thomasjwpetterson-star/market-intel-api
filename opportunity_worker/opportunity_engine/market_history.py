@@ -50,7 +50,8 @@ def history_sql(prime,sub,as_of):
 
 def recurrence_sql(history,as_of):
     # Delayed DoD reporting must not be mistaken for a demand collapse.
-    cutoff="date_add('day',-90,DATE "+lit(as_of)+")"
+    reference_month=datetime.date.fromisoformat(as_of).replace(day=1).isoformat()
+    cutoff="date_add('day',-90,DATE "+lit(reference_month)+")"
     preview="CAST(ROW(record_id,company_id,company_name,evidence_id,source_url,work_text,event_date,period_start,period_end,amount,amount_basis,parent_award_key,parent_piid) AS ROW(record_id varchar,company_id varchar,company_name varchar,evidence_id varchar,source_url varchar,work_text varchar,event_date varchar,period_start varchar,period_end varchar,amount double,amount_basis varchar,parent_award_key varchar,parent_piid varchar))"
     return f"""WITH h AS(SELECT * FROM {history} WHERE defence_customer AND technical_terms>=2
     AND try_cast(substr(event_date,1,10) AS date) BETWEEN {cutoff}-INTERVAL '3' YEAR AND {cutoff}),
@@ -87,7 +88,7 @@ def continuation_sql(history,recurrence,as_of):
     # not a claim that a replacement competition will be held or remain open.
     return f"""SELECT h.* FROM {history} h WHERE defence_customer AND source_kind='prime_award' AND technical_terms>=3
     AND amount>=100000 AND try_cast(substr(last_observed,1,10) AS date)>=DATE {lit(as_of)}-INTERVAL '15' MONTH
-    AND try_cast(substr(coalesce(nullif(potential_end,''),period_end),1,10) AS date) BETWEEN DATE {lit(as_of)}+INTERVAL '90' DAY AND DATE {lit(as_of)}+INTERVAL '10' YEAR
+    AND try_cast(substr(coalesce(nullif(potential_end,''),period_end),1,10) AS date) BETWEEN DATE {lit(as_of)} AND DATE {lit(as_of)}+INTERVAL '10' YEAR
     AND try_cast(substr(period_start,1,10) AS date)<=DATE {lit(as_of)}
     AND NOT EXISTS(SELECT 1 FROM {recurrence} r WHERE r.cohort_id=h.cohort_id)
     AND NOT regexp_like(lower(work_text),'^(?:funding|administrative|modification|incremental funding|deobligation)\\b')

@@ -94,3 +94,11 @@ def test_multi_supplier_hardware_family_keeps_configuration_unresolved():
     x=make_opportunity(r,'2026-11-01');assert json.loads(x['value_inputs_json'])['hardware_family_configuration_unresolved']
     x=make_opportunity(dict(r,work_text='Aircraft fuel pump NSN 2915003538074'),'2026-11-01')
     assert not json.loads(x['value_inputs_json'])['hardware_family_configuration_unresolved']
+
+
+def test_clock_only_daily_rebuilds_do_not_rewrite_monthly_forecasts():
+    a=make_opportunity(example(),'2026-11-01');b=make_opportunity(example(),'2026-11-20')
+    assert a['episode_id']==b['episode_id'] and a['record_hash']==b['record_hash']
+    assert scenario(example(),'2026-11-01')['next_36_month_median']==scenario(example(),'2026-11-20')['next_36_month_median']
+    assert recurrence_sql('db.history','2026-11-01')==recurrence_sql('db.history','2026-11-20')
+    assert make_opportunity(example(),'2026-12-01')['record_hash']!=a['record_hash']
