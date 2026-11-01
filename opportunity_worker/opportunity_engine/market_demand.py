@@ -242,6 +242,8 @@ def refresh_current(previous,root,aws,prepared_key=None):
     (r/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')
     try:
         augment(r,aws,prepared_key)
+        from .vocabulary_refresh import augment as augment_vocabulary
+        augment_vocabulary(r,aws)
         from .pipeline_coverage import build
         build(r)
         from .logic_provenance import record

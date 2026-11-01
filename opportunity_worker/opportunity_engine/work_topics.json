@@ -1,0 +1,536 @@
+{
+  "version": "work-vocabulary-v1",
+  "interpretation": "PSC hierarchy plus explicit source-scope concepts and independent work types. Multi-label retrieval and explanation, not technical equivalence or qualification.",
+  "topics": [
+    {
+      "id": "radar",
+      "label": "Radar systems and equipment",
+      "parent": "electronics",
+      "pattern": "\\b(radar|aesa|AN[ /-]?APG[ -]?\\d+|AN[ /-]?SPY[ -]?\\d+|SABR)\\b"
+    },
+    {
+      "id": "radar.signal-processing",
+      "label": "Radar signal processing",
+      "parent": "radar",
+      "pattern": "\\bradar.{0,35}(signal process|data process|waveform)|\\b(signal process|waveform).{0,35}radar"
+    },
+    {
+      "id": "radar.antennas",
+      "label": "Radar antennas and arrays",
+      "parent": "radar",
+      "pattern": "\\bradar.{0,35}(antenna|array)|\\b(antenna|array).{0,35}radar|\\bAESA\\b"
+    },
+    {
+      "id": "radar.altimetry",
+      "label": "Radar altimeters",
+      "parent": "radar",
+      "pattern": "\\b(radar|radio)[ -]?altimet"
+    },
+    {
+      "id": "electronic-warfare",
+      "label": "Electronic warfare and countermeasures",
+      "parent": "electronics",
+      "pattern": "\\belectronic (warfare|attack|support measures)|\\b(jammer|jamming|NGJ[- ]?MB|NGJ[- ]?LB|ALQ[- ]?\\d+|countermeasures?)\\b"
+    },
+    {
+      "id": "rf-antennas",
+      "label": "RF antennas and antenna systems",
+      "parent": "electronics",
+      "pattern": "\\b(antennas?|antenna systems?|phased arrays?)\\b"
+    },
+    {
+      "id": "radomes",
+      "label": "Radomes",
+      "parent": "electronics",
+      "pattern": "\\bradomes?\\b"
+    },
+    {
+      "id": "rf-microwave",
+      "label": "RF and microwave components",
+      "parent": "electronics",
+      "pattern": "\\b(microwave|radio frequency|RF modules?|RF monitor|waveguides?|transmit.receive modules?|RF filters?)\\b"
+    },
+    {
+      "id": "electro-optical",
+      "label": "Electro-optical and infrared systems",
+      "parent": "electronics",
+      "pattern": "\\b(electro.optic\\w*|infrared|EO[ /-]?IR|FLIR|thermal imag\\w*|laser range\\w*)\\b"
+    },
+    {
+      "id": "lasers-photonics",
+      "label": "Lasers and photonics",
+      "parent": "electronics",
+      "pattern": "\\b(lasers?|photonics|optical coatings?|optical assemblies)\\b"
+    },
+    {
+      "id": "navigation-inertial",
+      "label": "Navigation and inertial systems",
+      "parent": "electronics",
+      "pattern": "\\b(inertial|gyroscopes?|accelerometers?|navigation systems?|inertial measurement|IMU)\\b"
+    },
+    {
+      "id": "positioning-timing",
+      "label": "Positioning, navigation and timing",
+      "parent": "electronics",
+      "pattern": "\\b(GPS|GNSS|positioning navigation|position.navigation.timing|atomic clocks?)\\b"
+    },
+    {
+      "id": "communications",
+      "label": "Tactical communications",
+      "parent": "electronics",
+      "pattern": "\\b(tactical radios?|manpack|radio transmitters?|radio receivers?|software.defined radio|tactical communications?)\\b"
+    },
+    {
+      "id": "satcom",
+      "label": "Satellite communications",
+      "parent": "electronics",
+      "pattern": "\\b(satcom|satellite communications?|satellite terminals?)\\b"
+    },
+    {
+      "id": "network-datalinks",
+      "label": "Tactical networks and data links",
+      "parent": "electronics",
+      "pattern": "\\b(data links?|datalinks?|Link[ -]?16|MIDS|JTIDS|tactical networks?)\\b"
+    },
+    {
+      "id": "electronic-computing",
+      "label": "Embedded computing and electronics",
+      "parent": "electronics",
+      "pattern": "\\b(embedded comput\\w*|mission computers?|single.board computers?|circuit cards?|printed circuit|PCBs?|FPGA|microelectronics|semiconductors?)\\b"
+    },
+    {
+      "id": "electronic-connectors",
+      "label": "Electrical connectors and interconnects",
+      "parent": "electronics",
+      "pattern": "\\b(connectors?|backshells?|wiring harness\\w*|cable assemblies|fiber.optic cable|fibre.optic cable)\\b"
+    },
+    {
+      "id": "electronic-sensors",
+      "label": "Electronic sensors and detection",
+      "parent": "electronics",
+      "pattern": "\\b(proximity switches?|pressure transduc\\w*|pressure sensors?|detectors?|temperature sensors?|magnetometers?)\\b"
+    },
+    {
+      "id": "avionics",
+      "label": "Avionics systems",
+      "parent": "aircraft",
+      "pattern": "\\b(avionics|flight management systems?|cockpit displays?|flight instruments?)\\b"
+    },
+    {
+      "id": "flight-controls",
+      "label": "Flight controls and actuation",
+      "parent": "aircraft",
+      "pattern": "\\b(flight controls?|flight control actuators?|control surface\\w*|fly.by.wire)\\b"
+    },
+    {
+      "id": "aircraft-electrical-power",
+      "label": "Aircraft electrical power",
+      "parent": "aircraft",
+      "pattern": "\\b(generator control units?|GCU|aircraft.{0,25}(generators?|electrical power)|starter.generator|airborne.{0,25}power)\\b"
+    },
+    {
+      "id": "electrical-power",
+      "label": "Electrical generation and conversion",
+      "parent": "industrial",
+      "pattern": "\\b(generators?|inverters?|power conversion|power distribution|electrical power|voltage regulators?)\\b"
+    },
+    {
+      "id": "batteries-storage",
+      "label": "Batteries and energy storage",
+      "parent": "industrial",
+      "pattern": "\\b(batteries|battery|energy storage|fuel cells?)\\b"
+    },
+    {
+      "id": "aircraft-engines",
+      "label": "Aircraft engines and turbines",
+      "parent": "aircraft",
+      "pattern": "\\b(aircraft engines?|jet engines?|turbofan|turboshaft|turboprop|F100|F110|F135|T700|TF34)\\b"
+    },
+    {
+      "id": "engine-components",
+      "label": "Engine and turbine components",
+      "parent": "industrial",
+      "pattern": "\\b(turbine blades?|compressor blades?|combustors?|engine regulators?|engine controls?|turbine disks?)\\b"
+    },
+    {
+      "id": "fuel-systems",
+      "label": "Fuel systems and pumps",
+      "parent": "industrial",
+      "pattern": "\\bfuel.{0,25}(pumps?|boost|controls?|systems?)|\\b(BOOST PUMP|FUEL BOOST)\\b"
+    },
+    {
+      "id": "hydraulics-pneumatics",
+      "label": "Hydraulic and pneumatic equipment",
+      "parent": "industrial",
+      "pattern": "\\b(hydraulic\\w*|pneumatic\\w*|hydra.mechanical|EHM)\\b"
+    },
+    {
+      "id": "pumps-valves",
+      "label": "Pumps and valves",
+      "parent": "industrial",
+      "pattern": "\\b(pumps?|valves?|manifolds?)\\b"
+    },
+    {
+      "id": "landing-gear",
+      "label": "Landing gear and shock struts",
+      "parent": "aircraft",
+      "pattern": "\\b(landing gear|shock struts?|shock strut assembly|aircraft brakes?)\\b"
+    },
+    {
+      "id": "rotorcraft",
+      "label": "Rotorcraft and rotor systems",
+      "parent": "aircraft",
+      "pattern": "\\b(rotorcraft|helicopters?|rotor blades?|Black[ -]?Hawk|CH[- ]?53|UH[- ]?60|AH[- ]?64)\\b"
+    },
+    {
+      "id": "airframes-structures",
+      "label": "Airframes and aircraft structures",
+      "parent": "aircraft",
+      "pattern": "\\b(airframes?|fuselage|aircraft structures?|wing assemblies|bulkheads?)\\b"
+    },
+    {
+      "id": "aircraft-life-support",
+      "label": "Aircrew and aircraft life support",
+      "parent": "aircraft",
+      "pattern": "\\b(ejection seats?|oxygen systems?|aircrew|parachutes?|aircraft life support)\\b"
+    },
+    {
+      "id": "thermal-management",
+      "label": "Thermal and environmental control",
+      "parent": "industrial",
+      "pattern": "\\b(heat exchangers?|thermal management|environmental control systems?|cooling systems?|refrigeration)\\b"
+    },
+    {
+      "id": "uncrewed-aircraft",
+      "label": "Uncrewed aircraft systems",
+      "parent": "aircraft",
+      "pattern": "\\b(UAS|UAV|unmanned aerial|uncrewed aerial|Scan[ -]?Eagle|Blackjack|RQ[- ]?21|MEUAS|MQ[- ]?\\d+)\\b"
+    },
+    {
+      "id": "autonomy-robotics",
+      "label": "Autonomy and robotics",
+      "parent": "industrial",
+      "pattern": "\\b(autonomous|autonomy|robotics?|uncrewed|unmanned)\\b"
+    },
+    {
+      "id": "spacecraft",
+      "label": "Spacecraft and satellite systems",
+      "parent": "space",
+      "pattern": "\\b(spacecraft|satellite bus|space vehicles?|satellite systems?|space payloads?)\\b"
+    },
+    {
+      "id": "launch-space-propulsion",
+      "label": "Launch and space propulsion",
+      "parent": "space",
+      "pattern": "\\b(launch vehicles?|rocket engines?|space propulsion|launch services?)\\b"
+    },
+    {
+      "id": "space-ground",
+      "label": "Space ground systems",
+      "parent": "space",
+      "pattern": "\\b(space ground|satellite ground|ground control stations?|space command and control)\\b"
+    },
+    {
+      "id": "missile-systems",
+      "label": "Missiles and missile defence",
+      "parent": "weapons",
+      "pattern": "\\b(missiles?|missile defense|missile defence|PAC[- ]?3|THAAD|PATRIOT|AMRAAM|JASSM|GBSD|Sentinel)\\b"
+    },
+    {
+      "id": "guidance-seekers",
+      "label": "Guidance and seeker systems",
+      "parent": "weapons",
+      "pattern": "\\b(seekers?|guidance systems?|guidance sections?|guided.weapons? analysis)\\b"
+    },
+    {
+      "id": "munitions-fuzes",
+      "label": "Munitions, warheads and fuzes",
+      "parent": "weapons",
+      "pattern": "\\b(munitions?|ammunition|warheads?|fuzes?|fuses?|projectiles?|bombs?)\\b"
+    },
+    {
+      "id": "gun-systems",
+      "label": "Guns and weapon stations",
+      "parent": "weapons",
+      "pattern": "\\b(gun systems?|machine guns?|cannons?|weapon stations?|gun mounts?)\\b"
+    },
+    {
+      "id": "energetics",
+      "label": "Energetics and propellants",
+      "parent": "weapons",
+      "pattern": "\\b(energetics|propellants?|explosives?|solid rocket motors?)\\b"
+    },
+    {
+      "id": "ground-vehicles",
+      "label": "Ground vehicles and mobility",
+      "parent": "land",
+      "pattern": "\\b(ground vehicles?|tactical vehicles?|armored vehicles?|armoured vehicles?|JLTV|Stryker|Abrams|Bradley|combat vehicles?)\\b"
+    },
+    {
+      "id": "vehicle-drivetrain",
+      "label": "Vehicle drivetrains and transmissions",
+      "parent": "land",
+      "pattern": "\\b(drivetrains?|transmissions?|vehicle axles?|vehicle engines?)\\b"
+    },
+    {
+      "id": "shipbuilding",
+      "label": "Shipbuilding and naval structures",
+      "parent": "maritime",
+      "pattern": "\\b(shipbuilding|ship construction|hull fabrication|naval vessels?|destroyers?|frigates?|submarines?)\\b"
+    },
+    {
+      "id": "marine-propulsion",
+      "label": "Marine propulsion and power",
+      "parent": "maritime",
+      "pattern": "\\b(marine propulsion|ship propulsion|shipboard power|marine diesel|propeller shafts?)\\b"
+    },
+    {
+      "id": "sonar-undersea",
+      "label": "Sonar and undersea systems",
+      "parent": "maritime",
+      "pattern": "\\b(sonar|undersea|underwater acoustics|torpedoes?|unmanned underwater|uncrewed underwater)\\b"
+    },
+    {
+      "id": "maritime-maintenance",
+      "label": "Ship repair and maintenance",
+      "parent": "maritime",
+      "pattern": "\\b(ship repair|ship maintenance|dry.dock|ship overhaul|submarine maintenance)\\b"
+    },
+    {
+      "id": "precision-machining",
+      "label": "Precision machining and fabrication",
+      "parent": "industrial",
+      "pattern": "\\b(precision machin\\w*|CNC|machining|metal fabrication|welding|sheet metal)\\b"
+    },
+    {
+      "id": "castings-forgings",
+      "label": "Castings and forgings",
+      "parent": "industrial",
+      "pattern": "\\b(castings?|forgings?|forging|casting)\\b"
+    },
+    {
+      "id": "composites-materials",
+      "label": "Composites and advanced materials",
+      "parent": "industrial",
+      "pattern": "\\b(composites?|advanced materials?|carbon fiber|carbon fibre|ceramics?)\\b"
+    },
+    {
+      "id": "bearings-mechanical",
+      "label": "Bearings and mechanical components",
+      "parent": "industrial",
+      "pattern": "\\b(bearings?|gears?|gearboxes?|clutches?|mechanical seals?|fasteners?)\\b"
+    },
+    {
+      "id": "coatings-treatments",
+      "label": "Coatings and surface treatments",
+      "parent": "industrial",
+      "pattern": "\\b(coatings?|surface treatments?|plating|anodiz\\w*|anodis\\w*)\\b"
+    },
+    {
+      "id": "additive-manufacturing",
+      "label": "Additive manufacturing",
+      "parent": "industrial",
+      "pattern": "\\b(additive manufacturing|3D print\\w*|three.dimensional print\\w*)\\b"
+    },
+    {
+      "id": "ndt-inspection",
+      "label": "Non-destructive testing and inspection",
+      "parent": "industrial",
+      "pattern": "\\b(non.destructive|nondestructive|eddy current|ultrasonic inspection|radiographic inspection|NDT)\\b"
+    },
+    {
+      "id": "test-instrumentation",
+      "label": "Test equipment and instrumentation",
+      "parent": "industrial",
+      "pattern": "\\b(test equipment|test stations?|instrumentation|telemetry|calibration|automatic test systems?)\\b"
+    },
+    {
+      "id": "it-enterprise",
+      "label": "Enterprise IT services",
+      "parent": "services",
+      "pattern": "\\b(enterprise IT|enterprise information technology|IT support|information technology support|NMCI|SMIT)\\b"
+    },
+    {
+      "id": "it-network-operations",
+      "label": "Network operations and infrastructure",
+      "parent": "services",
+      "pattern": "\\b(network operations?|network infrastructure|network management|network sustainment|GSM[- ]?O)\\b"
+    },
+    {
+      "id": "cybersecurity",
+      "label": "Cybersecurity",
+      "parent": "services",
+      "pattern": "\\b(cyber\\w*|zero trust|information assurance|penetration test\\w*|security operations cent\\w*)\\b"
+    },
+    {
+      "id": "software-applications",
+      "label": "Software development and applications",
+      "parent": "services",
+      "pattern": "\\b(software development|application development|software engineering|DevSecOps|applications? moderniz\\w*|applications? modernis\\w*)\\b"
+    },
+    {
+      "id": "software-licensing",
+      "label": "Software licensing and maintenance",
+      "parent": "services",
+      "pattern": "\\b(software licen\\w*|software maintenance|software subscription|Oracle|Palantir|enterprise software|Java standard edition)\\b"
+    },
+    {
+      "id": "cloud-data-centres",
+      "label": "Cloud and data-centre services",
+      "parent": "services",
+      "pattern": "\\b(cloud|data cent(?:er|re)s?|hosting|infrastructure as a service)\\b"
+    },
+    {
+      "id": "ai-data-analytics",
+      "label": "AI, data and analytics",
+      "parent": "services",
+      "pattern": "\\b(artificial intelligence|machine learning|data analytics|data science|data engineering|computer vision)\\b"
+    },
+    {
+      "id": "systems-engineering",
+      "label": "Systems engineering and integration",
+      "parent": "services",
+      "pattern": "\\b(systems engineering|system integration|systems integration|digital engineering|model.based systems)\\b"
+    },
+    {
+      "id": "research-engineering",
+      "label": "Research and development engineering",
+      "parent": "services",
+      "pattern": "\\b(research and development|R&D|research.{0,20}engineering|prototype development|non.recurring engineering|NRE)\\b"
+    },
+    {
+      "id": "programme-support",
+      "label": "Programme and acquisition support",
+      "parent": "services",
+      "pattern": "\\b(program management|programme management|program support|financial management|acquisition support|contract management)\\b"
+    },
+    {
+      "id": "logistics-sustainment",
+      "label": "Logistics and sustainment services",
+      "parent": "services",
+      "pattern": "\\b(logistics|supply.chain management|sustainment services|inventory management|warehousing)\\b"
+    },
+    {
+      "id": "training-simulation",
+      "label": "Training and simulation",
+      "parent": "services",
+      "pattern": "\\b(training|simulators?|simulation|TCTS|combat training)\\b"
+    },
+    {
+      "id": "engineering-test",
+      "label": "Test and evaluation services",
+      "parent": "services",
+      "pattern": "\\b(test and evaluation|testing services|test services|operational test|flight testing|flight test services)\\b"
+    },
+    {
+      "id": "range-support",
+      "label": "Range instrumentation and support",
+      "parent": "services",
+      "pattern": "\\brange.{0,35}(instrumentation|telecommunications|engineering|operations)|\\b(TARIF|TARIFIPT)\\b"
+    },
+    {
+      "id": "intelligence-isr",
+      "label": "Intelligence and ISR services",
+      "parent": "services",
+      "pattern": "\\b(ISR services|intelligence analysis|intelligence surveillance|intelligence, surveillance|geospatial intelligence|SIGINT|GEOINT)\\b"
+    },
+    {
+      "id": "facilities-construction",
+      "label": "Facilities, construction and installation",
+      "parent": "services",
+      "pattern": "\\b(construction|facilities maintenance|facility maintenance|installation services|civil engineering|HVAC)\\b"
+    },
+    {
+      "id": "medical-biodefence",
+      "label": "Medical and biodefence",
+      "parent": "services",
+      "pattern": "\\b(medical|biodefense|biodefence|vaccines?|biomedical|chemical biological)\\b"
+    }
+  ],
+  "work_types": [
+    {
+      "id": "design_development",
+      "label": "Design and development",
+      "pattern": "\\b(design|development|research|prototyp\\w*|NRE|non.recurring engineering)\\b"
+    },
+    {
+      "id": "integration",
+      "label": "Integration",
+      "pattern": "\\b(integration|integrating|integrate)\\b"
+    },
+    {
+      "id": "production",
+      "label": "Production",
+      "pattern": "\\b(manufactur\\w*|production|fabrication|full.rate|FRP|LRIP)\\b"
+    },
+    {
+      "id": "repair_overhaul",
+      "label": "Repair and overhaul",
+      "pattern": "\\b(repair\\w*|overhaul|remanufactur\\w*|refurbish\\w*)\\b"
+    },
+    {
+      "id": "operations_sustainment",
+      "label": "Operations and sustainment",
+      "pattern": "\\b(operations|sustainment|maintenance)\\b"
+    },
+    {
+      "id": "test_evaluation",
+      "label": "Test and evaluation",
+      "pattern": "\\b(test and evaluation|testing|test services|flight test|qualification services)\\b"
+    },
+    {
+      "id": "training",
+      "label": "Training",
+      "pattern": "\\b(training|on.the.job)\\b"
+    },
+    {
+      "id": "supply_licensing",
+      "label": "Supply and licensing",
+      "pattern": "\\b(supply|supplies|purchase|procure|licen[cs]\\w*|subscriptions?)\\b"
+    },
+    {
+      "id": "construction_installation",
+      "label": "Construction and installation",
+      "pattern": "\\b(construction|installation|installing)\\b"
+    },
+    {
+      "id": "advisory_analysis",
+      "label": "Advisory and analysis",
+      "pattern": "\\b(analysis|advisory|consulting|financial management|program management|programme management)\\b"
+    }
+  ],
+  "roots": [
+    {
+      "id": "electronics",
+      "label": "Defence electronics"
+    },
+    {
+      "id": "aircraft",
+      "label": "Aircraft and aviation"
+    },
+    {
+      "id": "space",
+      "label": "Space systems"
+    },
+    {
+      "id": "weapons",
+      "label": "Weapons and missiles"
+    },
+    {
+      "id": "land",
+      "label": "Land systems"
+    },
+    {
+      "id": "maritime",
+      "label": "Maritime and undersea"
+    },
+    {
+      "id": "industrial",
+      "label": "Industrial components and manufacturing"
+    },
+    {
+      "id": "services",
+      "label": "Services and integration"
+    }
+  ]
+}

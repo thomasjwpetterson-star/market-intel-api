@@ -66,6 +66,24 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn("regexp_replace(upper(c.native_identifier),'-00$','')",aws.sql)
         self.assertIn('related_source_records_json',aws.sql)
         self.assertLess(aws.sql.index('q.source_family_rank=1'),aws.sql.index('OFFSET 0 LIMIT 24'))
+
+    def test_company_independent_topic_feed_is_version_bound_and_validated(self):
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
+        repo.manifest=lambda:{'as_of':'2026-11-01','tables':{'opportunity_vocabulary':{},'work_vocabulary_topics':{}}}
+        repo.opportunities(topic='electronics',psc='58')
+        self.assertIn('ov.record_hash=o.record_hash',aws.sql)
+        self.assertIn('arrays_overlap',aws.sql)
+        self.assertIn("parent_id='electronics'",aws.sql)
+        self.assertIn("starts_with(coalesce(o.psc,''),'58')",aws.sql)
+        self.assertNotIn('JOIN safe.company_matches',aws.sql)
+        with self.assertRaises(ValueError):repo.opportunities(topic="radar' OR true --")
+        with self.assertRaises(ValueError):repo.opportunities(psc='58%')
+        repo.manifest=lambda:{'as_of':'2026-11-01','tables':{}}
+        self.assertEqual(repo.opportunities(topic='radar'),[])
+
+    def test_new_vocabulary_routes_require_the_same_verified_principal(self):
+        self.assertEqual(self.client.get('/opportunity-intelligence/work-vocabulary').status_code,401)
+        self.assertEqual(self.client.get('/opportunity-intelligence/companies/45934/capability-vocabulary').status_code,401)
     def test_official_plan_for_exact_company_and_award_precedes_generic_follow_on(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
         repo.manifest=lambda:{'as_of':'2026-11-01','tables':{'agency_forecast_incumbents':{},'company_work_matches':{'columns':[]}}}

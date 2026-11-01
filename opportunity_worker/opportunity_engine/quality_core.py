@@ -19,6 +19,8 @@ LOGIC_HASH=hashlib.sha256(Path(__file__).read_bytes()+(Path(__file__).parent/'sc
 def plain(value):return re.sub(r'\s+',' ',re.sub('<[^>]+>',' ',html.unescape(str(value or '')))).strip()
 def terms(value):return set(w for w in words(_FACILITY_LOCATION.sub(' ',plain(value))) if len(w)>=3 and w not in STOP and w not in NOISE)
 def administrative_scope(value):
+ from .work_vocabulary import administrative_only
+ if administrative_only(value):return True
  if _POSTAL_SCOPE.fullmatch(plain(value)):return True
  t=terms(value)
  semantic={w for w in t if not any(ch.isdigit() for ch in w)}

@@ -33,6 +33,8 @@ def validate(directory):
   check('demand_progression_unique',c.execute('SELECT count(*)-count(DISTINCT relationship_id) FROM market_demand_progression').fetchone()[0]==0)
   check('demand_progression_current_forecast_version',c.execute('SELECT count(*) FROM market_demand_progression p LEFT JOIN opportunities o USING(episode_id) WHERE p.forecast_source_hash IS DISTINCT FROM o.record_hash').fetchone()[0]==0)
   check('demand_progression_retains_notice_evidence',c.execute("SELECT count(*) FROM market_demand_progression WHERE nullif(notice_source_evidence_id,'') IS NULL OR nullif(notice_source_url,'') IS NULL OR relationship_kind NOT IN ('candidate_same_buyer_scope','explicit_incumbent_contract_reference')").fetchone()[0]==0)
+ from .vocabulary_gates import validate as validate_vocabulary
+ validate_vocabulary(c,m,check)
  if 'market_capability_customer_links' in m['tables']:
   check('new_customer_routes_are_observed_service_work',c.execute("SELECT count(*) FROM market_capability_customer_links WHERE observed_records<2 OR NOT regexp_full_match(substr(psc,1,1),'[ADFRSTUV]') OR work_mode IN ('repair','supply_or_unspecified') OR nullif(sample_evidence_id,'') IS NULL").fetchone()[0]==0)
  if 'company_matching_profiles' in m['tables']:
