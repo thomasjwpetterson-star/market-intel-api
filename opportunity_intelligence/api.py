@@ -256,7 +256,7 @@ class Repository:
  def capability_vocabulary(self,cage,limit=25,offset=0):
   if not re.fullmatch('[A-Z0-9]{5}',cage) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid company vocabulary request')
   if 'company_capability_vocabulary' not in self.manifest()['tables']:return []
-  return self.rows('SELECT c.*,v.annotation_json FROM '+self.table('company_capability_vocabulary')+' c JOIN '+self.table('work_vocabulary_scopes')+" v ON v.scope_id=c.scope_id WHERE c.company_id='CAGE:"+cage+"' ORDER BY c.observed_records DESC,c.capability_id OFFSET "+str(offset)+' LIMIT '+str(limit))
+  return self.rows('SELECT c.*,v.annotation_json FROM '+self.table('company_capability_vocabulary')+' c JOIN '+self.table('work_vocabulary_scopes')+" v ON v.scope_id=c.scope_id WHERE c.company_id='CAGE:"+cage+"' ORDER BY CASE c.scope_status WHEN 'explicit_scope_labels' THEN 0 WHEN 'reported_psc_only' THEN 1 WHEN 'context_only' THEN 2 WHEN 'unclassified_scope' THEN 3 ELSE 4 END,c.observed_records DESC,c.capability_id OFFSET "+str(offset)+' LIMIT '+str(limit))
 
  def matching_profile(self,cage,limit=25,offset=0):
   if not re.fullmatch('[A-Z0-9]{5}',cage) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid matching profile request')
