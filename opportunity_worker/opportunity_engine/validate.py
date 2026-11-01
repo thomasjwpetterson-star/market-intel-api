@@ -29,6 +29,8 @@ def validate(directory):
     check(n+'_local_source_hashes',all(hashlib.sha256(Path(f['path']).read_bytes()).hexdigest()==f['sha256'] for f in files));c.read_parquet([f['path'] for f in files]).create_view(n);check(n+'_local_source_count',c.execute('SELECT count(*) FROM '+n).fetchone()[0]==t['rows'])
    continue
   p=Path(t['path']);check(n+'_content_hash',hashlib.sha256(p.read_bytes()).hexdigest()==t['sha256']);c.read_parquet(str(p)).create_view(n);check(n+'_count',c.execute('SELECT count(*) FROM '+n).fetchone()[0]==t['rows'])
+ if 'market_capability_customer_links' in m['tables']:
+  check('new_customer_routes_are_observed_service_work',c.execute("SELECT count(*) FROM market_capability_customer_links WHERE observed_records<2 OR NOT regexp_full_match(substr(psc,1,1),'[ADFRSTUV]') OR work_mode IN ('repair','supply_or_unspecified') OR nullif(sample_evidence_id,'') IS NULL").fetchone()[0]==0)
  if 'company_matching_profiles' in m['tables']:
   check('matching_profiles_cover_all_registered_cages',c.execute('SELECT count(*) FROM company_registry r ANTI JOIN company_matching_profiles p USING(company_id)').fetchone()[0]==0)
   check('matching_profiles_company_unique',c.execute('SELECT count(*)-count(DISTINCT company_id) FROM company_matching_profiles').fetchone()[0]==0)
@@ -40,7 +42,7 @@ def validate(directory):
   check('recurring_flow_horizon_arithmetic',c.execute("SELECT count(*) FROM opportunities WHERE value_basis='estimated_recurring_buying_flow_36m' AND abs(value_median-3*try_cast(json_extract_string(value_inputs_json,'$.next_12_month_median') AS DOUBLE))>0.01").fetchone()[0]==0)
   check('subcontract_reports_not_annual_revenue_forecasts',c.execute("SELECT count(*) FROM opportunities WHERE lane='recurring_subcontract_work' AND (value_basis='estimated_recurring_buying_flow_36m' OR json_extract_string(value_inputs_json,'$.next_12_month_median') IS NOT NULL)").fetchone()[0]==0)
   check('inferred_demand_never_published_response_route',c.execute("SELECT count(*) FROM opportunities o JOIN demand_decisions d USING(episode_id) WHERE o.lane IN ('recurring_government_work','recurring_subcontract_work','funded_contract_follow_on') AND (d.stage<>'expected_demand' OR coalesce(try_cast(json_extract_string(d.decision_json,'$.response_window_verified') AS BOOLEAN),false))").fetchone()[0]==0)
-  check('inferred_demand_links_have_supplier_evidence',c.execute("SELECT count(*) FROM company_work_matches WHERE match_route='market-observed-supplier-v1' AND (nullif(sample_evidence_id,'') IS NULL OR nullif(work_text,'') IS NULL OR company_entry_status<>'observed_same_scope_supplier')").fetchone()[0]==0)
+  check('inferred_demand_links_have_supplier_evidence',c.execute("SELECT count(*) FROM company_work_matches WHERE match_route IN ('market-observed-supplier-v1','market-capability-customer-v1') AND (nullif(sample_evidence_id,'') IS NULL OR nullif(work_text,'') IS NULL OR company_entry_status NOT IN ('observed_same_scope_supplier','observed_capability_new_customer'))").fetchone()[0]==0)
  from .expansion_gates import validate_expansion
  validate_expansion(c,m,check)
  if 'catalogue_sales_evidence' in m['tables']:

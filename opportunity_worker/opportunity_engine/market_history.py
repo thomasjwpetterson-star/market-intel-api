@@ -140,3 +140,30 @@ def refresh(aws,manifest,root):
     manifest.setdefault('sources',{}).update(sources)
     manifest['market_demand_policy']=dict(version=POLICY,as_of=as_of,history_years=5,recurrence_years=3,reporting_lag_days=90,coverage=stats[0],coverage_query_id=query['QueryExecutionId'],qualification='Historical supply is evidence of prior work, not proof of current configuration, rights, eligibility or an unplaced package.',financial='Recurring buying scenarios, historical package benchmarks and reported subcontract amounts remain separate. No company revenue or win probability is inferred.')
     return sources
+
+
+def capability_customer_routes(aws,manifest,root):
+    """Exact observed service capabilities can identify another customer.
+
+    Hardware/repair source qualification is not transferred to a different
+    customer or item. This is a capability-fit demand prospect, not a bid gate.
+    """
+    c=DATABASE+'.'+manifest['sources']['company_capability_history']['table'];r=DATABASE+'.'+manifest['sources']['market_recurring_demand']['table'];h=DATABASE+'.'+manifest['sources']['market_work_history']['table'];as_of=manifest['as_of']
+    sql=f"""SELECT r.cohort_id,c.company_id,c.capability_id,c.source_kind,c.scope_key,c.work_mode,c.psc,c.work_text,c.last_observed,c.observed_records,c.sample_evidence_id,c.evidence_digest,
+    max(h.source_url) matching_source_url
+    FROM {r} r JOIN {c} c ON c.capability_id=r.capability_id
+    LEFT JOIN {h} h ON h.company_id=c.company_id AND h.evidence_id=c.sample_evidence_id
+    WHERE c.source_kind='prime_award' AND c.observed_records>=2
+    AND regexp_like(coalesce(r.psc,''),'^[ADFRSTUV]') AND c.work_mode NOT IN ('repair','supply_or_unspecified')
+    AND cardinality(split(r.scope_key,'|'))>=3
+    AND try_cast(substr(c.last_observed,1,10) AS date)>=DATE {lit(as_of)}-INTERVAL '3' YEAR
+    AND NOT contains(cast(json_parse(r.supplier_ids_json) AS array(varchar)),c.company_id)
+    GROUP BY r.cohort_id,c.company_id,c.capability_id,c.source_kind,c.scope_key,c.work_mode,c.psc,c.work_text,c.last_observed,c.observed_records,c.sample_evidence_id,c.evidence_digest"""
+    source=remote(aws,'market_capability_customer_links',sql,'market_customer_routes_'+uuid.uuid4().hex[:8],as_of)
+    root=Path(root);root.mkdir(parents=True,exist_ok=True)
+    for i,f in enumerate(source['files']):
+        dest=root/(str(i)+'.parquet');aws.s3.download_file(BUCKET,f['s3_uri'].split('/',3)[3],str(dest))
+        if hashlib.sha256(dest.read_bytes()).hexdigest()!=f['sha256']:raise ValueError('Customer-capability source changed')
+        f['path']=str(dest)
+    source.update(remote_only=False,path=source['files'][0]['path']);manifest['sources']['market_capability_customer_links']=source
+    return source

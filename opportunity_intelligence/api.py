@@ -156,6 +156,7 @@ class Repository:
    join+=' LEFT JOIN '+self.table('opportunity_quality_reviews')+' qr ON qr.episode_id=o.episode_id AND qr.record_hash=o.record_hash'
    extra+=self.quality_projection()
   where+=category_where
+  where+=" AND NOT(o.source_name='market_work_history' AND regexp_like(coalesce(o.psc,''),'^[A-Z]') AND cardinality(split(coalesce(json_extract_scalar(o.value_inputs_json,'$.scope_key'),''),'|'))<3)"
   # Enforce exact source clocks at request time so a daily snapshot cannot keep
   # expired ISO deadlines open until the next nightly build. Date-only notices
   # retain calendar precision and do not acquire a midnight deadline.
@@ -203,9 +204,12 @@ class Repository:
    count_task=pool.submit(self.rows,count_sql);price_task=pool.submit(self.rows,priced_sql);business_task=pool.submit(contextvars.copy_context().run,self.business_context,cage);counts=count_task.result();priced=price_task.result();business=business_task.result()
   return dict(summary(counts[0] if counts else {},priced,self.manifest()['run_id'],business),company_id='CAGE:'+cage,cage_code=cage)
 
- def market_work_evidence(self,episode_id,limit=25,offset=0):
+ def market_work_evidence(self,episode_id,limit=25,offset=0,cage=None):
   if not re.fullmatch('[a-f0-9]{64}',episode_id) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid market-work evidence request')
+  if cage is not None and not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid evidence CAGE')
   if 'market_work_history' not in self.manifest()['tables']:return []
+  if cage:
+   return self.rows('SELECT h.* FROM '+self.table('market_work_history')+' h JOIN '+self.table('company_work_matches')+" cw ON cw.company_id=h.company_id AND cw.sample_evidence_id=h.evidence_id WHERE cw.company_id='CAGE:"+cage+"' AND cw.episode_id='"+episode_id+"' ORDER BY h.event_date DESC,h.record_id OFFSET "+str(offset)+' LIMIT '+str(limit))
   return self.rows("SELECT h.*,CASE WHEN h.source_kind='prime_award' THEN h.amount END observed_net_obligations,CASE WHEN h.source_kind='subcontract_report' THEN h.amount END reported_amount,h.event_date first_action_date,h.last_observed latest_action_date,CASE WHEN starts_with(h.company_id,'CAGE:') THEN substr(h.company_id,6) END cage_code,h.customer_name buyer_name,h.customer_name prime_name FROM "+self.table('market_work_history')+' h JOIN '+self.table('opportunities')+" o ON h.cohort_id=json_extract_scalar(o.value_inputs_json,'$.cohort_id') WHERE o.episode_id='"+episode_id+"' AND (o.lane='funded_contract_follow_on' AND h.record_id=json_extract_scalar(o.value_inputs_json,'$.record_id') OR o.lane<>'funded_contract_follow_on' AND try_cast(substr(h.event_date,1,10) AS date) BETWEEN date_add('year',-3,try_cast(json_extract_scalar(o.value_inputs_json,'$.history_cutoff') AS date)) AND try_cast(json_extract_scalar(o.value_inputs_json,'$.history_cutoff') AS date)) ORDER BY h.event_date DESC,h.record_id OFFSET "+str(offset)+' LIMIT '+str(limit))
 
  def matching_profile(self,cage,limit=25,offset=0):
@@ -437,7 +441,7 @@ def create_router(verify_principal,repository=None):
  @router.get('/companies/{cage}/research')
  def research(cage:str,limit:int=Query(20,ge=1,le=100)):return {'awards':call(repo.research,cage,limit),'topic_calls':call(repo.research_calls,cage,limit)}
  @router.get('/opportunities/{episode_id}/work-evidence')
- def market_work_evidence(episode_id:str,limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):return {'records':call(repo.market_work_evidence,episode_id,limit,offset),'release':repo.manifest()['run_id'],'interpretation':'Actual award and subcontract history for this exact buyer/work stream. Conditional projections remain separate from observations and company revenue.'}
+ def market_work_evidence(episode_id:str,limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000),cage:str=None):return {'records':call(repo.market_work_evidence,episode_id,limit,offset,cage),'release':repo.manifest()['run_id'],'interpretation':'Actual award and subcontract history for this exact buyer/work stream. Conditional projections remain separate from observations and company revenue.'}
  @router.get('/opportunities/{episode_id}/supplier-evidence')
  def supplier_evidence(episode_id:str,kind:str='primes',limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   return {'records':call(repo.supplier_evidence,episode_id,kind,limit,offset),'release':repo.manifest()['run_id'],'kind':kind,'interpretation':'Complete source lineage, paginated. Role indicators reuse the exact company profile in this release; they are company-level evidence, not proof of manufacturing or approval for this package. Performance locations are not assumed to be procurement or production sites.'}

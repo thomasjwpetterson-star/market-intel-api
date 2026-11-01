@@ -61,6 +61,9 @@ def make_opportunity(row,as_of,continuation=False):
         rationale=f"The same customer bought this evidenced work across {row['awards']} historical packages and {row['buying_months']} buying months. Timing uses the observed purchase intervals. Prior suppliers establish company relevance; future work remains conditional."
         timing='Estimated repeat-buying window from observed award cadence, with a 90-day reporting-lag allowance. No solicitation date is announced.'
     eid=digest({'model':POLICY,'lane':lane,'cohort':cohort});source_evidence=row.get('evidence_digest') or row.get('evidence_id');url=row.get('source_url') or (preview[0].get('source_url') if preview else None)
+    hardware_family=bool(re.fullmatch(r'[0-9]{4}',str(row.get('psc') or ''))) and not continuation and int(row.get('suppliers') or 0)>1
+    exact_item=bool(re.search(r'\b[0-9]{13}\b|\b(?:NSN|NIIN|P/?N|PART(?: NUMBER| NO\.?)?)\s*[:#]?\s*(?=[A-Z0-9/-]*[0-9])[A-Z0-9][A-Z0-9/-]{3,}',scope,re.I))
+    inputs['hardware_family_configuration_unresolved']=hardware_family and not exact_item
     inputs.update(source_policy=POLICY,source_kind=kind,capability_id=row.get('capability_id'),scope_key=row.get('scope_key'),work_mode=row.get('work_mode'),overlap_status='requires_notice_and_contract_reconciliation',funded_business_not_unplaced_work=True)
     base=dict(episode_id=eid,lane=lane,title=title,scope_text=scope,customer_name=row['customer_name'],programme=row.get('programme'),psc=row.get('psc'),naics=row.get('naics'),window_start=start,window_end=end,date_basis=timing,value_low=lo,value_median=mid,value_high=hi,value_basis=basis,value_scope='Conditional gross buying flow over 36 months' if basis=='estimated_recurring_buying_flow_36m' else 'Historical package size guide; future contract amount and company workshare are not established',value_inputs_json=json.dumps(inputs,sort_keys=True,default=str),source_name='market_work_history',source_url=url,source_evidence_id=source_evidence,source_locator=cohort,native_identifier=cohort,procurement_state='future_buying_inferred_from_observed_work',reconciled_state='future_procurement_not_confirmed',access_state='Observed prior supplier relationship; current scope, eligibility, configuration and availability require confirmation',notice_posted_date=None,notice_type=None,rationale=rationale,limitations='Historical demand does not establish unplaced work, a new-source qualification route or a future award to the incumbent. Inspect the linked packages, timing assumptions and successor evidence.')
     base['record_hash']=digest(base);return base
@@ -78,12 +81,17 @@ def augment(directory,aws,prepared_key=None):
                 if hashlib.sha256(dest.read_bytes()).hexdigest()!=f['sha256']:raise ValueError('Prepared market file content changed')
                 f['path']=str(dest)
     else:refresh_history(aws,m,r/'market_sources')
+    from .market_history import capability_customer_routes
+    if all(m['sources'].get(n,{}).get('table') for n in ('market_work_history','company_capability_history','market_recurring_demand')) and aws is not None:
+        capability_customer_routes(aws,m,r/'market_customer_routes')
     c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='5GB';SET preserve_insertion_order=false");c.execute("SET temp_directory='"+str(r/'market_tmp').replace("'","''")+"'")
     names=('opportunities','demand_decisions','company_profiles','company_registry','company_matches','company_work_matches','company_match_assessments','opportunity_quality_reviews')
     for n in names:
         if n in m['tables']:c.read_parquet(m['tables'][n]['path']).create_view('old_'+n)
     for name in ('market_recurring_demand','market_continuation_work','market_supplier_history'):
         c.read_parquet([f['path'] for f in m['sources'][name]['files']]).create_view(name)
+    if 'market_capability_customer_links' in m['sources']:
+        c.read_parquet([f['path'] for f in m['sources']['market_capability_customer_links']['files']]).create_view('market_capability_customer_links')
     # One planning stream per buyer/scope, with every underlying contract kept
     # in normalized history. Avoid presenting ten active orders as ten recompetes.
     c.execute("CREATE TEMP VIEW continuations AS SELECT * FROM market_continuation_work QUALIFY row_number() OVER(PARTITION BY cohort_id ORDER BY coalesce(nullif(potential_end,''),period_end),last_observed DESC,record_id)=1")
@@ -95,7 +103,9 @@ def augment(directory,aws,prepared_key=None):
                 rows=cur.fetchmany(1000)
                 if not rows:break
                 for values in rows:
-                    o=make_opportunity(dict(zip(keys,values)),as_of,continuation);f.write(json.dumps(o,default=str)+'\n');count+=1
+                    row=dict(zip(keys,values))
+                    if re.match(r'^[A-Z]',str(row.get('psc') or '')) and len(str(row.get('scope_key') or '').split('|'))<3:continue
+                    o=make_opportunity(row,as_of,continuation);f.write(json.dumps(o,default=str)+'\n');count+=1
     if count==0:raise ValueError('The full-market history produced no demand records')
     c.read_json(str(path),format='newline_delimited',sample_size=-1).create_view('market_opportunities')
     def output(name,sql):
@@ -122,20 +132,23 @@ def augment(directory,aws,prepared_key=None):
     output('demand_decisions','SELECT * FROM old_demand_decisions WHERE episode_id NOT IN (SELECT episode_id FROM old_opportunities WHERE lane IN ('+lane_list+')) UNION ALL SELECT '+project('old_demand_decisions',{n:'x."'+n+'"' for n,*_ in c.execute('DESCRIBE market_decisions').fetchall()})+' FROM market_decisions x')
     # Historical supply establishes a specific incumbent/account relationship.
     # It is not a new-source approval and is never inherited by sister sites.
-    c.execute("""CREATE TEMP TABLE market_links AS SELECT s.*,o.episode_id,o.record_hash,p.profile_hash,p.company_name,
+    c.execute("""CREATE TEMP TABLE market_links AS SELECT s.*,o.episode_id,o.record_hash,p.profile_hash,p.company_name,'prior_customer_work' relationship_kind,
     sha256('market-observed-supplier-v1|'||s.company_id||'|'||o.episode_id) match_id,
     sha256(concat_ws('|',s.company_id,o.record_hash,s.evidence_digest,p.profile_hash)) match_hash
     FROM market_supplier_history s JOIN market_opportunities o ON json_extract_string(o.value_inputs_json,'$.cohort_id')=s.cohort_id
     JOIN old_company_profiles p ON p.company_id=s.company_id
     WHERE (o.lane<>'funded_contract_follow_on' OR s.company_id=json_extract_string(o.value_inputs_json,'$.incumbent_company_id')) AND s.observed_records>=CASE WHEN o.lane='funded_contract_follow_on' THEN 1 ELSE 2 END
     AND length(trim(s.work_text))>=8""")
-    common=dict(match_id='x.match_id',company_id='x.company_id',episode_id='x.episode_id',score='90.0',match_route="'market-observed-supplier-v1'",matched_terms="'Observed supplier in this exact customer and normalized work stream'",company_evidence_caveat="'This site has delivered the evidenced work to this customer. This is a conditional continuation prospect, not proof of current qualification, an open competition or available supplier work.'",sample_evidence_id='x.sample_evidence_id',match_hash='x.match_hash',opportunity_hash='x.record_hash',profile_hash='x.profile_hash')
+    if 'market_capability_customer_links' in m['sources']:
+        alt=dict(cohort_id='a.cohort_id',company_id='a.company_id',capability_id='a.capability_id',source_kind='a.source_kind',scope_key='a.scope_key',work_mode='a.work_mode',psc='a.psc',work_text='a.work_text',last_observed='a.last_observed',observed_records='a.observed_records',sample_evidence_id='a.sample_evidence_id',record_id="sha256('market-capability-doc-v1|'||a.company_id||'|'||a.capability_id)",evidence_digest='a.evidence_digest',episode_id='o.episode_id',record_hash='o.record_hash',profile_hash='p.profile_hash',company_name='p.company_name',relationship_kind="'same_capability_other_customer'",match_id="sha256('market-capability-customer-v1|'||a.company_id||'|'||o.episode_id)",match_hash="sha256(concat_ws('|',a.company_id,o.record_hash,a.evidence_digest,p.profile_hash))")
+        c.execute('INSERT INTO market_links SELECT '+project('market_links',alt)+" FROM market_capability_customer_links a JOIN market_opportunities o ON json_extract_string(o.value_inputs_json,'$.cohort_id')=a.cohort_id JOIN old_company_profiles p ON p.company_id=a.company_id WHERE NOT EXISTS(SELECT 1 FROM market_links own WHERE own.company_id=a.company_id AND own.episode_id=o.episode_id)")
+    common=dict(match_id='x.match_id',company_id='x.company_id',episode_id='x.episode_id',score='90.0',match_route="CASE WHEN x.relationship_kind='same_capability_other_customer' THEN 'market-capability-customer-v1' ELSE 'market-observed-supplier-v1' END",matched_terms="'Observed supplier in this exact customer and normalized work stream'",company_evidence_caveat="CASE WHEN x.relationship_kind='same_capability_other_customer' THEN 'This site has delivered the same normalized service scope and work mode to another customer. This is a capability-fit buying prospect; future procurement, eligibility and available work are not confirmed.' ELSE 'This site has delivered the evidenced work to this customer. This is a conditional continuation prospect, not proof of current qualification, an open competition or available supplier work.' END",sample_evidence_id='x.sample_evidence_id',match_hash='x.match_hash',opportunity_hash='x.record_hash',profile_hash='x.profile_hash')
     retain=' WHERE episode_id NOT IN (SELECT episode_id FROM old_opportunities WHERE lane IN ('+lane_list+'))'
     output('company_matches','SELECT * FROM old_company_matches'+retain+' UNION ALL SELECT '+project('old_company_matches',common)+' FROM market_links x')
-    work=dict(common,doc_id='x.record_id',work_text='x.work_text',source_kind='x.source_kind',last_observed='x.last_observed',work_context="'Exact historical customer/scope; underlying awards and reports are linked'",company_entry_status="'observed_same_scope_supplier'",review_category="'work_lead'",fit_verdict="'accepted'",fit_reason="'Exact historical supplier/customer/work relationship supports retention and account planning. New procurement and current access remain unconfirmed.'",observed_work_psc="NULL",required_delivery_mode="'not_established'",observed_delivery_mode="'not_established'",shared_scope_terms_json="'[\"observed customer\",\"observed work\"]'")
-    output('company_work_matches','SELECT * FROM old_company_work_matches'+retain+' UNION ALL SELECT '+project('old_company_work_matches',work)+' FROM market_links x')
-    assessments=dict(work,verdict="'accepted'",reason=work['fit_reason'],source_verdict="'usable'",policy_hash="'"+POLICY+"'",original_company_evidence_caveat=common['company_evidence_caveat'])
-    output('company_match_assessments','SELECT * FROM old_company_match_assessments'+retain+' UNION ALL SELECT '+project('old_company_match_assessments',assessments)+' FROM market_links x')
+    work=dict(common,doc_id='x.record_id',work_text='x.work_text',source_kind='x.source_kind',last_observed='x.last_observed',work_context="'Exact historical customer/scope; underlying awards and reports are linked'",company_entry_status="CASE WHEN x.relationship_kind='same_capability_other_customer' THEN 'observed_capability_new_customer' ELSE 'observed_same_scope_supplier' END",review_category="CASE WHEN coalesce(try_cast(json_extract_string(o.value_inputs_json,'$.hardware_family_configuration_unresolved') AS BOOLEAN),false) THEN 'market_context' ELSE 'work_lead' END",fit_verdict="CASE WHEN coalesce(try_cast(json_extract_string(o.value_inputs_json,'$.hardware_family_configuration_unresolved') AS BOOLEAN),false) THEN 'review' ELSE 'accepted' END",fit_reason="CASE WHEN x.relationship_kind='same_capability_other_customer' THEN 'Observed service deliveries match the same normalized scope and work mode at another customer. Future buying and notice-specific eligibility are unconfirmed.' ELSE 'Exact historical supplier/customer/work relationship supports retention and account planning. New procurement and current access remain unconfirmed.' END",observed_work_psc="NULL",required_delivery_mode="'not_established'",observed_delivery_mode="'not_established'",shared_scope_terms_json="'[\"observed customer\",\"observed work\"]'")
+    output('company_work_matches','SELECT * FROM old_company_work_matches'+retain+' UNION ALL SELECT '+project('old_company_work_matches',work)+' FROM market_links x JOIN market_opportunities o USING(episode_id)')
+    assessments=dict(work,verdict=work['fit_verdict'],reason=work['fit_reason'],source_verdict="'usable'",policy_hash="'"+POLICY+"'",original_company_evidence_caveat=common['company_evidence_caveat'])
+    output('company_match_assessments','SELECT * FROM old_company_match_assessments'+retain+' UNION ALL SELECT '+project('old_company_match_assessments',assessments)+' FROM market_links x JOIN market_opportunities o USING(episode_id)')
     quality=dict(episode_id='x.episode_id',record_hash='x.record_hash',source_evidence_id='x.source_evidence_id',source_url='x.source_url',verdict="'usable'",reason="'Source-backed historical demand inference; future procurement is not announced'",passages_json="'[]'",source_entry_kind="'historical_customer_work'",category_override="'work'",scope_has_item_identifier='false',restricted_item='false',qualification_invitation='false',source_cages_json="'[]'",required_parts_json="'[]'",required_delivery_mode="'not_established'",policy_hash="'"+POLICY+"'",pre_quality_decision_json='d.decision_json')
     output('opportunity_quality_reviews','SELECT * FROM old_opportunity_quality_reviews'+retain+' UNION ALL SELECT '+project('old_opportunity_quality_reviews',quality)+' FROM market_opportunities x JOIN market_decisions d USING(episode_id)')
     # Every held CAGE identity gets a matching profile with explicit readiness;
@@ -162,7 +175,7 @@ def augment(directory,aws,prepared_key=None):
     CASE WHEN p.company_id IS NOT NULL THEN 'observed_work_product_or_research' WHEN r.coverage_state='declared_classifications_only' THEN 'declared_only_requires_delivery_evidence' ELSE 'identity_only_requires_enrichment' END matching_readiness,
     'company_capability_history' capability_evidence_table,'"""+as_of+"""' assessed_as_of
     FROM old_company_registry r LEFT JOIN old_company_profiles p ON p.company_id=r.company_id LEFT JOIN new_company_parent_resolution parent ON parent.company_id=r.company_id""")
-    for name in ('market_work_history','company_capability_history','market_recurring_demand','market_continuation_work','market_supplier_history','market_recurrence_training','market_recurrence_validation'):
+    for name in ('market_work_history','company_capability_history','market_recurring_demand','market_continuation_work','market_supplier_history','market_recurrence_training','market_recurrence_validation','market_capability_customer_links'):
         if name not in m['sources']:continue
         source=m['sources'][name];m['tables'][name]=dict(rows=source['rows'],sha256=source['sha256'],columns=source['columns'],remote_binding=True,table=source['table'],s3_uri=source['s3_uri'],source_binding=name)
     m['rules']=rules.catalogue();m['market_demand_policy']['generated_opportunities']=count;m['market_demand_policy']['company_links']=c.execute('SELECT count(*) FROM market_links').fetchone()[0]

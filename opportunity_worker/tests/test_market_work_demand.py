@@ -64,23 +64,33 @@ def test_full_augmentation_links_only_evidenced_sites_and_profiles_all_identitie
     }
     for name,cols in schemas.items():
         c.execute('CREATE TABLE '+name+'('+','.join(n+' '+t for n,t in cols.items())+')')
-    c.execute("INSERT INTO company_profiles VALUES ('CAGE:12345','A supplier','profilehash')")
-    c.execute("INSERT INTO company_registry VALUES ('CAGE:12345','A supplier','observed_evidence_profile','12345','54321','2026-10-01'),('CAGE:54321','Declared site','declared_classifications_only','54321','88888','2026-10-01'),('CAGE:88888','Identity site','registered_identity_only','88888',NULL,'2026-10-01'),('CAGE:99997','Cycle one','registered_identity_only','99997','99998','2026-10-01'),('CAGE:99998','Cycle two','registered_identity_only','99998','99997','2026-10-01')")
+    c.execute("INSERT INTO company_profiles VALUES ('CAGE:12345','A supplier','profilehash'),('CAGE:55555','Another service provider','otherhash')")
+    c.execute("INSERT INTO company_registry VALUES ('CAGE:12345','A supplier','observed_evidence_profile','12345','54321','2026-10-01'),('CAGE:54321','Declared site','declared_classifications_only','54321','88888','2026-10-01'),('CAGE:88888','Identity site','registered_identity_only','88888',NULL,'2026-10-01'),('CAGE:99997','Cycle one','registered_identity_only','99997','99998','2026-10-01'),('CAGE:99998','Cycle two','registered_identity_only','99998','99997','2026-10-01'),('CAGE:55555','Another service provider','observed_evidence_profile','55555',NULL,'2026-10-01')")
     for name,cols in schemas.items():
         path=tmp_path/(name+'.parquet');c.execute('COPY '+name+' TO ? (FORMAT PARQUET)',[str(path)]);tables[name]=dict(path=str(path),rows=c.execute('SELECT count(*) FROM '+name).fetchone()[0],sha256=hashlib.sha256(path.read_bytes()).hexdigest(),columns=[dict(Name=k,Type='double' if v=='DOUBLE' else 'string') for k,v in cols.items()])
     for name,rows in [('market_recurring_demand',[example()]),('market_continuation_work',[]),('market_supplier_history',[dict(cohort_id='a'*64,company_id='CAGE:12345',capability_id='b'*64,source_kind='prime_award',work_text=example()['work_text'],last_observed='2026-07-01',observed_records=3,sample_evidence_id='d'*64,record_id='one',evidence_digest='e'*64)])]:
         jp=tmp_path/(name+'.json');jp.write_text(json.dumps(rows or [dict(cohort_id=None,source_kind=None,technical_terms=None,potential_end=None,period_end=None,last_observed=None,record_id=None)]));path=tmp_path/(name+'.parquet')
         c.execute('CREATE OR REPLACE TEMP TABLE fixture_source AS SELECT * FROM read_json_auto(?)'+(' WHERE false' if not rows else ''),[str(jp)]);c.execute('COPY fixture_source TO ? (FORMAT PARQUET)',[str(path)])
         sources[name]=dict(path=str(path),files=[dict(path=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest())],rows=len(rows),sha256=hashlib.sha256(path.read_bytes()).hexdigest(),columns=[dict(Name=n,Type='string') for n,*_ in c.execute('DESCRIBE SELECT * FROM read_parquet(?)',[str(path)]).fetchall()],table='oi_test_'+name,s3_uri='s3://fake/'+name)
+    jp=tmp_path/'routes.json';jp.write_text(json.dumps([dict(cohort_id='a'*64,company_id='CAGE:55555',capability_id='b'*64,source_kind='prime_award',scope_key=example()['scope_key'],work_mode='services',psc='D302',work_text=example()['work_text'],last_observed='2026-06-01',observed_records=3,sample_evidence_id='9'*64,evidence_digest='8'*64)]));path=tmp_path/'routes.parquet'
+    c.execute('CREATE TEMP TABLE route_fixture AS SELECT * FROM read_json_auto(?)',[str(jp)]);c.execute('COPY route_fixture TO ? (FORMAT PARQUET)',[str(path)])
+    sources['market_capability_customer_links']=dict(path=str(path),files=[dict(path=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest())],rows=1,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),columns=[dict(Name=n,Type='string') for n,*_ in c.execute('DESCRIBE route_fixture').fetchall()],table='oi_test_routes',s3_uri='s3://fake/routes')
     for n in ('market_work_history','company_capability_history'):sources[n]=dict(rows=1,sha256='f'*64,columns=[dict(Name='company_id',Type='string')],table='oi_test_'+n,s3_uri='s3://fake/'+n,files=[])
     c.close();m=dict(run_id='test_market',as_of='2026-11-01',tables=tables,sources={},rules={});(tmp_path/'manifest.json').write_text(json.dumps(m))
     def fake_refresh(aws,manifest,root):manifest['sources'].update(sources);manifest['market_demand_policy']={}
     monkeypatch.setattr(mod,'refresh_history',fake_refresh)
     out=mod.augment(tmp_path,None)
-    c=duckdb.connect();assert c.execute('SELECT count(*) FROM read_parquet(?)',[out['tables']['company_matching_profiles']['path']]).fetchone()[0]==5
-    assert c.execute('SELECT count(*) FROM read_parquet(?)',[out['tables']['company_matches']['path']]).fetchone()[0]==1
+    c=duckdb.connect();assert c.execute('SELECT count(*) FROM read_parquet(?)',[out['tables']['company_matching_profiles']['path']]).fetchone()[0]==6
+    assert c.execute('SELECT count(*) FROM read_parquet(?)',[out['tables']['company_matches']['path']]).fetchone()[0]==2
     assert c.execute('SELECT stage FROM read_parquet(?)',[out['tables']['demand_decisions']['path']]).fetchone()[0]=='expected_demand'
     assert c.execute('SELECT pre_quality_decision_json IS NOT NULL FROM read_parquet(?)',[out['tables']['opportunity_quality_reviews']['path']]).fetchone()[0]
     assert c.execute("SELECT resolved_registry_parent_cage FROM read_parquet(?) WHERE company_id='CAGE:12345'",[out['tables']['company_parent_resolution']['path']]).fetchone()[0]=='88888'
     assert c.execute("SELECT count(*) FROM read_parquet(?) WHERE resolution_status='cycle_requires_review' AND resolved_registry_parent_cage IS NULL",[out['tables']['company_parent_resolution']['path']]).fetchone()[0]==2
+    assert c.execute("SELECT company_entry_status FROM read_parquet(?) WHERE company_id='CAGE:55555'",[out['tables']['company_work_matches']['path']]).fetchone()[0]=='observed_capability_new_customer'
     c.close()
+
+def test_multi_supplier_hardware_family_keeps_configuration_unresolved():
+    r=example(psc='2915',work_text='Aircraft fuel pump',scope_key='aircraft|fuel|pump',suppliers=4)
+    x=make_opportunity(r,'2026-11-01');assert json.loads(x['value_inputs_json'])['hardware_family_configuration_unresolved']
+    x=make_opportunity(dict(r,work_text='Aircraft fuel pump NSN 2915003538074'),'2026-11-01')
+    assert not json.loads(x['value_inputs_json'])['hardware_family_configuration_unresolved']
