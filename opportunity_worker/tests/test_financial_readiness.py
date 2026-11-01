@@ -71,3 +71,40 @@ def test_main_raw_report_and_value_evidence_are_explicitly_unvalidated():
     assert repo.company_history('ABCDE','subcontracts')[0]['reported_amount'] is None
     assert repo.value_evidence('a'*64)['financial_validation']=='not_validated'
     assert repo.company_events('ABCDE')[0]['financial_validation']=='not_validated'
+
+
+@pytest.mark.parametrize('lane',[LANES[0],LANES[1],None])
+def test_new_clean_release_cannot_validate_old_event_amounts(lane):
+    m=manifest(True)
+    row=dict(event_id='event',lane=lane,release_id='old-raw',previous_release_id='older-raw',
+             previous_value_median=39157943915794,current_value_median=100)
+    result=guard(row,m)
+    assert result['financial_validation']=='not_validated'
+    assert result['previous_value_median'] is None and result['current_value_median'] is None
+    assert json.loads(result['unvalidated_financial_evidence_json'])['amounts']['previous_value_median']==39157943915794
+    assert guard(result,m)==result
+
+
+def test_transition_event_is_quarantined_but_two_reconciled_releases_can_compare():
+    m=manifest(True)
+    row=dict(event_id='event',lane=LANES[0],release_id='test',previous_release_id='old',previous_value_median=100,current_value_median=80)
+    assert guard(row,m)['current_value_median'] is None
+    m['subcontract_opportunity_finance']['validated_release_ids']=['old','test']
+    assert guard(row,m)['current_value_median']==80
+    assert guard(row,m)['financial_validation']=='validated'
+
+
+def test_explicit_unvalidated_record_remains_quarantined_after_global_reconciliation():
+    row=dict(lane=LANES[0],financial_validation='not_validated',value_median=1e12)
+    assert guard(row,manifest(True))['value_median'] is None
+
+
+@pytest.mark.parametrize('module',['opportunity_engine.api','opportunity_intelligence.api'])
+def test_both_event_adapters_apply_historical_release_guard(module):
+    import importlib
+    api=importlib.import_module(module)
+    class Local(api.Repository):
+        def __init__(self):pass
+        def manifest(self):return manifest(True)
+        def rows(self,sql):return [dict(event_id='event',lane=None,release_id='old',previous_release_id='older',previous_value_median=1e12)]
+    assert Local().company_events('ABCDE')[0]['previous_value_median'] is None

@@ -130,7 +130,8 @@ class Repository(DiscoveryRepositoryMixin):
   if not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid pagination')
   if 'company_opportunity_events' not in self.manifest()['tables']:return []
   where="company_id='CAGE:"+cage+"'"+(" AND episode_id='"+episode_id+"'" if episode_id else '')
-  return self.rows('SELECT * FROM '+self.table('company_opportunity_events')+' WHERE '+where+' ORDER BY event_date DESC,release_id DESC,event_id OFFSET '+str(offset)+' LIMIT '+str(limit))
+  where=where.replace('company_id=', 'e.company_id=').replace('episode_id=', 'e.episode_id=')
+  return [guard_finance(row,self.manifest()) for row in self.rows('SELECT e.*,o.lane FROM '+self.table('company_opportunity_events')+' e LEFT JOIN '+self.table('opportunities')+' o ON o.episode_id=e.episode_id WHERE '+where+' ORDER BY event_date DESC,release_id DESC,event_id OFFSET '+str(offset)+' LIMIT '+str(limit))]
 
  def award(self,award_id):
   if not re.fullmatch('[a-f0-9]{64}',award_id):raise ValueError('Invalid award identifier')
