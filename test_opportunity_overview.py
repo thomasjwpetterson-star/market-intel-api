@@ -1,3 +1,4 @@
+import json
 import unittest
 from opportunity_intelligence.overview import summary
 
