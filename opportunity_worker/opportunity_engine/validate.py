@@ -29,6 +29,18 @@ def validate(directory):
     check(n+'_local_source_hashes',all(hashlib.sha256(Path(f['path']).read_bytes()).hexdigest()==f['sha256'] for f in files));c.read_parquet([f['path'] for f in files]).create_view(n);check(n+'_local_source_count',c.execute('SELECT count(*) FROM '+n).fetchone()[0]==t['rows'])
    continue
   p=Path(t['path']);check(n+'_content_hash',hashlib.sha256(p.read_bytes()).hexdigest()==t['sha256']);c.read_parquet(str(p)).create_view(n);check(n+'_count',c.execute('SELECT count(*) FROM '+n).fetchone()[0]==t['rows'])
+ if 'company_matching_profiles' in m['tables']:
+  check('matching_profiles_cover_all_registered_cages',c.execute('SELECT count(*) FROM company_registry r ANTI JOIN company_matching_profiles p USING(company_id)').fetchone()[0]==0)
+  check('matching_profiles_company_unique',c.execute('SELECT count(*)-count(DISTINCT company_id) FROM company_matching_profiles').fetchone()[0]==0)
+  check('identity_only_profiles_not_observed_capability',c.execute("SELECT count(*) FROM company_matching_profiles WHERE coverage_state='registered_identity_only' AND matching_readiness<>'identity_only_requires_enrichment'").fetchone()[0]==0)
+ if m.get('market_demand_policy'):
+  check('market_work_has_source_coverage_query',bool(m['market_demand_policy'].get('coverage_query_id')))
+  check('market_future_has_customer_scope_timing_and_evidence',c.execute("SELECT count(*) FROM opportunities WHERE lane IN ('recurring_government_work','recurring_subcontract_work','funded_contract_follow_on') AND (nullif(customer_name,'') IS NULL OR nullif(scope_text,'') IS NULL OR nullif(source_evidence_id,'') IS NULL OR nullif(source_url,'') IS NULL OR window_end IS NULL OR json_extract_string(value_inputs_json,'$.company_addressable_value') IS NOT NULL)").fetchone()[0]==0)
+  check('recurring_flow_three_completed_awards',c.execute("SELECT count(*) FROM opportunities WHERE value_basis='estimated_recurring_buying_flow_36m' AND try_cast(json_extract_string(value_inputs_json,'$.completed_historical_awards') AS INTEGER)<3").fetchone()[0]==0)
+  check('recurring_flow_horizon_arithmetic',c.execute("SELECT count(*) FROM opportunities WHERE value_basis='estimated_recurring_buying_flow_36m' AND abs(value_median-3*try_cast(json_extract_string(value_inputs_json,'$.next_12_month_median') AS DOUBLE))>0.01").fetchone()[0]==0)
+  check('subcontract_reports_not_annual_revenue_forecasts',c.execute("SELECT count(*) FROM opportunities WHERE lane='recurring_subcontract_work' AND (value_basis='estimated_recurring_buying_flow_36m' OR json_extract_string(value_inputs_json,'$.next_12_month_median') IS NOT NULL)").fetchone()[0]==0)
+  check('inferred_demand_never_published_response_route',c.execute("SELECT count(*) FROM opportunities o JOIN demand_decisions d USING(episode_id) WHERE o.lane IN ('recurring_government_work','recurring_subcontract_work','funded_contract_follow_on') AND (d.stage<>'expected_demand' OR coalesce(try_cast(json_extract_string(d.decision_json,'$.response_window_verified') AS BOOLEAN),false))").fetchone()[0]==0)
+  check('inferred_demand_links_have_supplier_evidence',c.execute("SELECT count(*) FROM company_work_matches WHERE match_route='market-observed-supplier-v1' AND (nullif(sample_evidence_id,'') IS NULL OR nullif(work_text,'') IS NULL OR company_entry_status<>'observed_same_scope_supplier')").fetchone()[0]==0)
  from .expansion_gates import validate_expansion
  validate_expansion(c,m,check)
  if 'catalogue_sales_evidence' in m['tables']:

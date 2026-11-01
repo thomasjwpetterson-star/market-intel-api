@@ -274,9 +274,12 @@
     {
       "id": "PR12",
       "label": "Repeat demand / recompete / expiry",
-      "adapter_status": "operational",
+      "adapter_status": "operational_conditional_demand",
       "lanes": [
-        "scoped_recurrence"
+        "scoped_recurrence",
+        "recurring_government_work",
+        "recurring_subcontract_work",
+        "funded_contract_follow_on"
       ],
       "legacy_families": [
         "BS03",
@@ -284,12 +287,12 @@
         "BS14"
       ],
       "required_evidence": [
-        "Specific historical work and buying office",
-        "Distinct awards and observed cadence",
-        "Successor/extension/award checks and accessible route"
+        "Actual customer/work awards or revision-resolved subcontract packages",
+        "Observed buying cadence or funded work with a stated future end",
+        "Specific supplier delivery evidence and retained comparator records"
       ],
-      "next_action": "Check the next requirement and contracting route with the responsible office.",
-      "value_method": "Comparable contract/action amounts; cadence window is inferred, not an announced release.",
+      "next_action": "Review the linked work and current notices or successor awards, then confirm the customer\u2019s next buying plan and participation route.",
+      "value_method": "Steady-buying scenarios require at least three completed prime awards; subcontract and follow-on amounts remain historical package benchmarks.",
       "disconfirming_evidence": [
         "Extension or successor awarded",
         "Requirement ended",

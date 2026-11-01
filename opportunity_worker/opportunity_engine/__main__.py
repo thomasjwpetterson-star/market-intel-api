@@ -15,10 +15,16 @@ from .demand_history import rebuild as rebuild_demand,refresh_forecast_episodes
 from .quality import apply as apply_quality,review_current
 
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--from-current',action='store_true',required=True);ap.add_argument('--workdir',required=True);ap.add_argument('--as-of',default=datetime.datetime.now(datetime.timezone.utc).date().isoformat());ap.add_argument('--publish',action='store_true');ap.add_argument('--refresh',action='store_true');ap.add_argument('--review-current',action='store_true');ap.add_argument('--refresh-items',action='store_true');ap.add_argument('--source-bindings-key');ap.add_argument('--resume-derived-checkpoint-key');ap.add_argument('--publish-validated-checkpoint-key');ap.add_argument('--retain-prior-unreferenced-innovation',action='store_true');args=ap.parse_args();a=AWS();root=Path(args.workdir).resolve();root.mkdir(parents=True,exist_ok=True)
+ ap=argparse.ArgumentParser();ap.add_argument('--from-current',action='store_true',required=True);ap.add_argument('--workdir',required=True);ap.add_argument('--as-of',default=datetime.datetime.now(datetime.timezone.utc).date().isoformat());ap.add_argument('--publish',action='store_true');ap.add_argument('--refresh',action='store_true');ap.add_argument('--review-current',action='store_true');ap.add_argument('--refresh-items',action='store_true');ap.add_argument('--source-bindings-key');ap.add_argument('--refresh-market-demand',action='store_true');ap.add_argument('--market-source-bindings-key');ap.add_argument('--resume-derived-checkpoint-key');ap.add_argument('--publish-validated-checkpoint-key');ap.add_argument('--retain-prior-unreferenced-innovation',action='store_true');args=ap.parse_args();a=AWS();root=Path(args.workdir).resolve();root.mkdir(parents=True,exist_ok=True)
  pointer=json.loads(a.s3.get_object(Bucket=BUCKET,Key=PREFIX+'/current.json')['Body'].read());key=pointer['manifest_key']
  if not key.startswith(PREFIX+'/releases/'):raise ValueError('Invalid release pointer')
  m=json.loads(a.s3.get_object(Bucket=BUCKET,Key=key)['Body'].read())
+ if args.refresh_market_demand:
+  if args.refresh or args.review_current or args.refresh_items or args.source_bindings_key or args.resume_derived_checkpoint_key or args.publish_validated_checkpoint_key:raise ValueError('Market work refresh is an exclusive operation')
+  from .market_demand import refresh_current
+  out=refresh_current(m,root,a,args.market_source_bindings_key)
+  if args.publish:publish(out)
+  print(json.dumps(dict(directory=str(out),published=args.publish,mode='whole_market_work_demand')));return
  if args.refresh_items:
   if args.refresh or args.review_current or args.source_bindings_key or args.resume_derived_checkpoint_key or args.publish_validated_checkpoint_key:raise ValueError('Item refresh is an exclusive operation')
   from .item_refresh import refresh as refresh_items
@@ -141,6 +147,9 @@ def main():
   if 'native_company_identity' in sources:refresh_reporting_lag(out,a)
   from .product_market import build as build_product_market
   if 'company_work' in sources:build_product_market(out)
+  if sources.get('native_company_awards',{}).get('table') and sources.get('native_company_subcontracts',{}).get('table'):
+   from .market_demand import augment as augment_market_demand
+   augment_market_demand(out,a)
   from .pipeline_coverage import build as build_coverage
   if 'company_work' in sources:build_coverage(out)
   from .logic_provenance import record as record_logic

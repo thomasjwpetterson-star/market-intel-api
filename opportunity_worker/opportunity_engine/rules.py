@@ -93,6 +93,7 @@ def evaluate(o,as_of):
  elif lane in ('research_and_facilities_plan','all_service_procurement_plan'):stage='planning_context';route='external_task_not_established'
  elif template:stage='emerging_demand';route='prime_supply_chain_validation'
  elif lane=='funded_prime_supplier_packages':stage='historical_watch';route='no_new_sourcing_event'
+ elif lane in ('recurring_government_work','recurring_subcontract_work','funded_contract_follow_on'):stage='expected_demand';route='observed_work_continuation_check';unknown.extend(['Future procurement and supplier selection are not confirmed','Existing orders and published requirements may overlap with this demand stream'])
  elif lane=='scoped_recurrence':stage='repeat_demand_inference';route='future_route_unconfirmed'
  elif lane=='new_prime_historical_supplier_flow':unknown.append('New-parent/prior-outsourcing lineage is incomplete')
  elif lane.startswith('published'):unknown.append('Current response window is not verified')
@@ -114,6 +115,10 @@ def evaluate(o,as_of):
   if code=='PR16':out['unresolved'].append('SBIR/STTR applicant, phase, ownership/size and research-data rights conditions require notice-specific verification; past topic activity is not eligibility')
   if code=='PR18':out['unresolved'].append('Direct task-order access depends on vehicle holder/on-ramp or permitted teaming status')
   if code=='PR19':out['unresolved'].append('FMS approval or programme ceiling does not establish a signed/funded supplier package')
+ if lane in ('recurring_government_work','recurring_subcontract_work','funded_contract_follow_on'):
+  out['value_interpretation']='conditional_recurring_buying_scenario' if o.get('value_basis')=='estimated_recurring_buying_flow_36m' else 'historical_package_benchmark'
+  out['same_scope_resolution_required']=True
+  out['source_basis']['comparator_evidence_ids']=[x.get('evidence_id') for x in inputs.get('comparators',[]) if isinstance(x,dict) and x.get('evidence_id')]
  out['response_window_verified']=bool(lane.startswith('published') and end and end>=today and not terminal)
  if invitation_current and end is None:out['next_action']='Contact the office in the agency notice to confirm whether capability information is still being accepted, then establish the qualification scope, technical-data access, cost and timetable.'
  out['decision_hash']=hashlib.sha256(json.dumps(out,sort_keys=True,default=str).encode()).hexdigest()
