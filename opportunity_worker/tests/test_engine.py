@@ -87,7 +87,7 @@ def test_refresh_worker_orchestrates_native_sources_before_publication(tmp_path,
   if name=='refresh_sbir':
    p=root/'source.csv';p.write_bytes(raw);(root/'inputs/sbir_source.json').write_text(json.dumps(dict(source,path=str(p))))
   else:
-   pointer={'refresh_topics':'topics','refresh_shared_sources':'shared_sources','refresh_commercial_sources':'commercial','connect_cloud_evidence':'connections','refresh_company_registry':'company_registry','refresh_company_history':'company_history','refresh_innovation':'innovation','refresh_dla_monthly':'dla_monthly','refresh_agency_forecasts':'agency_forecasts'}[name];p=root/('input_'+pointer+'.json');p.write_text(json.dumps({'sources':{}}));(root/('inputs/'+pointer+'_latest.json')).write_text(json.dumps({'path':str(p)}))
+   pointer={'refresh_topics':'topics','refresh_shared_sources':'shared_sources','refresh_company_references':'company_references','refresh_commercial_sources':'commercial','connect_cloud_evidence':'connections','refresh_company_registry':'company_registry','refresh_company_history':'company_history','refresh_innovation':'innovation','refresh_dla_monthly':'dla_monthly','refresh_agency_forecasts':'agency_forecasts'}[name];p=root/('input_'+pointer+'.json');p.write_text(json.dumps({'sources':{}}));(root/('inputs/'+pointer+'_latest.json')).write_text(json.dumps({'path':str(p)}))
  monkeypatch.setattr(worker.subprocess,'run',execute)
  monkeypatch.setattr(worker,'build',lambda *a,**kw:calls.append('prebuild' if kw.get('skip_matching') else 'build'))
  monkeypatch.setattr(worker,'enrich',lambda *a:calls.append('enrich'))
@@ -95,4 +95,4 @@ def test_refresh_worker_orchestrates_native_sources_before_publication(tmp_path,
  monkeypatch.setattr(worker,'validate',lambda *a:{'passed':1,'failed':0})
  monkeypatch.setattr(worker,'publish',lambda *a:calls.append('publish'))
  monkeypatch.setattr(sys,'argv',['worker','--from-current','--workdir',str(tmp_path),'--as-of','2026-10-29','--refresh','--publish']);worker.main()
- assert calls==['refresh_sbir','refresh_topics','refresh_shared_sources','refresh_dla_monthly','refresh_commercial_sources','refresh_company_registry','refresh_company_history','refresh_innovation','refresh_agency_forecasts','prebuild','connect_cloud_evidence','build','early_integrity','enrich','publish']
+ assert calls==['refresh_sbir','refresh_topics','refresh_shared_sources','refresh_company_references','refresh_dla_monthly','refresh_commercial_sources','refresh_company_registry','refresh_company_history','refresh_innovation','refresh_agency_forecasts','prebuild','connect_cloud_evidence','build','early_integrity','enrich','publish']
