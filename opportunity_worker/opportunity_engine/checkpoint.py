@@ -97,3 +97,27 @@ def archive_failed_attempt(directory,aws,parent_release):
   if path.exists():aws.put_json(base+'/'+name+'.json',json.loads(path.read_text()))
  m['checkpoint_parent_release']=parent_release;m['checkpoint_phase']='unpublished_completed_derivation'
  key=base+'/manifest.json';aws.put_json(key,m);print('Unpublished derivation checkpoint:',key,flush=True);return key
+
+def revalidate_derived_checkpoint(aws,key,current,root):
+ """Recover exact unpublished outputs, then run every release gate afresh."""
+ m=load_derived_checkpoint(aws,key,current)
+ r=Path(root)/'runs'/m['run_id'];r.mkdir(parents=True,exist_ok=True)
+ for name,t in m['tables'].items():
+  if t.get('remote_binding'):continue
+  uri=t.get('recovery_s3_uri')
+  if not uri:
+   if t.get('source_binding'):
+    uri=next(f['s3_uri'] for f in m['sources'][t['source_binding']]['files'] if f['sha256']==t['sha256'])
+   else:uri=t['s3_uri']+'part-00000.parquet'
+  path=r/(name+'.parquet')
+  if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=t['sha256']:aws.s3.download_file(BUCKET,uri.split('/',3)[3],str(path))
+  if hashlib.sha256(path.read_bytes()).hexdigest()!=t['sha256']:raise ValueError('Unpublished checkpoint content changed: '+name)
+  t['path']=str(path)
+  print('Restored unpublished output',name,t['rows'],flush=True)
+ m['revalidated_from_checkpoint_key']=key
+ for field in ('checkpoint_phase','checkpoint_parent_release'):m.pop(field,None)
+ (r/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')
+ from .logic_provenance import record
+ from .validate import validate,validate_demand_integrity
+ record(r);validate_demand_integrity(r);validate(r,aws)
+ return r

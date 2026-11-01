@@ -18,8 +18,12 @@ def validate_demand_integrity(directory):
  if failed:raise ValueError('Demand integrity failed before company matching: '+json.dumps(failed))
  return checks
 
-def validate(directory):
- r=Path(directory);m=json.loads((r/'manifest.json').read_text());c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1400MB';SET preserve_insertion_order=false");checks=[]
+def validate(directory,aws=None):
+ r=Path(directory);m=json.loads((r/'manifest.json').read_text())
+ from .validation_inputs import prepare
+ m=prepare(r,m,aws)
+ (r/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')
+ c=duckdb.connect();c.execute("SET threads=1;SET memory_limit='1400MB';SET preserve_insertion_order=false");checks=[]
  def check(name,ok,detail=None):checks.append(dict(name=name,passed=bool(ok),detail=detail))
  for n,t in m['tables'].items():
   if t.get('remote_binding'):

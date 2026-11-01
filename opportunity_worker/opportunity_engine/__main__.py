@@ -15,10 +15,16 @@ from .demand_history import rebuild as rebuild_demand,refresh_forecast_episodes
 from .quality import apply as apply_quality,review_current
 
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--from-current',action='store_true',required=True);ap.add_argument('--workdir',required=True);ap.add_argument('--as-of',default=datetime.datetime.now(datetime.timezone.utc).date().isoformat());ap.add_argument('--publish',action='store_true');ap.add_argument('--refresh',action='store_true');ap.add_argument('--review-current',action='store_true');ap.add_argument('--refresh-items',action='store_true');ap.add_argument('--source-bindings-key');ap.add_argument('--refresh-market-demand',action='store_true');ap.add_argument('--refresh-work-vocabulary',action='store_true');ap.add_argument('--market-source-bindings-key');ap.add_argument('--resume-derived-checkpoint-key');ap.add_argument('--publish-validated-checkpoint-key');ap.add_argument('--retain-prior-unreferenced-innovation',action='store_true');args=ap.parse_args();a=AWS();root=Path(args.workdir).resolve();root.mkdir(parents=True,exist_ok=True)
+ ap=argparse.ArgumentParser();ap.add_argument('--from-current',action='store_true',required=True);ap.add_argument('--workdir',required=True);ap.add_argument('--as-of',default=datetime.datetime.now(datetime.timezone.utc).date().isoformat());ap.add_argument('--publish',action='store_true');ap.add_argument('--refresh',action='store_true');ap.add_argument('--review-current',action='store_true');ap.add_argument('--refresh-items',action='store_true');ap.add_argument('--source-bindings-key');ap.add_argument('--refresh-market-demand',action='store_true');ap.add_argument('--refresh-work-vocabulary',action='store_true');ap.add_argument('--market-source-bindings-key');ap.add_argument('--resume-derived-checkpoint-key');ap.add_argument('--publish-validated-checkpoint-key');ap.add_argument('--revalidate-derived-checkpoint-key');ap.add_argument('--retain-prior-unreferenced-innovation',action='store_true');args=ap.parse_args();a=AWS();root=Path(args.workdir).resolve();root.mkdir(parents=True,exist_ok=True)
  pointer=json.loads(a.s3.get_object(Bucket=BUCKET,Key=PREFIX+'/current.json')['Body'].read());key=pointer['manifest_key']
  if not key.startswith(PREFIX+'/releases/'):raise ValueError('Invalid release pointer')
  m=json.loads(a.s3.get_object(Bucket=BUCKET,Key=key)['Body'].read())
+ if args.revalidate_derived_checkpoint_key:
+  if args.refresh or args.review_current or args.refresh_items or args.refresh_market_demand or args.refresh_work_vocabulary or args.source_bindings_key or args.resume_derived_checkpoint_key or args.publish_validated_checkpoint_key:raise ValueError('Checkpoint revalidation is an exclusive operation')
+  from .checkpoint import revalidate_derived_checkpoint
+  out=revalidate_derived_checkpoint(a,args.revalidate_derived_checkpoint_key,m,root)
+  if args.publish:publish(out)
+  print(json.dumps(dict(directory=str(out),published=args.publish,mode='revalidated_completed_derivation')));return
  if args.refresh_work_vocabulary:
   if args.refresh or args.refresh_market_demand or args.review_current or args.refresh_items or args.source_bindings_key or args.resume_derived_checkpoint_key or args.publish_validated_checkpoint_key:raise ValueError('Vocabulary refresh is an exclusive operation')
   from .vocabulary_refresh import refresh_current
