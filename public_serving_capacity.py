@@ -2,8 +2,8 @@
 
 Rate-limit exemptions are identities, not capacity exemptions. Keep one of the
 two DuckDB readers and AnyIO worker tokens available for customer requests.
-Only duplicate public reads may wait briefly for shared work. Different cold
-records have no admission queue; cached public records can still be served.
+Duplicate public reads may wait briefly for shared work. A configurable small
+FIFO admits cold records without occupying serving threads while they wait.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import logging
 import asyncio
 import re
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 
 logger = logging.getLogger("mimir-api")
 
@@ -19,7 +19,8 @@ logger = logging.getLogger("mimir-api")
 class PublicServingCapacityMiddleware:
     def __init__(self, app, limit=1, cache_generation=None, max_entries=256,
                  max_bytes=32 * 1024 * 1024, ttl=300, stale_ttl=3600,
-                 max_waiters=16, wait_timeout=2, clock=time.monotonic):
+                 max_waiters=16, wait_timeout=2, pending_limit=0,
+                 pending_timeout=8, clock=time.monotonic):
         self.app = app
         self.limit = limit
         self.active = 0
@@ -35,6 +36,8 @@ class PublicServingCapacityMiddleware:
         self.waiters = 0
         self.flights = {}
         self.clock = clock
+        self.pending = deque()
+        self.pending_limit, self.pending_timeout = pending_limit, pending_timeout
 
     async def __call__(self, scope, receive, send):
         if (scope["type"] != "http" or scope.get("method") not in {"GET", "HEAD"}
@@ -59,9 +62,9 @@ class PublicServingCapacityMiddleware:
             return await self._respond(cached, send, 'hit')
         if cached and age <= self.stale_ttl and self.active >= self.limit:
             return await self._respond(cached, send, 'stale')
-        # Only identical public reads can wait; total waiters and wait time are
+        # Identical public reads share work; total waiters and wait time are
         # bounded. Shield keeps a timed-out/disconnected follower from cancelling
-        # the one real query. There is no queue of different cold records.
+        # the one real query. Other records use the separate bounded FIFO below.
         if key in self.flights and self.waiters < self.max_waiters:
             self.waiters += 1
             try:
@@ -74,11 +77,11 @@ class PublicServingCapacityMiddleware:
             finally:
                 self.waiters -= 1
         # No await between checking and acquiring: atomic within the ASGI loop.
-        if self.active >= self.limit:
+        if not await self._admit():
             self.rejected += 1
             if self.rejected == 1 or self.rejected % 100 == 0:
-                logger.warning("Public serving capacity exhausted: active=%s limit=%s rejected=%s pending=%s",
-                               self.active, self.limit, self.rejected, self.waiters)
+                logger.warning("Public serving capacity exhausted: active=%s limit=%s rejected=%s pending=%s coalesced_waiters=%s",
+                               self.active, self.limit, self.rejected, len(self.pending), self.waiters)
             body = b'{"detail":"Public intelligence is busy. Please retry shortly."}'
             await send({"type": "http.response.start", "status": 503, "headers": [
                 (b"content-type", b"application/json"),
@@ -87,7 +90,12 @@ class PublicServingCapacityMiddleware:
             ]})
             await send({"type": "http.response.body", "body": body})
             return
-        self.active += 1
+        # A previous queued request for this key may have filled the cache while
+        # we waited. Return it without starting the same database work again.
+        cached = self.cache.get(key) if key is not None else None
+        if cached and self.clock() - cached[0] <= self.ttl:
+            self._release()
+            return await self._respond(cached, send, 'hit')
         # A disconnected/cancelled caller cannot stop a running synchronous
         # worker. Keep its slot until downstream actually finishes, otherwise
         # repeated cancellations could admit an unbounded number of queries.
@@ -98,6 +106,46 @@ class PublicServingCapacityMiddleware:
             task.add_done_callback(lambda completed: self.flights.pop(key, None))
         task.add_done_callback(self._finished)
         await asyncio.shield(task)
+
+    async def _admit(self):
+        # No await between checking and reserving. Existing queued requests have
+        # priority over newcomers, so a continuous crawl cannot steal their turn.
+        if self.active < self.limit and not self.pending:
+            self.active += 1
+            return True
+        if len(self.pending) >= self.pending_limit:
+            return False
+        future = asyncio.get_running_loop().create_future()
+        self.pending.append(future)
+        try:
+            await asyncio.wait_for(asyncio.shield(future), self.pending_timeout)
+            return True
+        except BaseException as error:
+            # A timeout/cancellation can race the grant. Return a reserved slot
+            # if granted; otherwise cancel the queue entry before dropping it.
+            if future.done() and not future.cancelled():
+                self._release()
+            else:
+                future.cancel()
+            if isinstance(error, TimeoutError):
+                return False
+            raise
+        finally:
+            try:
+                self.pending.remove(future)
+            except ValueError:
+                pass
+
+    def _release(self):
+        self.active -= 1
+        while self.pending:
+            future = self.pending.popleft()
+            if not future.done():
+                # Reserve now, before waking the waiter. A new caller cannot
+                # take the free slot between release and waiter scheduling.
+                self.active += 1
+                future.set_result(True)
+                break
 
     async def _serve(self, scope, receive, send, key):
         messages, size = [], 0
@@ -134,7 +182,7 @@ class PublicServingCapacityMiddleware:
                         self.cache_bytes += weight
                         return entry
         finally:
-            self.active -= 1
+            self._release()
 
     async def _respond(self, entry, send, status):
         headers = [(k, v) for k, v in entry[1] if k.lower() not in {b'age', b'x-mimir-public-cache'}]

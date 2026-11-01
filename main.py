@@ -560,6 +560,8 @@ if allow_all:
 app.add_middleware(ApiTrafficProtectionMiddleware)
 app.add_middleware(
     PublicServingCapacityMiddleware,
+    pending_limit=4,
+    pending_timeout=8,
     cache_generation=lambda: (
         GLOBAL_CACHE.get("last_loaded"),
         (GLOBAL_CACHE.get("public_intelligence_release") or {}).get("release_id"),
