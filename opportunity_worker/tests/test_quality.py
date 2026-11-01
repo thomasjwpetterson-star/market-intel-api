@@ -142,3 +142,22 @@ def test_generic_hardware_waiver_needs_item_scope_but_exact_identifiers_and_sour
  assert not q.needs_item_scope_review('sam_notices','component_supply',False,True,False)
  assert not q.needs_item_scope_review('sam_notices','component_supply',False,False,True)
  assert not q.needs_item_scope_review('sam_notices','research_development',False,False,False)
+
+
+def test_explicit_capability_rfi_is_engagement_route_without_nsn_but_oem_only_and_waiver_are_not(tmp_path):
+ c=duckdb.connect();tables={}
+ def put(name,sql):
+  p=tmp_path/(name+'.parquet');c.execute('COPY ('+sql+') TO ? (FORMAT PARQUET)',[str(p)]);tables[name]=dict(path=str(p))
+ put('opportunities',"""SELECT episode_id,episode_id record_hash,'Production of surface ship sonar domes and windows' title,body scope_text,'2027-01-01' window_end,'sam_notices' source_name,episode_id source_evidence_id,'https://sam.gov/source' source_url,'5845' psc
+ FROM (VALUES ('open-rfi','This is a Sources Sought Synopsis/Request for Information only, to conduct market research. This is not an invitation to bid.'),('waiver','Synopsis is waived. This acquisition is not expected to exceed the simplified acquisition threshold.'),('oem-only','No substitutes permitted. Non-OEM suppliers must provide traceability to the original equipment manufacturer OEM.')) t(episode_id,body)""")
+ put('demand_decisions',"""SELECT episode_id,record_hash source_record_hash,'PR13' rule_id,CASE WHEN episode_id='waiver' THEN 'published_requirement' ELSE 'qualification_opening' END stage,'hash' decision_hash,to_json(struct_pack(stage:=CASE WHEN episode_id='waiver' THEN 'published_requirement' ELSE 'qualification_opening' END)) decision_json FROM read_parquet('"""+str(tmp_path/'opportunities.parquet')+"')")
+ put('company_matches',"""SELECT episode_id match_id,'CAGE:5UTE1' company_id,episode_id,90.0 score,'work-route' match_route,'sonar,domes' matched_terms,'Historical sonar work; qualification remains unconfirmed' company_evidence_caveat,'evidence' sample_evidence_id,'hash' match_hash,record_hash opportunity_hash,'profile' profile_hash FROM read_parquet('"""+str(tmp_path/'opportunities.parquet')+"')")
+ put('company_work_matches',"SELECT *,episode_id doc_id,'Research and development for sonar domes and windows' work_text,'prime_award' source_kind,'2026-01-01' last_observed,'' work_context,'market_context' review_category,'source_specific_route' company_entry_status FROM read_parquet('"+str(tmp_path/'company_matches.parquet')+"')")
+ c.close();(tmp_path/'manifest.json').write_text(json.dumps(dict(tables=tables,sources={},as_of='2026-10-31',logic_sha256='original')))
+ apply(tmp_path);c=duckdb.connect();result={r[0]:r[1:] for r in c.execute('SELECT episode_id,fit_verdict,review_category,pre_quality_review_category,fit_reason FROM read_parquet(?)',[str(tmp_path/'company_work_matches.parquet')]).fetchall()}
+ assert result['open-rfi'][:3]==('accepted','work_lead','work_lead')
+ assert 'not proof of production qualification or an invitation to bid' in result['open-rfi'][3]
+ assert result['waiver'][:2]==('review','market_context')
+ assert result['oem-only'][:2]==('review','market_context')
+ c.close();apply(tmp_path);c=duckdb.connect()
+ assert c.execute("SELECT review_category FROM read_parquet(?) WHERE episode_id='open-rfi'",[str(tmp_path/'company_work_matches.parquet')]).fetchone()[0]=='work_lead'
