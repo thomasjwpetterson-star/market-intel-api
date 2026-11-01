@@ -38,6 +38,15 @@ def test_dated_official_psc_reference_keeps_retired_nodes_and_source():
     assert all(len(r['source_sha256'])==64 and r['source_url'].startswith('https://www.acquisition.gov/') for r in REFERENCE.values())
     assert any(not r['active_in_reference'] for r in REFERENCE.values())
 
+def test_market_research_and_business_development_are_not_engineering_deliverables():
+    inquiry=annotate('This is market research to identify suppliers. Contact our business development office to procure a radar system.','5840',reference=REFERENCE)
+    assert not any(m['work_type']=='design_development' for m in inquiry['work_types'])
+    assert 'radar' in inquiry['topic_ids']
+    technical=annotate('Engineering development and prototype radar integration','5840',reference=REFERENCE)
+    assert any(m['work_type']=='design_development' for m in technical['work_types'])
+    assert all(m['matched_phrase'] in m['passage'] for m in technical['work_types'])
+    assert annotate('We do not provide repair services. Radar integration is required.','5840',reference=REFERENCE)['work_types'][0]['work_type']=='integration'
+
 def test_whole_projection_filters_evidence_and_preserves_original_sources(tmp_path,monkeypatch):
     from opportunity_engine import vocabulary_refresh as vr
     c=duckdb.connect();tables={}

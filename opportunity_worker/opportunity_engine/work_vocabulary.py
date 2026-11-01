@@ -20,6 +20,12 @@ def plain(text):
 def administrative_only(text):
     return bool(ADMIN_ONLY.fullmatch(plain(text)))
 
+def positive_hit(pattern,text):
+    for hit in pattern.finditer(text):
+        prefix=re.split(r'[.!?;:]',text[max(0,hit.start()-40):hit.start()])[-1]
+        if not re.search(r'\b(?:no|not|without|excluding|except)\b.{0,25}$',prefix,re.I):return hit
+    return None
+
 def codebook(as_of):
     ref=json.loads((BASE/'psc_reference.json').read_text());groups={}
     for row in ref['records']:groups.setdefault(row['psc'],[]).append(row)
@@ -40,13 +46,13 @@ def annotate(text,psc='',as_of=None,reference=None):
     matches=[];modes=[]
     if not administrative:
         for rule,pattern in TOPICS:
-            hit=next((h for h in pattern.finditer(text) if not re.search(r'\b(?:no|not|without|excluding|except)\b.{0,25}$',text[max(0,h.start()-40):h.start()],re.I)),None)
+            hit=positive_hit(pattern,text)
             if not hit:continue
             if rule.get('exclude') and re.search(rule['exclude'],text,re.I):continue
             matches.append(dict(topic_id=rule['id'],label=rule['label'],parent_id=rule['parent'],passage=text[max(0,hit.start()-45):min(len(text),hit.end()+85)],matched_phrase=hit[0],basis='explicit_scope_wording',rule_id=rule['id']))
         for rule,pattern in MODES:
-            hit=pattern.search(text)
-            if hit:modes.append(dict(work_type=rule['id'],label=rule['label'],matched_phrase=hit[0],basis='explicit_scope_wording'))
+            hit=positive_hit(pattern,text)
+            if hit:modes.append(dict(work_type=rule['id'],label=rule['label'],matched_phrase=hit[0],passage=text[max(0,hit.start()-45):min(len(text),hit.end()+85)],basis='explicit_scope_wording'))
     # Product coding alone does not prove manufacturing, and J/R&D coding alone
     # remains a classification clue rather than a demonstrated work statement.
     status='administrative_only' if administrative else 'explicit_scope_labels' if matches else 'reported_psc_only' if reported else 'unclassified_scope'

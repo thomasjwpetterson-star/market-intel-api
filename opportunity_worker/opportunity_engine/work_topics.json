@@ -1,5 +1,5 @@
 {
-  "version": "work-vocabulary-v1",
+  "version": "work-vocabulary-v1.1",
   "interpretation": "PSC hierarchy plus explicit source-scope concepts and independent work types. Multi-label retrieval and explanation, not technical equivalence or qualification.",
   "topics": [
     {
@@ -451,7 +451,7 @@
     {
       "id": "design_development",
       "label": "Design and development",
-      "pattern": "\\b(design|development|research|prototyp\\w*|NRE|non.recurring engineering)\\b"
+      "pattern": "\\b(research\\s+(?:and|&)\\s+development|R\\s*&\\s*D|research\\s+(?:services|support|contract|on|into)|(?:applied|basic|advanced)\\s+research|(?:experimental|engineering|systems?|technology|product|software|materials?)\\s+development|design\\s+(?:and development|engineering|services|support|of)|(?:engineering|preliminary|detailed|conceptual)\\s+design|prototyp\\w*|NRE|non.recurring engineering)\\b"
     },
     {
       "id": "integration",
