@@ -84,17 +84,17 @@ def augment(directory,aws,prepared_key=None):
         p=json.loads(aws.s3.get_object(Bucket=BUCKET,Key=prepared_key)['Body'].read())
         if p['as_of']!=as_of or p['parent_facts_sha256']!={n:m['tables'][n]['sha256'] for n in ('company_award_facts','company_subcontract_facts')}:raise ValueError('Prepared market inputs do not match the current award/report population')
         from .market_history import history_sql
-        expected_history=history_sql(DATABASE+'.'+m['sources']['native_company_awards']['table'],DATABASE+'.'+m['sources']['native_company_subcontracts']['table'],as_of)
+        expected_history=history_sql(DATABASE+'.'+(m['tables']['company_award_facts'].get('table') or m['sources']['native_company_awards']['table']),DATABASE+'.'+(m['tables']['company_subcontract_facts'].get('table') or m['sources']['native_company_subcontracts']['table']),as_of)
         if p['sources']['market_work_history'].get('query_sha256')!=hashlib.sha256(expected_history.encode()).hexdigest():
             refresh_history(aws,m,r/'market_sources')
         else:
             m['sources'].update(p['sources']);m['market_demand_policy']=p['policy']
             # Reuse source bytes only when the current transformation is identical.
             # Small changed projections are rebuilt against the same pinned full history.
-            from .market_history import recurrence_sql,continuation_sql
+            from .market_history import recurrence_sql,continuation_sql,supplier_history_sql
             from .distributed_history import remote
             history=DATABASE+'.'+m['sources']['market_work_history']['table']
-            for name,sql in (('market_recurring_demand',recurrence_sql(history,as_of)),('market_continuation_work',continuation_sql(history,DATABASE+'.'+m['sources']['market_recurring_demand']['table'],as_of))):
+            for name,sql in (('market_recurring_demand',recurrence_sql(history,as_of)),('market_continuation_work',continuation_sql(history,DATABASE+'.'+m['sources']['market_recurring_demand']['table'],as_of)),('market_supplier_history',supplier_history_sql(history,as_of))):
                 if m['sources'][name].get('query_sha256')!=hashlib.sha256(sql.encode()).hexdigest():
                     m['sources'][name]=remote(aws,name,sql,'market_prepared_refresh_'+uuid.uuid4().hex[:8],as_of)
             for name in ('market_recurring_demand','market_continuation_work','market_supplier_history'):

@@ -103,6 +103,18 @@ def capability_sql(history):
     json_format(cast(array_sort(array_agg(DISTINCT programme) FILTER(WHERE nullif(programme,'') IS NOT NULL AND upper(programme) NOT IN ('NONE','NOT APPLICABLE','UNKNOWN'))) AS JSON)) programmes_json
     FROM {history} GROUP BY company_id,capability_id"""
 
+def supplier_history_filter(as_of):
+    return "(try_cast(substr(event_date,1,10) AS date)>=DATE "+lit(as_of)+"-INTERVAL '3' YEAR OR source_kind='prime_award' AND try_cast(substr(coalesce(nullif(potential_end,''),period_end),1,10) AS date)>=DATE "+lit(as_of)+")"
+
+
+def supplier_history_sql(history,as_of):
+    return f"""SELECT cohort_id,company_id,min(capability_id) capability_id,min(source_kind) source_kind,
+    max_by(work_text,event_date) work_text,max(event_date) last_observed,count(*) observed_records,
+    min(scope_key) scope_key,min(work_mode) work_mode,min(psc) psc,max_by(evidence_id,event_date) sample_evidence_id,max_by(record_id,event_date) record_id,
+    lower(to_hex(sha256(checksum(evidence_id)))) evidence_digest
+    FROM {history} WHERE {supplier_history_filter(as_of)} GROUP BY cohort_id,company_id"""
+
+
 def refresh(aws,manifest,root):
     root=Path(root);root.mkdir(parents=True,exist_ok=True);as_of=manifest['as_of'];run='market_demand_'+as_of.replace('-','')+'_'+uuid.uuid4().hex[:8];sources={}
     def table(name):
@@ -125,11 +137,7 @@ def refresh(aws,manifest,root):
     capabilities=emit('company_capability_history',capability_sql(history))
     rec=emit('market_recurring_demand',recurrence_sql(history,as_of),True)
     emit('market_continuation_work',continuation_sql(history,rec,as_of),True)
-    emit('market_supplier_history',f"""SELECT cohort_id,company_id,min(capability_id) capability_id,min(source_kind) source_kind,
-    max_by(work_text,event_date) work_text,max(event_date) last_observed,count(*) observed_records,
-    min(scope_key) scope_key,min(work_mode) work_mode,min(psc) psc,max_by(evidence_id,event_date) sample_evidence_id,max_by(record_id,event_date) record_id,
-    lower(to_hex(sha256(checksum(evidence_id)))) evidence_digest
-    FROM {history} WHERE try_cast(substr(event_date,1,10) AS date)>=DATE {lit(as_of)}-INTERVAL '3' YEAR GROUP BY cohort_id,company_id""",True)
+    emit('market_supplier_history',supplier_history_sql(history,as_of),True)
     training_date=str(datetime.date.fromisoformat(as_of)-datetime.timedelta(days=365))
     training=emit('market_recurrence_training',recurrence_sql(history,training_date))
     emit('market_recurrence_validation',f"""WITH outcomes AS(SELECT t.cohort_id,count(h.record_id) subsequent_packages,count(DISTINCT h.company_id) subsequent_suppliers

@@ -118,3 +118,13 @@ def test_active_funded_performance_is_not_removed_by_action_recency():
     assert "try_cast(substr(period_end,1,10) AS date)>=DATE '2026-11-01' OR" in s
     h=history_sql('db.awards','db.subs','2026-11-01')
     assert "OR try_cast(substr(period_end,1,10) AS date)>=DATE '2026-11-01'" in h
+
+
+def test_old_funded_incumbents_keep_supplier_links_without_reactivating_stale_history():
+    import duckdb
+    from opportunity_engine.market_history import supplier_history_filter
+    c=duckdb.connect();c.execute("CREATE TABLE h(record_id VARCHAR,source_kind VARCHAR,event_date VARCHAR,period_end VARCHAR,potential_end VARCHAR)")
+    c.execute("INSERT INTO h VALUES ('active-old','prime_award','2018-01-01','2028-01-01',NULL),('remaining-options','prime_award','2019-01-01','2025-01-01','2029-01-01'),('ended-old','prime_award','2019-01-01','2025-01-01','2025-01-01'),('recent-sub','subcontract_report','2026-01-01',NULL,NULL),('old-sub','subcontract_report','2019-01-01',NULL,NULL)")
+    kept={r[0] for r in c.execute('SELECT record_id FROM h WHERE '+supplier_history_filter('2026-11-01')).fetchall()}
+    assert kept=={'active-old','remaining-options','recent-sub'}
+    c.close()
