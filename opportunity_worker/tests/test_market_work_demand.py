@@ -56,7 +56,7 @@ def test_full_augmentation_links_only_evidenced_sites_and_profiles_all_identitie
       'opportunities':dict(episode_id='VARCHAR',record_hash='VARCHAR',lane='VARCHAR',title='VARCHAR',scope_text='VARCHAR',customer_name='VARCHAR',programme='VARCHAR',psc='VARCHAR',naics='VARCHAR',window_start='VARCHAR',window_end='VARCHAR',date_basis='VARCHAR',value_low='DOUBLE',value_median='DOUBLE',value_high='DOUBLE',value_basis='VARCHAR',value_scope='VARCHAR',value_inputs_json='VARCHAR',source_name='VARCHAR',source_url='VARCHAR',source_evidence_id='VARCHAR',source_locator='VARCHAR',native_identifier='VARCHAR',procurement_state='VARCHAR',reconciled_state='VARCHAR',access_state='VARCHAR',rationale='VARCHAR',limitations='VARCHAR'),
       'demand_decisions':{k:'VARCHAR' for k in ('episode_id','source_record_hash','rule_id','decision_json','stage','decision_hash')},
       'company_profiles':{k:'VARCHAR' for k in ('company_id','company_name','profile_hash')},
-      'company_registry':{k:'VARCHAR' for k in ('company_id','company_name','coverage_state')},
+      'company_registry':{k:'VARCHAR' for k in ('company_id','company_name','coverage_state','cage_code','parent_cage','dla_last_update')},
       'company_matches':dict(**{k:'VARCHAR' for k in ('match_id','company_id','episode_id','match_route','matched_terms','company_evidence_caveat','sample_evidence_id','match_hash','opportunity_hash','profile_hash')},score='DOUBLE'),
       'company_work_matches':dict(**{k:'VARCHAR' for k in ('match_id','company_id','episode_id','match_route','matched_terms','sample_evidence_id','match_hash','opportunity_hash','profile_hash','doc_id','work_text','source_kind','last_observed','company_entry_status','review_category','fit_verdict','fit_reason','company_evidence_caveat')},score='DOUBLE'),
       'company_match_assessments':{k:'VARCHAR' for k in ('match_id','company_id','episode_id','opportunity_hash','profile_hash','doc_id','work_text','sample_evidence_id','source_verdict','company_entry_status','verdict','reason','policy_hash')},
@@ -65,7 +65,7 @@ def test_full_augmentation_links_only_evidenced_sites_and_profiles_all_identitie
     for name,cols in schemas.items():
         c.execute('CREATE TABLE '+name+'('+','.join(n+' '+t for n,t in cols.items())+')')
     c.execute("INSERT INTO company_profiles VALUES ('CAGE:12345','A supplier','profilehash')")
-    c.execute("INSERT INTO company_registry VALUES ('CAGE:12345','A supplier','observed_evidence_profile'),('CAGE:54321','Declared site','declared_classifications_only'),('CAGE:88888','Identity site','registered_identity_only')")
+    c.execute("INSERT INTO company_registry VALUES ('CAGE:12345','A supplier','observed_evidence_profile','12345','54321','2026-10-01'),('CAGE:54321','Declared site','declared_classifications_only','54321','88888','2026-10-01'),('CAGE:88888','Identity site','registered_identity_only','88888',NULL,'2026-10-01'),('CAGE:99997','Cycle one','registered_identity_only','99997','99998','2026-10-01'),('CAGE:99998','Cycle two','registered_identity_only','99998','99997','2026-10-01')")
     for name,cols in schemas.items():
         path=tmp_path/(name+'.parquet');c.execute('COPY '+name+' TO ? (FORMAT PARQUET)',[str(path)]);tables[name]=dict(path=str(path),rows=c.execute('SELECT count(*) FROM '+name).fetchone()[0],sha256=hashlib.sha256(path.read_bytes()).hexdigest(),columns=[dict(Name=k,Type='double' if v=='DOUBLE' else 'string') for k,v in cols.items()])
     for name,rows in [('market_recurring_demand',[example()]),('market_continuation_work',[]),('market_supplier_history',[dict(cohort_id='a'*64,company_id='CAGE:12345',capability_id='b'*64,source_kind='prime_award',work_text=example()['work_text'],last_observed='2026-07-01',observed_records=3,sample_evidence_id='d'*64,record_id='one',evidence_digest='e'*64)])]:
@@ -77,8 +77,10 @@ def test_full_augmentation_links_only_evidenced_sites_and_profiles_all_identitie
     def fake_refresh(aws,manifest,root):manifest['sources'].update(sources);manifest['market_demand_policy']={}
     monkeypatch.setattr(mod,'refresh_history',fake_refresh)
     out=mod.augment(tmp_path,None)
-    c=duckdb.connect();assert c.execute('SELECT count(*) FROM read_parquet(?)',[out['tables']['company_matching_profiles']['path']]).fetchone()[0]==3
+    c=duckdb.connect();assert c.execute('SELECT count(*) FROM read_parquet(?)',[out['tables']['company_matching_profiles']['path']]).fetchone()[0]==5
     assert c.execute('SELECT count(*) FROM read_parquet(?)',[out['tables']['company_matches']['path']]).fetchone()[0]==1
     assert c.execute('SELECT stage FROM read_parquet(?)',[out['tables']['demand_decisions']['path']]).fetchone()[0]=='expected_demand'
     assert c.execute('SELECT pre_quality_decision_json IS NOT NULL FROM read_parquet(?)',[out['tables']['opportunity_quality_reviews']['path']]).fetchone()[0]
+    assert c.execute("SELECT resolved_registry_parent_cage FROM read_parquet(?) WHERE company_id='CAGE:12345'",[out['tables']['company_parent_resolution']['path']]).fetchone()[0]=='88888'
+    assert c.execute("SELECT count(*) FROM read_parquet(?) WHERE resolution_status='cycle_requires_review' AND resolved_registry_parent_cage IS NULL",[out['tables']['company_parent_resolution']['path']]).fetchone()[0]==2
     c.close()

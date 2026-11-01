@@ -344,3 +344,17 @@ class DIBBSQuantitySemanticsTests(unittest.TestCase):
    self.assertEqual(quantity_fact({**row,'native_identifier':identifier}),{})
   for inputs in ('[]','{"quantity":0}','{"quantity":"NaN"}','bad'):
    self.assertEqual(quantity_fact({**row,'value_inputs_json':inputs}),{})
+
+class MarketWorkEvidenceTests(unittest.TestCase):
+ def test_market_history_evidence_is_bound_to_an_opportunity_and_training_period(self):
+  aws=CaptureAWS();repo=Repository(aws);repo.table=lambda n:'safe.'+n;repo.manifest=lambda:{'tables':{'market_work_history':{}}}
+  repo.market_work_evidence('a'*64,25,0)
+  self.assertIn("o.episode_id='"+'a'*64+"'",aws.sql)
+  self.assertIn('history_cutoff',aws.sql)
+  self.assertIn('o.value_inputs_json',aws.sql)
+  self.assertIn('OFFSET 0 LIMIT 25',aws.sql)
+  with self.assertRaises(ValueError):repo.market_work_evidence("x' OR true",25,0)
+ def test_matching_profiles_do_not_generate_capabilities_for_invalid_cages(self):
+  repo=Repository(CaptureAWS());repo.manifest=lambda:{'tables':{}}
+  self.assertEqual(repo.matching_profile('45934')['capabilities'],[])
+  with self.assertRaises(ValueError):repo.matching_profile("45934'",25,0)

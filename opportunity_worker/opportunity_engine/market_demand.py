@@ -48,7 +48,7 @@ def make_opportunity(row,as_of,continuation=False):
         keys=('record_id','company_id','company_name','evidence_id','source_url','work_text','event_date','period_start','period_end','amount','amount_basis','parent_award_key','parent_piid')
         preview=[dict(zip(keys,p)) for p in preview]
     if continuation:
-        lane='funded_contract_follow_on';inputs=dict(cohort_id=cohort,record_id=row['record_id'],historical_package_benchmark=number(row.get('amount')),amount_basis=row.get('amount_basis'),period_start=row.get('period_start'),period_end=row.get('period_end'),potential_end=row.get('potential_end'),comparators=[row],company_addressable_value=None,solicitation_date_estimate=None)
+        lane='funded_contract_follow_on';inputs=dict(cohort_id=cohort,record_id=row['record_id'],incumbent_company_id=row.get('company_id'),historical_package_benchmark=number(row.get('amount')),amount_basis=row.get('amount_basis'),period_start=row.get('period_start'),period_end=row.get('period_end'),potential_end=row.get('potential_end'),comparators=[row],company_addressable_value=None,solicitation_date_estimate=None)
         end=str(row.get('potential_end') or row.get('period_end'))[:10];start=str(max(datetime.date.fromisoformat(as_of),datetime.date.fromisoformat(end)-datetime.timedelta(days=730)))
         title='Potential follow-on: '+scope[:145];basis='historical_funded_package_benchmark';lo=mid=hi=number(row.get('amount'))
         rationale='This customer has funded the stated work at an identified supplier, and the held contract records a future final performance/option end. This supports account planning for possible follow-on work; a replacement procurement is not confirmed.'
@@ -127,7 +127,7 @@ def augment(directory,aws,prepared_key=None):
     sha256(concat_ws('|',s.company_id,o.record_hash,s.evidence_digest,p.profile_hash)) match_hash
     FROM market_supplier_history s JOIN market_opportunities o ON json_extract_string(o.value_inputs_json,'$.cohort_id')=s.cohort_id
     JOIN old_company_profiles p ON p.company_id=s.company_id
-    WHERE s.observed_records>=CASE WHEN o.lane='funded_contract_follow_on' THEN 1 ELSE 2 END
+    WHERE (o.lane<>'funded_contract_follow_on' OR s.company_id=json_extract_string(o.value_inputs_json,'$.incumbent_company_id')) AND s.observed_records>=CASE WHEN o.lane='funded_contract_follow_on' THEN 1 ELSE 2 END
     AND length(trim(s.work_text))>=8""")
     common=dict(match_id='x.match_id',company_id='x.company_id',episode_id='x.episode_id',score='90.0',match_route="'market-observed-supplier-v1'",matched_terms="'Observed supplier in this exact customer and normalized work stream'",company_evidence_caveat="'This site has delivered the evidenced work to this customer. This is a conditional continuation prospect, not proof of current qualification, an open competition or available supplier work.'",sample_evidence_id='x.sample_evidence_id',match_hash='x.match_hash',opportunity_hash='x.record_hash',profile_hash='x.profile_hash')
     retain=' WHERE episode_id NOT IN (SELECT episode_id FROM old_opportunities WHERE lane IN ('+lane_list+'))'
@@ -140,11 +140,30 @@ def augment(directory,aws,prepared_key=None):
     output('opportunity_quality_reviews','SELECT * FROM old_opportunity_quality_reviews'+retain+' UNION ALL SELECT '+project('old_opportunity_quality_reviews',quality)+' FROM market_opportunities x JOIN market_decisions d USING(episode_id)')
     # Every held CAGE identity gets a matching profile with explicit readiness;
     # classification-only identities never become claimed delivered capabilities.
-    output('company_matching_profiles',"""SELECT r.*,p.profile_hash,
+    registry_columns={n for n,*_ in c.execute('DESCRIBE old_company_registry').fetchall()}
+    if 'parent_cage' in registry_columns:
+        c.execute("""CREATE TEMP TABLE parent_edges AS SELECT cage_code,upper(trim(parent_cage)) parent_cage,dla_last_update
+        FROM old_company_registry WHERE regexp_full_match(upper(trim(parent_cage)),'[A-Z0-9]{5}')
+        AND upper(trim(parent_cage)) NOT IN ('00000','99999','XXXXX','ZZZZZ') AND upper(trim(parent_cage))<>cage_code""")
+        output('company_parent_resolution',"""WITH RECURSIVE chain AS(
+        SELECT cage_code, parent_cage current_cage,[cage_code,parent_cage] chain_path,1 depth,false cycle_detected,dla_last_update
+        FROM parent_edges
+        UNION ALL SELECT c.cage_code,e.parent_cage,list_append(c.chain_path,e.parent_cage),c.depth+1,list_contains(c.chain_path,e.parent_cage),c.dla_last_update
+        FROM chain c JOIN parent_edges e ON e.cage_code=c.current_cage WHERE c.depth<16 AND NOT c.cycle_detected)
+        SELECT 'CAGE:'||c.cage_code company_id,CASE WHEN c.cycle_detected OR c.depth=16 AND n.cage_code IS NOT NULL THEN NULL ELSE c.current_cage END resolved_registry_parent_cage,
+        CASE WHEN c.cycle_detected THEN 'cycle_requires_review' WHEN c.depth=16 AND n.cage_code IS NOT NULL THEN 'depth_limit_requires_review' WHEN r.cage_code IS NULL THEN 'chain_ends_at_unheld_reference' ELSE 'held_registered_parent_chain' END resolution_status,
+        c.depth,to_json(c.chain_path) chain_path_json,c.dla_last_update,
+        'Current registered parent-CAGE chain. Source dates remain attached. This is an organizational reference, not inherited site capability, qualification or retrospective ownership.' interpretation
+        FROM chain c LEFT JOIN parent_edges n ON n.cage_code=c.current_cage LEFT JOIN old_company_registry r ON r.cage_code=c.current_cage
+        QUALIFY row_number() OVER(PARTITION BY c.cage_code ORDER BY c.depth DESC,c.current_cage)=1""")
+    else:
+        c.execute("CREATE TEMP VIEW new_company_parent_resolution AS SELECT NULL::VARCHAR company_id,NULL::VARCHAR resolved_registry_parent_cage,NULL::VARCHAR resolution_status,NULL::VARCHAR chain_path_json WHERE false")
+    output('company_matching_profiles',"""SELECT r.*,p.profile_hash,parent.resolved_registry_parent_cage,parent.resolution_status parent_resolution_status,parent.chain_path_json parent_chain_path_json,
     CASE WHEN p.company_id IS NOT NULL THEN 'observed_work_product_or_research' WHEN r.coverage_state='declared_classifications_only' THEN 'declared_only_requires_delivery_evidence' ELSE 'identity_only_requires_enrichment' END matching_readiness,
     'company_capability_history' capability_evidence_table,'"""+as_of+"""' assessed_as_of
-    FROM old_company_registry r LEFT JOIN old_company_profiles p ON p.company_id=r.company_id""")
-    for name in ('market_work_history','company_capability_history','market_recurring_demand','market_continuation_work','market_supplier_history'):
+    FROM old_company_registry r LEFT JOIN old_company_profiles p ON p.company_id=r.company_id LEFT JOIN new_company_parent_resolution parent ON parent.company_id=r.company_id""")
+    for name in ('market_work_history','company_capability_history','market_recurring_demand','market_continuation_work','market_supplier_history','market_recurrence_training','market_recurrence_validation'):
+        if name not in m['sources']:continue
         source=m['sources'][name];m['tables'][name]=dict(rows=source['rows'],sha256=source['sha256'],columns=source['columns'],remote_binding=True,table=source['table'],s3_uri=source['s3_uri'],source_binding=name)
     m['rules']=rules.catalogue();m['market_demand_policy']['generated_opportunities']=count;m['market_demand_policy']['company_links']=c.execute('SELECT count(*) FROM market_links').fetchone()[0]
     (r/'manifest.json').write_text(json.dumps(m,indent=2)+'\n');c.close();return m

@@ -108,3 +108,11 @@ class ValuationCoverageTests(unittest.TestCase):
   self.assertEqual(result['forecast']['next_12_month_estimated_demand'],200)
   row.pop('forecast_next_12m_value')
   self.assertIsNone(summary({},[row],'release')['forecast']['next_12_month_estimated_demand'])
+
+class RecurringWorkSummaryTests(unittest.TestCase):
+ def test_recurring_work_is_not_added_to_published_or_dla_totals(self):
+  r=summary({'work_count':1},[dict(episode_id='work',commercial_value_kind='recurring_demand_scenario',commercial_value=18000000,title='Radar work',customer_name='Navy',value_inputs_json=json.dumps(dict(next_12_month_median=6000000,next_36_month_median=18000000)))],'release')
+  self.assertEqual(r['work_forecast']['next_12_month_estimated_buying'],6000000)
+  self.assertEqual(r['work_forecast']['next_36_month_estimated_buying'],18000000)
+  self.assertIsNone(r['overall']['priced_demand_total'])
+  self.assertIsNone(r['forecast']['estimated_demand_total'])

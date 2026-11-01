@@ -206,7 +206,14 @@ class Repository:
  def market_work_evidence(self,episode_id,limit=25,offset=0):
   if not re.fullmatch('[a-f0-9]{64}',episode_id) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid market-work evidence request')
   if 'market_work_history' not in self.manifest()['tables']:return []
-  return self.rows('SELECT h.* FROM '+self.table('market_work_history')+' h JOIN '+self.table('opportunities')+" o ON h.cohort_id=json_extract_scalar(o.value_inputs_json,'$.cohort_id') WHERE o.episode_id='"+episode_id+"' ORDER BY h.event_date DESC,h.record_id OFFSET "+str(offset)+' LIMIT '+str(limit))
+  return self.rows("SELECT h.*,CASE WHEN h.source_kind='prime_award' THEN h.amount END observed_net_obligations,CASE WHEN h.source_kind='subcontract_report' THEN h.amount END reported_amount,h.event_date first_action_date,h.last_observed latest_action_date,CASE WHEN starts_with(h.company_id,'CAGE:') THEN substr(h.company_id,6) END cage_code,h.customer_name buyer_name,h.customer_name prime_name FROM "+self.table('market_work_history')+' h JOIN '+self.table('opportunities')+" o ON h.cohort_id=json_extract_scalar(o.value_inputs_json,'$.cohort_id') WHERE o.episode_id='"+episode_id+"' AND (o.lane='funded_contract_follow_on' AND h.record_id=json_extract_scalar(o.value_inputs_json,'$.record_id') OR o.lane<>'funded_contract_follow_on' AND try_cast(substr(h.event_date,1,10) AS date) BETWEEN date_add('year',-3,try_cast(json_extract_scalar(o.value_inputs_json,'$.history_cutoff') AS date)) AND try_cast(json_extract_scalar(o.value_inputs_json,'$.history_cutoff') AS date)) ORDER BY h.event_date DESC,h.record_id OFFSET "+str(offset)+' LIMIT '+str(limit))
+
+ def matching_profile(self,cage,limit=25,offset=0):
+  if not re.fullmatch('[A-Z0-9]{5}',cage) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid matching profile request')
+  if 'company_matching_profiles' not in self.manifest()['tables']:return {'profile':None,'capabilities':[]}
+  profile=self.rows('SELECT * FROM '+self.table('company_matching_profiles')+" WHERE company_id='CAGE:"+cage+"'")
+  capabilities=self.rows('SELECT * FROM '+self.table('company_capability_history')+" WHERE company_id='CAGE:"+cage+"' ORDER BY observed_records DESC,capability_id OFFSET "+str(offset)+' LIMIT '+str(limit))
+  return dict(profile=profile[0] if profile else None,capabilities=capabilities,release=self.manifest()['run_id'])
 
  def item_source_references(self,cage,eid,limit=25,offset=0):
   if not re.fullmatch('[A-Z0-9]{5}',cage) or not re.fullmatch('[a-f0-9]{64}',eid) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid item source evidence request')
@@ -398,6 +405,8 @@ def create_router(verify_principal,repository=None):
   return {'records':call(repo.item_source_references,cage,episode_id,limit,offset),'release':repo.manifest()['run_id'],'interpretation':'Exact selected CAGE and NIIN catalogue part references. Codes are retained as recorded; they do not by themselves establish current manufacturing data rights, notice approval or interchangeability.'}
  @router.get('/companies/{cage}/business-evidence')
  def business_evidence(cage:str,kind:str='actions',limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):return {'records':call(repo.business_evidence,cage,kind,limit,offset),'release':repo.manifest()['run_id'],'kind':kind,'interpretation':'Observed transactions or physical product-market purchase lines. These historical amounts are not added to opportunity value; exact part references do not prove the delivered manufacturer.'}
+ @router.get('/companies/{cage}/matching-profile')
+ def matching_profile(cage:str,limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):return call(repo.matching_profile,cage,limit,offset)
  @router.get('/companies/{cage}/overview')
  def overview(cage:str):return call(repo.overview,cage)
  @router.get('/companies/{cage}/relationships')
