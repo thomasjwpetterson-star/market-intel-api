@@ -9,7 +9,7 @@ def test_contract_references_are_exact_tokens_not_substrings_or_nsns():
 
 def test_actual_notice_links_keep_candidate_scope_and_explicit_incumbent_distinct(tmp_path):
  c=duckdb.connect();cols='episode_id VARCHAR,record_hash VARCHAR,source_name VARCHAR,source_locator VARCHAR,title VARCHAR,scope_text VARCHAR,source_url VARCHAR,source_evidence_id VARCHAR,procurement_state VARCHAR,window_end VARCHAR'
- c.execute('CREATE TABLE calls('+cols+')');c.execute("INSERT INTO calls VALUES ('"+'b'*64+"','notice-version','sam_notices','notice1','Airborne radar signal processing software engineering','Previous contract W56HZV-24-C-0001','https://sam.gov/opp/one','notice-evidence','procurement_published','2027-01-01')")
+ c.execute('CREATE TABLE calls('+cols+')');c.execute("INSERT INTO calls VALUES ('"+'b'*64+"','notice-version','sam_notices','notice1','Airborne radar signal processing software engineering','Previous contract W56HZV-24-C-0001 and W56HZV24C0001','https://sam.gov/opp/one','notice-evidence','procurement_published','2027-01-01')")
  calls=tmp_path/'calls.parquet';c.execute('COPY calls TO ? (FORMAT PARQUET)',[str(calls)])
  c.execute("CREATE TABLE sam AS SELECT 'notice1' notice_id,'NRL' aac_code");sam=tmp_path/'sam.parquet';c.execute('COPY sam TO ? (FORMAT PARQUET)',[str(sam)])
  c.execute("CREATE TABLE ref AS SELECT 'cohort' cohort_id,'old-award' record_id,'W56HZV24C0001' piid,'award-evidence' evidence_id,'https://usaspending.gov/award/old' source_url");ref=tmp_path/'reference.parquet';c.execute('COPY ref TO ? (FORMAT PARQUET)',[str(ref)])

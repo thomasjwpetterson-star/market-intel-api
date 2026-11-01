@@ -1,6 +1,6 @@
 [project]
 name = "mimir-opportunity-engine"
-version = "0.5.58"
+version = "0.5.59"
 requires-python = ">=3.9"
 dependencies = ["boto3==1.40.52", "duckdb==1.4.2", "beautifulsoup4>=4.12,<5", "pdfplumber==0.11.7"]
 [project.optional-dependencies]

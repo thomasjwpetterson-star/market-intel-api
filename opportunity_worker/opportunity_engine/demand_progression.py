@@ -41,6 +41,10 @@ def prepare(c,m,r,aws,path,output):
     'The exact buying-office code and normalized work scope match. This is a possible procurement in the buying stream; configuration, quantities, successor identity and eligibility remain checks.' explanation
     FROM market_opportunities o JOIN market_notice_keys n ON json_extract_string(o.value_inputs_json,'$.scope_key')=n.normalized_scope
     WHERE nullif(n.aac_code,'') IS NOT NULL AND regexp_replace(upper(n.aac_code),'[^A-Z0-9]','','g')=regexp_replace(upper(json_extract_string(o.value_inputs_json,'$.customer_key')),'[^A-Z0-9]','','g')""")
+    # Expand the small set of explicit references once, so the whole-market
+    # join uses equality instead of scanning every notice for every contract.
+    c.execute("""CREATE TEMP TABLE market_notice_contracts AS SELECT DISTINCT n.* EXCLUDE(referenced_contracts),r.contract_reference
+    FROM market_notice_keys n,UNNEST(n.referenced_contracts) r(contract_reference)""")
     prime=m['sources'].get('native_company_awards',{}).get('table')
     current=m['sources'].get('market_continuation_work',{}).get('table')
     if prime and current:
@@ -52,7 +56,7 @@ def prepare(c,m,r,aws,path,output):
         'explicit_incumbent_contract_reference' relationship_kind,r.piid referenced_contract,n.title notice_title,n.source_url notice_source_url,n.source_evidence_id notice_source_evidence_id,n.procurement_state notice_state,n.window_end notice_deadline,
         'The agency notice explicitly references the exact incumbent contract behind this planning record. Inspect the notice type and current scope; a contract reference alone does not prove a replacement award or eligibility.' explanation
         FROM market_opportunities o JOIN market_contract_reference_source r ON r.record_id=json_extract_string(o.value_inputs_json,'$.record_id')
-        JOIN market_notice_keys n ON list_contains(n.referenced_contracts,regexp_replace(upper(r.piid),'[^A-Z0-9]','','g')) WHERE o.lane='funded_contract_follow_on'""")
+        JOIN market_notice_contracts n ON n.contract_reference=regexp_replace(upper(r.piid),'[^A-Z0-9]','','g') WHERE o.lane='funded_contract_follow_on'""")
     else:c.execute('CREATE TEMP TABLE market_explicit_notice_links AS SELECT * FROM market_scope_notice_links WHERE false')
     c.execute("""CREATE TEMP TABLE market_notice_links AS SELECT * FROM market_explicit_notice_links UNION ALL SELECT s.* FROM market_scope_notice_links s WHERE NOT EXISTS(SELECT 1 FROM market_explicit_notice_links e WHERE e.episode_id=s.episode_id AND e.notice_episode_id=s.notice_episode_id)""")
     rows=c.execute('SELECT * FROM market_notice_links').fetchall();keys=[d[0] for d in c.description];by={}
