@@ -66,6 +66,19 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertIn("regexp_replace(upper(c.native_identifier),'-00$','')",aws.sql)
         self.assertIn('related_source_records_json',aws.sql)
         self.assertLess(aws.sql.index('q.source_family_rank=1'),aws.sql.index('OFFSET 0 LIMIT 24'))
+    def test_official_plan_for_exact_company_and_award_precedes_generic_follow_on(self):
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
+        repo.manifest=lambda:{'as_of':'2026-11-01','tables':{'agency_forecast_incumbents':{},'company_work_matches':{'columns':[]}}}
+        repo.opportunities('CAGE:45934',kind='work')
+        self.assertIn("i.company_id='CAGE:45934'",aws.sql)
+        self.assertIn("o.lane='funded_contract_follow_on'",aws.sql)
+        self.assertIn("json_extract_scalar(o.value_inputs_json,'$.record_id')",aws.sql)
+        self.assertIn('pm.opportunity_hash=po.record_hash',aws.sql)
+        self.assertIn('try_cast(po.window_end AS date)>=current_date',aws.sql)
+        self.assertIn("coalesce(pcw.review_category,'')<>'market_context'",aws.sql)
+        repo.opportunities('CAGE:45934',monitoring_only=True)
+        self.assertNotIn('SELECT i.award_key',aws.sql)
+
     def test_live_feed_expires_exact_clocks_without_inventing_date_only_midnight(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name;repo.manifest=lambda:{'as_of':'2026-10-31','tables':{}}
         repo.opportunities('CAGE:45934',24,0,False,'work')

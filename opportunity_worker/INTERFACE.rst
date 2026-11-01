@@ -91,6 +91,10 @@ is inferred from the ranking score.
 Dashboard readiness and limitations
 ----------------------------------
 
+A current official plan linked to the same company and exact incumbent award
+takes precedence over a generic inferred follow-on in the served feed; both
+underlying source records remain inspectable.
+
 The signed-in company feed, saved episode references, CSV, evidence drilldowns,
 change history and separate forecast summaries can feed a company dashboard.
 This work does not change MCP deployment, public marketing or dashboard UI files.
