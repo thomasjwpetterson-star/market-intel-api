@@ -24,6 +24,7 @@ def preserve_nonitem(c,parent_opportunities,parent_decisions,new_demand,as_of):
 
 def refresh(previous,root,aws):
     from .ingestion.refresh_dla_monthly import refresh as refresh_monthly
+    from .company_references import refresh as refresh_references
     from .demand_history import refresh_forecast_episodes
     from .item_demand import prepare as prepare_items,augment as augment_items
     from .replenishment import prepare as prepare_stock,augment as augment_stock
@@ -58,6 +59,7 @@ def refresh(previous,root,aws):
         for f in m['sources'].get(name,{}).get('files',[]):f['path']=download(f['s3_uri'],f['sha256'],name)
     # Source-specific raw archives and snapshots remain immutable. A failed HTTP
     # check retains the last complete monthly source with its original dates.
+    m['sources']['item_reference_facts']=refresh_references(m['sources']['item_reference_facts'],root,aws)
     monthly=refresh_monthly(root);m['sources'].update(monthly['sources'])
     current_opportunities=m['tables']['opportunities']['path'];current_decisions=m['tables']['demand_decisions']['path']
     m['sources']['demand_candidates']=dict(files=[dict(path=current_opportunities,sha256=m['tables']['opportunities']['sha256'])])
@@ -76,8 +78,9 @@ def refresh(previous,root,aws):
     emit('opportunities','SELECT * FROM updated_opportunities')
     lanes=','.join("'"+x+"'" for x in ITEMS)
     emit('demand_decisions','SELECT d.* FROM parent_decisions d JOIN parent_opportunities o USING(episode_id) WHERE o.lane NOT IN ('+lanes+') UNION ALL BY NAME SELECT * FROM new_item_decisions')
-    for name in ('dla_forecasts','dla_inventory','item_price_references','item_market_price_evidence','item_replenishment_context'):
+    for name in ('dla_forecasts','dla_inventory','item_price_references','item_market_price_evidence','item_replenishment_context','item_reference_facts'):
         c.read_parquet([f['path'] for f in s[name]['files']]).create_view('source_'+name);emit(name,'SELECT * FROM source_'+name)
+        if name=='item_reference_facts':m['tables'][name]['source_binding']='item_reference_facts'
     c.read_parquet(m['tables']['company_matches']['path']).create_view('parent_matches')
     emit('company_matches','SELECT x.* FROM parent_matches x JOIN parent_opportunities o USING(episode_id) WHERE o.lane NOT IN ('+lanes+')')
     m['item_refresh_parent']=previous['run_id'];m['item_refresh_nonitem_graph_preserved']=True
