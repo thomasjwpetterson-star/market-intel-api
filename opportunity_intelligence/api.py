@@ -307,6 +307,11 @@ class Repository:
   if 'opportunity_quality_reviews' in self.manifest()['tables']:
    join=' LEFT JOIN '+self.table('opportunity_quality_reviews')+' qr ON qr.episode_id=o.episode_id AND qr.record_hash=o.record_hash'
    extra=self.quality_projection()
+  if 'opportunity_vocabulary' in self.manifest()['tables']:
+   join+=' LEFT JOIN '+self.table('opportunity_vocabulary')+' ov ON ov.episode_id=o.episode_id AND ov.record_hash=o.record_hash'
+   extra+=',ov.normalized_scope_label,ov.topic_ids_json,ov.work_types_json,ov.annotation_json work_vocabulary_json,ov.vocabulary_version'
+   for field in ('work_scope_topic_ids_json','context_topic_ids_json','psc_scope','work_psc','parent_prime_psc','parent_prime_psc_label'):
+    if any(col['Name']==field for col in self.manifest()['tables']['opportunity_vocabulary'].get('columns',[])):extra+=',ov.'+field
   if 'company_notice_item_prices' in self.manifest()['tables']:
    # New global item references are identical across candidates; legacy
    # company-specific rows must never be promoted to global source evidence.

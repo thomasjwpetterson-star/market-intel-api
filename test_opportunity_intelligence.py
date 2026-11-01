@@ -98,6 +98,15 @@ class OpportunityPilotTests(unittest.TestCase):
         manifest['tables']['work_vocabulary_topics']['columns']=[{'Name':'facet'}]
         seen.clear();repo.work_vocabulary()
         self.assertIn('vocabulary_version,facet FROM',seen[0])
+
+    def test_detail_retains_version_bound_work_and_parent_classification(self):
+        aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
+        repo.manifest=lambda:{'tables':{'opportunity_vocabulary':{'columns':[{'Name':'work_psc'},{'Name':'parent_prime_psc'}]}}}
+        repo.detail('a'*64)
+        self.assertIn('ov.record_hash=o.record_hash',aws.sql)
+        self.assertIn('ov.annotation_json work_vocabulary_json',aws.sql)
+        self.assertIn('ov.work_psc',aws.sql)
+        self.assertIn('ov.parent_prime_psc',aws.sql)
     def test_official_plan_for_exact_company_and_award_precedes_generic_follow_on(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
         repo.manifest=lambda:{'as_of':'2026-11-01','tables':{'agency_forecast_incumbents':{},'company_work_matches':{'columns':[]}}}
