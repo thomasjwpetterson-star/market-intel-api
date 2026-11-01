@@ -6,7 +6,9 @@ from pathlib import Path
 from functools import lru_cache
 from .aws import AWS,BUCKET,PREFIX,DATABASE
 from . import rules
-class Repository:
+from .financial_readiness import guard as guard_finance,risk_sql as finance_risk_sql,status as finance_status
+from .discovery_read_model import DiscoveryRepositoryMixin,register_routes as register_discovery_routes
+class Repository(DiscoveryRepositoryMixin):
  def __init__(self,aws=None):self.aws=aws or AWS();self._manifest=None;self._expires=0
  def manifest(self):
   if self._manifest is None or time.monotonic()>=self._expires:
@@ -32,7 +34,7 @@ class Repository:
  def innovation(self,limit=20):
   if not 1<=limit<=100:raise ValueError('Invalid limit')
   return self.rows('SELECT * FROM '+self.table('innovation_signals')+' ORDER BY posted_date DESC,title LIMIT '+str(limit))
- def opportunities(self,company=None,limit=20,offset=0,monitoring_only=False,kind='all'):
+ def opportunities(self,company=None,limit=20,offset=0,monitoring_only=False,kind='all',_query=False,_source_groups=True):
   if not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid pagination')
   o=self.table('opportunities');d=self.table('demand_decisions');where="d.stage IN ('historical_watch','repeat_demand_inference')" if monitoring_only else "d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context','historical_watch','repeat_demand_inference')";join='';extra=''
   if kind not in ('all','work','items'):raise ValueError('Invalid opportunity kind')
@@ -42,6 +44,7 @@ class Repository:
    if not re.fullmatch(r'(?:CAGE:[A-Z0-9]{5}|UEI:[A-Z0-9]{12})',company):raise ValueError('Invalid company identifier')
    join=' JOIN '+self.table('company_matches')+" m ON m.episode_id=o.episode_id AND m.company_id='"+company+"'";where+=' AND m.opportunity_hash=o.record_hash'
    ranking_value='coalesce(o.value_median,least(v.government_reference_lot_scenario,v.supplier_average_lot_scenario),v.government_reference_lot_scenario,v.supplier_average_lot_scenario,0.0)' if 'company_item_valuations' in self.manifest()['tables'] else 'coalesce(o.value_median,0.0)'
+   ranking_value='CASE WHEN '+finance_risk_sql(self.manifest())+' THEN 0.0 ELSE '+ranking_value+' END'
    extra=',m.match_id,m.match_route,m.matched_terms,m.sample_evidence_id,m.company_evidence_caveat'
    extra+=",least(100.0,(CASE d.stage WHEN 'published_requirement' THEN 70 WHEN 'qualification_opening' THEN 65 WHEN 'teaming_opening' THEN 65 WHEN 'emerging_demand' THEN 35 WHEN 'source_forecast' THEN 20 ELSE 10 END)+least(15.0,m.score/6.0)+least(20.0,5.0*ln(1.0+greatest("+ranking_value+",0.0)/100000.0))+(CASE WHEN o.window_end IS NOT NULL THEN 5 ELSE 0 END)) priority_score,'Demand stage, observed company scope fit, supported package benchmarks or item-price scenarios, and dated engagement window; not a win probability or company revenue' priority_basis"
    if 'company_work_matches' in self.manifest()['tables']:
@@ -61,11 +64,12 @@ class Repository:
     extra+=',np.items_json notice_item_pricing_json,np.interpretation notice_item_price_interpretation'
   selected='SELECT DISTINCT o.*,d.stage,d.decision_json'+extra+' FROM '+o+' o JOIN '+d+' d ON o.episode_id=d.episode_id'+join+' WHERE '+where
   ordering=("q.priority_score DESC," if company else '')+"CASE q.stage WHEN 'qualification_opening' THEN 0 WHEN 'teaming_opening' THEN 0 WHEN 'published_requirement' THEN 1 WHEN 'emerging_demand' THEN 2 ELSE 3 END,CASE WHEN q.lane='source_item_forecasts' THEN 1 ELSE 0 END,q.window_end ASC NULLS LAST,q.episode_id"
-  return self.rows('SELECT q.* FROM ('+selected+') q ORDER BY '+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit))
+  if _query:return selected
+  return [guard_finance(r,self.manifest()) for r in self.rows('SELECT q.* FROM ('+selected+') q ORDER BY '+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit))]
 
  def detail(self,eid):
   if not re.fullmatch('[a-f0-9]{64}',eid):raise ValueError('Invalid opportunity identifier')
-  return self.rows('SELECT o.*,d.decision_json FROM '+self.table('opportunities')+' o JOIN '+self.table('demand_decisions')+" d ON o.episode_id=d.episode_id WHERE o.episode_id='"+eid+"'")
+  return [guard_finance(r,self.manifest()) for r in self.rows('SELECT o.*,d.decision_json FROM '+self.table('opportunities')+' o JOIN '+self.table('demand_decisions')+" d ON o.episode_id=d.episode_id WHERE o.episode_id='"+eid+"'")]
  def research(self,cage,limit=20):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
   if not 1<=limit<=100:raise ValueError('Invalid limit')
@@ -157,7 +161,7 @@ def create_router(verify_principal,repository=None):
  def innovation(limit:int=Query(20,ge=1,le=100)):return {'records':call(repo.innovation,limit),'status':'Published agency engagement evidence; no company qualification or award probability inferred'}
  @router.get('/methodology')
  def methodology():
-  m=repo.manifest();return dict(m['rules'],release=m['run_id'],company_matching={'evidence':'Observed award and reported supplier work, exact item references, program/vehicle links and specific technical scope. Classification overlap alone is insufficient.','entry_routes':'Named prior suppliers, defined service work or explicit development/source-opening context take priority. Other hardware similarity is market context until an entry route is evidenced.','qualification':'A company/item association is separate from manufacturing rights, procurement approval, current configuration, eligibility and capacity.'},values={'historical_benchmarks':'Revision-resolved award net obligations and reported outsourced-package amounts. Approximate median and observed range use the complete comparison group; recent/extreme awards form a short preview.','unit_prices':'Exact company/item reference prices are unit evidence. Missing quantities do not produce totals. Forecast quantity × price is an alternative gross scenario, not company revenue.','allocation':'Prime/program funding is context. Company-addressable value remains unallocated without workshare evidence.'})
+  m=repo.manifest();return dict(m['rules'],release=m['run_id'],financial_readiness=finance_status(m),company_matching={'evidence':'Observed award and reported supplier work, exact item references, program/vehicle links and specific technical scope. Classification overlap alone is insufficient.','entry_routes':'Named prior suppliers, defined service work or explicit development/source-opening context take priority. Other hardware similarity is market context until an entry route is evidenced.','qualification':'A company/item association is separate from manufacturing rights, procurement approval, current configuration, eligibility and capacity.'},values={'historical_benchmarks':'Revision-resolved award net obligations and reported outsourced-package amounts. Approximate median and observed range use the complete comparison group; recent/extreme awards form a short preview.','unit_prices':'Exact company/item reference prices are unit evidence. Missing quantities do not produce totals. Forecast quantity × price is an alternative gross scenario, not company revenue.','allocation':'Prime/program funding is context. Company-addressable value remains unallocated without workshare evidence.'})
  @router.get('/opportunities')
  def opportunities(company:str=None,limit:int=Query(20,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000),kind:str=Query('all',pattern='^(all|work|items)$')):
   return {'records':call(repo.opportunities,company,limit,offset,False,kind),'release':repo.manifest()['run_id'],'status':'authenticated_evidence_feed','eligibility':'Company fit, access and qualification require evidence; these are not win probabilities.'}
@@ -204,4 +208,5 @@ def create_router(verify_principal,repository=None):
  @router.get('/sources')
  def sources():
   m=repo.manifest();return {'release':m['run_id'],'as_of':m['as_of'],'sources':m['source_status'],'limitations':m['limitations']}
+ register_discovery_routes(router,repo,call)
  return router
