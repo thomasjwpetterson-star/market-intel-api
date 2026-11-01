@@ -25,6 +25,7 @@ def preserve_nonitem(c,parent_opportunities,parent_decisions,new_demand,as_of):
 def refresh(previous,root,aws):
     from .ingestion.refresh_dla_monthly import refresh as refresh_monthly
     from .company_references import refresh as refresh_references
+    from .historical_purchases import refresh as refresh_history
     from .demand_history import refresh_forecast_episodes
     from .item_demand import prepare as prepare_items,augment as augment_items
     from .replenishment import prepare as prepare_stock,augment as augment_stock
@@ -60,6 +61,7 @@ def refresh(previous,root,aws):
     # Source-specific raw archives and snapshots remain immutable. A failed HTTP
     # check retains the last complete monthly source with its original dates.
     m['sources']['item_reference_facts']=refresh_references(m['sources']['item_reference_facts'],root,aws)
+    m['sources']['historical_item_purchase_lines']=refresh_history(m,root,aws,m['as_of'])
     monthly=refresh_monthly(root);m['sources'].update(monthly['sources'])
     current_opportunities=m['tables']['opportunities']['path'];current_decisions=m['tables']['demand_decisions']['path']
     m['sources']['demand_candidates']=dict(files=[dict(path=current_opportunities,sha256=m['tables']['opportunities']['sha256'])])

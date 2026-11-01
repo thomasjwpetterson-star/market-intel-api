@@ -79,9 +79,9 @@ def main():
   prior_bindings=root/'prior_bindings.json';prior_bindings.write_text(json.dumps(m))
   env=dict(os.environ,MIMIR_OPPORTUNITY_WORKDIR=str(root),MIMIR_OPPORTUNITY_PREVIOUS_MANIFEST=str(prior_bindings),PYTHONDONTWRITEBYTECODE='1',PYTHONPATH=os.pathsep.join(str(p) for p in sys.path if p))
   if args.source_bindings_key:env['MIMIR_OPPORTUNITY_REUSE_SOURCE_SNAPSHOT']='1'
-  for module in ('refresh_sbir','refresh_topics','refresh_shared_sources','refresh_company_references','refresh_dla_monthly','refresh_commercial_sources','refresh_company_registry','refresh_company_history','refresh_innovation','refresh_agency_forecasts'):
+  for module in ('refresh_sbir','refresh_topics','refresh_shared_sources','refresh_company_references','refresh_historical_purchases','refresh_dla_monthly','refresh_commercial_sources','refresh_company_registry','refresh_company_history','refresh_innovation','refresh_agency_forecasts'):
    command=[sys.executable,'-m','opportunity_engine.ingestion.'+module]
-   if module in ('refresh_shared_sources','refresh_company_history'):command+=['--as-of',args.as_of]
+   if module in ('refresh_shared_sources','refresh_company_history','refresh_historical_purchases'):command+=['--as-of',args.as_of]
    try:subprocess.run(command,env=env,check=True)
    except subprocess.CalledProcessError:
     # A partial public topic listing must not erase the last complete snapshot
@@ -93,7 +93,7 @@ def main():
     (root/('inputs/'+pointer_name+'_latest.json')).write_text(json.dumps({'path':str(fallback)}))
     print('Public source refresh failed: preserving prior complete snapshot with original source dates:',source_key,flush=True)
   sbir=json.loads((root/'inputs/sbir_source.json').read_text())
-  for name in ('topics','shared_sources','commercial','dla_monthly','company_references','company_registry','company_history','innovation','agency_forecasts'):
+  for name in ('topics','shared_sources','commercial','dla_monthly','company_references','historical_purchases','company_registry','company_history','innovation','agency_forecasts'):
    pointer=json.loads((root/('inputs/'+name+'_latest.json')).read_text());sources.update(json.loads(Path(pointer['path']).read_text())['sources'])
  # Rebuild the actual company and derived-demand inputs on every native refresh.
  # Archived native projections also allow deterministic recovery/rebuild runs.

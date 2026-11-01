@@ -33,6 +33,8 @@ def validate(directory):
  validate_expansion(c,m,check)
  if 'catalogue_sales_evidence' in m['tables']:
   check('catalogue_sales_physical_line_once_per_company',c.execute("SELECT count(*)-count(DISTINCT (company_id,coalesce(nullif(source_record_id,''),pricing_record_id))) FROM catalogue_sales_evidence").fetchone()[0]==0)
+  check('catalogue_sales_order_line_identity_once',c.execute("SELECT count(*) FROM (SELECT company_id,niin,supplier_cage,substr(transaction_date,1,10),coalesce(nullif(trim(source_row_locator),''),source_record_id) FROM catalogue_sales_evidence GROUP BY ALL HAVING count(*)>1)").fetchone()[0]==0)
+  check('catalogue_sales_trailing_summary_period',c.execute("SELECT count(*) FROM company_catalogue_sales x LEFT JOIN (SELECT company_id,count(*) n,sum(record_amount_usd) amount FROM catalogue_sales_evidence WHERE try_cast(substr(transaction_date,1,10) AS DATE)>DATE '"+m['as_of']+"'-INTERVAL 1 YEAR AND try_cast(substr(transaction_date,1,10) AS DATE)<=DATE '"+m['as_of']+"' GROUP BY company_id) y USING(company_id) WHERE x.physical_price_lines<>coalesce(y.n,0) OR abs(x.observed_catalogue_item_sales-coalesce(y.amount,0))>0.01").fetchone()[0]==0)
   check('catalogue_sales_unique_company',c.execute('SELECT count(*)-count(DISTINCT company_id) FROM company_catalogue_sales').fetchone()[0]==0)
   check('catalogue_sales_partition_arithmetic',c.execute('SELECT count(*) FROM company_catalogue_sales WHERE abs(observed_catalogue_item_sales-direct_seller_sales-other_seller_item_sales)>0.01 OR single_catalogue_part_other_seller_sales>exact_part_other_seller_sales+0.01 OR exact_part_other_seller_sales>other_seller_item_sales+0.01').fetchone()[0]==0)
  if 'company_pipeline_coverage' in m['tables']:
