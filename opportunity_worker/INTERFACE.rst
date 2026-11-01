@@ -59,7 +59,10 @@ Existing /opportunity-intelligence endpoints remain backwards compatible.
 
 * /companies/{cage}/overview adds work_forecast with separate 12/36-month
   conditional buying totals and every contributing stream/calculation.
-* /companies/{cage}/matching-profile supplies readiness and paginated capabilities.
+* /companies/{cage}/matching-profile supplies readiness, paginated capabilities
+  and observed_profile: the existing profile with its parent UEI/method, role,
+  prime/subcontract totals and product/manufacturing-source evidence counts.
+  The supplemental registered parent-CAGE chains do not replace those fields.
 * /opportunities and /opportunities/{episode_id} retain the existing row contract.
   New lanes: recurring_government_work, recurring_subcontract_work,
   funded_contract_follow_on. New stage: expected_demand; never a response deadline.

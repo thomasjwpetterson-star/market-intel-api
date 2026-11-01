@@ -366,6 +366,19 @@ class MarketWorkEvidenceTests(unittest.TestCase):
   self.assertIn('o.value_inputs_json',aws.sql)
   self.assertIn('OFFSET 0 LIMIT 25',aws.sql)
   with self.assertRaises(ValueError):repo.market_work_evidence("x' OR true",25,0)
+ def test_matching_profile_retains_existing_parent_roles_and_product_evidence(self):
+  aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
+  repo.manifest=lambda:{'run_id':'r','tables':{'company_matching_profiles':{},'company_capability_history':{},'company_profiles':{}}}
+  queries=[]
+  def rows(sql):
+   queries.append(sql)
+   return [{'company_id':'CAGE:45934','parent_uei':'parent','role_assessment':'manufacturer','actual_mfg_source_lines':12}] if 'safe.company_profiles ' in sql else []
+  repo.rows=rows
+  out=repo.matching_profile('45934')
+  self.assertEqual(out['observed_profile']['parent_uei'],'parent')
+  self.assertEqual(out['observed_profile']['actual_mfg_source_lines'],12)
+  self.assertTrue(all("company_id='CAGE:45934'" in q for q in queries))
+
  def test_matching_profiles_do_not_generate_capabilities_for_invalid_cages(self):
   repo=Repository(CaptureAWS());repo.manifest=lambda:{'tables':{}}
   self.assertEqual(repo.matching_profile('45934')['capabilities'],[])

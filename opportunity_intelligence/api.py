@@ -226,7 +226,8 @@ class Repository:
   if 'company_matching_profiles' not in self.manifest()['tables']:return {'profile':None,'capabilities':[]}
   profile=self.rows('SELECT * FROM '+self.table('company_matching_profiles')+" WHERE company_id='CAGE:"+cage+"'")
   capabilities=self.rows('SELECT * FROM '+self.table('company_capability_history')+" WHERE company_id='CAGE:"+cage+"' ORDER BY observed_records DESC,capability_id OFFSET "+str(offset)+' LIMIT '+str(limit))
-  return dict(profile=profile[0] if profile else None,capabilities=capabilities,release=self.manifest()['run_id'])
+  observed=self.rows('SELECT * FROM '+self.table('company_profiles')+" WHERE company_id='CAGE:"+cage+"'") if 'company_profiles' in self.manifest()['tables'] else []
+  return dict(profile=profile[0] if profile else None,observed_profile=observed[0] if observed else None,capabilities=capabilities,release=self.manifest()['run_id'])
 
  def item_source_references(self,cage,eid,limit=25,offset=0):
   if not re.fullmatch('[A-Z0-9]{5}',cage) or not re.fullmatch('[a-f0-9]{64}',eid) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid item source evidence request')
