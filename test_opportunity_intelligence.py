@@ -84,6 +84,17 @@ class OpportunityPilotTests(unittest.TestCase):
     def test_new_vocabulary_routes_require_the_same_verified_principal(self):
         self.assertEqual(self.client.get('/opportunity-intelligence/work-vocabulary').status_code,401)
         self.assertEqual(self.client.get('/opportunity-intelligence/companies/45934/capability-vocabulary').status_code,401)
+
+    def test_vocabulary_facets_are_additive_for_old_and_new_releases(self):
+        repo=Repository(CaptureAWS());repo.table=lambda name:'safe.'+name;seen=[]
+        repo.rows=lambda sql:seen.append(sql) or []
+        manifest={'run_id':'r','tables':{'work_vocabulary_reference':{},'work_vocabulary_topics':{}}}
+        repo.manifest=lambda:manifest
+        repo.work_vocabulary()
+        self.assertIn('cast(NULL AS varchar) facet',seen[0])
+        manifest['tables']['work_vocabulary_topics']['columns']=[{'Name':'facet'}]
+        seen.clear();repo.work_vocabulary()
+        self.assertIn('vocabulary_version,facet FROM',seen[0])
     def test_official_plan_for_exact_company_and_award_precedes_generic_follow_on(self):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name
         repo.manifest=lambda:{'as_of':'2026-11-01','tables':{'agency_forecast_incumbents':{},'company_work_matches':{'columns':[]}}}

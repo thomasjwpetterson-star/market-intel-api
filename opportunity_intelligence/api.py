@@ -189,6 +189,8 @@ class Repository:
   if vocabulary:
    join+=' LEFT JOIN '+self.table('opportunity_vocabulary')+' ov ON ov.episode_id=o.episode_id AND ov.record_hash=o.record_hash'
    extra+=',ov.normalized_scope_label,ov.topic_ids_json,ov.work_types_json,ov.annotation_json work_vocabulary_json,ov.vocabulary_version'
+   for field in ('work_scope_topic_ids_json','context_topic_ids_json'):
+    if any(col['Name']==field for col in self.manifest()['tables']['opportunity_vocabulary'].get('columns',[])):extra+=',ov.'+field
    if topic:
     topics=self.table('work_vocabulary_topics')
     allowed="(SELECT array_agg(topic_id) FROM "+topics+" WHERE topic_id='"+topic+"' OR parent_id='"+topic+"' OR parent_id IN (SELECT topic_id FROM "+topics+" WHERE parent_id='"+topic+"'))"
@@ -246,7 +248,8 @@ class Repository:
   if not 1<=limit<=100 or not 0<=offset<=10000:raise ValueError('Invalid pagination')
   if 'work_vocabulary_reference' not in self.manifest()['tables']:return {'status':'not_available','topics':[],'psc_reference':[]}
   where=" WHERE starts_with(psc,'"+psc_prefix+"')" if psc_prefix else ''
-  return dict(status='available',policy=self.manifest().get('work_vocabulary_policy'),topics=self.rows('SELECT topic_id,label,parent_id,vocabulary_version FROM '+self.table('work_vocabulary_topics')+' ORDER BY parent_id NULLS FIRST,label'),psc_reference=self.rows('SELECT * FROM '+self.table('work_vocabulary_reference')+where+' ORDER BY psc OFFSET '+str(offset)+' LIMIT '+str(limit)),release=self.manifest()['run_id'])
+  facet='facet' if any(c['Name']=='facet' for c in self.manifest()['tables']['work_vocabulary_topics'].get('columns',[])) else "cast(NULL AS varchar) facet"
+  return dict(status='available',policy=self.manifest().get('work_vocabulary_policy'),topics=self.rows('SELECT topic_id,label,parent_id,vocabulary_version,'+facet+' FROM '+self.table('work_vocabulary_topics')+' ORDER BY parent_id NULLS FIRST,label'),psc_reference=self.rows('SELECT * FROM '+self.table('work_vocabulary_reference')+where+' ORDER BY psc OFFSET '+str(offset)+' LIMIT '+str(limit)),release=self.manifest()['run_id'])
 
  def capability_vocabulary(self,cage,limit=25,offset=0):
   if not re.fullmatch('[A-Z0-9]{5}',cage) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid company vocabulary request')

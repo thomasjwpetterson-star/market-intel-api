@@ -49,16 +49,19 @@ def annotate(text,psc='',as_of=None,reference=None):
             hit=positive_hit(pattern,text)
             if not hit:continue
             if rule.get('exclude') and re.search(rule['exclude'],text,re.I):continue
-            matches.append(dict(topic_id=rule['id'],label=rule['label'],parent_id=rule['parent'],passage=text[max(0,hit.start()-45):min(len(text),hit.end()+85)],matched_phrase=hit[0],basis='explicit_scope_wording',rule_id=rule['id']))
+            matches.append(dict(topic_id=rule['id'],label=rule['label'],parent_id=rule['parent'],facet=rule.get('facet','work_scope'),passage=text[max(0,hit.start()-45):min(len(text),hit.end()+85)],matched_phrase=hit[0],basis='explicit_scope_wording',rule_id=rule['id']))
         for rule,pattern in MODES:
             hit=positive_hit(pattern,text)
             if hit:modes.append(dict(work_type=rule['id'],label=rule['label'],matched_phrase=hit[0],passage=text[max(0,hit.start()-45):min(len(text),hit.end()+85)],basis='explicit_scope_wording'))
     # Product coding alone does not prove manufacturing, and J/R&D coding alone
     # remains a classification clue rather than a demonstrated work statement.
-    status='administrative_only' if administrative else 'explicit_scope_labels' if matches else 'reported_psc_only' if reported else 'unclassified_scope'
-    label=' / '.join(r['label'] for r in matches[:2]) or (reported or {}).get('label') or 'Work scope needs classification'
+    work=[r for r in matches if r['facet']=='work_scope']
+    status='administrative_only' if administrative else 'explicit_scope_labels' if work else 'reported_psc_only' if reported else 'context_only' if matches else 'unclassified_scope'
+    parents={r['parent_id'] for r in work}
+    precise=[r for r in work if r['topic_id'] not in parents]
+    label=' / '.join(r['label'] for r in precise[:2]) or (reported or {}).get('label') or 'Work scope needs classification'
     if modes:label+=' · '+' / '.join(r['label'] for r in modes[:2])
-    return dict(vocabulary_version=VERSION,policy_hash=POLICY_HASH,reported_psc=code or None,psc_label=(reported or {}).get('label'),psc_reference_status='recognized_reference_code' if reported else 'missing_or_unrecognized_code',scope_status=status,topic_ids=[r['topic_id'] for r in matches],topics=matches,work_types=modes,normalized_scope_label=label,qualification='not_established',technical_equivalence='not_established')
+    return dict(vocabulary_version=VERSION,policy_hash=POLICY_HASH,reported_psc=code or None,psc_label=(reported or {}).get('label'),psc_reference_status='recognized_reference_code' if reported else 'missing_or_unrecognized_code',scope_status=status,topic_ids=[r['topic_id'] for r in matches],work_scope_topic_ids=[r['topic_id'] for r in work],context_topic_ids=[r['topic_id'] for r in matches if r['facet']!='work_scope'],topics=matches,work_types=modes,normalized_scope_label=label,qualification='not_established',technical_equivalence='not_established')
 
 def evidence_verdict(text,history_kind=None,net=None,positive=None,record_id=None):
     if administrative_only(text):return 'rejected','Generic meeting wording is administrative context, not evidence of the required technical deliverable.'

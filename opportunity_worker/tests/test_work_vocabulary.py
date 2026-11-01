@@ -47,6 +47,20 @@ def test_market_research_and_business_development_are_not_engineering_deliverabl
     assert all(m['matched_phrase'] in m['passage'] for m in technical['work_types'])
     assert annotate('We do not provide repair services. Radar integration is required.','5840',reference=REFERENCE)['work_types'][0]['work_type']=='integration'
 
+def test_component_scope_is_distinct_from_platform_and_mission_context():
+    switch=annotate('SWITCH,PROXIMITY for use on Navy submarines. Requirements for manufacture.','5930',reference=REFERENCE)
+    assert 'electronic-sensors.proximity-switches' in switch['work_scope_topic_ids']
+    assert 'naval-platforms' in switch['context_topic_ids']
+    assert 'shipbuilding' not in switch['topic_ids']
+    assert switch['normalized_scope_label'].startswith('Proximity switches')
+    context=annotate('Black Hawk helicopter programme','',reference=REFERENCE)
+    assert context['scope_status']=='context_only' and not context['work_scope_topic_ids']
+    detection=annotate('Radar detection of small unmanned aircraft systems','5840',reference=REFERENCE)
+    assert 'uncrewed-aircraft' in detection['context_topic_ids']
+    assert 'autonomy-robotics' not in detection['topic_ids']
+    assert 'cloud-data-centres' not in annotate('Radar measurement of cloud cover','5840',reference=REFERENCE)['topic_ids']
+    assert 'cloud-data-centres' in annotate('Cloud infrastructure migration services','D302',reference=REFERENCE)['topic_ids']
+
 def test_whole_projection_filters_evidence_and_preserves_original_sources(tmp_path,monkeypatch):
     from opportunity_engine import vocabulary_refresh as vr
     c=duckdb.connect();tables={}
