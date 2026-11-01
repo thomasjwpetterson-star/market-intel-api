@@ -78,6 +78,9 @@ class OpportunityPilotTests(unittest.TestCase):
         self.assertNotIn('JOIN safe.company_matches',aws.sql)
         with self.assertRaises(ValueError):repo.opportunities(topic="radar' OR true --")
         with self.assertRaises(ValueError):repo.opportunities(psc='58%')
+        repo.manifest=lambda:{'as_of':'2026-11-01','tables':{'opportunity_vocabulary':{'columns':[{'Name':'work_psc'}]},'work_vocabulary_topics':{}}}
+        repo.opportunities(psc='58')
+        self.assertIn("starts_with(coalesce(ov.work_psc,''),'58')",aws.sql)
         repo.manifest=lambda:{'as_of':'2026-11-01','tables':{}}
         self.assertEqual(repo.opportunities(topic='radar'),[])
 

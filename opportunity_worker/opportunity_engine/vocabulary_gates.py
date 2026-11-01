@@ -19,3 +19,9 @@ def validate(c,m,check):
  check('vocabulary_rejected_evidence_not_served',c.execute("SELECT count(*) FROM company_match_evidence_reviews e JOIN company_matches m ON m.company_id=e.company_id AND m.episode_id=e.episode_id WHERE e.evidence_verdict='rejected'").fetchone()[0]==0)
  check('vocabulary_incomplete_history_not_accepted',c.execute("SELECT count(*) FROM company_match_evidence_reviews e JOIN company_work_matches w USING(match_id) WHERE e.evidence_verdict='review' AND w.fit_verdict='accepted'").fetchone()[0]==0)
  check('vocabulary_source_financial_checks_versioned',bool(m['work_vocabulary_policy'].get('source_checks_query_ids')))
+ if m['work_vocabulary_policy'].get('psc_scope_policy'):
+  from .vocabulary_reprojection import SUPPLIER_LANES
+  lanes=','.join("'"+x+"'" for x in SUPPLIER_LANES)
+  check('vocabulary_supplier_psc_not_work_classification',c.execute("SELECT count(*) FROM opportunity_vocabulary v JOIN opportunities o USING(episode_id) WHERE o.lane IN ("+lanes+") AND (v.work_psc IS NOT NULL OR v.psc_scope<>'linked_prime_context')").fetchone()[0]==0)
+  check('vocabulary_parent_psc_source_retained',c.execute("SELECT count(*) FROM opportunity_vocabulary v JOIN opportunities o USING(episode_id) WHERE o.lane IN ("+lanes+") AND v.parent_prime_psc IS DISTINCT FROM o.psc").fetchone()[0]==0)
+  check('vocabulary_parent_psc_not_supplier_scope_label',c.execute("SELECT count(*) FROM opportunity_vocabulary v JOIN opportunities o USING(episode_id) WHERE o.lane IN ("+lanes+") AND json_array_length(v.work_scope_topic_ids_json)=0 AND nullif(v.parent_prime_psc_label,'') IS NOT NULL AND starts_with(v.normalized_scope_label,v.parent_prime_psc_label)").fetchone()[0]==0)

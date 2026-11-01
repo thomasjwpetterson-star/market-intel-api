@@ -189,13 +189,15 @@ class Repository:
   if vocabulary:
    join+=' LEFT JOIN '+self.table('opportunity_vocabulary')+' ov ON ov.episode_id=o.episode_id AND ov.record_hash=o.record_hash'
    extra+=',ov.normalized_scope_label,ov.topic_ids_json,ov.work_types_json,ov.annotation_json work_vocabulary_json,ov.vocabulary_version'
-   for field in ('work_scope_topic_ids_json','context_topic_ids_json'):
+   for field in ('work_scope_topic_ids_json','context_topic_ids_json','psc_scope','work_psc','parent_prime_psc','parent_prime_psc_label'):
     if any(col['Name']==field for col in self.manifest()['tables']['opportunity_vocabulary'].get('columns',[])):extra+=',ov.'+field
    if topic:
     topics=self.table('work_vocabulary_topics')
     allowed="(SELECT array_agg(topic_id) FROM "+topics+" WHERE topic_id='"+topic+"' OR parent_id='"+topic+"' OR parent_id IN (SELECT topic_id FROM "+topics+" WHERE parent_id='"+topic+"'))"
     where+=' AND arrays_overlap(cast(json_parse(ov.topic_ids_json) AS array(varchar)),'+allowed+')'
-  if psc:where+=" AND starts_with(coalesce(o.psc,''),'"+psc+"')"
+  if psc:
+   psc_field='ov.work_psc' if vocabulary and any(col['Name']=='work_psc' for col in self.manifest()['tables']['opportunity_vocabulary'].get('columns',[])) else 'o.psc'
+   where+=" AND starts_with(coalesce("+psc_field+",''),'"+psc+"')"
   selected='SELECT DISTINCT o.*,d.stage,d.decision_json'+extra+' FROM '+o+' o JOIN '+d+' d ON o.episode_id=d.episode_id'+join+' WHERE '+where
   ordering=("CASE WHEN q.commercial_value>=1000000 THEN 0 ELSE 1 END,q.priority_score DESC," if company else '')+"CASE q.stage WHEN 'qualification_opening' THEN 0 WHEN 'teaming_opening' THEN 0 WHEN 'published_requirement' THEN 1 WHEN 'emerging_demand' THEN 2 ELSE 3 END,CASE WHEN q.lane='source_item_forecasts' THEN 1 ELSE 0 END,q.window_end ASC NULLS LAST,q.episode_id"
   # Reposted notices sometimes append -00 to the same procurement identifier.

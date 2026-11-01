@@ -98,3 +98,14 @@ def test_whole_projection_filters_evidence_and_preserves_original_sources(tmp_pa
         if t.get('path'):c.read_parquet(t['path']).create_view(name,replace=True)
     checks=[];validate(c,m,lambda name,ok:checks.append((name,bool(ok))))
     assert all(ok for _,ok in checks),checks
+    # Source-context updates reuse the exact annotation policy without changing
+    # the opportunity evidence or company serving links.
+    m['tables']['opportunities']['sha256']=hashlib.sha256(Path(m['tables']['opportunities']['path']).read_bytes()).hexdigest()
+    (tmp_path/'manifest.json').write_text(json.dumps(m))
+    before=m['tables']['company_matches']['sha256']
+    from opportunity_engine.vocabulary_reprojection import apply
+    apply(tmp_path)
+    after=json.loads((tmp_path/'manifest.json').read_text())
+    assert after['tables']['company_matches']['sha256']==before
+    assert after['vocabulary_projection_refresh']['annotation_policy_unchanged'] is True
+    assert after['tables']['opportunities']['sha256']==m['tables']['opportunities']['sha256']
