@@ -43,13 +43,13 @@ def apply(directory):
         t=m['tables'][name];p=Path(t['path'])
         if hashlib.sha256(p.read_bytes()).hexdigest()!=t['sha256']:raise ValueError('Projection input changed: '+name)
         c.read_parquet(str(p)).create_view(alias)
-    c.execute('CREATE TEMP VIEW vocabulary_opportunity_keys AS SELECT o.episode_id,o.record_hash,o.lane,o.psc,v.scope_id FROM old_opportunities o JOIN old_opportunity_vocabulary v ON v.episode_id=o.episode_id AND v.record_hash=o.record_hash')
+    c.execute('CREATE TEMP TABLE vocabulary_opportunity_keys AS SELECT o.episode_id,o.record_hash,o.lane,o.psc,v.scope_id FROM old_opportunities o JOIN old_opportunity_vocabulary v ON v.episode_id=o.episode_id AND v.record_hash=o.record_hash')
     def output(name,sql):
         c.execute('CREATE OR REPLACE TEMP VIEW projection_result AS '+sql)
         p=r/(name+'.parquet');tmp=r/(name+'.projection.parquet')
-        c.execute('COPY projection_result TO ? (FORMAT PARQUET,COMPRESSION ZSTD)',[str(tmp)]);tmp.replace(p)
         types={'VARCHAR':'string','JSON':'string','BIGINT':'bigint','INTEGER':'bigint','UBIGINT':'bigint','DOUBLE':'double','BOOLEAN':'boolean'}
         cols=[dict(Name=n,Type=types[t]) for n,t,*_ in c.execute('DESCRIBE projection_result').fetchall()]
+        c.execute('COPY projection_result TO ? (FORMAT PARQUET,COMPRESSION ZSTD)',[str(tmp)]);tmp.replace(p)
         rows=c.execute('SELECT count(*) FROM read_parquet(?)',[str(p)]).fetchone()[0]
         m['tables'][name]=dict(path=str(p),sha256=hashlib.sha256(p.read_bytes()).hexdigest(),rows=rows,columns=cols)
         c.read_parquet(str(p)).create_view('new_'+name,replace=True);print('Vocabulary source projection',name,rows,flush=True)

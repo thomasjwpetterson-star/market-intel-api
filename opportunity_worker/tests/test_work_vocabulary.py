@@ -101,6 +101,14 @@ def test_whole_projection_filters_evidence_and_preserves_original_sources(tmp_pa
     # Source-context updates reuse the exact annotation policy without changing
     # the opportunity evidence or company serving links.
     m['tables']['opportunities']['sha256']=hashlib.sha256(Path(m['tables']['opportunities']['path']).read_bytes()).hexdigest()
+    # The preceding production release has no PSC-scope columns and stores the
+    # annotation as VARCHAR. Replacing it must not rebind a stale Parquet view.
+    legacy=Path(m['tables']['opportunity_vocabulary']['path']);older=tmp_path/'legacy_vocabulary.parquet'
+    migration=duckdb.connect()
+    migration.execute('COPY (SELECT * EXCLUDE(psc_scope,work_psc,parent_prime_psc,parent_prime_psc_label) REPLACE(cast(annotation_json AS VARCHAR) AS annotation_json) FROM read_parquet(?)) TO ? (FORMAT PARQUET)',[str(legacy),str(older)])
+    migration.close();older.replace(legacy)
+    m['tables']['opportunity_vocabulary']['sha256']=hashlib.sha256(legacy.read_bytes()).hexdigest()
+    m['tables']['opportunity_vocabulary']['columns']=[x for x in m['tables']['opportunity_vocabulary']['columns'] if x['Name'] not in ('psc_scope','work_psc','parent_prime_psc','parent_prime_psc_label')]
     (tmp_path/'manifest.json').write_text(json.dumps(m))
     before=m['tables']['company_matches']['sha256']
     from opportunity_engine.vocabulary_reprojection import apply
