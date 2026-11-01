@@ -330,3 +330,17 @@ class ItemSourceReaderTests(unittest.TestCase):
   self.assertIn("company_id='CAGE:45934'",aws.sql);self.assertIn("episode_id='"+'a'*64+"'",aws.sql);self.assertIn('OFFSET 12 LIMIT 25',aws.sql)
   with self.assertRaises(ValueError):repo.item_source_references("45934'",'a'*64)
   with self.assertRaises(ValueError):repo.item_source_references('45934','not-an-id')
+
+class DIBBSQuantitySemanticsTests(unittest.TestCase):
+ def test_modern_u_type_quantities_are_estimates_with_quoted_fields(self):
+  from opportunity_intelligence.notice_facts import quantity_fact
+  row=dict(source_name='dla_solicitations',native_identifier='SPE7M127U0979',source_evidence_id='native-line-hash',value_inputs_json=json.dumps(dict(nsn='5996006193378',quantity=27,request_unit='EA')))
+  result=quantity_fact(row)
+  self.assertTrue(result['notice_quantity_is_estimate'])
+  self.assertEqual(result['notice_quantity'],27)
+  self.assertEqual(result['notice_quantity_source_evidence_id'],'native-line-hash')
+  self.assertIn('not a guaranteed',result['notice_quantity_basis'])
+  for identifier in ('SPE7M127T0979','SPE7M119U0979','BAD27U0979'):
+   self.assertEqual(quantity_fact({**row,'native_identifier':identifier}),{})
+  for inputs in ('[]','{"quantity":0}','{"quantity":"NaN"}','bad'):
+   self.assertEqual(quantity_fact({**row,'value_inputs_json':inputs}),{})

@@ -1,7 +1,27 @@
 """Conservative, quoted single-item quantity facts from the retained notice text."""
 import json,re
 from decimal import Decimal,InvalidOperation,ROUND_HALF_UP
-from opportunity_worker.opportunity_engine.notice_quantity import VERSION,quantity_fact
+from opportunity_worker.opportunity_engine.notice_quantity import VERSION,quantity_fact as sam_quantity_fact
+
+
+def quantity_fact(row):
+ """A modern U-type DIBBS quantity is an IDC estimate, not a firm order.
+
+The source has changed the meaning of U historically; do not reinterpret
+pre-FY2020 identifiers. Preserve exact fields and the method's public source.
+ """
+ if row.get('source_name')!='dla_solicitations':return sam_quantity_fact(row)
+ identifier=str(row.get('native_identifier') or '').upper()
+ if not re.fullmatch(r'(?:SPE|SPR)[A-Z0-9]{3}(?:2[0-9]|[3-9][0-9])U[A-Z0-9]{4}',identifier):return {}
+ try:
+  inputs=json.loads(row.get('value_inputs_json') or '{}')
+  if not isinstance(inputs,dict):return {}
+  quantity=Decimal(str(inputs.get('quantity')))
+ except (InvalidOperation,ValueError,TypeError):return {}
+ if not isinstance(inputs,dict) or not quantity.is_finite() or not 0<quantity<=1000000000 or quantity!=quantity.to_integral_value():return {}
+ unit=str(inputs.get('request_unit') or '').strip().upper();nsn=str(inputs.get('nsn') or '')
+ if not re.fullmatch(r'[A-Z]{2,3}',unit) or not re.fullmatch(r'[0-9]{13}',nsn):return {}
+ return dict(notice_quantity=int(quantity),notice_quantity_nsn=nsn,notice_quantity_unit=unit,notice_quantity_is_estimate=True,notice_quantity_basis='Source-estimated IDC quantity; not a guaranteed order quantity. Check the solicitation minimum and ordering period.',notice_quantity_evidence='Structured DIBBS fields: solicitation '+identifier+'; quantity '+str(int(quantity))+'; unit '+unit,notice_quantity_policy='modern-dla-aidc-quantity-v1',notice_quantity_source_evidence_id=row.get('source_evidence_id'),notice_quantity_method_url='https://www.dla.mil/Portals/104/Documents/J7Acquisition/MasterSolicitation4ASAcqRev-102_September_29_2025.pdf')
 
 def price_scenario_fact(row):
  """Multiply only a quoted single-item quantity and same-item, same-unit price."""
