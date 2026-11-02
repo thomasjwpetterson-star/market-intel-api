@@ -1,4 +1,6 @@
 """Release gates cover provenance, joins, financial semantics and negative states."""
+from .calendar_windows import month_start
+
 import hashlib,json
 from pathlib import Path
 import duckdb
@@ -151,7 +153,7 @@ def validate(directory,aws=None):
   check('item_demand_one_context_per_episode',c.execute('SELECT count(*)-count(DISTINCT episode_id) FROM item_demand_context').fetchone()[0]==0)
   check('unverified_pack_units_not_valued',c.execute("SELECT count(*) FROM item_demand_context WHERE catalogue_unit<>'EA' AND (government_reference_lot_scenario IS NOT NULL OR market_price_lot_scenario IS NOT NULL)").fetchone()[0]==0)
   check('conflicting_forecast_rows_not_valued',c.execute('SELECT count(*) FROM item_demand_context WHERE (negative_months>0 OR month_count<>distinct_months) AND (government_reference_lot_scenario IS NOT NULL OR market_price_lot_scenario IS NOT NULL)').fetchone()[0]==0)
-  check('negative_months_outside_positive_window_not_valued',c.execute("SELECT count(*) FROM item_demand_context x JOIN dla_forecasts f USING(niin) WHERE f.forecast_qty<0 AND try_cast(substr(cast(f.forecast_month AS VARCHAR),1,10) AS DATE)>=cast(? AS DATE) AND (x.government_reference_lot_scenario IS NOT NULL OR x.market_price_lot_scenario IS NOT NULL)",[m['as_of']]).fetchone()[0]==0)
+  check('negative_months_outside_positive_window_not_valued',c.execute("SELECT count(*) FROM item_demand_context x JOIN dla_forecasts f USING(niin) WHERE f.forecast_qty<0 AND try_cast(substr(cast(f.forecast_month AS VARCHAR),1,10) AS DATE)>=cast(? AS DATE) AND (x.government_reference_lot_scenario IS NOT NULL OR x.market_price_lot_scenario IS NOT NULL)",[month_start(m['as_of'])]).fetchone()[0]==0)
   check('forecast_market_scenario_reconciles',c.execute('SELECT count(*) FROM item_demand_context WHERE market_price_lot_scenario IS NOT NULL AND abs(market_price_lot_scenario-round(quantity*market_price_median,2))>0.01').fetchone()[0]==0)
   check('item_market_prices_dated_not_future',c.execute("SELECT count(*) FROM item_market_price_evidence WHERE try_cast(substr(cast(transaction_date AS VARCHAR),1,10) AS DATE)>cast(? AS DATE) OR try_cast(substr(cast(transaction_date AS VARCHAR),1,10) AS DATE) IS NULL",[m['as_of']]).fetchone()[0]==0)
   check('item_market_physical_lines_unique',c.execute("SELECT count(*)-count(DISTINCT coalesce(nullif(source_record_id,''),pricing_record_id)) FROM item_market_price_evidence").fetchone()[0]==0)

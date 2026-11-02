@@ -59,3 +59,27 @@ def test_entry_route_does_not_turn_equivalent_hardware_into_accessible_work():
     assert company_entry_route('Fuel boost pump','Fuel boost pump',scope,lane,True)=='reported_supplier_relationship'
     assert company_entry_route('Fuel boost pump','Fuel boost pump','Current funded scope example: Prototype development of fuel boost pump',lane)=='development_or_source_opening_context'
     assert company_entry_route('Software testing services','Software testing services',scope,lane)=='defined_services_scope'
+
+
+def test_midmonth_refresh_retains_current_source_month_without_reviving_past_months(tmp_path):
+    from pathlib import Path
+    c=duckdb.connect();sources={}
+    def put(name,sql):
+        p=tmp_path/(name+'.parquet');c.execute('COPY ('+sql+') TO ? (FORMAT PARQUET)',[str(p)]);sources[name]={'files':[{'path':str(p)}]}
+    schema=json.loads((Path(__file__).parent/'fixtures/validation_schemas.json').read_text())['opportunities']
+    types={'string':'VARCHAR','double':'DOUBLE','bigint':'BIGINT','boolean':'BOOLEAN'}
+    put('demand_candidates','SELECT '+','.join('NULL::'+types[x['Type']]+' "'+x['Name']+'"' for x in schema)+' WHERE false')
+    put('dla_forecasts',"""SELECT '012345678' niin,DATE '2026-10-01' forecast_month,100::BIGINT forecast_qty,'edition' source_release,'forecast.txt' source_file,'past' source_item_id
+    UNION ALL SELECT '012345678',DATE '2026-11-01',10,'edition','forecast.txt','current'
+    UNION ALL SELECT '012345678',DATE '2026-12-01',20,'edition','forecast.txt','future'""")
+    versions=[]
+    for as_of in ('2026-11-01','2026-11-15','2026-12-02'):
+        out=refresh_forecast_episodes(sources,tmp_path/as_of,as_of)
+        cursor=c.execute('SELECT * FROM read_parquet(?)',[out['demand_candidates']['path']]);r=dict(zip([x[0] for x in cursor.description],cursor.fetchone()));versions.append(r)
+    assert [json.loads(r['value_inputs_json'])['forecast_quantity'] for r in versions]==[30,30,20]
+    assert versions[0]['episode_id']==versions[1]['episode_id']==versions[2]['episode_id']
+    assert versions[0]['record_hash']==versions[1]['record_hash']
+    assert versions[2]['window_start']=='2026-12-01'
+    assert evaluate(dict(versions[0],window_end='2026-11-01'),'2026-11-15')['stage']=='source_forecast'
+    assert evaluate(dict(versions[0],window_end='2026-10-01'),'2026-11-15')['stage']=='resolved_or_elapsed'
+    assert evaluate(dict(versions[0],lane='published_item_procurement',window_end='2026-11-01'),'2026-11-15')['stage']=='resolved_or_elapsed'

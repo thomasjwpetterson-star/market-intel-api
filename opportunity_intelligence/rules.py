@@ -44,7 +44,8 @@ def evaluate(o,as_of):
  raw=text(o.get('scope_text'));start=day(o.get('window_start'));end=day(o.get('window_end'))
  state=' '.join(str(o.get(k) or '') for k in ('reconciled_state','procurement_state')).lower()
  terminal=any(x in state for x in ('cancelled','awarded_or_ordered','source_confirmed_award'))
- elapsed=bool(end and end<today)
+ # FCST_DT is a year/month label, not a deadline on the first day.
+ elapsed=bool(end and (end.replace(day=1)<today.replace(day=1) if lane=='source_item_forecasts' else end<today))
  assessment=o.get('source_assessment') or {}
  hints=[]
  for key,pattern in SCREENS.items():

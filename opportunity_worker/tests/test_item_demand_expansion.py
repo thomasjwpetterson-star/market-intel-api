@@ -32,8 +32,9 @@ def test_full_dibbs_refresh_reuses_ids_and_prices_exact_unit_from_dated_lines(tm
  assert price==('EA',300,'2026-09-01')
  c.close()
 
+@pytest.mark.parametrize('as_of',['2026-10-31','2026-11-02'])
 @pytest.mark.parametrize('correction_month',[None,'2026-11-01','2027-03-01'])
-def test_forecast_years_prices_stock_and_unverified_pack_units_remain_separate(tmp_path,correction_month):
+def test_forecast_years_prices_stock_and_unverified_pack_units_remain_separate(tmp_path,correction_month,as_of):
  c=duckdb.connect();tables={};sources={}
  def put(n,q,source=False):
   p=tmp_path/(n+'.parquet');c.execute("COPY ("+q+") TO '"+str(p)+"' (FORMAT PARQUET)")
@@ -51,7 +52,7 @@ def test_forecast_years_prices_stock_and_unverified_pack_units_remain_separate(t
  put('item_price_references',"""SELECT '003538074' niin,'EA' unit,'EA' catalogue_unit,1000.0 government_reference_unit_price,200.0 market_price_low,300.0 market_price_median,400.0 market_price_high,2::BIGINT market_observations,2::BIGINT market_sellers,'2026-08-01' first_price_date,'2026-09-01' latest_price_date,'[]' price_preview_json,'ref' sample_reference_evidence,'snapshot' source_snapshot_sha256
  UNION ALL SELECT '001671344','HD','HD',40,20,30,40,2,2,'2026-08-01','2026-09-01','[]','packref','snapshot'""",True)
  put('item_market_price_evidence',"SELECT 'line' pricing_record_id,'003538074' niin",True)
- (tmp_path/'manifest.json').write_text(json.dumps(dict(as_of='2026-10-31',tables=tables,sources=sources)))
+ (tmp_path/'manifest.json').write_text(json.dumps(dict(as_of=as_of,tables=tables,sources=sources)))
  augment(tmp_path);m=json.loads((tmp_path/'manifest.json').read_text())
  rows=c.execute('SELECT niin,quantity,government_reference_lot_scenario,market_price_lot_scenario,stock_on_hand,inventory_signal,annual_scenarios_json,valuation_status FROM read_parquet(?) ORDER BY niin',[m['tables']['company_item_valuations']['path']]).fetchall()
  assert rows[0][0]=='001671344' and rows[0][2:4]==(None,None)

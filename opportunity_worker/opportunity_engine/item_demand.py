@@ -1,4 +1,6 @@
 """Whole-market item demand, dated prices and supply context. No sales probability."""
+from .calendar_windows import month_start
+
 import hashlib,json
 from pathlib import Path
 import duckdb
@@ -34,7 +36,7 @@ def prepare(sources,folder,as_of):
  min(transaction_date) first_price_date,max(transaction_date) latest_price_date,
  to_json(list(struct_pack(pricing_record_id:=pricing_record_id,source_record_id:=source_record_id,unit_price_usd:=unit_price_usd,quantity:=quantity,unit:=quantity_unit,date:=transaction_date,seller_cage:=supplier_cage,source_url:=source_url,source_s3_uri:=source_s3_uri,source_row_locator:=source_row_locator,source_sha256:=source_sha256) ORDER BY transaction_date DESC,pricing_record_id)[:12]) price_preview_json
  FROM price_lines GROUP BY niin,upper(trim(quantity_unit))""")
- c.execute("CREATE TEMP TABLE wanted AS SELECT DISTINCT right(nsn,9) niin FROM normalized_requests WHERE regexp_full_match(coalesce(nsn,''),'[0-9]{13}') UNION SELECT DISTINCT niin FROM dla_forecasts WHERE forecast_qty>0 AND substr(cast(forecast_month AS VARCHAR),1,10)>="+"'"+as_of+"'")
+ c.execute("CREATE TEMP TABLE wanted AS SELECT DISTINCT right(nsn,9) niin FROM normalized_requests WHERE regexp_full_match(coalesce(nsn,''),'[0-9]{13}') UNION SELECT DISTINCT niin FROM dla_forecasts WHERE forecast_qty>0 AND substr(cast(forecast_month AS VARCHAR),1,10)>="+"'"+month_start(as_of)+"'")
  # All catalogue sources may price an item. No candidate CAGE is needed for price.
  c.execute("""CREATE TEMP TABLE catalogue AS SELECT niin,CASE WHEN count(DISTINCT nullif(trim(unit_of_issue),''))=1 THEN min(nullif(trim(unit_of_issue),'')) END catalogue_unit,
  CASE WHEN count(DISTINCT nullif(trim(unit_of_issue),''))=1 AND count(DISTINCT govt_estimated_price) FILTER(WHERE govt_estimated_price>0)=1 AND count(*) FILTER(WHERE govt_estimated_price>0 AND nullif(trim(unit_of_issue),'') IS NULL)=0 THEN min(govt_estimated_price) FILTER(WHERE govt_estimated_price>0) END government_reference_unit_price,
@@ -130,7 +132,7 @@ def augment(directory):
  min(d.forecast_month) first_month,max(d.forecast_month) last_month,count(*) month_count,count(DISTINCT d.forecast_month) distinct_months,
  sum(d.forecast_qty)::BIGINT quantity,count(*) FILTER(WHERE d.forecast_qty<0) negative_months,
  to_json(list(struct_pack(month:=d.forecast_month,quantity:=d.forecast_qty,source_release:=d.source_release,source_file:=d.source_file,source_item_id:=d.source_item_id) ORDER BY d.forecast_month)) monthly_evidence_json
- FROM forecast_keys o JOIN dla_forecasts d ON d.niin=o.niin AND substr(cast(d.forecast_month AS VARCHAR),1,10)>='"""+m['as_of']+"' WHERE hash(o.niin)%32="+str(partition)+" GROUP BY o.episode_id,o.record_hash,o.niin")
+ FROM forecast_keys o JOIN dla_forecasts d ON d.niin=o.niin AND substr(cast(d.forecast_month AS VARCHAR),1,10)>='"""+month_start(m['as_of'])+"' WHERE hash(o.niin)%32="+str(partition)+" GROUP BY o.episode_id,o.record_hash,o.niin")
   print('Forecast context partition',partition+1,'/ 32',flush=True)
  c.execute("""CREATE TEMP TABLE years AS SELECT f.episode_id,f.record_hash,substr(d.forecast_month,1,4) calendar_year,sum(d.forecast_qty)::BIGINT quantity,
  round(sum(d.forecast_qty)*p.government_reference_unit_price,2) government_reference_scenario,

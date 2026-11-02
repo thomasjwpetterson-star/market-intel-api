@@ -1,10 +1,12 @@
+import pytest
 import json
 from pathlib import Path
 import duckdb
 from opportunity_engine.replenishment import prepare,augment
 
 
-def test_annual_outlook_never_overrides_source_forecast_or_conflicting_stale_inventory(tmp_path):
+@pytest.mark.parametrize('as_of',['2026-10-31','2026-11-02'])
+def test_annual_outlook_never_overrides_source_forecast_or_conflicting_stale_inventory(tmp_path,as_of):
  c=duckdb.connect();sources={}
  def source(name,sql):
   p=tmp_path/(name+'.parquet');c.execute('COPY ('+sql+') TO ? (FORMAT PARQUET)',[str(p)]);sources[name]={'files':[{'path':str(p)}]}
@@ -14,12 +16,12 @@ def test_annual_outlook_never_overrides_source_forecast_or_conflicting_stale_inv
  source('item_reference_facts',"SELECT '00000000'||cast(i AS VARCHAR) niin,'Widget' description,'1234000000001' nsn,'2' rnvc_codes FROM range(1,9) t(i)")
  schemas=json.loads((Path(__file__).parent/'fixtures/validation_schemas.json').read_text());types={'string':'VARCHAR','double':'DOUBLE','bigint':'BIGINT','boolean':'BOOLEAN'}
  source('demand_candidates','SELECT '+','.join('NULL::'+types[x['Type']]+' "'+x['Name']+'"' for x in schemas['opportunities'])+' WHERE false')
- out=prepare(sources,tmp_path/'out','2026-10-31')
+ out=prepare(sources,tmp_path/'out',as_of)
  assert out['item_replenishment_context']['rows']==1
  q=c.execute('SELECT * FROM read_parquet(?)',[out['item_replenishment_context']['path']]);row=dict(zip([x[0] for x in q.description],q.fetchone()))
  assert row['niin']=='000000001' and row['annual_demand_quantity']==10
  assert row['market_price_lot_scenario']==800 and row['government_reference_lot_scenario']==1000
- assert row['window_end']=='2027-10-30'
+ assert row['window_end']=={'2026-10-31':'2027-10-30','2026-11-02':'2027-11-01'}[as_of]
  q=c.execute('SELECT * FROM read_parquet(?)',[out['demand_candidates']['path']]);d=dict(zip([x[0] for x in q.description],q.fetchone()));inputs=json.loads(d['value_inputs_json'])
  assert d['value_median'] is None and inputs['company_addressable_value'] is None
  assert inputs['source_forecast_present'] is False and 'not a source forecast' in row['interpretation']

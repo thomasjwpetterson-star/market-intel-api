@@ -151,8 +151,9 @@ class Repository(DiscoveryRepositoryMixin):
    if 'company_item_valuations' in self.manifest()['tables']:
     asof=self.manifest().get('as_of')
     if not asof or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',asof):raise ValueError('Invalid release as-of date')
+    forecast_asof=asof[:7]+'-01'
     unit_price='coalesce(v.market_price_median,v.government_reference_unit_price)' if 'market_price_median' in valuation_columns else 'v.government_reference_unit_price'
-    months="reduce(try(cast(json_parse(v.monthly_evidence_json) AS array(json))),cast(0 AS double),(total,x)->total+CASE WHEN try_cast(substr(json_extract_scalar(x,'$.month'),1,10) AS date)>=DATE '"+asof+"' AND try_cast(substr(json_extract_scalar(x,'$.month'),1,10) AS date)<date_add('month',12,DATE '"+asof+"') THEN coalesce(try_cast(json_extract_scalar(x,'$.quantity') AS double),0.0) ELSE 0.0 END,total->total)"
+    months="reduce(try(cast(json_parse(v.monthly_evidence_json) AS array(json))),cast(0 AS double),(total,x)->total+CASE WHEN try_cast(substr(json_extract_scalar(x,'$.month'),1,10) AS date)>=DATE '"+forecast_asof+"' AND try_cast(substr(json_extract_scalar(x,'$.month'),1,10) AS date)<date_add('month',12,DATE '"+forecast_asof+"') THEN coalesce(try_cast(json_extract_scalar(x,'$.quantity') AS double),0.0) ELSE 0.0 END,total->total)"
     forecast_year="CASE WHEN o.lane='source_item_forecasts' AND v.catalogue_unit='EA' AND ("+forecast_lot+")>0 THEN "+months+'*'+unit_price+' END'
    from .priority import inventory_priority
    inventory_points,inventory_basis=inventory_priority(valuation_columns,self.manifest()['as_of'],forecast_year,unit_price)
@@ -214,7 +215,7 @@ class Repository(DiscoveryRepositoryMixin):
    if not asof or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',asof):raise ValueError('Invalid release as-of date')
    # Negative monthly source quantities are unresolved data, not purchases or
    # offsets that can silently be netted into a positive sales scenario.
-   join+=' LEFT JOIN (SELECT DISTINCT niin FROM '+self.table('dla_forecasts')+" WHERE forecast_qty<0 AND try_cast(substr(cast(forecast_month AS varchar),1,10) AS date)>=DATE '"+asof+"') fq ON fq.niin=json_extract_scalar(o.value_inputs_json,'$.niin')"
+   join+=' LEFT JOIN (SELECT DISTINCT niin FROM '+self.table('dla_forecasts')+" WHERE forecast_qty<0 AND try_cast(substr(cast(forecast_month AS varchar),1,10) AS date)>=DATE '"+(asof[:7]+'-01')+"') fq ON fq.niin=json_extract_scalar(o.value_inputs_json,'$.niin')"
    where+=" AND (o.lane<>'source_item_forecasts' OR fq.niin IS NULL)"
   if vocabulary:
    join+=' LEFT JOIN '+self.table('opportunity_vocabulary')+' ov ON ov.episode_id=o.episode_id AND ov.record_hash=o.record_hash'
@@ -249,7 +250,7 @@ class Repository(DiscoveryRepositoryMixin):
 
  def _overview_window(self,result,total_items=None):
   import calendar
-  start=datetime.date.fromisoformat(self.manifest()['as_of'])
+  start=datetime.date.fromisoformat(self.manifest()['as_of']).replace(day=1)
   end=start.replace(year=start.year+1,day=min(start.day,calendar.monthrange(start.year+1,start.month)[1]))
   forecast=result['forecast']
   forecast.update(next_12_month_window_start=start.isoformat(),next_12_month_window_end_exclusive=end.isoformat(),price_basis='Exact-item observed market prices where available, otherwise government reference prices. Forecast units use the catalogue EA basis; these are planning estimates, not current quotes or company revenue.')

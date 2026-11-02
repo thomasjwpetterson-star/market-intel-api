@@ -3,6 +3,8 @@
 The value is a conditional annual-usage scenario, never a net purchase quantity.
 No source forecasts (including zero/negative rows) are overridden by this model.
 """
+from .calendar_windows import month_start
+
 import hashlib
 import json
 from pathlib import Path
@@ -20,7 +22,7 @@ def prepare(sources, folder, as_of):
     c.execute("SET temp_directory='"+str(folder/'tmp').replace("'","''")+"'")
     for name in required:
         c.read_parquet([f['path'] for f in sources[name]['files']]).create_view(name)
-    c.execute("CREATE TEMP TABLE forecasted AS SELECT DISTINCT niin FROM dla_forecasts WHERE substr(cast(forecast_month AS VARCHAR),1,10)>='"+as_of+"'")
+    c.execute("CREATE TEMP TABLE forecasted AS SELECT DISTINCT niin FROM dla_forecasts WHERE substr(cast(forecast_month AS VARCHAR),1,10)>='"+month_start(as_of)+"'")
     c.execute("""CREATE TEMP TABLE latest AS SELECT niin,max(substr(snapshot_date,1,10)) snapshot_date
     FROM dla_inventory WHERE public_release_eligible AND try_cast(substr(snapshot_date,1,10) AS DATE) BETWEEN cast(? AS DATE)-INTERVAL 90 DAY AND cast(? AS DATE)
     GROUP BY niin""",[as_of,as_of])

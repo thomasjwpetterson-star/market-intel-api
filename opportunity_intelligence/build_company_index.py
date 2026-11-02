@@ -16,7 +16,13 @@ def strings(row):
     return {k:None if v is None else str(v).lower() if isinstance(v,bool) else str(v) for k,v in row.items()}
 
 
+class EmptyRows:
+    description=[]
+    def fetchmany(self,*args):return []
+    def fetchall(self):return []
+
 def read_rows(con,files):
+    if not files:return EmptyRows()
     return con.execute('SELECT * FROM read_parquet(?)',[[f['path'] for f in files]])
 
 
@@ -49,6 +55,32 @@ def company_batches(con,root):
     finally:database.close()
 
 
+def verify_company(repo,aws,company,payload,manifest,root):
+    for kind in ('all','work','items'):
+        q=repo.opportunities(company,kind=kind,_query=True)
+        authoritative,_=aws.result('SELECT episode_id,record_hash,commercial_value,commercial_value_kind,item_demand FROM ('+q+')')
+        actual=eligible(payload,kind)
+        def keys(records):return sorted((r['episode_id'],r['record_hash'],r.get('commercial_value_kind'),None if r.get('commercial_value') is None else round(float(r['commercial_value']),6),str(r.get('item_demand')).lower()) for r in records)
+        if keys(authoritative)!=keys(actual):raise ValueError('Warehouse/index parity failed: '+company+'/'+kind)
+    authoritative=repo.overview(company[5:]);computed=overview(payload,manifest)
+    if hasattr(repo,'_overview_window'):computed=repo._overview_window(computed,sum(row.get('lane')=='source_item_forecasts' for row in eligible(payload)))
+    # Components contain unordered source aggregates. Compare cardinality,
+    # disjoint totals and historical coverage separately from that ordering.
+    checks=['overall','categories','forecast','planned_packages','replenishment','work_forecast','valuation_coverage','business_coverage','materiality_floor']
+    def stable(value):
+        if isinstance(value,dict):return {k:stable(v) for k,v in value.items() if k not in ('value_components','related_requirements')}
+        if isinstance(value,list):return [stable(x) for x in value]
+        if isinstance(value,str) and re.fullmatch(r'-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[Ee][+-]?[0-9]+)?',value):
+            from decimal import Decimal
+            return str(Decimal(value).normalize())
+        return value
+    if any(stable(authoritative.get(k))!=stable(computed.get(k)) for k in checks):
+        (root/('overview-mismatch-'+company[5:]+'.json')).write_bytes(encode(dict(company=company,authoritative=authoritative,computed=computed)))
+        raise ValueError('Overview parity failed: '+company)
+    print('Company point-read parity passed',company,len(payload['records']),flush=True)
+    return dict(company_id=company,kinds=['all','work','items'],overview=True,records=len(payload['records']))
+
+
 def build(manifest,root,companies=None,publish=False,advertise=True):
     root=Path(root);root.mkdir(parents=True,exist_ok=True)
     aws=AWS();repo=Repository(aws);repo._manifest=manifest;repo._expires=float('inf')
@@ -61,7 +93,8 @@ def build(manifest,root,companies=None,publish=False,advertise=True):
     extraction=aws.extract('company_serving_candidates',sql,root,'company_serving_'+release)
     con=duckdb.connect(str(root/'build.duckdb'));con.execute("SET memory_limit='4GB'");con.execute('SET threads=1');con.execute('SET preserve_insertion_order=false');con.execute('SET partitioned_write_max_open_files=8');con.execute("SET temp_directory='"+str(root/'spill').replace("'","''")+"'")
     paths=[f['path'] for f in extraction['files']]
-    con.from_parquet(paths).create_view('candidates',replace=True)
+    if paths:con.from_parquet(paths).create_view('candidates',replace=True)
+    else:con.execute('CREATE OR REPLACE VIEW candidates AS SELECT cast(NULL AS varchar) serving_company_id,cast(NULL AS varchar) episode_id WHERE false')
     duplicates=con.execute('SELECT count(*) FROM (SELECT serving_company_id,episode_id,count(*) n FROM candidates GROUP BY 1,2 HAVING count(*)>1)').fetchone()[0]
     if duplicates:raise ValueError('Duplicate company/episode facts in serving projection')
     companies_meta={}
@@ -79,7 +112,8 @@ def build(manifest,root,companies=None,publish=False,advertise=True):
                 if not re.fullmatch('CAGE:[A-Z0-9]{5}',company or ''):continue
                 item=companies_meta.setdefault(company,dict(business={},plans=[]))
                 if name=='company_history_coverage':item['observed_prime_net_obligations']=row.get('observed_prime_net_obligations')
-                else:item['business'].update(row)
+                else:
+                    item['business'].update(row);item.setdefault('business_present_tables',[]).append(name)
     if 'agency_forecast_incumbents' in manifest['tables']:
         plansql=repo.opportunities('CAGE:00000',_query=True,_source_groups=False,_materialize=True,_plan_links=True)
         if companies:plansql="SELECT * FROM ("+plansql+") WHERE serving_company_id IN ("+','.join("'CAGE:"+c+"'" for c in companies)+')'
@@ -121,7 +155,28 @@ def build(manifest,root,companies=None,publish=False,advertise=True):
         for values in batch:
             row=strings(dict(zip(names,values)));eid=row.pop('forecast_episode_id')
             notice_activity.setdefault(eid,[]).append(row)
-    snapshot_time=dt.datetime.now(dt.timezone.utc);shards={};proof=[];pending=[];total=0;max_size=0
+    candidate_ids={x[0] for x in con.execute('SELECT DISTINCT serving_company_id FROM candidates').fetchall()}
+    chosen=set('CAGE:'+c for c in companies) if companies else set(sorted(candidate_ids)[:3])|{'CAGE:0007B','CAGE:45934','CAGE:07639','CAGE:81755','CAGE:98897'}
+    if not companies:
+        wholesale=next((c for c in sorted(candidate_ids) if str(companies_meta.get(c,{}).get('company',{}).get('primary_naics') or '').startswith('42')),None)
+        sub_ids=[x[0] for x in con.execute("SELECT DISTINCT serving_company_id FROM candidates WHERE lane='recurring_subcontract_work' LIMIT 30").fetchall()]
+        sub=next((c for c in sub_ids if not float(companies_meta.get(c,{}).get('business',{}).get('lag_adjusted_annual_dod_net_obligations') or 0)),None)
+        chosen.update(c for c in (wholesale,sub) if c)
+    sample_payloads={}
+    for company in sorted(chosen):
+        cursor=con.execute('SELECT * FROM candidates WHERE serving_company_id=?',[company]);names=[c[0] for c in cursor.description]
+        records=[strings(dict(zip(names,values))) for values in cursor.fetchall()]
+        sample_payloads[company]=dict(company_id=company,release=release,binding=source_binding,records=records,**companies_meta.get(company,dict(business={},plans=[])))
+    def preflight(item):
+        company,payload=item
+        try:return verify_company(repo,aws,company,payload,manifest,root)
+        except Exception:
+            diagnostic=root/('overview-mismatch-'+company[5:]+'.json')
+            if diagnostic.exists():aws.s3.put_object(Bucket=BUCKET,Key=PREFIX+'/operations/company_index_failures/'+release+'/'+company[5:]+'.json',Body=diagnostic.read_bytes(),ServerSideEncryption='AES256')
+            raise
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as validation_pool:proof=list(validation_pool.map(preflight,sample_payloads.items()))
+    # Every cohort is checked before bulk sorting, compression or S3 writes.
+    snapshot_time=dt.datetime.now(dt.timezone.utc);shards={};pending=[];total=0;max_size=0
     pool=concurrent.futures.ThreadPoolExecutor(max_workers=12)
     def put(key,data):
         aws.s3.put_object(Bucket=BUCKET,Key=key,Body=data,ServerSideEncryption='AES256',ContentType='application/gzip' if key.endswith('.gz') else 'application/json')
@@ -147,58 +202,25 @@ def build(manifest,root,companies=None,publish=False,advertise=True):
             pending.clear()
         total+=len(rows);max_size=max(max_size,len(data))
         return payload
-    current=None;rows=[];sample_payloads={}
+    current=None;rows=[]
     for names,batch in company_batches(con,root):
         for values in batch:
             row=strings(dict(zip(names,values)));company=row.pop('serving_company_id')
             if current and company!=current:
                 payload=emit(current,rows)
-                if len(sample_payloads)<6 or current in ('CAGE:45934','CAGE:07639','CAGE:81755','CAGE:98897'):sample_payloads[current]=payload
-                if not any(p.get('_sample_role')=='subcontract_led' for p in sample_payloads.values()) and any(r.get('lane')=='recurring_subcontract_work' for r in rows) and not float(payload.get('business',{}).get('lag_adjusted_annual_dod_net_obligations') or 0):
-                    payload['_sample_role']='subcontract_led';sample_payloads[current]=payload
-                if not any(p.get('_sample_role')=='wholesale_classification' for p in sample_payloads.values()) and str(payload.get('company',{}).get('primary_naics') or '').startswith('42'):
-                    payload['_sample_role']='wholesale_classification';sample_payloads[current]=payload
                 current=company;rows=[]
             if current is None:current=company
             rows.append(row)
     if current:
-        payload=emit(current,rows);sample_payloads.setdefault(current,payload)
+        payload=emit(current,rows)
     for company in list(companies_meta):
         payload=emit(company,[])
-        if companies:sample_payloads.setdefault(company,payload)
     for company in ['CAGE:'+c for c in companies or []]:
-        if company[5:] not in shards.get(company[5:7],{}):sample_payloads[company]=emit(company,[])
+        if company[5:] not in shards.get(company[5:7],{}):emit(company,[])
     expected=con.execute('SELECT count(*) FROM candidates').fetchone()[0]
     if total!=expected:raise ValueError('Serialized full population differs from extraction')
     # Validate original SQL family membership and canonical money on different
     # kinds, not just counts from the same serializer. No ready marker on failure.
-    def parity(item):
-        company,payload=item
-        for kind in ('all','work','items'):
-            q=repo.opportunities(company,kind=kind,_query=True)
-            authoritative,_=aws.result('SELECT episode_id,record_hash,commercial_value,commercial_value_kind,item_demand FROM ('+q+')')
-            actual=eligible(payload,kind)
-            def keys(records):return sorted((r['episode_id'],r['record_hash'],r.get('commercial_value_kind'),None if r.get('commercial_value') is None else round(float(r['commercial_value']),6),str(r.get('item_demand')).lower()) for r in records)
-            if keys(authoritative)!=keys(actual):raise ValueError('Warehouse/index parity failed: '+company+'/'+kind)
-        authoritative=repo.overview(company[5:]);computed=overview(payload,manifest)
-        if hasattr(repo,'_overview_window'):computed=repo._overview_window(computed,sum(row.get('lane')=='source_item_forecasts' for row in eligible(payload)))
-        # Components contain unordered source aggregates. Compare cardinality,
-        # disjoint totals and historical coverage separately from that ordering.
-        checks=['overall','categories','forecast','planned_packages','replenishment','work_forecast','valuation_coverage','business_coverage','materiality_floor']
-        def stable(value):
-            if isinstance(value,dict):return {k:stable(v) for k,v in value.items() if k not in ('value_components','related_requirements')}
-            if isinstance(value,list):return [stable(x) for x in value]
-            if isinstance(value,str) and re.fullmatch(r'-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[Ee][+-]?[0-9]+)?',value):
-                from decimal import Decimal
-                return str(Decimal(value).normalize())
-            return value
-        if any(stable(authoritative.get(k))!=stable(computed.get(k)) for k in checks):
-            (root/('overview-mismatch-'+company[5:]+'.json')).write_bytes(encode(dict(company=company,authoritative=authoritative,computed=computed)))
-            raise ValueError('Overview parity failed: '+company)
-        print('Company point-read parity passed',company,len(payload['records']),flush=True)
-        return dict(company_id=company,kinds=['all','work','items'],overview=True,records=len(payload['records']))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as validation_pool:
-        proof=list(validation_pool.map(parity,sample_payloads.items()))
     for task in pending:task.result()
     pool.shutdown(wait=True)
     descriptor=dict(version=VERSION,release=release,binding=source_binding,contract=query_contract,complete=companies is None,created_at=snapshot_time.isoformat(),source_query_id=extraction['query_id'],source_query_sha256=extraction['query_sha256'],candidate_rows=total,companies=sum(len(s) for s in shards.values()),maximum_company_compressed_bytes=max_size,parity=proof,shards={})

@@ -139,3 +139,12 @@ class BoundedServingWriterTests(unittest.TestCase):
   self.assertEqual(len(rows),1500);self.assertEqual(len(set(r['episode_id'] for r in rows)),1500)
   order=[r['serving_company_id'] for r in rows];transitions=[c for i,c in enumerate(order) if i==0 or order[i-1]!=c];self.assertEqual(len(transitions),len(set(order)))
   self.assertTrue(all(r['evidence']==r['episode_id']*2000 for r in rows));c.close()
+
+class SparseBusinessContextTests(unittest.TestCase):
+ def test_absent_later_tables_have_the_same_null_projection_as_warehouse_joins(self):
+  m=dict(run_id='release',tables={'company_activity_baselines':{'columns':[{'Name':'annual_net_obligations'},{'Name':'shared'}]},'company_product_market_coverage':{'columns':[{'Name':'other_field'},{'Name':'shared'}]}})
+  p=payload([]);p.update(business={'annual_net_obligations':'100','shared':'earlier-table'},business_present_tables=['company_activity_baselines'])
+  result=overview(p,m,NOW)['business_coverage']
+  self.assertEqual(result['annual_net_obligations'],'100');self.assertIsNone(result['other_field']);self.assertIsNone(result['shared'])
+  del p['business_present_tables']
+  self.assertIsNone(overview(p,m,NOW)['business_coverage']['shared'])

@@ -111,7 +111,9 @@ def eligible(payload,kind='all',now=None):
 
 def rank(row,sort='relevance',discovery=False):
     amount=number(row.get('commercial_value'));deadline=row.get('window_end') or '\uffff'
-    if sort=='value':return (amount is None or amount<=0,-(amount or 0),deadline,row['episode_id'])
+    if sort=='value':
+        amount=amount if amount is not None and amount>0 else None
+        return (amount is None,-(amount or 0),deadline,row['episode_id'])
     if sort=='deadline':return (deadline,row['episode_id'])
     stage={'published_requirement':0,'qualification_opening':1,'teaming_opening':1}.get(row.get('stage'),2)
     priority=number(row.get('priority_score'))
@@ -135,7 +137,16 @@ def overview(payload,manifest,now=None):
         published_first_deadline=min((r['window_end'] for r in published if r.get('window_end')),default=None),published_last_deadline=max((r['window_end'] for r in published if r.get('window_end')),default=None))
     kinds=('item_reference_estimate','historical_unit_price_estimate','forecast_scenario','annual_usage_scenario','planned_package_reference','recurring_demand_scenario','historical_package_benchmark')
     priced=[r for r in rows if r.get('commercial_value_kind') in kinds and ((number(r.get('commercial_value')) or 0)>0 or r.get('commercial_value_kind')=='planned_package_reference')]
-    return dict(summary(counts,priced,manifest['run_id'],payload.get('business',{})),company_id=payload['company_id'],cage_code=payload['company_id'][5:])
+    columns={name:[c['Name'] for c in manifest.get('tables',{}).get(name,{}).get('columns',[]) if c['Name'] not in ('company_id','company_name')] for name in ('company_activity_baselines','company_catalogue_sales','company_reporting_lag_baselines','company_product_market_coverage')}
+    supplied=payload.get('business',{});present=payload.get('business_present_tables')
+    if present is None:
+        # Backwards-compatible source objects used distinct table-specific
+        # fields as presence evidence; generic shared labels are insufficient.
+        occurrences={col:sum(col in names for names in columns.values()) for names in columns.values() for col in names}
+        present={name for name,names in columns.items() if any(col in supplied for col in names if occurrences[col]==1)}
+    business={}
+    for name,names in columns.items():business.update({col:supplied.get(col) if name in present else None for col in names})
+    return dict(summary(counts,priced,manifest['run_id'],business),company_id=payload['company_id'],cage_code=payload['company_id'][5:])
 
 
 class CompanyIndex:
