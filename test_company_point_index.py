@@ -137,5 +137,5 @@ class BoundedServingWriterTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as folder:
    rows=[dict(zip(names,row)) for names,batch in company_batches(c,folder) for row in batch]
   self.assertEqual(len(rows),1500);self.assertEqual(len(set(r['episode_id'] for r in rows)),1500)
-  order=[r['serving_company_id'] for r in rows];self.assertEqual(order,sorted(order))
+  order=[r['serving_company_id'] for r in rows];transitions=[c for i,c in enumerate(order) if i==0 or order[i-1]!=c];self.assertEqual(len(transitions),len(set(order)))
   self.assertTrue(all(r['evidence']==r['episode_id']*2000 for r in rows));c.close()

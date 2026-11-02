@@ -21,20 +21,32 @@ def read_rows(con,files):
 
 
 def company_batches(con,root):
-    # Spill once into bounded CAGE-prefix buckets. Sorting all wide notice and
-    # valuation rows together exhausted the prior 4GB external-sort budget.
-    bucket=Path(tempfile.mkdtemp(prefix='company-buckets-',dir=root))
-    destination=str(bucket).replace("'","''")
-    con.execute("COPY (SELECT *,substr(serving_company_id,6,2) _serving_shard FROM candidates) TO '"+destination+"' (FORMAT PARQUET,COMPRESSION ZSTD,PARTITION_BY(_serving_shard),ROW_GROUP_SIZE 2048)")
-    for folder in sorted(bucket.iterdir()):
-        if not folder.is_dir():continue
-        paths=[str(p) for p in folder.glob('*.parquet')]
-        con.read_parquet(paths,hive_partitioning=False).create_view('serving_bucket',replace=True)
-        cursor=con.execute('SELECT * FROM serving_bucket ORDER BY serving_company_id,episode_id');names=[c[0] for c in cursor.description]
+    # Order keys in a disk B-tree; never sort or partition the wide evidence
+    # payload in DuckDB. SQLite's page cache is bounded independently of input.
+    import sqlite3
+    folder=Path(tempfile.mkdtemp(prefix='company-order-',dir=root))
+    database=sqlite3.connect(str(folder/'records.sqlite'))
+    database.execute('PRAGMA journal_mode=OFF');database.execute('PRAGMA synchronous=OFF')
+    database.execute('PRAGMA temp_store=FILE');database.execute('PRAGMA cache_size=-65536')
+    database.execute('CREATE TABLE records(company_id TEXT,episode_id TEXT,payload TEXT,PRIMARY KEY(company_id,episode_id)) WITHOUT ROWID')
+    try:
+        cursor=con.execute('SELECT * FROM candidates');names=[c[0] for c in cursor.description]
         while True:
-            batch=cursor.fetchmany(500)
+            batch=cursor.fetchmany(128)
             if not batch:break
-            yield names,batch
+            encoded=[]
+            for values in batch:
+                row=strings(dict(zip(names,values)))
+                encoded.append((row['serving_company_id'],row['episode_id'],encode(row).decode()))
+            database.executemany('INSERT INTO records VALUES(?,?,?)',encoded)
+        database.commit()
+        cursor=database.execute('SELECT payload FROM records ORDER BY company_id,episode_id')
+        while True:
+            batch=cursor.fetchmany(128)
+            if not batch:break
+            decoded=[json.loads(raw) for (raw,) in batch]
+            yield names,[[row.get(name) for name in names] for row in decoded]
+    finally:database.close()
 
 
 def build(manifest,root,companies=None,publish=False,advertise=True):
