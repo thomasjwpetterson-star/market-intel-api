@@ -86,12 +86,26 @@ class DiscoveryRepositoryMixin(MarketUpdatesMixin,ActivityFeedMixin):
             # The company query already carries vocabulary, pricing, source
             # grouping and eligibility. Avoid fetching the whole interest
             # catalogue and joining its annotations a second time.
+            payload=self.indexed_company(company) if hasattr(self,'indexed_company') else None
+            if payload is not None:
+                from opportunity_intelligence.company_index import eligible,rank,number
+                rows=[guard_finance(r,m) for r in eligible(payload,kind)]
+                def keep(row):
+                    value=number(row.get('commercial_value'))
+                    value=value if value is not None and value>0 else None
+                    return include_unpriced if value is None else value>=minimum_value
+                rows=[r for r in rows if keep(r)]
+                rows.sort(key=lambda row:rank(row,sort,discovery=True))
+                more=len(rows)>offset+limit
+                response.update(availability='available',has_more=more,next_offset=offset+limit if more else None)
+                response['records']=[dict(row,matched_interest_tags=[],discovery_routes=['company_match'],company_fit_established=True,fit_assessment='existing_engine_candidate',qualification='not_established') for row in rows[offset:offset+limit]]
+                return response
             base=self.opportunities(company,kind=kind,_query=True)
             amount='q.commercial_value' if ' commercial_value,' in base else 'q.value_median'
             amount='CASE WHEN '+finance_risk_sql(m,'q')+' OR ('+amount+')<=0 THEN cast(NULL AS double) ELSE '+amount+' END'
             condition='true' if include_unpriced else '('+amount+') IS NOT NULL'
             if minimum_value>0:condition+=' AND (('+amount+')>='+str(float(minimum_value))+(' OR ('+amount+') IS NULL' if include_unpriced else '')+')'
-            ordering=('('+amount+') DESC NULLS LAST,' if sort=='value' else 'q.window_end ASC NULLS LAST,' if sort=='deadline' else 'CASE WHEN ('+amount+')>=1000000 THEN 0 ELSE 1 END,q.priority_score DESC NULLS LAST,')
+            ordering=("CASE q.stage WHEN 'published_requirement' THEN 0 WHEN 'qualification_opening' THEN 1 WHEN 'teaming_opening' THEN 1 ELSE 2 END," if sort=='relevance' else '')+('('+amount+') DESC NULLS LAST,' if sort=='value' else 'q.window_end ASC NULLS LAST,' if sort=='deadline' else 'CASE WHEN ('+amount+')>=1000000 THEN 0 ELSE 1 END,q.priority_score DESC NULLS LAST,')
             query='SELECT q.* FROM ('+base+') q WHERE '+condition+' ORDER BY '+ordering+'q.window_end ASC NULLS LAST,q.episode_id OFFSET '+str(offset)+' LIMIT '+str(limit+1)
             if self.manifest()['run_id']!=m['run_id']:raise ReleaseChanged('The evidence release changed. Reload the feed before continuing.')
             rows=self.rows(query)

@@ -6,6 +6,7 @@ from pathlib import Path
 from functools import lru_cache
 from .aws import AWS,BUCKET,PREFIX,DATABASE
 from . import rules
+from .company_index import IndexUnavailable
 from .notice_facts import quantity_fact,price_scenario_fact
 from opportunity_worker.opportunity_engine.financial_readiness import guard as guard_finance,risk_sql as finance_risk_sql,status as finance_status
 from .priority import POLICY as INVENTORY_PRIORITY_POLICY,POLICY_HASH as INVENTORY_PRIORITY_POLICY_HASH
@@ -20,8 +21,12 @@ class Repository(DiscoveryRepositoryMixin):
   if self._manifest is None or time.monotonic()>=self._expires:
    p=json.loads(self.aws.s3.get_object(Bucket=BUCKET,Key=PREFIX+'/current.json')['Body'].read());key=p['manifest_key']
    if not key.startswith(PREFIX+'/releases/'):raise ValueError('Invalid engine release pointer')
-   self._manifest=json.loads(self.aws.s3.get_object(Bucket=BUCKET,Key=key)['Body'].read());self._expires=time.monotonic()+30
+   self._manifest=json.loads(self.aws.s3.get_object(Bucket=BUCKET,Key=key)['Body'].read());self._manifest['_company_index']=p.get('company_index');self._expires=time.monotonic()+30
   return self._manifest
+ def indexed_company(self,company):
+  from .company_index import CompanyIndex
+  if not hasattr(self,'_company_index'):self._company_index=CompanyIndex(self)
+  return self._company_index.load(company)
  def table(self,name):
   t=(self.manifest().get('source_tables',{}) if name=='company_work' else self.manifest()['tables'])[name]['table']
   if not re.fullmatch(r'oi_[a-z0-9_]+',t):raise ValueError('Invalid engine table binding')
@@ -57,6 +62,8 @@ class Repository(DiscoveryRepositoryMixin):
   return result
  def company(self,cage):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
+  payload=self.indexed_company('CAGE:'+cage)
+  if payload is not None and payload.get('company'):return [dict(payload['company'])]
   return self.rows('SELECT * FROM '+self.table('company_registry')+" WHERE cage_code='"+cage+"'")
  def relationships(self,cage,limit=50,offset=0):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
@@ -85,9 +92,21 @@ class Repository(DiscoveryRepositoryMixin):
  def innovation(self,limit=20):
   if not 1<=limit<=100:raise ValueError('Invalid limit')
   return self.rows('SELECT * FROM '+self.table('innovation_signals')+' ORDER BY posted_date DESC,title LIMIT '+str(limit))
- def opportunities(self,company=None,limit=20,offset=0,monitoring_only=False,kind='all',minimum_value=0.0,_query=False,topic=None,psc=None,_source_groups=True):
+ def opportunities(self,company=None,limit=20,offset=0,monitoring_only=False,kind='all',minimum_value=0.0,_query=False,topic=None,psc=None,_source_groups=True,_materialize=False,_plan_links=False):
   if not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid pagination')
   if not math.isfinite(minimum_value) or not 0<=minimum_value<=1000000000000:raise ValueError('Invalid minimum value')
+  if _materialize and (company!='CAGE:00000' or not _query or _source_groups):raise ValueError('Invalid serving projection compilation')
+  if kind not in ('all','work','items'):raise ValueError('Invalid opportunity kind')
+  if company and not re.fullmatch(r'(?:CAGE:[A-Z0-9]{5}|UEI:[A-Z0-9]{12})',company):raise ValueError('Invalid company identifier')
+  if company and not _query and not monitoring_only and not topic and not psc:
+   payload=self.indexed_company(company)
+   if payload is not None:
+    from .company_index import eligible,rank,number
+    rows=[guard_finance(r,self.manifest()) for r in eligible(payload,kind)]
+    rows=[r for r in rows if not minimum_value or (number(r.get('commercial_value')) or 0)>=minimum_value]
+    rows.sort(key=rank);records=rows[offset:offset+limit]
+    for record in records:record.update(quantity_fact(record));record.update(price_scenario_fact(record))
+    return records
   o=self.table('opportunities');d=self.table('demand_decisions');where="d.stage IN ('historical_watch','repeat_demand_inference')" if monitoring_only else "d.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context','historical_watch','repeat_demand_inference')";join='';extra=''
   if kind not in ('all','work','items'):raise ValueError('Invalid opportunity kind')
   if company and not re.fullmatch(r'(?:CAGE:[A-Z0-9]{5}|UEI:[A-Z0-9]{12})',company):raise ValueError('Invalid company identifier')
@@ -108,7 +127,12 @@ class Repository(DiscoveryRepositoryMixin):
     plan_join=(' LEFT JOIN '+pw+' pcw ON pcw.company_id=pm.company_id AND pcw.episode_id=po.episode_id AND pcw.opportunity_hash=po.record_hash') if pw else ''
     plan_access=" AND coalesce(pcw.review_category,'')<>'market_context'" if pw else ''
     published_plan="SELECT i.award_key FROM "+planned+" i JOIN "+o+" po ON po.episode_id=i.episode_id JOIN "+d+" pd ON pd.episode_id=po.episode_id JOIN "+pm+" pm ON pm.episode_id=po.episode_id AND pm.opportunity_hash=po.record_hash AND pm.company_id=i.company_id"+plan_join+" WHERE i.company_id='"+company+"' AND nullif(i.award_key,'') IS NOT NULL AND pd.stage NOT IN ('resolved_or_elapsed','evidence_gap','planning_context','historical_watch','repeat_demand_inference') AND try_cast(po.window_end AS date)>=current_date"+plan_access
-    where+=" AND NOT (o.lane='funded_contract_follow_on' AND coalesce(json_extract_scalar(o.value_inputs_json,'$.record_id'),'') IN ("+published_plan+"))"
+    if _plan_links:
+     return published_plan.replace('SELECT i.award_key','SELECT i.company_id serving_company_id,i.award_key,po.window_end,po.value_inputs_json').replace("i.company_id='CAGE:00000' AND ",'').replace(' AND try_cast(po.window_end AS date)>=current_date','')
+    if not _materialize:where+=" AND NOT (o.lane='funded_contract_follow_on' AND coalesce(json_extract_scalar(o.value_inputs_json,'$.record_id'),'') IN ("+published_plan+"))"
+   if _materialize:
+    join=join.replace("m.company_id='CAGE:00000'","regexp_like(m.company_id,'^CAGE:[A-Z0-9]{5}$')")
+    where=where.replace("coalesce(json_extract_scalar(o.value_inputs_json,'$.record_id'),'') IN (SELECT i.award_key","(m.company_id,coalesce(json_extract_scalar(o.value_inputs_json,'$.record_id'),'')) IN (SELECT i.company_id,i.award_key").replace("i.company_id='CAGE:00000' AND ", '')
    notice_lot="coalesce(try_cast(json_extract_scalar(np.items_json,'$[0].government_reference_lot_scenario') AS double),try_cast(json_extract_scalar(np.items_json,'$[0].supplier_average_lot_scenario') AS double))" if 'company_notice_item_prices' in self.manifest()['tables'] else 'NULL'
    if 'company_notice_item_prices' in self.manifest()['tables']:notice_lot="CASE WHEN json_array_length(np.items_json)=1 THEN "+notice_lot+" END"
    notice_lot="CASE WHEN NOT regexp_like(lower(coalesce(o.title,'')),'\\b(repair\\w*|overhaul\\w*|remanufactur\\w*)\\b') AND NOT regexp_like(coalesce(o.psc,''),'^[JNYZ]') THEN "+notice_lot+' END'
@@ -182,7 +206,7 @@ class Repository(DiscoveryRepositoryMixin):
   # Enforce exact source clocks at request time so a daily snapshot cannot keep
   # expired ISO deadlines open until the next nightly build. Date-only notices
   # retain calendar precision and do not acquire a midnight deadline.
-  if not monitoring_only:
+  if not monitoring_only and not _materialize:
    where+=" AND (d.stage NOT IN ('published_requirement','qualification_opening','teaming_opening') OR try_cast(substr(o.window_end,1,10) AS date) IS NULL OR try_cast(substr(o.window_end,1,10) AS date)>=current_date)"
    where+=" AND (coalesce(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_precision'),'')<>'timestamp_utc' OR try(from_iso8601_timestamp(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_utc'))) IS NULL OR try(from_iso8601_timestamp(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_utc')))>=current_timestamp)"
   if 'dla_forecasts' in self.manifest()['tables']:
@@ -204,9 +228,9 @@ class Repository(DiscoveryRepositoryMixin):
   if psc:
    psc_field='ov.work_psc' if vocabulary and any(col['Name']=='work_psc' for col in self.manifest()['tables']['opportunity_vocabulary'].get('columns',[])) else 'o.psc'
    where+=" AND starts_with(coalesce("+psc_field+",''),'"+psc+"')"
-  selected='SELECT DISTINCT o.*,d.stage,d.decision_json'+extra+' FROM '+o+' o JOIN '+d+' d ON o.episode_id=d.episode_id'+join+' WHERE '+where
+  selected='SELECT DISTINCT '+('m.company_id serving_company_id,' if _materialize else '')+'o.*,d.stage,d.decision_json'+extra+' FROM '+o+' o JOIN '+d+' d ON o.episode_id=d.episode_id'+join+' WHERE '+where
   if _query and not _source_groups:return selected
-  ordering=("CASE WHEN q.commercial_value>=1000000 THEN 0 ELSE 1 END,q.priority_score DESC," if company else '')+"CASE q.stage WHEN 'qualification_opening' THEN 0 WHEN 'teaming_opening' THEN 0 WHEN 'published_requirement' THEN 1 WHEN 'emerging_demand' THEN 2 ELSE 3 END,CASE WHEN q.lane='source_item_forecasts' THEN 1 ELSE 0 END,q.window_end ASC NULLS LAST,q.episode_id"
+  ordering=("CASE q.stage WHEN 'published_requirement' THEN 0 WHEN 'qualification_opening' THEN 1 WHEN 'teaming_opening' THEN 1 ELSE 2 END,CASE WHEN q.commercial_value>=1000000 THEN 0 ELSE 1 END,q.priority_score DESC," if company else '')+"CASE q.stage WHEN 'qualification_opening' THEN 0 WHEN 'teaming_opening' THEN 0 WHEN 'published_requirement' THEN 1 WHEN 'emerging_demand' THEN 2 ELSE 3 END,CASE WHEN q.lane='source_item_forecasts' THEN 1 ELSE 0 END,q.window_end ASC NULLS LAST,q.episode_id"
   # Reposted notices sometimes append -00 to the same procurement identifier.
   # Collapse only that narrow family with the same buyer and normalized title;
   # different solicitations for the same item remain separate. Keep every link.
@@ -226,6 +250,10 @@ class Repository(DiscoveryRepositoryMixin):
  def overview(self,cage):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
   from .overview import summary
+  payload=self.indexed_company('CAGE:'+cage)
+  if payload is not None:
+   from .company_index import overview
+   return overview(payload,self.manifest())
   query=self.opportunities('CAGE:'+cage,kind='all',_query=True)
   scale="(SELECT max(observed_prime_net_obligations) FROM "+self.table('company_history_coverage')+" WHERE company_id='CAGE:"+cage+"')" if 'company_history_coverage' in self.manifest()['tables'] else 'NULL'
   published_stage="stage IN ('published_requirement','qualification_opening','teaming_opening')"
@@ -301,6 +329,18 @@ class Repository(DiscoveryRepositoryMixin):
   if not re.fullmatch('[a-f0-9]{64}',eid) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid item request relationship')
   if 'item_request_progression' not in self.manifest()['tables']:return []
   return self.rows('SELECT * FROM '+self.table('item_request_progression')+" WHERE forecast_episode_id='"+eid+"' ORDER BY response_deadline,request_episode_id OFFSET "+str(offset)+' LIMIT '+str(limit))
+
+ def company_markets(self,cage,level='psc',limit=8):
+  from .company_markets import query
+  sql=query(self,cage,level,limit)
+  payload=self.indexed_company('CAGE:'+cage)
+  if payload is not None and 'markets' in payload and level=='psc' and limit<=8:return payload['markets'][:limit]
+  return self.rows(sql)
+
+ def related_item_notices(self,eid,limit=25,offset=0):
+  if not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid pagination')
+  from .item_notice_activity import query
+  return self.rows(query(self,eid)+' ORDER BY notice_posted_date DESC NULLS LAST,notice_episode_id OFFSET '+str(offset)+' LIMIT '+str(limit))
 
  def item_market_prices(self,eid,limit=25,offset=0):
   if not re.fullmatch('[a-f0-9]{64}',eid) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid item price request')
@@ -454,6 +494,7 @@ def create_router(verify_principal,repository=None):
  def call(fn,*args):
   try:return fn(*args)
   except ValueError as e:raise HTTPException(status_code=400,detail=str(e))
+  except IndexUnavailable:raise HTTPException(status_code=503,detail='Company feed is temporarily unavailable')
  @router.get('/companies')
  def companies(q:str=Query(...,min_length=1,max_length=100),limit:int=Query(20,ge=1,le=100)):return {'records':call(repo.companies,q,limit)}
  @router.get('/companies/{cage}')
@@ -474,6 +515,12 @@ def create_router(verify_principal,repository=None):
  @router.get('/work-vocabulary')
  def work_vocabulary(psc_prefix:str=None,limit:int=Query(100,ge=1,le=100),offset:int=Query(0,ge=0,le=10000)):
   return call(repo.work_vocabulary,psc_prefix,limit,offset)
+ @router.get('/opportunities/{episode_id}/related-item-notices')
+ def related_item_notices(episode_id:str,limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
+  return {'records':call(repo.related_item_notices,episode_id,limit,offset),'release':repo.manifest()['run_id'],'interpretation':'Current and earlier notices for the exact item. Quantities and statuses remain separate from forecasts.'}
+ @router.get('/companies/{cage}/markets')
+ def company_markets(cage:str,level:str='psc',limit:int=Query(8,ge=1,le=25)):
+  return {'records':call(repo.company_markets,cage,level,limit),'release':repo.manifest()['run_id'],'classification_level':level,'cage_code':cage,'scope':'Selected CAGE, held DoD obligations in the reporting-lag-adjusted year. Award PSC classification is not a verified capability or opportunity.'}
  @router.get('/companies/{cage}/overview')
  def overview(cage:str):return call(repo.overview,cage)
  @router.get('/companies/{cage}/relationships')
