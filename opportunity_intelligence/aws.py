@@ -1,5 +1,7 @@
 """Read-only adapter for the versioned opportunity release. No build/ingest code."""
 import json
+import copy
+from concurrent.futures import Future
 import threading
 import time
 from collections import OrderedDict
@@ -16,18 +18,44 @@ class AWS:
         self.athena = boto3.client('athena', region_name='us-east-1', config=cfg)
         self.cache = OrderedDict()
         self.lock = threading.Lock()
+        self.pending = {}
 
     def result(self, sql):
-        # Immutable release table names are part of each key. Cached results
-        # therefore cannot cross a release change. No user-private data is cached.
+        # Share identical concurrent public evidence queries. Each caller gets
+        # its own row objects because presentation enrichers may mutate them.
         with self.lock:
             cached = self.cache.get(sql)
             if cached and cached[0] > time.monotonic():
-                return cached[1], {}
+                return copy.deepcopy(cached[1]), {}
+            future = self.pending.get(sql)
+            leader = future is None
+            if leader:
+                future = Future()
+                self.pending[sql] = future
+        if not leader:
+            rows, execution = future.result(timeout=60)
+            return copy.deepcopy(rows), execution
+        try:
+            rows, execution = self._execute(sql)
+            with self.lock:
+                self.cache[sql] = (time.monotonic() + 300, copy.deepcopy(rows))
+                while len(self.cache) > 128:
+                    self.cache.popitem(last=False)
+            future.set_result((copy.deepcopy(rows), execution))
+            return rows, execution
+        except BaseException as error:
+            future.set_exception(error)
+            raise
+        finally:
+            with self.lock:
+                self.pending.pop(sql, None)
+
+    def _execute(self, sql):
         qid = self.athena.start_query_execution(
             QueryString=sql, QueryExecutionContext={'Database': DATABASE},
             ResultConfiguration={'OutputLocation': 's3://' + BUCKET + '/athena-query-results/'},
-            WorkGroup='primary')['QueryExecutionId']
+            WorkGroup='primary',
+            ResultReuseConfiguration={'ResultReuseByAgeConfiguration': {'Enabled': True, 'MaxAgeInMinutes': 5}})['QueryExecutionId']
         started = time.monotonic()
         while True:
             execution = self.athena.get_query_execution(QueryExecutionId=qid)['QueryExecution']
@@ -48,8 +76,4 @@ class AWS:
                     names = values
                 else:
                     rows.append(dict(zip(names, values)))
-        with self.lock:
-            self.cache[sql] = (time.monotonic() + 60, rows)
-            while len(self.cache) > 128:
-                self.cache.popitem(last=False)
         return rows, execution

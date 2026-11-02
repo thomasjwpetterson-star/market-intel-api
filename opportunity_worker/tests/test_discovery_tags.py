@@ -66,6 +66,7 @@ def repo():
         ('b'*64,'2'*64,'Established wiring work','5995','emerging_demand','2032-01-01',None,None),
         ('c'*64,'3'*64,'Work on rotorcraft','5840','published_requirement','2027-03-01',500000.,'source_planned_value'),
         ('d'*64,'4'*64,'Old radar notice','5840','resolved_or_elapsed','2020-01-01',2000000.,'historical_comparison')])
+    c.execute("ALTER TABLE opportunities ADD COLUMN lane VARCHAR DEFAULT 'published_procurement'")
     c.execute('CREATE TABLE opportunity_vocabulary(episode_id VARCHAR,record_hash VARCHAR,work_scope_topic_ids_json VARCHAR,context_topic_ids_json VARCHAR,work_types_json VARCHAR,annotation_json VARCHAR,work_psc VARCHAR)')
     a=json.dumps(dict(topics=[dict(topic_id='radar.processing.track.fusion',passage='Radar fusion research')],work_types=[dict(work_type='design_development',passage='Research of radar fusion')]))
     c.executemany('INSERT INTO opportunity_vocabulary VALUES (?,?,?,?,?,?,?)',[
@@ -89,7 +90,7 @@ def repo():
         def _discovery_table(self,m,n):return n
         def opportunities(self,company=None,kind='all',_query=False,_source_groups=True):
             # Existing source eligibility remains authoritative outside tag logic.
-            sql="SELECT *"+(",123.45 government_reference_unit_price" if company else '')+" FROM opportunities WHERE stage<>'resolved_or_elapsed'"
+            sql="SELECT *"+(",123.45 government_reference_unit_price,CASE WHEN value_median>1000000 THEN 90 ELSE 20 END priority_score" if company else '')+" FROM opportunities WHERE stage<>'resolved_or_elapsed'"
             if company:sql+=" AND episode_id IN (SELECT episode_id FROM company_matches WHERE company_id='"+company+"') AND episode_id NOT IN (SELECT episode_id FROM company_work_matches WHERE review_category='market_context')"
             return sql
         def rows(self,sql):
@@ -196,7 +197,67 @@ def test_both_api_adapters_keep_auth_limits_and_release_conflicts(repo,module):
     assert client.get('/opportunity-intelligence/work-tags').status_code==401
     app=FastAPI();app.include_router(api.create_router(lambda:{'id':'verified-user'},repo));client=TestClient(app)
     assert client.get('/opportunity-intelligence/work-tags?q=AESA').json()['records'][0]['tag_id']=='scope:radar'
-    assert client.get('/opportunity-intelligence/discovery?tags=scope:radar').status_code==200
+    response=client.get('/opportunity-intelligence/discovery?tags=scope:radar&minimum_value=1000000&include_unpriced=false&sort=value')
+    assert response.status_code==200
+    assert response.json()['minimum_value']==1000000 and response.json()['include_unpriced'] is False and response.json()['sort']=='value'
+    assert client.get('/opportunity-intelligence/discovery?tags=scope:radar&minimum_value=-1').status_code==422
     assert client.get('/opportunity-intelligence/discovery?tags=scope:fake').status_code==400
     assert client.get('/opportunity-intelligence/discovery?tags=scope:radar&release=old').status_code==409
     assert client.get('/opportunity-intelligence/discovery?tags=scope:radar&limit=101').status_code==422
+
+
+def test_interest_value_filter_keeps_unknown_work_optional_and_retains_value_basis(repo):
+    result=repo.discovery(mode='combined',company='CAGE:ABCDE',tags='context:rotorcraft',minimum_value=1000000)
+    assert {x['episode_id'] for x in result['records']}=={x*64 for x in 'ab'}
+    result=repo.discovery(tags='scope:radar,context:rotorcraft',minimum_value=1000000,include_unpriced=False)
+    assert [x['episode_id'] for x in result['records']]==['a'*64]
+    assert result['records'][0]['value_basis']=='historical_comparison'
+    assert repo.discovery(tags='context:rotorcraft',minimum_value=1000000,include_unpriced=False)['records']==[]
+
+
+def test_size_ranking_and_deadline_ranking_are_separate(repo):
+    repo.connection.execute("UPDATE opportunities SET window_end='2027-01-01' WHERE episode_id=repeat('c',64)")
+    kwargs=dict(tags='scope:radar,context:rotorcraft')
+    assert [x['episode_id'][0] for x in repo.discovery(**kwargs,sort='value')['records']]==['a','c']
+    assert [x['episode_id'][0] for x in repo.discovery(**kwargs,sort='deadline')['records']]==['c','a']
+
+
+def test_company_discovery_retains_existing_priority_instead_of_reordering_by_deadline(repo):
+    repo.connection.execute("UPDATE opportunities SET window_end='2026-11-03' WHERE episode_id=repeat('b',64)")
+    result=repo.discovery(mode='company',company='CAGE:ABCDE')
+    assert [x['episode_id'][0] for x in result['records']]==['a','b']
+
+
+@pytest.mark.parametrize('bad',[dict(minimum_value=float('nan')),dict(minimum_value=float('inf')),dict(minimum_value=-1),dict(minimum_value=1e13),dict(include_unpriced='false'),dict(sort='unsafe')])
+def test_invalid_value_filters_are_rejected_before_query(repo,bad):
+    with pytest.raises(ValueError):repo.discovery(tags='scope:radar',**bad)
+    assert repo.queries==[]
+
+
+def test_quarantined_subcontract_value_cannot_rank_or_pass_minimum(repo):
+    c=repo.connection
+    c.execute("UPDATE opportunities SET lane='recurring_subcontract_work' WHERE episode_id=repeat('a',64)")
+    result=repo.discovery(tags='scope:radar,context:rotorcraft',minimum_value=1000000,include_unpriced=False)
+    assert result['records']==[]
+    result=repo.discovery(tags='scope:radar,context:rotorcraft',sort='value')
+    assert [x['episode_id'][0] for x in result['records']]==['c','a']
+    assert result['records'][1]['value_median'] is None
+
+
+def test_company_only_feed_skips_interest_catalogue_and_repeated_vocabulary_join(repo):
+    def fail(*args):raise AssertionError('Company-only feed must not fetch catalogue')
+    repo._discovery_catalogue=fail
+    result=repo.discovery(mode='company',company='CAGE:ABCDE')
+    assert len(result['records'])==2 and len(repo.queries)==1
+    assert 'JOIN opportunity_vocabulary' not in repo.queries[0]
+
+
+def test_unknown_company_commercial_size_encoded_as_zero_remains_optional(repo):
+    original=repo.opportunities
+    def query(*args,**kwargs):
+        return 'SELECT z.*,coalesce(value_median,0.0) commercial_value,1 extra FROM ('+original(*args,**kwargs)+') z'
+    repo.opportunities=query
+    result=repo.discovery(mode='company',company='CAGE:ABCDE',minimum_value=1000000)
+    assert {x['episode_id'][0] for x in result['records']}=={'a','b'}
+    result=repo.discovery(mode='company',company='CAGE:ABCDE',minimum_value=1000000,include_unpriced=False)
+    assert [x['episode_id'][0] for x in result['records']]==['a']

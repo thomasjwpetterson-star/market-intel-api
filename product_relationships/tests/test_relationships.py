@@ -52,6 +52,21 @@ class Relationships(unittest.TestCase):
         self.db.execute("INSERT INTO refs VALUES ('000000004','OWN01','P4','P4','5','2','A','A',DATE '2026-08-17','V_FLIS_PART.CSV')")
         row=[r for r in self.rows(queries.portfolio_query('OWN01','SELL1')) if r['niin']=='000000004'][0]
         self.assertEqual(row['attribution'],'overlapping_catalog_sources')
+    def test_relationship_labels_are_per_product_and_never_assert_competition(self):
+        parent=self
+        class Source:
+            def table(self,name):return 'market_intel_platform_candidate.oi_fixture'
+            def rows(self,sql):return parent.rows(sql)
+        result=Repository(Source()).context('OWN01','SELL1',100,0)
+        records={r['niin']:r for r in result['records']}
+        self.assertEqual(records['000000001']['relationship_type'],'catalog_linked_seller')
+        self.assertEqual(records['000000003']['relationship_type'],'mixed_product_sources')
+        self.assertEqual(records['000000004']['relationship_type'],'seller_design_references')
+        self.assertTrue(all(r['competition_established'] is False for r in records.values()))
+        market=Repository(Source()).context('OWN01',None,100,0)
+        self.assertEqual(market['records'][0]['relationship_type'],'mixed_product_sources')
+        self.assertFalse(market['records'][0]['competition_established'])
+
     def test_large_company_scope_does_not_exceed_query_size_limit(self):
         sql=queries.market_query('OWN01','market_intel_platform_candidate.oi_fixture',limit=100)
         self.assertLess(len(sql.encode()),20000)

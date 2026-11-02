@@ -25,12 +25,40 @@ def array(value):
         return parsed if isinstance(parsed, list) else []
     except (ValueError, TypeError): return []
 
+def relationship_context(row, *, aggregate=False):
+    """Describe this overlap, never assign a company-wide competitor role."""
+    if aggregate:
+        channel=number(row.get('selected_catalog_items'))
+        design=number(row.get('seller_design_items'))
+        ambiguous=number(row.get('ambiguous_items'))
+        kind=('mixed_product_sources' if channel and (design or ambiguous) else
+              'catalog_linked_seller' if channel else
+              'seller_design_references' if design else 'source_relationship_unresolved')
+    else:
+        kind={'selected_catalog_match':'catalog_linked_seller',
+              'seller_design_reference':'seller_design_references',
+              'overlapping_catalog_sources':'mixed_product_sources',
+              'multiple_other_sources':'mixed_product_sources',
+              'other_source_reference':'other_source_references'}.get(row.get('attribution'),'source_relationship_unresolved')
+    labels={
+        'catalog_linked_seller':('Seller of linked products','Recorded sales use part references in this company’s catalog.'),
+        'seller_design_references':('Seller with design references','The seller has design-control references on these items. This does not establish an independent competing product.'),
+        'mixed_product_sources':('Mixed product sources','The records link these products to more than one source. The relationship varies by item.'),
+        'other_source_references':('Other catalog source','The sold part is linked to another catalog source.'),
+        'source_relationship_unresolved':('Other seller','The available part references do not establish who made the sold product.'),
+    }
+    label,explanation=labels[kind]
+    return dict(relationship_type=kind,relationship_label=label,relationship_explanation=explanation,
+                competition_established=False,relationship_scope='observed_product_overlap')
+
+
 def product(row):
     result = {k: v for k, v in row.items() if not k.endswith('_json') and k not in COUNT_KEYS}
     for key in COUNT_KEYS:
         if key in row: result[key] = number(row[key])
     for key in ('selected_catalog_match','seller_design_reference'):
         if key in result: result[key] = result[key] is True or result[key] == 'true'
+    result.update(relationship_context(row))
     result['part_references'] = [p for p in array(row.get('seller_parts_json')) if isinstance(p,str)]
     result['source_references'] = [p for p in array(row.get('reference_evidence_json')) if isinstance(p,dict) and p.get('cage')]
     return result
@@ -65,6 +93,7 @@ class Repository:
             else:
                 clean.pop('examples_json',None)
                 for key in COUNT_KEYS[:6]: clean[key] = number(row.get(key))
+                clean.update(relationship_context(clean,aggregate=True))
                 clean['examples'] = [product(p) for p in array(row.get('examples_json')) if isinstance(p,dict)]
                 records.append(clean)
         products = records if seller else [item for record in records for item in record['examples']]
