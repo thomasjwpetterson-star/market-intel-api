@@ -117,3 +117,25 @@ class RepositoryPointReadTests(unittest.TestCase):
   self.repo.table=lambda name:'safe.'+name
   q=query(self.repo,'a'*64);self.assertIn('sam_notices',q);self.assertIn('dla_solicitations',q);self.assertIn('recorded_stage',q);self.assertNotIn('current_date',q)
   with self.assertRaises(ValueError):query(self.repo,"a' OR true")
+
+class OverviewPayloadTests(unittest.TestCase):
+ def test_company_summary_keeps_full_bodies_in_evidence_not_every_price_component(self):
+  from opportunity_intelligence.api import Repository
+  r=Repository(object());r.manifest=lambda:dict(run_id='release',tables={})
+  forecast=row('forecast');forecast.update(stage='source_forecast',lane='source_item_forecasts',commercial_value='5000000',commercial_value_kind='forecast_scenario',valuation_status='catalogue_EA_assumed_forecast_unit_not_stated',item_reference_niin='016736255',scope_text='Long source text',matched_work_text='Detailed source work')
+  r.indexed_company=lambda c:payload([forecast])
+  result=r.overview('45934');component=result['forecast']['value_components'][0]
+  self.assertEqual(component['commercial_value'],'5000000')
+  self.assertNotIn('scope_text',component);self.assertNotIn('matched_work_text',component)
+
+class BoundedServingWriterTests(unittest.TestCase):
+ def test_prefix_spill_retains_all_wide_facts_and_contiguous_company_order(self):
+  import duckdb,tempfile
+  from opportunity_intelligence.build_company_index import company_batches
+  c=duckdb.connect();c.execute("SET memory_limit='64MB'");c.execute('SET threads=1');c.execute('SET preserve_insertion_order=false');c.execute('SET partitioned_write_max_open_files=2')
+  c.execute("CREATE TABLE candidates AS SELECT CASE WHEN i%3=0 THEN 'CAGE:45934' WHEN i%3=1 THEN 'CAGE:07639' ELSE 'CAGE:98897' END serving_company_id,cast(i AS varchar) episode_id,repeat(cast(i AS varchar),2000) evidence FROM range(1500) t(i)")
+  with tempfile.TemporaryDirectory() as folder:
+   rows=[dict(zip(names,row)) for names,batch in company_batches(c,folder) for row in batch]
+  self.assertEqual(len(rows),1500);self.assertEqual(len(set(r['episode_id'] for r in rows)),1500)
+  order=[r['serving_company_id'] for r in rows];self.assertEqual(order,sorted(order))
+  self.assertTrue(all(r['evidence']==r['episode_id']*2000 for r in rows));c.close()

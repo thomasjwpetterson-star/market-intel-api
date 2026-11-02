@@ -39,8 +39,10 @@ def binding(manifest):
 
 def contract(repo):
     sql=repo.opportunities('CAGE:00000',_query=True,_source_groups=False,_materialize=True)
-    files=('company_index.py','overview.py','build_company_index.py','item_notice_activity.py','company_markets.py')
-    return hashlib.sha256(sql.encode()+b''.join(Path(__file__).with_name(name).read_bytes() for name in files)).hexdigest()
+    plans=repo.opportunities('CAGE:00000',_query=True,_source_groups=False,_materialize=True,_plan_links=True) if 'agency_forecast_incumbents' in repo.manifest()['tables'] else ''
+    # Bind eligibility SQL, layout and monetary policy. Operational producer
+    # changes (parallelism, spill layout) do not change the stored fact contract.
+    return hashlib.sha256(VERSION.encode()+sql.encode()+plans.encode()+POLICY_HASH.encode()+Path(__file__).with_name('overview.py').read_bytes()).hexdigest()
 
 
 def truth(value):

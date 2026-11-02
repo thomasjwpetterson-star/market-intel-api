@@ -253,7 +253,13 @@ class Repository(DiscoveryRepositoryMixin):
   payload=self.indexed_company('CAGE:'+cage)
   if payload is not None:
    from .company_index import overview
-   return overview(payload,self.manifest())
+   result=overview(payload,self.manifest())
+   # Match the existing warehouse summary projection. Full source bodies and
+   # company matching payloads belong to evidence/card reads, not every total.
+   fields=set(('annual_scenarios_json valuation_status market_price_median market_price_lot_scenario latest_price_date stock_on_hand inventory_date inventory_signal window_start window_end value_low value_high value_basis forecast_catalogue_unit episode_id record_hash title customer_name source_url source_evidence_id commercial_value commercial_value_kind item_demand item_reference_niin notice_item_pricing_json value_inputs_json forecast_next_12m_value included_value niin aggregation').split())
+   for name in ('forecast','replenishment','planned_packages'):
+    result[name]['value_components']=[{k:v for k,v in row.items() if k in fields} for row in result[name].get('value_components',[])]
+   return result
   query=self.opportunities('CAGE:'+cage,kind='all',_query=True)
   scale="(SELECT max(observed_prime_net_obligations) FROM "+self.table('company_history_coverage')+" WHERE company_id='CAGE:"+cage+"')" if 'company_history_coverage' in self.manifest()['tables'] else 'NULL'
   published_stage="stage IN ('published_requirement','qualification_opening','teaming_opening')"

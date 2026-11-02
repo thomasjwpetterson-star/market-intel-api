@@ -20,7 +20,24 @@ def read_rows(con,files):
     return con.execute('SELECT * FROM read_parquet(?)',[[f['path'] for f in files]])
 
 
-def build(manifest,root,companies=None,publish=False):
+def company_batches(con,root):
+    # Spill once into bounded CAGE-prefix buckets. Sorting all wide notice and
+    # valuation rows together exhausted the prior 4GB external-sort budget.
+    bucket=Path(tempfile.mkdtemp(prefix='company-buckets-',dir=root))
+    destination=str(bucket).replace("'","''")
+    con.execute("COPY (SELECT *,substr(serving_company_id,6,2) _serving_shard FROM candidates) TO '"+destination+"' (FORMAT PARQUET,COMPRESSION ZSTD,PARTITION_BY(_serving_shard),ROW_GROUP_SIZE 2048)")
+    for folder in sorted(bucket.iterdir()):
+        if not folder.is_dir():continue
+        paths=[str(p) for p in folder.glob('*.parquet')]
+        con.read_parquet(paths,hive_partitioning=False).create_view('serving_bucket',replace=True)
+        cursor=con.execute('SELECT * FROM serving_bucket ORDER BY serving_company_id,episode_id');names=[c[0] for c in cursor.description]
+        while True:
+            batch=cursor.fetchmany(500)
+            if not batch:break
+            yield names,batch
+
+
+def build(manifest,root,companies=None,publish=False,advertise=True):
     root=Path(root);root.mkdir(parents=True,exist_ok=True)
     aws=AWS();repo=Repository(aws);repo._manifest=manifest;repo._expires=float('inf')
     release=manifest['run_id'];source_binding=binding(manifest);query_contract=contract(repo)
@@ -30,7 +47,7 @@ def build(manifest,root,companies=None,publish=False):
     sql=repo.opportunities('CAGE:00000',_query=True,_source_groups=False,_materialize=True)
     if companies:sql="SELECT * FROM ("+sql+") WHERE serving_company_id IN ("+','.join("'CAGE:"+c+"'" for c in companies)+')'
     extraction=aws.extract('company_serving_candidates',sql,root,'company_serving_'+release)
-    con=duckdb.connect(str(root/'build.duckdb'));con.execute("SET memory_limit='4GB'");con.execute("SET temp_directory='"+str(root/'spill').replace("'","''")+"'")
+    con=duckdb.connect(str(root/'build.duckdb'));con.execute("SET memory_limit='4GB'");con.execute('SET threads=1');con.execute('SET preserve_insertion_order=false');con.execute('SET partitioned_write_max_open_files=8');con.execute("SET temp_directory='"+str(root/'spill').replace("'","''")+"'")
     paths=[f['path'] for f in extraction['files']]
     con.from_parquet(paths).create_view('candidates',replace=True)
     duplicates=con.execute('SELECT count(*) FROM (SELECT serving_company_id,episode_id,count(*) n FROM candidates GROUP BY 1,2 HAVING count(*)>1)').fetchone()[0]
@@ -118,11 +135,8 @@ def build(manifest,root,companies=None,publish=False):
             pending.clear()
         total+=len(rows);max_size=max(max_size,len(data))
         return payload
-    cursor=con.execute('SELECT * FROM candidates ORDER BY serving_company_id,episode_id');names=[c[0] for c in cursor.description]
     current=None;rows=[];sample_payloads={}
-    while True:
-        batch=cursor.fetchmany(500)
-        if not batch:break
+    for names,batch in company_batches(con,root):
         for values in batch:
             row=strings(dict(zip(names,values)));company=row.pop('serving_company_id')
             if current and company!=current:
@@ -182,10 +196,11 @@ def build(manifest,root,companies=None,publish=False):
     (root/'ready.json').write_bytes(encode(descriptor))
     if publish:
         if companies:raise ValueError('Bounded samples cannot publish an authoritative universe index')
+        put(base+'ready.json',encode(descriptor))
+    if publish and advertise:
         response=aws.s3.get_object(Bucket=BUCKET,Key=PREFIX+'/current.json')
         pointer=json.loads(response['Body'].read())
         if pointer['run_id']!=release:raise ValueError('Serving release advanced; do not advertise a mixed generation')
-        put(base+'ready.json',encode(descriptor))
         pointer['company_index']=dict(version=VERSION,sha256=hashlib.sha256(encode(descriptor)).hexdigest())
         aws.s3.put_object(Bucket=BUCKET,Key=PREFIX+'/current.json',Body=encode(pointer),IfMatch=response['ETag'],ServerSideEncryption='AES256',ContentType='application/json')
     return descriptor
