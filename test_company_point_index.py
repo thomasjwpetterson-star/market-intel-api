@@ -121,7 +121,7 @@ class RepositoryPointReadTests(unittest.TestCase):
 class OverviewPayloadTests(unittest.TestCase):
  def test_company_summary_keeps_full_bodies_in_evidence_not_every_price_component(self):
   from opportunity_intelligence.api import Repository
-  r=Repository(object());r.manifest=lambda:dict(run_id='release',tables={})
+  r=Repository(object());r.manifest=lambda:dict(run_id='release',as_of='2026-11-01',tables={})
   forecast=row('forecast');forecast.update(stage='source_forecast',lane='source_item_forecasts',commercial_value='5000000',commercial_value_kind='forecast_scenario',valuation_status='catalogue_EA_assumed_forecast_unit_not_stated',item_reference_niin='016736255',scope_text='Long source text',matched_work_text='Detailed source work')
   r.indexed_company=lambda c:payload([forecast])
   result=r.overview('45934');component=result['forecast']['value_components'][0]

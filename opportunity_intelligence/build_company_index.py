@@ -181,6 +181,7 @@ def build(manifest,root,companies=None,publish=False,advertise=True):
             def keys(records):return sorted((r['episode_id'],r['record_hash'],r.get('commercial_value_kind'),None if r.get('commercial_value') is None else round(float(r['commercial_value']),6),str(r.get('item_demand')).lower()) for r in records)
             if keys(authoritative)!=keys(actual):raise ValueError('Warehouse/index parity failed: '+company+'/'+kind)
         authoritative=repo.overview(company[5:]);computed=overview(payload,manifest)
+        if hasattr(repo,'_overview_window'):computed=repo._overview_window(computed,sum(row.get('lane')=='source_item_forecasts' for row in eligible(payload)))
         # Components contain unordered source aggregates. Compare cardinality,
         # disjoint totals and historical coverage separately from that ordering.
         checks=['overall','categories','forecast','planned_packages','replenishment','work_forecast','valuation_coverage','business_coverage','materiality_floor']

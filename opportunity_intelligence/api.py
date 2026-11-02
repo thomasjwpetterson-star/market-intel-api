@@ -247,6 +247,17 @@ class Repository(DiscoveryRepositoryMixin):
    record.update(quantity_fact(record));record.update(price_scenario_fact(record))
   return [guard_finance(record,self.manifest()) for record in records]
 
+ def _overview_window(self,result,total_items=None):
+  import calendar
+  start=datetime.date.fromisoformat(self.manifest()['as_of'])
+  end=start.replace(year=start.year+1,day=min(start.day,calendar.monthrange(start.year+1,start.month)[1]))
+  forecast=result['forecast']
+  forecast.update(next_12_month_window_start=start.isoformat(),next_12_month_window_end_exclusive=end.isoformat(),price_basis='Exact-item observed market prices where available, otherwise government reference prices. Forecast units use the catalogue EA basis; these are planning estimates, not current quotes or company revenue.')
+  if total_items is not None:forecast['matched_forecast_items']=int(total_items)
+  from .company_index import number
+  forecast['next_12_month_positive_priced_items']=sum((number(row.get('forecast_next_12m_value')) or 0)>0 for row in forecast.get('value_components',[]))
+  return result
+
  def overview(self,cage):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
   from .overview import summary
@@ -259,19 +270,21 @@ class Repository(DiscoveryRepositoryMixin):
    fields=set(('annual_scenarios_json valuation_status market_price_median market_price_lot_scenario latest_price_date stock_on_hand inventory_date inventory_signal window_start window_end value_low value_high value_basis forecast_catalogue_unit episode_id record_hash title customer_name source_url source_evidence_id commercial_value commercial_value_kind item_demand item_reference_niin notice_item_pricing_json value_inputs_json forecast_next_12m_value included_value niin aggregation').split())
    for name in ('forecast','replenishment','planned_packages'):
     result[name]['value_components']=[{k:v for k,v in row.items() if k in fields} for row in result[name].get('value_components',[])]
-   return result
+   from .company_index import eligible
+   return self._overview_window(result,sum(row.get('lane')=='source_item_forecasts' for row in eligible(payload)))
   query=self.opportunities('CAGE:'+cage,kind='all',_query=True)
   scale="(SELECT max(observed_prime_net_obligations) FROM "+self.table('company_history_coverage')+" WHERE company_id='CAGE:"+cage+"')" if 'company_history_coverage' in self.manifest()['tables'] else 'NULL'
   published_stage="stage IN ('published_requirement','qualification_opening','teaming_opening')"
   priced_kind="commercial_value_kind IN ('item_reference_estimate','historical_unit_price_estimate') AND commercial_value>0"
-  count_sql='SELECT count_if(NOT item_demand) work_count,count_if(item_demand) items_count,count_if(NOT item_demand AND commercial_value>=1000000) work_larger_count,count_if(item_demand AND commercial_value>=1000000) items_larger_count,'+scale+' observed_prime_net_obligations,'+   'count_if('+published_stage+') published_records_count,count_if(('+published_stage+') AND ('+priced_kind+')) published_priced_records_count,'+   "count_if(("+published_stage+") AND commercial_value_kind IN ('historical_comparison','historical_context_source_limit')) published_historical_guide_records_count,"+   'min(CASE WHEN '+published_stage+' THEN window_end END) published_first_deadline,max(CASE WHEN '+published_stage+' THEN window_end END) published_last_deadline FROM ('+query+')'
+  count_sql="SELECT count_if(lane='source_item_forecasts') forecast_items_total,"+'count_if(NOT item_demand) work_count,count_if(item_demand) items_count,count_if(NOT item_demand AND commercial_value>=1000000) work_larger_count,count_if(item_demand AND commercial_value>=1000000) items_larger_count,'+scale+' observed_prime_net_obligations,'+   'count_if('+published_stage+') published_records_count,count_if(('+published_stage+') AND ('+priced_kind+')) published_priced_records_count,'+   "count_if(("+published_stage+") AND commercial_value_kind IN ('historical_comparison','historical_context_source_limit')) published_historical_guide_records_count,"+   'min(CASE WHEN '+published_stage+' THEN window_end END) published_first_deadline,max(CASE WHEN '+published_stage+' THEN window_end END) published_last_deadline FROM ('+query+')'
   forecast_columns={x['Name'] for x in self.manifest()['tables'].get('company_item_valuations',{}).get('columns',[])}
   forecast_extra=','.join(name if name in forecast_columns else 'NULL '+name for name in ('annual_scenarios_json','valuation_status','market_price_median','market_price_lot_scenario','latest_price_date','stock_on_hand','inventory_date','inventory_signal'))
   priced_sql="SELECT "+forecast_extra+",window_start,window_end,value_low,value_high,value_basis,forecast_catalogue_unit,episode_id,record_hash,title,customer_name,source_url,source_evidence_id,commercial_value,commercial_value_kind,item_demand,item_reference_niin,notice_item_pricing_json,value_inputs_json,forecast_next_12m_value FROM ("+query+") WHERE commercial_value_kind IN ('item_reference_estimate','historical_unit_price_estimate','forecast_scenario','annual_usage_scenario','planned_package_reference','recurring_demand_scenario','historical_package_benchmark') AND (commercial_value>0 OR commercial_value_kind='planned_package_reference')"
   from concurrent.futures import ThreadPoolExecutor
   with ThreadPoolExecutor(max_workers=3) as pool:
    count_task=pool.submit(self.rows,count_sql);price_task=pool.submit(self.rows,priced_sql);business_task=pool.submit(contextvars.copy_context().run,self.business_context,cage);counts=count_task.result();priced=price_task.result();business=business_task.result()
-  return dict(summary(counts[0] if counts else {},priced,self.manifest()['run_id'],business),company_id='CAGE:'+cage,cage_code=cage)
+  result=dict(summary(counts[0] if counts else {},priced,self.manifest()['run_id'],business),company_id='CAGE:'+cage,cage_code=cage)
+  return self._overview_window(result,(counts[0] if counts else {}).get('forecast_items_total',0))
 
  def market_work_evidence(self,episode_id,limit=25,offset=0,cage=None):
   if not re.fullmatch('[a-f0-9]{64}',episode_id) or not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid market-work evidence request')
