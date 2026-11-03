@@ -5390,6 +5390,27 @@ def explorer_page(payload: ExplorerRequest):
         raise HTTPException(status_code=500, detail="Failed to generate data page.")
 
 
+@app.post("/api/research/aggregate")
+def private_research_aggregate(payload: Dict[str, Any], request: Request, response: Response):
+    from private_research_query import run_aggregate
+    expected = os.getenv("MIMIR_EXPORT_PROXY_SECRET", "").strip()
+    supplied = request.headers.get("X-Mimir-Export-Key", "").strip()
+    if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+        raise HTTPException(status_code=401, detail="An authenticated Mimir research proxy is required.")
+    before = GLOBAL_CACHE.get("last_loaded")
+    if not before or GLOBAL_CACHE.get("is_loading", False):
+        raise HTTPException(status_code=503, detail="Research data is updating. Retry shortly.")
+    try:
+        value = run_aggregate(payload, lambda sql, params: df_sanitize_for_json(duck_fetch_df(sql, params)).to_dict(orient="records"))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    if GLOBAL_CACHE.get("last_loaded") != before or GLOBAL_CACHE.get("is_loading", False):
+        raise HTTPException(status_code=503, detail="Research data changed. Retry the query.")
+    value["source_generation"] = str(before)
+    response.headers["Cache-Control"] = "private, no-store"
+    return value
+
+
 @app.post("/api/explorer/count")
 def explorer_count(payload: ExplorerRequest):
     """
