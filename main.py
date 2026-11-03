@@ -82,6 +82,7 @@ from public_intelligence_release import (
     public_release_table_columns,
     stage_public_intelligence_manifest,
 )
+from contract_lookup_serving import register_contract_lookup
 from platform_reference.main_release_cache import (
     stage_main_cache,
 )
@@ -3668,6 +3669,12 @@ def reload_all_data():
                             CAST(NULL AS INTEGER) AS year
                         WHERE 1=0;
                     """)
+
+            new_global_cache["contract_lookup_ready"] = register_contract_lookup(
+                conn, LOCAL_CACHE_DIR,
+                enabled=RELEASE_PINNED_CACHE and os.getenv("MIMIR_CONTRACT_LOOKUP_ENABLED", "1") == "1",
+            )
+            logger.info("Disk contract lookup enabled: %s", new_global_cache["contract_lookup_ready"])
 
             conn.execute("DROP VIEW IF EXISTS v_subcontracts;")
             network_columns = {
@@ -11236,6 +11243,7 @@ def get_award_profile(id: str):
     safe_id = sanitize(id)
 
     try:
+        lookup_view = "v_contracts_lookup" if GLOBAL_CACHE.get("contract_lookup_ready") else "v_contracts_rolled"
         rolled_cols = get_duck_table_columns("v_contracts_rolled")
         description_expr = (
             "COALESCE(NULLIF(TRIM(base_award_description), ''), description)"
@@ -11266,7 +11274,7 @@ def get_award_profile(id: str):
                 total_spend,
                 start_date,
                 last_action_date
-            FROM v_contracts_rolled
+            FROM {lookup_view}
             WHERE contract_id = ?
             LIMIT 1
         """, [safe_id])

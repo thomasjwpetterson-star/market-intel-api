@@ -33,8 +33,14 @@ PLATFORM_FILES = {
     "nsn_summary.parquet", "nsn_supplier_lookup.parquet",
     "nsn_cage_reference.parquet", "platform_bom.parquet",
     "contracts_rolled.parquet", "summary.parquet", "profiles.parquet",
-    "risk.parquet",
+    "risk.parquet", "contracts_lookup.parquet",
 }
+OPTIONAL_FILES = {"contracts_lookup.parquet"}
+
+
+def asset_fingerprint(entry: dict) -> str:
+    """Bind an optional lookup to the exact original serving asset."""
+    return hashlib.sha256(json.dumps(entry, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def sha256(path: Path) -> str:
@@ -81,8 +87,14 @@ def validate_manifest(manifest: dict) -> dict[str, dict]:
         if filename in PLATFORM_FILES and row.get("platform_reference_release_id") != platform_release_id:
             raise ValueError(f"platform cache uses the wrong release: {filename}")
         entries[filename] = row
-    if set(entries) != REQUIRED_FILES:
-        raise ValueError(f"Main cache set differs: missing={sorted(REQUIRED_FILES-set(entries))}, extra={sorted(set(entries)-REQUIRED_FILES)}")
+    if not REQUIRED_FILES.issubset(entries) or set(entries) - REQUIRED_FILES - OPTIONAL_FILES:
+        raise ValueError(f"Main cache set differs: missing={sorted(REQUIRED_FILES-set(entries))}, extra={sorted(set(entries)-REQUIRED_FILES-OPTIONAL_FILES)}")
+    lookup = entries.get("contracts_lookup.parquet")
+    if lookup is not None:
+        if lookup.get("source_asset_sha256") != asset_fingerprint(entries["contracts_rolled.parquet"]):
+            raise ValueError("contract lookup does not match its analytical source")
+        if any(not part.get("sha256") for part in lookup.get("parts", [lookup])):
+            raise ValueError("contract lookup requires SHA-256 for every part")
     return entries
 
 

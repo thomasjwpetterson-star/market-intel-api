@@ -7,7 +7,7 @@ from pathlib import Path
 
 import duckdb
 
-from main_release_cache import (PLATFORM_FILES, REQUIRED_FILES,
+from main_release_cache import (PLATFORM_FILES, REQUIRED_FILES, asset_fingerprint,
                                 get_candidate_main_manifest, get_main_manifest,
                                 stage_main_cache, validate_manifest)
 
@@ -74,6 +74,26 @@ class MainReleaseCacheTests(unittest.TestCase):
         (release / "products.parquet").unlink()
         with self.assertRaisesRegex(ValueError, "existing unverified"):
             stage_main_cache(FakeS3(self.objects), "bucket", self.manifest, root)
+
+    def test_optional_lookup_is_bound_to_source_and_staged_with_hash_verification(self):
+        source = next(row for row in self.manifest["files"] if row["local_path"] == "contracts_rolled.parquet")
+        lookup = {**source, "local_path": "contracts_lookup.parquet",
+                  "source_asset_sha256": asset_fingerprint(source)}
+        self.manifest["files"].append(lookup)
+        release = stage_main_cache(FakeS3(self.objects), "bucket", self.manifest,
+                                   Path(self.temp.name) / "lookup-release")
+        self.assertTrue((release / "contracts_lookup.parquet").is_file())
+        lookup["source_asset_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            validate_manifest(self.manifest)
+
+    def test_lookup_parts_cannot_omit_content_hash(self):
+        source = next(row for row in self.manifest["files"] if row["local_path"] == "contracts_rolled.parquet")
+        self.manifest["files"].append({"local_path": "contracts_lookup.parquet",
+            "platform_reference_release_id": "platform-v7", "source_asset_sha256": asset_fingerprint(source),
+            "parts": [{"s3_key": "lookup", "s3_version_id": "v1", "size": 123, "etag": "e"}]})
+        with self.assertRaisesRegex(ValueError, "requires SHA-256"):
+            validate_manifest(self.manifest)
 
     def test_failed_parallel_download_never_selects_partial_release(self):
         root = Path(self.temp.name) / "failed-releases"
