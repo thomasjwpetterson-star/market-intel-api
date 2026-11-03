@@ -34,6 +34,12 @@ def build_coverage_query(payload, columns):
         if not isinstance(payload['domain'],str) or len(payload['domain'])>128 or 'market_segment' not in columns:
             raise ValueError('Choose an available market segment.')
         where.append('UPPER(TRIM(market_segment))=?');params.append(payload['domain'].strip().upper())
+    if agency:
+        # Keep all selected-agency actions, plus primary programme actions from
+        # other agencies for joint-procurement context. Avoid processing every
+        # unrelated agency's descriptions for each filtered request.
+        where.append('(UPPER(TRIM(sub_agency))=? OR UPPER(TRIM(parent_agency))=? OR UPPER(TRIM(platform_family))=?)')
+        params.extend([agency,agency,programme])
     scope = ' AND '.join(where) or '1=1'
     source = "COALESCE(NULLIF(UPPER(TRIM(source_system)),''),'UNKNOWN')" if 'source_system' in columns else "'UNKNOWN'"
     sql = f"""
@@ -51,6 +57,7 @@ def build_coverage_query(payload, columns):
     )
     SELECT buyer,department,source_system,GROUPING(buyer) AS all_buyers,
            (SELECT MIN(year) FROM v_transactions) AS action_history_start_fy,
+           (SELECT MAX(year) FROM v_transactions) AS action_history_latest_fy,
            (SELECT COUNT(*) FROM bom) AS reference_item_count,
            COUNT(*) AS buyer_action_count,
            COUNT(item) AS buyer_actions_with_item_number,
@@ -86,9 +93,9 @@ def run_coverage(payload, columns, read):
     # Distinct item counts cannot be summed across buyers/sources.
     if len(selected)>1:
         summary.pop('reference_linked_item_count')
-    first_fy=total['action_history_start_fy']
-    full_window=bool(first_fy is not None and (not filters.get('years') or min(filters['years'])>=first_fy))
-    if not full_window:reason='action_history_does_not_cover_full_requested_window'
+    first_fy,last_fy=total['action_history_start_fy'],total['action_history_latest_fy']
+    within_range=bool(first_fy is not None and (not filters.get('years') or min(filters['years'])>=first_fy and max(filters['years'])<=last_fy))
+    if not within_range:reason='requested_years_outside_cached_action_range'
     elif summary['programme_action_count'] and not summary['programme_actions_with_item_number']:reason='programme_actions_have_no_item_numbers'
     elif summary['programme_actions_with_item_number'] and not summary['programme_actions_with_reference_item']:reason='programme_item_numbers_not_in_reference_crosswalk'
     elif not summary['programme_action_count'] and summary['description_candidate_action_count']:reason='description_matches_outside_primary_programme_mapping'
@@ -96,7 +103,8 @@ def run_coverage(payload, columns, read):
     else:reason='programme_item_identifiers_available'
     buyers=sorted([{'agency':r['buyer'],'source_system':r['source_system'],'action_count':int(r['programme_action_count']),'net_obligations_usd':round(float(r['programme_net_obligations_usd']),2)} for r in rows if not r['all_buyers'] and r['programme_action_count']],key=lambda r:r['net_obligations_usd'],reverse=True)
     return {'schema_version':'1.0','filters':filters,'reason':reason,'selected_scope':summary,
-        'action_history_start_fy':first_fy,'full_requested_action_window_available':full_window,
+        'action_history_start_fy':first_fy,'action_history_latest_fy':last_fy,'requested_years_within_cached_range':within_range,
+        'history_interpretation':'Cached fiscal-year range, not an attestation of a complete government action ledger.',
         'reference_item_count':int(total['reference_item_count']),
         'programme_recorded_agencies':buyers[:10],'programme_recorded_agencies_scope':'Same fiscal years and market segment; all recorded agencies.',
         'agency_interpretation':'Recorded contracting agency, not a complete funding-service or operating-service breakdown.',

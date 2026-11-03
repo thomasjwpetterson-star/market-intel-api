@@ -72,11 +72,12 @@ class ProgrammeCoverage(unittest.TestCase):
         self.assertNotIn('reference_linked_item_count',self.coverage(agency='DoD')['selected_scope'])
 
     def test_empty_and_pre_cache_scopes_are_distinct(self):
-        r=self.coverage(agency='Navy',years=[2026])
+        r=self.coverage(agency='Unknown agency',years=[2025])
         self.assertEqual(r['reason'],'no_primary_programme_actions_for_recorded_agency')
         self.assertEqual(r['selected_scope']['buyer_action_count'],0)
         r=self.coverage(agency='Navy',years=[2020])
-        self.assertEqual(r['reason'],'action_history_does_not_cover_full_requested_window')
+        self.assertEqual(r['reason'],'requested_years_outside_cached_action_range')
+        self.assertEqual(self.coverage(agency='Navy',years=[2026])['reason'],'requested_years_outside_cached_action_range')
 
     def test_identifier_gap_also_resolves_for_other_programmes(self):
         r=self.coverage(program='F-35',agency='Air Force')
