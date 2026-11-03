@@ -76,6 +76,23 @@ class ResearchQueries(unittest.TestCase):
         for value in invalid:
             with self.subTest(value=value),self.assertRaises(ValueError):build_queries(value)
 
+    def test_description_search_intersects_buyer_and_year_without_double_counting_aliases(self):
+        for column in ['description','base_award_description','action_description']:
+            self.db.execute('ALTER TABLE v_transactions ADD COLUMN '+column+' VARCHAR')
+        self.db.execute("UPDATE v_transactions SET description='AMRAAM AIM-120 test adapter' WHERE contract_id='ONE'")
+        self.db.execute("UPDATE v_transactions SET action_description='AMRAAM support' WHERE contract_id='THREE'")
+        args={'dataset':'contract_actions','filters':{'agency':'Navy','years':[2025],'description_terms':['AMRAAM','AIM-120']}}
+        result=run_aggregate(args,self.read)
+        self.assertEqual(result['source_row_count'],2)
+        self.assertEqual(result['observed_obligations_usd'],90)
+        self.assertEqual(result['match_basis'],'description_search_not_confirmed_programme_attribution')
+        self.assertNotIn('program',result['filters'])
+        self.assertEqual(run_aggregate({**args,'filters':{**args['filters'],'search':'100%_test'}},self.read)['source_row_count'],0)
+
+    def test_description_search_is_not_accepted_on_funding_rollups(self):
+        with self.assertRaises(ValueError):build_queries({'filters':{'search':'AMRAAM'}})
+        with self.assertRaises(ValueError):build_queries({'dataset':'contract_actions','filters':{'description_terms':[]}})
+
     def route_client(self):
         tree=ast.parse(Path(__file__).with_name('main.py').read_text())
         node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='private_research_aggregate');node.decorator_list=[]

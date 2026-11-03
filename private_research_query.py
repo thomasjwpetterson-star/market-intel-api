@@ -11,7 +11,7 @@ SOURCES = {
     'contract_actions': {'table':'v_transactions','amount':'spend_amount','cage':'vendor_cage','company':'vendor_name','psc':'psc'},
 }
 DIMENSIONS = {'year':'year','company':None,'agency':'sub_agency','psc':None,'program':'platform_family','naics':'naics_code'}
-FILTERS = {'years','cage','parent','agency','department','psc','naics','program','contract_id'}
+FILTERS = {'years','cage','parent','agency','department','psc','naics','program','contract_id','search','description_terms'}
 
 def _text(value, maximum=128):
     if not isinstance(value,str) or not 1<=len(value.strip())<=maximum or any(ord(c)<32 for c in value):
@@ -35,6 +35,15 @@ def build_queries(payload):
     if not isinstance(filters,dict) or not filters or set(filters)-FILTERS:raise ValueError('Supply at least one documented research filter.')
     clauses=[];params=[];normal={};prefix=''
     for key,value in filters.items():
+        if key in {'search','description_terms'}:
+            if dataset!='contract_actions':raise ValueError('Description searches use contract_actions.')
+            from research_descriptions import description_predicate, description_terms
+            terms=description_terms(value)
+            if key=='search' and not isinstance(value,str):raise ValueError('Use a single search string.')
+            normal[key]=terms[0] if key=='search' else terms
+            text_sql,text_params=description_predicate(terms)
+            clauses.append(text_sql);params.extend(text_params)
+            continue
         if key=='years':
             if not isinstance(value,list) or not 1<=len(value)<=10 or any(type(y) is not int or not 1900<=y<=2200 for y in value):raise ValueError('Use one to ten financial years.')
             years=sorted(set(value));normal[key]=years
@@ -91,5 +100,6 @@ def run_aggregate(payload, read):
             'observed_obligations_usd':round(value,2) if count else None,'source_row_count':count,
             'groups':[{**row,'observed_obligations_usd':round(row['observed_obligations_usd'],2)} for row in rows[:query['limit']]],
             'groups_truncated':len(rows)>query['limit'],'measure':'recorded_net_contract_obligations',
+            'match_basis':'description_search_not_confirmed_programme_attribution' if set(query['filters']) & {'search','description_terms'} else 'structured_source_filters',
             'company_grouping':'recorded_parent' if query['dataset']=='funding_summary' else 'recorded_vendor',
             'department_membership_basis':'recorded_parent_and_sub_agency_relationships' if 'department' in query['filters'] else None}

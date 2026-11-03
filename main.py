@@ -5274,6 +5274,17 @@ def build_explorer_query(
 
     # Generic search for the reference universe.
     search_value = filters.get("q") or filters.get("search") or filters.get("query")
+    if table == "v_transactions":
+        from research_descriptions import description_predicate
+        for terms in [search_value, filters.get("description_terms")]:
+            if terms is not None:
+                try:
+                    text_sql, text_params = description_predicate(terms, actual_cols)
+                except ValueError as error:
+                    raise HTTPException(status_code=400, detail=str(error)) from error
+                where_parts.append(text_sql)
+                params.extend(text_params)
+                has_valid_filter = True
     if search_value and table == NSN_REF_TABLE:
         search_cols = []
         for candidate in [
@@ -5294,7 +5305,7 @@ def build_explorer_query(
             has_valid_filter = True
 
     for col, val in filters.items():
-        if col in ["min_spend", "max_spend", "q", "search", "query"]:
+        if col in ["min_spend", "max_spend", "q", "search", "query", "description_terms"]:
             continue
 
         requested_col = str(col).strip().lower()
@@ -5454,6 +5465,31 @@ def private_research_aggregate(payload: Dict[str, Any], request: Request, respon
         value = run_aggregate(payload, lambda sql, params: df_sanitize_for_json(duck_fetch_df(sql, params)).to_dict(orient="records"))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
+    if GLOBAL_CACHE.get("last_loaded") != before or GLOBAL_CACHE.get("is_loading", False):
+        raise HTTPException(status_code=503, detail="Research data changed. Retry the query.")
+    value["source_generation"] = str(before)
+    response.headers["Cache-Control"] = "private, no-store"
+    return value
+
+
+@app.post("/api/research/programme-coverage")
+def private_programme_coverage(payload: Dict[str, Any], request: Request, response: Response):
+    from programme_coverage import run_coverage
+    expected = os.getenv("MIMIR_EXPORT_PROXY_SECRET", "").strip()
+    supplied = request.headers.get("X-Mimir-Export-Key", "").strip()
+    if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+        raise HTTPException(status_code=401, detail="An authenticated Mimir research proxy is required.")
+    before = GLOBAL_CACHE.get("last_loaded")
+    if not before or GLOBAL_CACHE.get("is_loading", False):
+        raise HTTPException(status_code=503, detail="Research data is updating. Retry shortly.")
+    try:
+        value = run_coverage(payload, get_duck_table_columns("v_transactions"),
+            lambda sql, params: df_sanitize_for_json(duck_fetch_df(sql, params)).to_dict(orient="records"))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Programme coverage lookup failed")
+        raise HTTPException(status_code=503, detail="Programme coverage is temporarily unavailable.") from error
     if GLOBAL_CACHE.get("last_loaded") != before or GLOBAL_CACHE.get("is_loading", False):
         raise HTTPException(status_code=503, detail="Research data changed. Retry the query.")
     value["source_generation"] = str(before)
