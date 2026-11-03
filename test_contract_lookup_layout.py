@@ -34,3 +34,24 @@ def test_validation_rejects_changed_value_and_never_overwrites_source(tmp_path):
     with pytest.raises(ValueError,match='new path'):
         sort_lookup_file(source,source)
     c.close()
+
+
+def test_duplicate_selection_across_parts_with_production_order_setting(tmp_path):
+    source=tmp_path/'source';candidate=tmp_path/'candidate';source.mkdir();candidate.mkdir()
+    c=duckdb.connect(config={'threads':1,'preserve_insertion_order':False})
+    try:
+        for index,sql in enumerate([
+            "SELECT * FROM (VALUES ('Z','first'),('A','a'),('Z','second')) t(contract_id,vendor_name)",
+            "SELECT * FROM (VALUES ('Z','later part'),('B','b')) t(contract_id,vendor_name)",
+        ]):
+            path=source/f'part-{index:05d}.parquet'
+            c.execute(f"COPY ({sql}) TO '{path}' (FORMAT PARQUET)")
+            sort_lookup_file(path,candidate/path.name,memory_mb=128,window_rows=2)
+        for key in ['A','B','Z','MISSING']:
+            old=c.execute('SELECT * FROM read_parquet(?) WHERE contract_id=? LIMIT 1',
+                          [str(source/'*.parquet'),key]).fetchall()
+            new=c.execute('SELECT * FROM read_parquet(?) WHERE contract_id=? LIMIT 1',
+                          [[str(p) for p in sorted(candidate.glob('*.parquet'))],key]).fetchall()
+            assert old==new
+    finally:
+        c.close()
