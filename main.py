@@ -6666,7 +6666,6 @@ def get_platform_profile(
         "contract_count_basis": "enriched_award_records",
         "count_definitions": {
             "award_record_count": "Enriched award records in the selected programme, fiscal years and buyer scope; the same grain as the contract_awards research dataset.",
-            "summary_group_contract_count": "Sum of summary-group contract counts across groups and years; not a count of unique awards.",
             "recorded_company_name_count": "Distinct recorded company names; not consolidated parent groups or supplier sites.",
             "supplier_site_count": "Distinct nonempty CAGE supplier-site identifiers in the funding summary scope.",
         },
@@ -6675,7 +6674,7 @@ def get_platform_profile(
         return {
             "found": True, "name": name, "total_obligations": 0.0,
             "contractor_count": 0, "contract_count": award_count, "top_vendors": [], "top_agencies": [],
-            "summary_group_contract_count": 0, "recorded_company_name_count": 0, "supplier_site_count": 0,
+            "recorded_company_name_count": 0, "supplier_site_count": 0,
             **count_metadata,
         }
 
@@ -6687,7 +6686,6 @@ def get_platform_profile(
         official_name = name
 
     total_obligations = float(pd.to_numeric(df["total_spend"], errors="coerce").fillna(0).sum())
-    summary_group_contract_count = int(pd.to_numeric(df["contract_count"], errors="coerce").fillna(0).sum())
     contractor_count = int(df["vendor_name"].nunique())
     site_codes = df["cage_code"].dropna().astype(str).str.strip().str.upper()
     supplier_site_count = int(site_codes[site_codes != ""].nunique())
@@ -6712,7 +6710,6 @@ def get_platform_profile(
         "total_obligations": total_obligations,
         "contractor_count": contractor_count,
         "contract_count": award_count,
-        "summary_group_contract_count": summary_group_contract_count,
         "recorded_company_name_count": contractor_count,
         "supplier_site_count": supplier_site_count,
         **count_metadata,
@@ -7325,187 +7322,49 @@ def get_platform_contractors(
 
 @app.get("/api/platform/parts")
 def get_platform_parts(
-    name: str,
-    include_zero: bool = True,
-    limit: int = 100,
-    offset: int = 0,
-    min_spend: float = 0,
-    years: Optional[List[int]] = Query(None),
-    agency: Optional[str] = None
+    name: str, include_zero: bool = True, limit: int = 100, offset: int = 0,
+    min_spend: float = 0, years: Optional[List[int]] = Query(None),
+    agency: Optional[str] = None, domain: Optional[str] = None
 ):
-    if agency and str(agency).strip():
-        raise HTTPException(status_code=422, detail="Buyer filtering is unavailable for programme item rollups. Use contract action records filtered by programme and buyer.")
-    safe_plat = sanitize(name).upper()
-
-    ys = safe_years(years, min_year=2019, max_year=2200, max_len=50)
-    year_clause = ""
-    params: List[Any] = [safe_plat]
-    if ys:
-        placeholders = ",".join(["?"] * len(ys))
-        year_clause = f"AND s.year IN ({placeholders})"
-        params.extend(ys)
-
-    # Financials stay at NIIN/CAGE/fiscal-year grain. Platform membership is
-    # joined separately, so part-reference multiplicity cannot multiply value.
-    query = f"""
-        WITH bom_niins AS (
-            SELECT DISTINCT LPAD(TRIM(CAST(niin AS VARCHAR)), 9, '0') AS niin
-            FROM v_platform_bom
-            WHERE UPPER(TRIM(CAST(platform_family AS VARCHAR))) = ?
-        ),
-        scoped AS (
-            SELECT
-                LPAD(TRIM(CAST(s.niin AS VARCHAR)), 9, '0') AS niin,
-                TRY_CAST(s.year AS INTEGER) AS fiscal_year,
-                UPPER(TRIM(CAST(s.cage AS VARCHAR))) AS cage,
-                NULLIF(TRIM(CAST(s.vendor AS VARCHAR)), '') AS vendor,
-                TRY_CAST(s.total_revenue AS DOUBLE) AS line_value,
-                TRY_CAST(s.total_units_sold AS DOUBLE) AS line_units,
-                TRY_CAST(s.last_sold AS DATE) AS last_sold,
-                TRY_CAST(s.platform_count AS INTEGER) AS platform_count,
-                CAST(s.platform_attribution_status AS VARCHAR) AS platform_attribution_status
-            FROM v_nsn_supplier_lookup s
-            INNER JOIN bom_niins b
-                ON LPAD(TRIM(CAST(s.niin AS VARCHAR)), 9, '0') = b.niin
-            WHERE 1=1 {year_clause}
-        ),
-        year_totals AS (
-            SELECT
-                niin,
-                fiscal_year,
-                SUM(COALESCE(line_value, 0)) AS year_value,
-                SUM(COALESCE(line_units, 0)) AS year_units,
-                MAX(last_sold) AS year_last_sold,
-                MAX(platform_count) AS platform_count,
-                MAX(platform_attribution_status) AS platform_attribution_status
-            FROM scoped
-            GROUP BY 1, 2
-        ),
-        niin_totals AS (
-            SELECT
-                niin,
-                SUM(year_value) AS observed_value,
-                SUM(year_units) AS observed_units,
-                MAX(year_last_sold) AS last_sold_date,
-                STRING_AGG(
-                    CAST(fiscal_year AS VARCHAR) || ':' || CAST(year_value AS VARCHAR),
-                    '|' ORDER BY fiscal_year
-                ) AS annual_revenue_trend,
-                MAX(platform_count) AS platform_count,
-                MAX(platform_attribution_status) AS platform_attribution_status
-            FROM year_totals
-            GROUP BY 1
-        ),
-        vendor_totals AS (
-            SELECT
-                niin,
-                cage,
-                MAX(vendor) AS vendor,
-                SUM(COALESCE(line_value, 0)) AS vendor_value
-            FROM scoped
-            GROUP BY 1, 2
-        ),
-        top_vendors AS (
-            SELECT
-                niin,
-                MAX_BY(cage, vendor_value) AS top_vendor,
-                MAX_BY(vendor, vendor_value) AS top_vendor_name
-            FROM vendor_totals
-            GROUP BY 1
-        )
-        SELECT
-            b.niin,
-            COALESCE(NULLIF(TRIM(CAST(p.nsn AS VARCHAR)), ''), b.niin) AS nsn,
-            NULLIF(TRIM(CAST(p.item_name AS VARCHAR)), '') AS description,
-            NULLIF(TRIM(CAST(p.fsc_code AS VARCHAR)), '') AS fsc_code,
-            COALESCE(t.observed_value, 0) AS amount,
-            COALESCE(t.observed_units, 0) AS total_units_sold,
-            COALESCE(t.annual_revenue_trend, '') AS annual_revenue_trend,
-            t.last_sold_date,
-            v.top_vendor,
-            v.top_vendor_name,
-            COALESCE(t.platform_count, 0) AS platform_count,
-            COALESCE(t.platform_attribution_status, 'UNMAPPED') AS platform_attribution_status
-        FROM bom_niins b
-        LEFT JOIN niin_totals t ON b.niin = t.niin
-        LEFT JOIN top_vendors v ON b.niin = v.niin
-        LEFT JOIN v_nsn_profile_lookup p
-            ON b.niin = LPAD(TRIM(CAST(p.niin AS VARCHAR)), 9, '0')
-        WHERE (? OR COALESCE(t.observed_value, 0) > 0)
-          AND COALESCE(t.observed_value, 0) >= ?
-        ORDER BY amount DESC, b.niin
-        LIMIT ? OFFSET ?
-    """
-    params.extend([
-        bool(include_zero),
-        float(min_spend),
-        max(1, min(int(limit), 5000)),
-        max(0, int(offset)),
-    ])
-
+    from programme_parts import build_parts_query
     try:
-        df = duck_fetch_df(query, params)
-    except Exception as e:
-        logger.error(f"Failed to fetch platform parts from NIIN/CAGE fiscal sidecar: {e}")
-        return []
-
-    results = []
-    for row in df.itertuples(index=False):
-        platform_count = int(getattr(row, "platform_count", 0) or 0)
-        results.append({
-            "item_id": str(getattr(row, "nsn", "") or getattr(row, "niin", "")),
-            "nsn": str(getattr(row, "nsn", "") or getattr(row, "niin", "")),
-            "niin": str(getattr(row, "niin", "") or "").zfill(9),
-            "description": getattr(row, "description", "") or "",
-            "fsc_code": getattr(row, "fsc_code", "") or "",
-            "total_units_sold": int(getattr(row, "total_units_sold", 0) or 0),
-            "amount": float(getattr(row, "amount", 0) or 0),
-            "annual_revenue_trend": getattr(row, "annual_revenue_trend", "") or "",
-            "top_vendor": getattr(row, "top_vendor", "") or "",
-            "top_vendor_name": getattr(row, "top_vendor_name", "") or "",
-            "last_sold": getattr(row, "last_sold_date", None),
-            "platform_count": platform_count,
-            "platform_attribution_status": getattr(row, "platform_attribution_status", "UNMAPPED"),
-            "shared_platform_exposure": platform_count > 1,
-            "financial_grain": "NIIN_CAGE_FISCAL_YEAR",
-        })
-
-    return results
+        sql, params = build_parts_query(name, years, agency, domain, include_zero, min_spend, limit, offset)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    try:
+        df = duck_fetch_df(sql, params)
+    except Exception as error:
+        logger.exception("Programme item funding lookup failed")
+        raise HTTPException(status_code=503, detail="Programme item funding is temporarily unavailable.") from error
+    rows = df_sanitize_for_json(df).to_dict(orient="records")
+    for row in rows:
+        row["shared_platform_exposure"] = int(row.get("platform_count") or 0) > 1
+        row["financial_grain"] = "NIIN_BUYER_FISCAL_YEAR"
+        row["funding_basis"] = "recorded_actions_with_pre_cache_item_history"
+        if row.get("last_sold") is not None:
+            row["last_sold"] = str(row["last_sold"])
+    return rows
 
 
 @app.get("/api/platform/parts/count")
 def get_platform_parts_count(
-    name: str,
-    years: Optional[List[int]] = Query(None), # Added to prevent FastAPI 422 crash from UI filters
-    agency: Optional[str] = None,
-    domain: Optional[str] = None,
-    platform: Optional[str] = None
+    name: str, years: Optional[List[int]] = Query(None), agency: Optional[str] = None,
+    domain: Optional[str] = None, platform: Optional[str] = None,
+    include_zero: bool = True, min_spend: float = 0
 ):
-    safe_plat = sanitize(name).upper()
-    
-    query = """
-        SELECT COUNT(DISTINCT niin) as total
-        FROM v_platform_bom
-        WHERE platform_family = ?
-    """
-    
+    from programme_parts import build_parts_query
     try:
-        df = duck_fetch_df(query, [safe_plat])
-        if not df.empty:
-            count_val = int(df.iloc[0]['total'])
-            return {"count": count_val}
-    except Exception as e:
-        logger.error(f"Parts count query failed: {e}")
-        
-    return {"count": 0}
+        sql, params = build_parts_query(name, years, agency, domain, include_zero, min_spend, count_only=True)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    try:
+        df = duck_fetch_df(sql, params)
+        first_fy = df["buyer_history_start_fy"].iloc[0]
+        return {"count": int(df["count"].iloc[0]), "buyer_history_start_fy": None if pd.isna(first_fy) else int(first_fy)}
+    except Exception as error:
+        logger.exception("Programme item count failed")
+        raise HTTPException(status_code=503, detail="Programme item count is temporarily unavailable.") from error
 
-# ==========================================
-#   ✅ PASTE THIS INTO api.py
-# ==========================================
-
-# ==========================================
-#   ✅ REPLACE get_platform_awards IN api.py
-# ==========================================
 
 @app.get("/api/platform/awards")
 def get_platform_awards(

@@ -74,7 +74,7 @@ class ProgrammeScopeCounts(unittest.TestCase):
         value = self.ns['get_platform_profile']('AMRAAM', years=[2024,2025])
         self.assertEqual(value['contract_count'], 3)
         self.assertEqual(value['award_record_count'], 3)
-        self.assertEqual(value['summary_group_contract_count'], 11)
+        self.assertNotIn('summary_group_contract_count', value)
         self.assertEqual(value['recorded_company_name_count'], 1)
         self.assertEqual(value['supplier_site_count'], 2)
         self.assertEqual(value['total_obligations'], 300)
@@ -85,18 +85,20 @@ class ProgrammeScopeCounts(unittest.TestCase):
         self.ns['query_summary_df'] = lambda **kw: pd.DataFrame()
         value = self.ns['get_platform_profile']('AMRAAM', years=[2024,2025])
         self.assertEqual(value['award_record_count'], 3)
-        self.assertEqual(value['summary_group_contract_count'], 0)
+        self.assertNotIn('summary_group_contract_count', value)
 
-    def test_programme_parts_reject_buyer_filter_before_source_read(self):
-        source = Mock(side_effect=AssertionError('Unsupported scope must not query data'))
-        self.ns['duck_fetch_df'] = source
+    def test_programme_parts_buyer_filter_is_forwarded_to_real_query(self):
+        self.ns['duck_fetch_df'] = Mock(return_value=pd.DataFrame())
+        self.ns['df_sanitize_for_json'] = lambda df: df
+        self.ns['logger'] = Mock()
         app = FastAPI()
         app.get('/parts')(self.ns['get_platform_parts'])
-        for buyer in ['NAVY', 'DEPARTMENT OF THE AIR FORCE']:
-            response = TestClient(app).get('/parts', params={'name':'AMRAAM','agency':buyer})
-            self.assertEqual(response.status_code, 422)
-            self.assertIn('Buyer filtering is unavailable', response.json()['detail'])
-        source.assert_not_called()
+        response = TestClient(app).get('/parts', params={'name':'AMRAAM','agency':'Navy','years':2025})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+        sql,params = self.ns['duck_fetch_df'].call_args.args
+        self.assertIn('DEPARTMENT OF THE NAVY',params)
+        self.assertIn(2025,params)
 
 
 if __name__ == '__main__':
