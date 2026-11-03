@@ -6565,6 +6565,28 @@ def get_top_platforms(
     return out
 
 
+def programme_award_record_count(name, years=None, agency=None, domain=None):
+    """Count the same award records as Explorer, not summed summary counts."""
+    filters = {"platform_family": name}
+    if years:
+        filters["year"] = years
+    if agency:
+        filters["sub_agency"] = agency
+    if domain:
+        filters["market_segment"] = domain
+    columns = get_duck_table_columns("v_contracts_rolled")
+    if not (set(filters) - {"year"}).issubset(columns):
+        raise HTTPException(status_code=503, detail="Programme award counts are unavailable for this scope.")
+    sql, params = build_contract_awards_explorer_query(
+        ExplorerRequest(table=CONTRACT_AWARD_EXPLORER_TABLE, filters=filters),
+        row_limit=0, count_only=True,
+    )
+    result = duck_fetch_df(sql, params)
+    if len(result) != 1 or "count" not in result or pd.isna(result["count"].iloc[0]):
+        raise HTTPException(status_code=503, detail="Programme award count could not be established.")
+    return int(result["count"].iloc[0])
+
+
 @app.get("/api/platform/profile")
 def get_platform_profile(
     name: str,
@@ -6607,13 +6629,26 @@ def get_platform_profile(
         limit=0
     )
 
+    award_count = programme_award_record_count(search_upper, years, agency, domain)
+    count_metadata = {
+        "award_record_count": award_count,
+        "contract_count_basis": "enriched_award_records",
+        "count_definitions": {
+            "award_record_count": "Enriched award records in the selected programme, fiscal years and buyer scope; the same grain as the contract_awards research dataset.",
+            "summary_group_contract_count": "Sum of summary-group contract counts across groups and years; not a count of unique awards.",
+            "recorded_company_name_count": "Distinct recorded company names; not consolidated parent groups or supplier sites.",
+            "supplier_site_count": "Distinct nonempty CAGE supplier-site identifiers in the funding summary scope.",
+        },
+    }
     if df.empty:
         return {
             "found": True, "name": name, "total_obligations": 0.0,
-            "contractor_count": 0, "contract_count": 0, "top_vendors": [], "top_agencies": []
+            "contractor_count": 0, "contract_count": award_count, "top_vendors": [], "top_agencies": [],
+            "summary_group_contract_count": 0, "recorded_company_name_count": 0, "supplier_site_count": 0,
+            **count_metadata,
         }
 
-    # ✅ 3. Native Pandas aggregations remain identical
+    # Funding and counts retain their distinct source grains.
     official_name = name
     try:
         official_name = df["platform_family"].mode()[0]
@@ -6621,8 +6656,10 @@ def get_platform_profile(
         official_name = name
 
     total_obligations = float(pd.to_numeric(df["total_spend"], errors="coerce").fillna(0).sum())
-    contract_count = int(pd.to_numeric(df["contract_count"], errors="coerce").fillna(0).sum())
+    summary_group_contract_count = int(pd.to_numeric(df["contract_count"], errors="coerce").fillna(0).sum())
     contractor_count = int(df["vendor_name"].nunique())
+    site_codes = df["cage_code"].dropna().astype(str).str.strip().str.upper()
+    supplier_site_count = int(site_codes[site_codes != ""].nunique())
 
     top_vendors_df = (
         df.groupby(["cage_code", "vendor_name"], dropna=False)["total_spend"]
@@ -6643,7 +6680,11 @@ def get_platform_profile(
         "name": official_name,
         "total_obligations": total_obligations,
         "contractor_count": contractor_count,
-        "contract_count": contract_count,
+        "contract_count": award_count,
+        "summary_group_contract_count": summary_group_contract_count,
+        "recorded_company_name_count": contractor_count,
+        "supplier_site_count": supplier_site_count,
+        **count_metadata,
         "top_vendors": top_vendors,
         "top_agencies": top_agencies,
     }
@@ -7261,6 +7302,8 @@ def get_platform_parts(
     years: Optional[List[int]] = Query(None),
     agency: Optional[str] = None
 ):
+    if agency and str(agency).strip():
+        raise HTTPException(status_code=422, detail="Buyer filtering is unavailable for programme item rollups. Use contract action records filtered by programme and buyer.")
     safe_plat = sanitize(name).upper()
 
     ys = safe_years(years, min_year=2019, max_year=2200, max_len=50)
