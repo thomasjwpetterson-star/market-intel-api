@@ -8,12 +8,13 @@ from unittest.mock import Mock
 
 import duckdb
 import pandas as pd
+import numpy as np
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.testclient import TestClient
 
 
 def namespace():
-    wanted = {'programme_award_record_count', 'get_platform_profile', 'get_platform_parts',
+    wanted = {'programme_award_record_count', 'get_platform_profile', 'get_platform_parts', 'get_platform_parts_count', 'df_sanitize_for_json',
               'build_contract_awards_explorer_query', 'build_contract_awards_explorer_query_from_rollup',
               '_rolled_contract_years', 'quote_ident', 'safe_int'}
     nodes = []
@@ -21,7 +22,7 @@ def namespace():
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
             node.decorator_list = []
             nodes.append(node)
-    ns = dict(pd=pd, re=re, Any=Any, List=List, Optional=Optional, Query=Query,
+    ns = dict(pd=pd, np=np, re=re, Any=Any, List=List, Optional=Optional, Query=Query,
               HTTPException=HTTPException, ExplorerRequest=lambda **kw: SimpleNamespace(columns=[], **kw),
               CONTRACT_AWARD_EXPLORER_TABLE='v_contract_awards_enriched',
               EXPLORER_DEFAULT_COLUMNS={'v_contract_awards_enriched':['contract_id']},

@@ -1,6 +1,10 @@
 import unittest
 import duckdb
 from programme_parts import build_parts_query
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from unittest.mock import Mock
+from test_programme_scope_counts import namespace
 
 
 class BuyerItemFunding(unittest.TestCase):
@@ -77,6 +81,17 @@ class BuyerItemFunding(unittest.TestCase):
         sql,params=build_parts_query("AMRAAM' OR 1=1 --",agency="NAVY' OR 1=1 --")
         self.assertNotIn("OR 1=1 --",sql);self.assertIn("AMRAAM' OR 1=1 --",params)
         self.assertEqual(self.read(agency="NAVY' OR 1=1 --"),[])
+
+    def test_real_http_routes_return_buyer_filtered_json_and_matching_count(self):
+        ns=namespace();ns['duck_fetch_df']=lambda sql,params:self.db.execute(sql,params).fetchdf();ns['logger']=Mock()
+        app=FastAPI();app.get('/parts')(ns['get_platform_parts']);app.get('/count')(ns['get_platform_parts_count'])
+        client=TestClient(app)
+        response=client.get('/parts',params={'name':'AMRAAM','agency':'Navy','years':2025})
+        self.assertEqual(response.status_code,200)
+        rows=response.json();self.assertEqual(rows[0]['amount'],80);self.assertIsNone(rows[0]['total_units_sold'])
+        self.assertEqual(rows[0]['financial_grain'],'NIIN_BUYER_FISCAL_YEAR')
+        count=client.get('/count',params={'name':'AMRAAM','agency':'Navy','years':2025})
+        self.assertEqual(count.status_code,200);self.assertEqual(count.json()['count'],len(rows))
 
 
 if __name__=='__main__':unittest.main()
