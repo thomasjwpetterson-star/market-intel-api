@@ -5491,7 +5491,12 @@ def private_research_aggregate(payload: Dict[str, Any], request: Request, respon
     if not before or GLOBAL_CACHE.get("is_loading", False):
         raise HTTPException(status_code=503, detail="Research data is updating. Retry shortly.")
     try:
-        value = run_aggregate(payload, lambda sql, params: df_sanitize_for_json(duck_fetch_df(sql, params)).to_dict(orient="records"))
+        from private_platform_reference import reference_for
+        from private_research_context import aggregate
+        release=GLOBAL_CACHE.get('platform_release')or{}
+        reference=reference_for(release.get('components',{}).get('main',{}).get('release_id'))
+        reader=lambda sql,params:df_sanitize_for_json(programme_read_df(sql,params)).to_dict(orient='records')
+        value = aggregate(payload,reference,reader)if reference else run_aggregate(payload,reader)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
     if GLOBAL_CACHE.get("last_loaded") != before or GLOBAL_CACHE.get("is_loading", False):
@@ -5499,6 +5504,115 @@ def private_research_aggregate(payload: Dict[str, Any], request: Request, respon
     value["source_generation"] = str(before)
     response.headers["Cache-Control"] = "private, no-store"
     return value
+
+
+@app.post('/api/research/query')
+def private_research_dataset(payload: Dict[str,Any],request: Request,response: Response):
+    expected=os.getenv('MIMIR_EXPORT_PROXY_SECRET','').strip()
+    supplied=request.headers.get('X-Mimir-Export-Key','').strip()
+    if not expected or not supplied or not hmac.compare_digest(expected,supplied):
+        raise HTTPException(status_code=401,detail='An authenticated Mimir research proxy is required.')
+    before=GLOBAL_CACHE.get('last_loaded')
+    if not before or GLOBAL_CACHE.get('is_loading',False):raise HTTPException(status_code=503,detail='Research data is updating.')
+    try:
+        from private_platform_reference import reference_for
+        from private_research_context import metadata,wrap_action_read,wrap_item_read
+        if set(payload)-{'table','columns','filters','limit','offset','operation'}:raise ValueError('Use documented research dataset fields.')
+        body=dict(payload);operation=body.pop('operation','rows')
+        if operation not in {'rows','count'}:raise ValueError('Choose rows or count.')
+        if body.get('table')not in {'v_transactions','v_contract_awards_enriched','v_summary','v_nsn_cage_reference','v_subcontracts'}:raise ValueError('Choose a research dataset.')
+        columns=body.get('columns',[])
+        if not isinstance(columns,list)or len(columns)>40 or any(not isinstance(c,str)or not re.fullmatch('[a-z][a-z0-9_]{0,63}',c)for c in columns):raise ValueError('Choose valid research fields.')
+        release=GLOBAL_CACHE.get('platform_release')or{}
+        reference=reference_for(release.get('components',{}).get('main',{}).get('release_id'))
+        if reference is None:raise RuntimeError('Current private v7 mapping is not configured.')
+        filters=dict(body.get('filters')or{});program=filters.get('platform_family')
+        if program is not None and not isinstance(program,str):raise ValueError('Choose one canonical programme identity.')
+        allowed_filters={
+            'v_transactions':{'year','vendor_cage','sub_agency','parent_agency','psc','naics_code','platform_family','contract_id','niin','nsn','search','description_terms'},
+            'v_contract_awards_enriched':{'year','vendor_cage','sub_agency','parent_agency','psc_code','psc','naics_code','platform_family','contract_id'},
+            'v_summary':{'year','cage_code','clean_parent','sub_agency','psc_code','naics_code','platform_family'},
+            'v_nsn_cage_reference':{'cage_code','nsn','niin','part_number','fsc_code','platform_family','search'},
+            'v_subcontracts':{'year','subcontractor_cage','prime_cage','sub_agency','parent_agency','psc_code','naics_code','platform_family','prime_award_id'},
+        }
+        if not filters or set(filters)-allowed_filters[body['table']]:raise ValueError('Use supported dataset filters.')
+        if any(isinstance(v,dict)or isinstance(v,list)and len(v)>10 for v in filters.values()):raise ValueError('Use bounded literal dataset filters.')
+        meta=metadata(reference,program)
+        if program:filters['platform_family']=meta['canonical_programme_name']
+        body['filters']=filters
+        item_program=bool(program and body['table']=='v_nsn_cage_reference')
+        query=ExplorerRequest(**body);reader=lambda sql,params:df_sanitize_for_json(programme_read_df(sql,params)).to_dict(orient='records')
+        count_only=operation=='count';limit=safe_int(body.get('limit'),11,1,501);offset=safe_int(body.get('offset'),0,0,100000)
+        if query.table=='v_contract_awards_enriched':
+            sql,params=build_contract_awards_explorer_query_from_actions(query,row_limit=limit,offset=offset,count_only=count_only)
+            reader=wrap_action_read(reference,reader,program)
+            meta['source_grain']='AVAILABLE_ACTIONS_GROUPED_BY_NATIVE_AWARD_KEY'
+        else:
+            sql,params=build_explorer_query(query,row_limit=limit,offset=offset,count_only=count_only)
+            if query.table=='v_transactions':reader=wrap_action_read(reference,reader,program);meta['source_grain']='AVAILABLE_CONTRACT_ACTIONS'
+            elif query.table=='v_summary'and program:reader=wrap_action_read(reference,reader,program,summary=True);meta['source_grain']='AVAILABLE_ACTIONS_SUMMARISED'
+            elif item_program:reader=wrap_item_read(reference,reader,program,get_duck_table_columns('v_nsn_cage_reference'));meta['source_grain']='V7_ASSOCIATED_ITEM_REFERENCES'
+            elif query.table=='v_subcontracts':meta['source_grain']='NATIVE_REPORTED_SUBCONTRACTS';meta['parent_award_cascade_enabled']=False
+        if not count_only:
+            if query.table=='v_contract_awards_enriched':sql=sql.replace('f.contract_id\n','f.contract_id, f.award_key\n')
+            else:
+                available=get_duck_table_columns(query.table)
+                order_fields=[c for c in (['action_date','award_key','transaction_key','contract_id']if query.table=='v_transactions'else['niin','cage_code','part_number']if query.table=='v_nsn_cage_reference'else['year','cage_code','psc_code','sub_agency','platform_family']if query.table=='v_summary'else['year','prime_award_id','subcontractor_cage'])if c in available]
+                if order_fields:sql=sql.replace(' LIMIT ?', ' ORDER BY '+','.join(quote_ident(c)for c in order_fields)+' LIMIT ?')
+        rows=reader(sql,params)
+        value={'rows':rows,**meta}
+        if count_only:
+            if len(rows)!=1 or not isinstance(rows[0].get('count'),int):raise ValueError('The source count could not be established.')
+            value['count']=rows[0]['count'];value['rows']=[]
+    except (ValueError,TypeError,KeyError)as error:raise HTTPException(status_code=400,detail=str(error))from error
+    if GLOBAL_CACHE.get('last_loaded')!=before or GLOBAL_CACHE.get('is_loading',False):raise HTTPException(status_code=503,detail='Research data changed. Retry the query.')
+    value['source_generation']=str(before);response.headers['Cache-Control']='private, no-store'
+    return value
+
+
+@app.post('/api/research/item-history')
+def private_item_history(payload: Dict[str,Any],request: Request,response: Response):
+    expected=os.getenv('MIMIR_EXPORT_PROXY_SECRET','').strip();supplied=request.headers.get('X-Mimir-Export-Key','').strip()
+    if not expected or not supplied or not hmac.compare_digest(expected,supplied):raise HTTPException(status_code=401,detail='An authenticated Mimir research proxy is required.')
+    before=GLOBAL_CACHE.get('last_loaded')
+    if not before or GLOBAL_CACHE.get('is_loading',False):raise HTTPException(status_code=503,detail='Research data is updating.')
+    try:
+        from private_research_context import item_history,wrap_action_read,metadata
+        from programme_parts import buyer_name
+        from private_platform_reference import reference_for
+        reader=lambda sql,params:df_sanitize_for_json(programme_read_df(sql,params)).to_dict(orient='records')
+        value=item_history(payload,reader)
+        filters={'niin':value['niin']}
+        if payload.get('years'):filters['year']=payload['years']
+        if payload.get('agency'):
+            buyer=buyer_name(payload['agency']);filters['parent_agency'if buyer=='DEPARTMENT OF DEFENSE'else'sub_agency']=buyer
+        if payload.get('psc'):filters['psc']=payload['psc']
+        query=ExplorerRequest(table='v_transactions',columns=['award_key','contract_id','action_date','year','vendor_name','vendor_cage','spend_amount','sub_agency','parent_agency','platform_family'],filters=filters)
+        sql,params=build_explorer_query(query,row_limit=payload.get('limit',51),offset=payload.get('offset',0))
+        release=GLOBAL_CACHE.get('platform_release')or{};reference=reference_for(release.get('components',{}).get('main',{}).get('release_id'))
+        if reference is None:raise RuntimeError('Private v7 reference is unavailable.')
+        value['contracts']=wrap_action_read(reference,reader)(sql,params);value.update(metadata(reference))
+    except (ValueError,KeyError,TypeError)as error:raise HTTPException(status_code=400,detail=str(error))from error
+    if GLOBAL_CACHE.get('last_loaded')!=before or GLOBAL_CACHE.get('is_loading',False):raise HTTPException(status_code=503,detail='Research data changed. Retry the query.')
+    value['source_generation']=str(before);response.headers['Cache-Control']='private, no-store';return value
+
+
+@app.post('/api/research/reference-context')
+def private_reference_context(payload: Dict[str,Any],request: Request,response: Response):
+    expected=os.getenv('MIMIR_EXPORT_PROXY_SECRET','').strip();supplied=request.headers.get('X-Mimir-Export-Key','').strip()
+    if not expected or not supplied or not hmac.compare_digest(expected,supplied):raise HTTPException(status_code=401,detail='An authenticated Mimir research proxy is required.')
+    before=GLOBAL_CACHE.get('last_loaded')
+    if not before or GLOBAL_CACHE.get('is_loading',False):raise HTTPException(status_code=503,detail='Research data is updating.')
+    try:
+        from private_platform_reference import reference_for
+        from private_research_context import reference_context,search_programmes
+        if set(payload)-{'kind','identifier'}:raise ValueError('Choose a documented reference lookup.')
+        release=GLOBAL_CACHE.get('platform_release')or{};reference=reference_for(release.get('components',{}).get('main',{}).get('release_id'))
+        if reference is None:raise RuntimeError('Private v7 reference is unavailable.')
+        value=search_programmes(reference,payload['identifier'])if payload.get('kind')=='program_search'else reference_context(reference,payload['kind'],payload['identifier'])
+    except (ValueError,KeyError,TypeError)as error:raise HTTPException(status_code=400,detail=str(error))from error
+    if GLOBAL_CACHE.get('last_loaded')!=before or GLOBAL_CACHE.get('is_loading',False):raise HTTPException(status_code=503,detail='Research data changed. Retry the query.')
+    value['source_generation']=str(before);response.headers['Cache-Control']='private, no-store';return value
 
 
 @app.post("/api/research/programme-coverage")

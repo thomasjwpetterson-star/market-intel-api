@@ -3,10 +3,10 @@
   "base_platform_reference_release_id": "2026-10-15-hellfire-jagm-split-v7",
   "manifest": {
     "bucket": "a-and-d-intel-lake-newaccount",
-    "key": "governance/platform_reference/candidates/2026-11-04-amraam-navy-awards-v7-private/manifest.json",
-    "s3_version_id": "Rvle92HzbN6zCfBT2EWrpZQxC5SPciId",
-    "sha256": "127b690f9bc83f6aa467e9c892c8026390513fbf03a243451b239e2d4e8caee4",
-    "bytes": 24797
+    "key": "governance/platform_reference/candidates/2026-11-04-native-item-crosswalk-v7-private/manifest.json",
+    "s3_version_id": "WwymyY_NXHo9ZO.X.uyT2sW27PCeSSo.",
+    "sha256": "5d25c0021f388b09c0a3b054923b0580e9a2880a8a45a861fc2653ded22980df",
+    "bytes": 25941
   },
-  "binding_basis": "Selected shared v7 methodology; verified private seven-award successor. Public Main pointer is unchanged."
+  "binding_basis": "Selected shared private v7 authority; exact native item crosswalk successor."
 }

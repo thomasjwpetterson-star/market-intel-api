@@ -63,7 +63,7 @@ def build_parts_query(name, years=None, agency=None, domain=None, include_zero=T
         reviewed_select=',COALESCE(e.evidence_count,0) AS reviewed_award_item_evidence_count'
         item_amount='CASE WHEN COALESCE(t.financial_record_count,0)=0 AND COALESCE(e.evidence_count,0)>0 THEN NULL ELSE COALESCE(t.amount,0) END'
         financial_eligibility='(financial_record_count > 0 OR reviewed_award_item_evidence_count > 0)'
-        item_nsn='COALESCE(p.nsn,e.nsn,b.niin)'
+        item_nsn='COALESCE(e.nsn,p.nsn,b.niin)'
         item_description='COALESCE(p.description,e.item_name)'
     if ys:
         clauses.append('f.fiscal_year IN (' + ','.join('?' for _ in ys) + ')')

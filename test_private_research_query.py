@@ -123,6 +123,8 @@ class ResearchQueries(unittest.TestCase):
         node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='private_research_aggregate');node.decorator_list=[]
         ns={'Dict':Dict,'Any':Any,'Request':Request,'Response':Response,'HTTPException':HTTPException,'os':os,'hmac':hmac,'GLOBAL_CACHE':{'last_loaded':1,'is_loading':False},'duck_fetch_df':lambda sql,params:self.db.execute(sql,params).fetchdf(),'df_sanitize_for_json':lambda df:df}
         exec(compile(ast.Module(body=[node],type_ignores=[]),'main.py','exec'),ns)
+        ns['programme_read_df']=lambda sql,params:ns['duck_fetch_df'](sql,params)
+        reference_patch=patch('private_platform_reference.reference_for',return_value=None);reference_patch.start();self.addCleanup(reference_patch.stop)
         app=FastAPI();app.post('/api/research/aggregate')(ns['private_research_aggregate'])
         return TestClient(app),ns
 

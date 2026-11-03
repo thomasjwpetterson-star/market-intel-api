@@ -54,6 +54,19 @@ class BuyerItemFunding(unittest.TestCase):
             ns['GLOBAL_CACHE']['is_loading']=True
             self.assertEqual(client.post('/items',json=payload,headers=headers).status_code,503)
 
+    def test_private_item_history_uses_native_actions_and_preserves_psc_scope(self):
+        from private_research_context import item_history
+        def read(sql,params):
+            c=self.db.execute(sql,params)
+            return [dict(zip([v[0]for v in c.description],r))for r in c.fetchall()]
+        value=item_history({'nsn':'1234000000001','years':[2025],'agency':'Navy'},read)
+        self.assertEqual(value['annual'],[{'label':'2025','spend':80.0}])
+        self.assertIsNone(value['recorded_quantity'])
+        self.db.execute('ALTER TABLE v_transactions ADD COLUMN psc VARCHAR')
+        self.db.execute("UPDATE v_transactions SET psc='1234'")
+        self.assertEqual(item_history({'nsn':'1234000000001','years':[2025],'agency':'Navy','psc':'9999'},read)['annual'],[])
+        self.assertEqual(item_history({'nsn':'1234000000001','years':[2025],'agency':'Navy','psc':'1234'},read)['annual'],[{'label':'2025','spend':80.0}])
+
     def test_buyers_get_different_real_values_and_matching_items(self):
         navy=self.read(agency='Navy',years=[2025]);air=self.read(agency='Air Force',years=[2025])
         self.assertEqual([(r['niin'],r['amount']) for r in navy],[('000000001',80),('000000002',0)])
