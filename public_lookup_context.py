@@ -1,9 +1,11 @@
 """Identify bounded public projection reads without changing analytical admission."""
 from contextvars import ContextVar
+from contextlib import contextmanager
 import logging
 import os
 import resource
 import sys
+import threading
 
 
 PUBLIC_LOOKUP_REQUEST = ContextVar("mimir_public_lookup_request", default=False)
@@ -11,6 +13,38 @@ _MEMORY_CEILING_BYTES = int(os.getenv("DUCK_PUBLIC_MEMORY_CEILING_MB", "6144")) 
 if _MEMORY_CEILING_BYTES <= 0:
     raise ValueError("DUCK_PUBLIC_MEMORY_CEILING_MB must be positive")
 _MEMORY_SUSPENDED = False
+_ADMISSION_CEILING_BYTES = int(os.getenv("PUBLIC_SERVING_MEMORY_CEILING_MB", "5120")) * 1024**2
+if _ADMISSION_CEILING_BYTES <= 0:
+    raise ValueError("PUBLIC_SERVING_MEMORY_CEILING_MB must be positive")
+_ADMISSION_SUSPENDED = False
+_PUBLIC_ANALYTICAL_SLOT = threading.BoundedSemaphore(1)
+
+
+@contextmanager
+def public_analytical_slot():
+    """Keep at most one public fallback in the shared analytical reader pool."""
+    if PUBLIC_LOOKUP_REQUEST.get():
+        with _PUBLIC_ANALYTICAL_SLOT:
+            yield
+    else:
+        yield
+
+
+def public_admission_memory_ok():
+    """Latch public admission back to one before the reserved-reader ceiling."""
+    global _ADMISSION_SUSPENDED
+    if _ADMISSION_SUSPENDED:
+        return False
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    peak_bytes = int(peak if sys.platform == "darwin" else peak * 1024)
+    if peak_bytes >= min(_ADMISSION_CEILING_BYTES, _MEMORY_CEILING_BYTES):
+        _ADMISSION_SUSPENDED = True
+        logging.getLogger("mimir-api").error(
+            "Public serving admission reduced: peak_process_bytes=%s ceiling_bytes=%s limit=1",
+            peak_bytes, min(_ADMISSION_CEILING_BYTES, _MEMORY_CEILING_BYTES),
+        )
+        return False
+    return True
 
 # Only these indexed, single-row projections may use the reserved connection.
 # Legacy fallbacks, manifest searches and analytical scans retain the two-reader

@@ -1,7 +1,7 @@
 """Admit public analytical work before it consumes a shared worker thread.
 
-Rate-limit exemptions are identities, not capacity exemptions. Keep one of the
-two DuckDB readers and AnyIO worker tokens available for customer requests.
+Rate-limit exemptions are identities, not capacity exemptions. Database reader
+limits separately protect customer work; this bounds active public handlers.
 Duplicate public reads may wait briefly for shared work. A configurable small
 FIFO admits cold records without occupying serving threads while they wait.
 """
@@ -21,9 +21,12 @@ class PublicServingCapacityMiddleware:
     def __init__(self, app, limit=1, cache_generation=None, max_entries=256,
                  max_bytes=32 * 1024 * 1024, ttl=300, stale_ttl=3600,
                  max_waiters=16, wait_timeout=2, pending_limit=0,
-                 pending_timeout=8, clock=time.monotonic):
+                 pending_timeout=8, clock=time.monotonic, capacity_ok=None):
         self.app = app
         self.limit = limit
+        if limit not in (1, 2):
+            raise ValueError("Public serving limit must be 1 or 2")
+        self.capacity_ok = capacity_ok
         self.active = 0
         self.rejected = 0
         self.inflight = set()
@@ -61,7 +64,7 @@ class PublicServingCapacityMiddleware:
         if cached and age <= self.ttl:
             self.cache.move_to_end(key)
             return await self._respond(cached, send, 'hit')
-        if cached and age <= self.stale_ttl and self.active >= self.limit:
+        if cached and age <= self.stale_ttl and self.active >= self._capacity_limit():
             return await self._respond(cached, send, 'stale')
         # Identical public reads share work; total waiters and wait time are
         # bounded. Shield keeps a timed-out/disconnected follower from cancelling
@@ -82,7 +85,7 @@ class PublicServingCapacityMiddleware:
             self.rejected += 1
             if self.rejected == 1 or self.rejected % 100 == 0:
                 logger.warning("Public serving capacity exhausted: active=%s limit=%s rejected=%s pending=%s coalesced_waiters=%s",
-                               self.active, self.limit, self.rejected, len(self.pending), self.waiters)
+                               self.active, self._capacity_limit(), self.rejected, len(self.pending), self.waiters)
             body = b'{"detail":"Public intelligence is busy. Please retry shortly."}'
             await send({"type": "http.response.start", "status": 503, "headers": [
                 (b"content-type", b"application/json"),
@@ -108,10 +111,13 @@ class PublicServingCapacityMiddleware:
         task.add_done_callback(self._finished)
         await asyncio.shield(task)
 
+    def _capacity_limit(self):
+        return 1 if self.capacity_ok is not None and not self.capacity_ok() else self.limit
+
     async def _admit(self):
         # No await between checking and reserving. Existing queued requests have
         # priority over newcomers, so a continuous crawl cannot steal their turn.
-        if self.active < self.limit and not self.pending:
+        if self.active < self._capacity_limit() and not self.pending:
             self.active += 1
             return True
         if len(self.pending) >= self.pending_limit:
@@ -139,6 +145,10 @@ class PublicServingCapacityMiddleware:
 
     def _release(self):
         self.active -= 1
+        # When memory pressure reduces two slots to one, drain the extra work
+        # before granting queued requests. Never cancel a running sync query.
+        if self.active >= self._capacity_limit():
+            return
         while self.pending:
             future = self.pending.popleft()
             if not future.done():

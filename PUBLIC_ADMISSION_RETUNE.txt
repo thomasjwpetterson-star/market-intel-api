@@ -1,0 +1,41 @@
+PUBLIC ADMISSION RETUNING — 4 NOVEMBER 2026 FIJI
+
+Allow two active public handlers, retaining four pending requests and the
+eight-second pending timeout. PUBLIC_SERVING_LIMIT=1 and a normal deploy restores
+single admission. Values other than one or two fail startup rather than allowing
+unbounded concurrency. Crawler budgets and response-cache sizes are unchanged.
+
+The database still has two analytical readers and one reserved public lookup
+reader. Public fallbacks acquire a one-place semaphore before leasing from the
+analytical pool. Two public handlers therefore cannot occupy both analytical
+readers. Ordinary customer work does not take that semaphore. Only the existing
+exact indexed query allowlist can use the reserved reader.
+
+At a process peak RSS of 5 GiB, public admission latches down to one until restart.
+PUBLIC_SERVING_MEMORY_CEILING_MB configures this threshold; the effective threshold
+cannot exceed the existing reserved-reader ceiling (default 6 GiB). Already active
+handlers drain, with no extra pending grant while above the reduced active limit.
+The existing 6 GiB reader fallback remains in effect. Neither check cancels an
+already executing query or guarantees that a sudden allocation cannot exceed RAM.
+Container memory is wider than process RSS. Render memory, errors and health still
+require observation during rollout. The Render plan remains one 2 CPU/8 GiB instance.
+
+Successful schema descriptions are reused for the same release generation in a
+bounded 64-entry metadata cache. This avoids repeated DESCRIBE reader leases for
+legacy award profiles and Explorer reads. Release generation changes invalidate
+reuse; failures are not retained, and callers receive a new mutable set. This
+holds column names only, not corpus records, page bodies or analytical results.
+
+Tests cover a reserved point lookup overtaking a blocked public fallback, two
+public fallbacks leaving a customer reader free, memory-latched admission and
+draining, existing cancellation/queue/cache safeguards, and schema generation
+refresh/failure recovery. No expansion of in-memory public projections is required.
+
+Before production rollout: retain the current deploy artifact, run focused
+regressions, and use bounded probes of distinct records at one arrival per second
+alongside at most two analytical history reads. Stop additional probe arrivals on
+server error, readiness failure or memory concern. Observe Render memory and logs.
+If container memory approaches 4.5 GiB during the trial, stop probes and investigate;
+revert this commit and deploy if the change causes instability. Retain unrelated
+main commits when reverting. A source revert of this admission change preserves
+the prior reserved-reader improvement. No new instance or paid plan is requested.

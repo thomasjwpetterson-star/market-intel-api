@@ -14,7 +14,8 @@ from fastapi import FastAPI, Response
 from httpx import ASGITransport, AsyncClient
 
 from public_serving_capacity import PublicServingCapacityMiddleware
-from public_lookup_context import is_reserved_public_lookup, public_reader_memory_ok
+from public_lookup_context import is_reserved_public_lookup, public_reader_memory_ok, public_analytical_slot
+from contextlib import nullcontext
 
 
 def production_functions():
@@ -32,6 +33,7 @@ def production_functions():
               DUCK_CONN=object(), ensure_duck_conn=lambda: None,
               _DUCK_PUBLIC_POOL=None, is_reserved_public_lookup=is_reserved_public_lookup,
               public_reader_memory_ok=public_reader_memory_ok,
+              public_analytical_slot=public_analytical_slot, nullcontext=nullcontext,
               df_sanitize_for_json=lambda df: df)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), 'main.py', 'exec'), ns)
     return ns
@@ -113,6 +115,26 @@ async def test_capacity_released_after_downstream_failure():
         await middleware(scope, None, None)
     assert middleware.active == 0
     assert not middleware.inflight
+
+
+@pytest.mark.asyncio
+async def test_memory_reduction_drains_two_slots_before_granting_next_waiter():
+    memory_ok = [True]
+    middleware = PublicServingCapacityMiddleware(None, limit=2, pending_limit=2,
+                                                capacity_ok=lambda: memory_ok[0])
+    assert await middleware._admit()
+    assert await middleware._admit()
+    pending = asyncio.create_task(middleware._admit())
+    await asyncio.sleep(0)
+    memory_ok[0] = False
+    middleware._release()
+    await asyncio.sleep(0)
+    assert middleware.active == 1 and not pending.done()
+    middleware._release()
+    assert await asyncio.wait_for(pending, 1)
+    assert middleware.active == 1
+    middleware._release()
+    assert middleware.active == 0
 
 
 @pytest.mark.asyncio

@@ -2,10 +2,13 @@ from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks, Req
 from fastapi.middleware.cors import CORSMiddleware
 from api_traffic_protection import ApiTrafficProtectionMiddleware
 from public_serving_capacity import PublicServingCapacityMiddleware
-from public_lookup_context import is_reserved_public_lookup, public_reader_memory_ok
+from public_lookup_context import (
+    is_reserved_public_lookup, public_reader_memory_ok,
+    public_admission_memory_ok, public_analytical_slot,
+)
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timedelta, date
 from decimal import Decimal, ROUND_HALF_UP
 import boto3
@@ -260,32 +263,35 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
     if public_lookup:
         pool = _DUCK_PUBLIC_POOL
     wait_started = time.perf_counter()
-    try:
-        c = pool.get(timeout=float(os.getenv("DUCK_POOL_TIMEOUT", "60")))
-        wait_seconds = time.perf_counter() - wait_started
-        # Use a cursor for isolation of statement state
-        query_started = time.perf_counter()
-        cursor = c.cursor()
+    # Two public HTTP handlers must not turn into two public fallback scans.
+    # Keep a shared analytical reader available for non-public work.
+    with nullcontext() if public_lookup else public_analytical_slot():
         try:
-            df = cursor.execute(sql, params).fetchdf()
-        finally:
-            cursor.close()
-            query_seconds = time.perf_counter() - query_started
-            if wait_seconds >= 1 or query_seconds >= 2:
-                # No SQL parameters, user identities or row contents in logs.
-                logger.warning("Slow DuckDB read query=%s wait_ms=%.1f execute_ms=%.1f pool_available=%s pool=%s",
-                               hashlib.sha256(sql.encode()).hexdigest()[:12],
-                               wait_seconds * 1000, query_seconds * 1000, pool.qsize(),
-                               "public_lookup" if public_lookup else "analytical")
-        return df_sanitize_for_json(df)
-    finally:
-        if c is not None:
+            c = pool.get(timeout=float(os.getenv("DUCK_POOL_TIMEOUT", "60")))
+            wait_seconds = time.perf_counter() - wait_started
+            # Use a cursor for isolation of statement state
+            query_started = time.perf_counter()
+            cursor = c.cursor()
             try:
-                pool.put(c)
-            except Exception:
-                pass
-        if public_lookup:
-            public_reader_memory_ok()
+                df = cursor.execute(sql, params).fetchdf()
+            finally:
+                cursor.close()
+                query_seconds = time.perf_counter() - query_started
+                if wait_seconds >= 1 or query_seconds >= 2:
+                    # No SQL parameters, user identities or row contents in logs.
+                    logger.warning("Slow DuckDB read query=%s wait_ms=%.1f execute_ms=%.1f pool_available=%s pool=%s",
+                                   hashlib.sha256(sql.encode()).hexdigest()[:12],
+                                   wait_seconds * 1000, query_seconds * 1000, pool.qsize(),
+                                   "public_lookup" if public_lookup else "analytical")
+            return df_sanitize_for_json(df)
+        finally:
+            if c is not None:
+                try:
+                    pool.put(c)
+                except Exception:
+                    pass
+            if public_lookup:
+                public_reader_memory_ok()
 
 
 
@@ -295,6 +301,10 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("API starting up (Hybrid V5 Mode)...")
+    logger.info("Public serving configured: active_limit=%s pending_limit=4 memory_ceiling_mb=%s fallback_readers=1",
+                os.getenv("PUBLIC_SERVING_LIMIT", "2"),
+                min(int(os.getenv("PUBLIC_SERVING_MEMORY_CEILING_MB", "5120")),
+                    int(os.getenv("DUCK_PUBLIC_MEMORY_CEILING_MB", "6144"))))
 
     if os.getenv("MIMIR_MAIN_FOLLOW_ROOT", "0").strip().lower() in {"1", "true", "yes"}:
         global LOCAL_CACHE_DIR, DUCKDB_PATH, RELEASE_PINNED_CACHE, PINNED_PLATFORM_BUNDLE
@@ -591,6 +601,8 @@ if allow_all:
 app.add_middleware(ApiTrafficProtectionMiddleware)
 app.add_middleware(
     PublicServingCapacityMiddleware,
+    limit=int(os.getenv("PUBLIC_SERVING_LIMIT", "2")),
+    capacity_ok=public_admission_memory_ok,
     pending_limit=4,
     pending_timeout=8,
     cache_generation=lambda: (
@@ -4386,6 +4398,16 @@ def quote_ident(identifier: str) -> str:
     return '"' + str(identifier).replace('"', '""') + '"'
 
 
+@lru_cache(maxsize=64)
+def _get_duck_table_columns_cached(table: str, generation) -> frozenset:
+    # Schemas change at release reload, not per contract. Cache only successful
+    # metadata, never corpus rows or failed DESCRIBE results.
+    df = duck_fetch_df(f"DESCRIBE {table}")
+    if df.empty or "column_name" not in df.columns:
+        raise ValueError("DuckDB relation metadata is unavailable")
+    return frozenset(str(c).strip().lower() for c in df["column_name"].dropna().tolist())
+
+
 def get_duck_table_columns(table: str) -> set:
     if table not in ALLOWED_EXPLORER_TABLES and table not in INTERNAL_DUCK_RELATIONS:
         return set()
@@ -4394,10 +4416,7 @@ def get_duck_table_columns(table: str) -> set:
         return set(CONTRACT_AWARD_SYNTHETIC_COLUMNS)
 
     try:
-        df = duck_fetch_df(f"DESCRIBE {table}")
-        if df.empty or "column_name" not in df.columns:
-            return set()
-        return {str(c).strip().lower() for c in df["column_name"].dropna().tolist()}
+        return set(_get_duck_table_columns_cached(table, GLOBAL_CACHE.get("last_loaded")))
     except Exception:
         logger.exception("Failed to describe explorer table: %s", table)
         return set()

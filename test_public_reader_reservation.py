@@ -166,6 +166,97 @@ def test_memory_tripwire_routes_back_to_analytical_pool(readers):
 
 
 @pytest.mark.asyncio
+async def test_second_public_slot_passes_a_blocked_fallback_using_reserved_reader(readers):
+    namespace, analytical, public = readers
+    held = [analytical.get_nowait(), analytical.get_nowait()]
+    app = FastAPI()
+    app.add_middleware(PublicServingCapacityMiddleware, limit=2, pending_limit=4)
+
+    @app.get('/api/public/intelligence/awards/{record}')
+    def award(record: str):
+        sql = 'SELECT 42 AS value' if record == 'fallback' else LOOKUP
+        return namespace['duck_fetch_df'](sql, [] if record == 'fallback' else [record]).to_dict('records')
+
+    slow = None
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            slow = asyncio.create_task(client.get('/api/public/intelligence/awards/fallback'))
+            await asyncio.sleep(.05)
+            assert not slow.done()
+            response = await asyncio.wait_for(client.get('/api/public/intelligence/awards/A7'), 1)
+            assert response.status_code == 200 and response.json()[0]['contract_id'] == 'A7'
+            assert not slow.done()
+            analytical.put(held.pop())
+            assert (await asyncio.wait_for(slow, 1)).status_code == 200
+    finally:
+        for connection in held:
+            analytical.put(connection)
+        if slow is not None:
+            await slow
+
+
+@pytest.mark.asyncio
+async def test_two_public_fallbacks_leave_an_analytical_reader_for_customer(readers):
+    namespace, analytical, _ = readers
+    original_get = analytical.get
+    entered, release = threading.Event(), threading.Event()
+
+    def held_get(*args, **kwargs):
+        connection = original_get(*args, **kwargs)
+        if PUBLIC_LOOKUP_REQUEST.get() and not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        return connection
+
+    analytical.get = held_get
+    app = FastAPI()
+    app.add_middleware(PublicServingCapacityMiddleware, limit=2)
+
+    @app.get('/api/public/intelligence/awards/{record}')
+    def fallback(record: str):
+        return namespace['duck_fetch_df']('SELECT 1 AS value').to_dict('records')
+
+    @app.get('/customer')
+    def customer():
+        return namespace['duck_fetch_df']('SELECT 42 AS value').to_dict('records')
+
+    tasks = []
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            tasks.append(asyncio.create_task(client.get('/api/public/intelligence/awards/F1')))
+            for _ in range(100):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(.01)
+            assert entered.is_set()
+            tasks.append(asyncio.create_task(client.get('/api/public/intelligence/awards/F2')))
+            await asyncio.sleep(.05)
+            assert analytical.qsize() == 1, 'The second fallback must wait before leasing a reader'
+            result = await asyncio.wait_for(client.get('/customer'), 1)
+            assert result.json() == [{'value': 42}]
+            release.set()
+            assert all(r.status_code == 200 for r in await asyncio.gather(*tasks))
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
+
+
+def test_admission_memory_ceiling_latches_before_reader_ceiling(monkeypatch, caplog):
+    monkeypatch.setattr(public_lookup_context, '_ADMISSION_SUSPENDED', False)
+    monkeypatch.setattr(public_lookup_context, '_ADMISSION_CEILING_BYTES', 100 * 1024**2)
+    monkeypatch.setattr(public_lookup_context, '_MEMORY_CEILING_BYTES', 120 * 1024**2)
+    monkeypatch.setattr(public_lookup_context.sys, 'platform', 'linux')
+    peak = [99 * 1024]
+    monkeypatch.setattr(public_lookup_context.resource, 'getrusage', lambda _: SimpleNamespace(ru_maxrss=peak[0]))
+    assert public_lookup_context.public_admission_memory_ok()
+    peak[0] = 100 * 1024
+    assert not public_lookup_context.public_admission_memory_ok()
+    peak[0] = 1
+    assert not public_lookup_context.public_admission_memory_ok()
+    assert caplog.text.count('Public serving admission reduced') == 1
+
+
+@pytest.mark.asyncio
 async def test_real_cold_award_and_publication_metadata_avoid_analytical_wait(readers):
     namespace, analytical, public = readers
     connection = public.get_nowait()
