@@ -90,6 +90,8 @@ def run_coverage(payload, columns, read):
         value=sum(float(r.get(k) or 0) for r in selected)
         if not math.isfinite(value):raise ValueError('The source returned an invalid funding amount.')
         summary[k]=round(value,2)
+    summary['description_candidates_with_other_programme_mapping'] = (
+        summary['description_candidate_action_count'] - summary['unmapped_description_action_count'])
     # Distinct item counts cannot be summed across buyers/sources.
     if len(selected)>1:
         summary.pop('reference_linked_item_count')
@@ -109,5 +111,5 @@ def run_coverage(payload, columns, read):
         'programme_recorded_agencies':buyers[:10],'programme_recorded_agencies_scope':'Same fiscal years and market segment; all recorded agencies.',
         'agency_interpretation':'Recorded contracting agency, not a complete funding-service or operating-service breakdown.',
         'description_search_terms':aliases,
-        'description_candidate_interpretation':'Description matches outside the primary programme mapping are research evidence. Their funding is not added to confirmed programme totals.',
+        'description_candidate_interpretation':'All description candidates are OUTSIDE the requested primary programme mapping. Unmapped candidates have no primary programme label; the remainder carry OTHER programme labels, not the requested programme. Neither subset is already included in the primary programme action count. Candidate funding is not added to confirmed programme totals.',
         'programme_context':context_for(filters['program'])}

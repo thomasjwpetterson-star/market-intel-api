@@ -59,6 +59,15 @@ class ProgrammeCoverage(unittest.TestCase):
         self.assertEqual(r['reason'],'programme_item_numbers_not_in_reference_crosswalk')
         self.assertEqual(r['selected_scope']['programme_actions_with_item_number'],1)
 
+    def test_other_programme_candidates_are_not_described_as_primary_programme_matches(self):
+        self.db.execute("INSERT INTO v_transactions SELECT 2025,'USA_SPENDING','DEPARTMENT OF THE NAVY','DEPARTMENT OF DEFENSE','OTHER MISSILE',NULL,NULL,'AMRAAM shared support',NULL,NULL,5")
+        r=self.coverage(agency='Navy');s=r['selected_scope']
+        self.assertEqual(s['description_candidate_action_count'],3)
+        self.assertEqual(s['unmapped_description_action_count'],2)
+        self.assertEqual(s['description_candidates_with_other_programme_mapping'],1)
+        self.assertEqual(s['programme_action_count'],0)
+        self.assertIn('Neither subset is already included',r['description_candidate_interpretation'])
+
     def test_duplicate_reference_rows_do_not_multiply_funding(self):
         r=self.coverage(agency='DLA');s=r['selected_scope']
         self.assertEqual(r['reference_item_count'],2)
