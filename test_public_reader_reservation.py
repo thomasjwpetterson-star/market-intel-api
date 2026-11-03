@@ -196,7 +196,8 @@ async def test_second_public_slot_passes_a_blocked_fallback_using_reserved_reade
 
 
 @pytest.mark.asyncio
-async def test_two_public_fallbacks_leave_an_analytical_reader_for_customer(readers):
+async def test_single_fallback_policy_remains_available_for_rollback(readers, monkeypatch):
+    monkeypatch.setattr(public_lookup_context, '_PUBLIC_ANALYTICAL_SLOT', threading.BoundedSemaphore(1))
     namespace, analytical, _ = readers
     original_get = analytical.get
     entered, release = threading.Event(), threading.Event()

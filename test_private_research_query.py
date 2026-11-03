@@ -1,5 +1,6 @@
 import ast
 import hmac
+import json
 import os
 import unittest
 from pathlib import Path
@@ -43,6 +44,30 @@ class ResearchQueries(unittest.TestCase):
         value=run_aggregate({'dataset':'contract_actions','filters':{'contract_id':'ONE'},'group_by':['year']},self.read)
         self.assertEqual(value['observed_obligations_usd'],90)
         self.assertEqual(value['company_grouping'],'recorded_vendor')
+
+    def test_one_scan_preserves_totals_null_groups_and_pagination(self):
+        self.db.execute("INSERT INTO v_transactions VALUES (NULL,'44444',NULL,'DEPARTMENT OF DEFENSE',NULL,'5840','Radar','NULLS',-30),(2024,'44444',NULL,'DEPARTMENT OF DEFENSE','Navy','5840','Radar','NULLS',30)")
+        for groups in [['year'],['company'],['year','company'],['agency','company','year']]:
+            for offset in [0,1,99]:
+                for psc in ['5840','9999']:
+                    args={'dataset':'contract_actions','filters':{'psc':psc},'group_by':groups,'limit':1,'offset':offset}
+                    with self.subTest(groups=groups,offset=offset,psc=psc):
+                        calls=[]
+                        def once(sql,params):calls.append(sql);return self.read(sql,params)
+                        actual=run_aggregate(args,once)
+                        self.assertEqual(len(calls),1)
+                        legacy=build_queries(args)
+                        legacy.pop('combined_sql')
+                        with patch('private_research_query.build_queries',return_value=legacy):
+                            expected=run_aggregate(args,self.read)
+                        self.assertEqual(actual,expected)
+
+    def test_action_plan_has_one_source_scan(self):
+        query=build_queries({'dataset':'contract_actions','filters':{'psc':'5840'},'group_by':['year','company']})
+        plan=json.loads(self.db.execute('EXPLAIN (FORMAT JSON) '+query['combined_sql'],query['combined_params']).fetchone()[1])
+        def scans(nodes):
+            return sum((1 if node.get('extra_info',{}).get('Table','').endswith('.v_transactions') else 0)+scans(node.get('children',[])) for node in nodes)
+        self.assertEqual(scans(plan),1)
 
     def test_missing_series_is_null(self):
         value=run_aggregate({'filters':{'years':[2024]}},self.read)

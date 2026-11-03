@@ -17,12 +17,15 @@ _ADMISSION_CEILING_BYTES = int(os.getenv("PUBLIC_SERVING_MEMORY_CEILING_MB", "51
 if _ADMISSION_CEILING_BYTES <= 0:
     raise ValueError("PUBLIC_SERVING_MEMORY_CEILING_MB must be positive")
 _ADMISSION_SUSPENDED = False
-_PUBLIC_ANALYTICAL_SLOT = threading.BoundedSemaphore(1)
+_PUBLIC_FALLBACK_CONCURRENCY = int(os.getenv("DUCK_PUBLIC_FALLBACK_CONCURRENCY", "2"))
+if _PUBLIC_FALLBACK_CONCURRENCY not in (1, 2):
+    raise ValueError("DUCK_PUBLIC_FALLBACK_CONCURRENCY must be 1 or 2")
+_PUBLIC_ANALYTICAL_SLOT = threading.BoundedSemaphore(_PUBLIC_FALLBACK_CONCURRENCY)
 
 
 @contextmanager
 def public_analytical_slot():
-    """Keep at most one public fallback in the shared analytical reader pool."""
+    """Use idle analytical readers without exceeding the existing pool size."""
     if PUBLIC_LOOKUP_REQUEST.get():
         with _PUBLIC_ANALYTICAL_SLOT:
             yield

@@ -41,6 +41,8 @@ class PublicServingCapacityMiddleware:
         self.flights = {}
         self.clock = clock
         self.pending = deque()
+        if not 0 <= pending_limit <= 16 or not 0 < pending_timeout <= 12:
+            raise ValueError("Public queue must be bounded to 16 requests and 12 seconds")
         self.pending_limit, self.pending_timeout = pending_limit, pending_timeout
 
     async def __call__(self, scope, receive, send):
@@ -83,9 +85,6 @@ class PublicServingCapacityMiddleware:
         # No await between checking and acquiring: atomic within the ASGI loop.
         if not await self._admit():
             self.rejected += 1
-            if self.rejected == 1 or self.rejected % 100 == 0:
-                logger.warning("Public serving capacity exhausted: active=%s limit=%s rejected=%s pending=%s coalesced_waiters=%s",
-                               self.active, self._capacity_limit(), self.rejected, len(self.pending), self.waiters)
             body = b'{"detail":"Public intelligence is busy. Please retry shortly."}'
             await send({"type": "http.response.start", "status": 503, "headers": [
                 (b"content-type", b"application/json"),
@@ -115,12 +114,14 @@ class PublicServingCapacityMiddleware:
         return 1 if self.capacity_ok is not None and not self.capacity_ok() else self.limit
 
     async def _admit(self):
+        started = self.clock()
         # No await between checking and reserving. Existing queued requests have
         # priority over newcomers, so a continuous crawl cannot steal their turn.
         if self.active < self._capacity_limit() and not self.pending:
             self.active += 1
             return True
         if len(self.pending) >= self.pending_limit:
+            self._log_rejection("queue_full", started)
             return False
         future = asyncio.get_running_loop().create_future()
         self.pending.append(future)
@@ -135,6 +136,7 @@ class PublicServingCapacityMiddleware:
             else:
                 future.cancel()
             if isinstance(error, TimeoutError):
+                self._log_rejection("queue_timeout", started)
                 return False
             raise
         finally:
@@ -142,6 +144,11 @@ class PublicServingCapacityMiddleware:
                 self.pending.remove(future)
             except ValueError:
                 pass
+
+    def _log_rejection(self, reason, started):
+        logger.warning("Public serving capacity exhausted: reason=%s wait_ms=%.1f active=%s limit=%s rejected=%s pending=%s coalesced_waiters=%s",
+                       reason, (self.clock()-started)*1000, self.active,
+                       self._capacity_limit(), self.rejected+1, len(self.pending), self.waiters)
 
     def _release(self):
         self.active -= 1

@@ -84,12 +84,34 @@ def build_queries(payload):
     order='year ASC' if groups==['year'] else 'observed_obligations_usd DESC, '+', '.join(g+' ASC NULLS LAST' for g in groups)
     total_sql=prefix+f'SELECT {metric} AS observed_obligations_usd, COUNT(*) AS source_row_count'+base
     grouped_sql=prefix+f'SELECT {select}, {metric} AS observed_obligations_usd'+base+f' GROUP BY {group} ORDER BY {order} LIMIT ? OFFSET ?'
-    return {'dataset':dataset,'filters':normal,'group_by':groups,'limit':limit,'offset':offset,'total_sql':total_sql,'total_params':params,'grouped_sql':grouped_sql,'grouped_params':params+[limit+1,offset]}
+    query={'dataset':dataset,'filters':normal,'group_by':groups,'limit':limit,'offset':offset,'total_sql':total_sql,'total_params':params,'grouped_sql':grouped_sql,'grouped_params':params+[limit+1,offset]}
+    if dataset=='contract_actions':
+        # Compute the whole-scope total and the group page in one source scan.
+        # GROUPING distinguishes the total from genuine NULL-valued dimensions.
+        columns=', '.join(column for column,_ in dimensions)
+        total_mask=(1 << len(dimensions))-1
+        query['combined_sql']=(
+            f'WITH research_once AS MATERIALIZED (SELECT {select}, {metric} AS observed_obligations_usd, '
+            f'COUNT(*) AS source_row_count, GROUPING({columns}) AS _mimir_grouping{base} '
+            f'GROUP BY GROUPING SETS (({columns}), ())), '
+            f'research_page AS (SELECT * FROM research_once WHERE _mimir_grouping=0 ORDER BY {order} LIMIT ? OFFSET ?) '
+            f'SELECT * FROM (SELECT * FROM research_once WHERE _mimir_grouping={total_mask} '
+            f'UNION ALL SELECT * FROM research_page) ORDER BY _mimir_grouping DESC, {order}'
+        )
+        query['combined_params']=params+[limit+1,offset]
+        query['total_mask']=total_mask
+    return query
 
 def run_aggregate(payload, read):
     query=build_queries(payload)
-    total_rows=read(query['total_sql'],query['total_params'])
-    rows=read(query['grouped_sql'],query['grouped_params'])
+    if 'combined_sql' in query:
+        combined=read(query['combined_sql'],query['combined_params'])
+        total_rows=[row for row in combined if row['_mimir_grouping']==query['total_mask']]
+        rows=[{key:value for key,value in row.items() if key not in {'_mimir_grouping','source_row_count'}}
+              for row in combined if row['_mimir_grouping']==0]
+    else:
+        total_rows=read(query['total_sql'],query['total_params'])
+        rows=read(query['grouped_sql'],query['grouped_params'])
     if len(total_rows)!=1 or len(rows)>query['limit']+1:raise ValueError('The research source returned an inconsistent aggregate.')
     total=total_rows[0];value=total['observed_obligations_usd']
     if not isinstance(value,(int,float)) or not math.isfinite(value):raise ValueError('The research source returned an invalid amount.')

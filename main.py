@@ -2,6 +2,9 @@ from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks, Req
 from fastapi.middleware.cors import CORSMiddleware
 from api_traffic_protection import ApiTrafficProtectionMiddleware
 from public_serving_capacity import PublicServingCapacityMiddleware
+from analytical_admission import AnalyticalAdmissionMiddleware
+from analytical_deadline import query_deadline, remaining_query_budget
+from queue import Empty
 from public_lookup_context import (
     is_reserved_public_lookup, public_reader_memory_ok,
     public_admission_memory_ok, public_analytical_slot,
@@ -264,17 +267,24 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
     if public_lookup:
         pool = _DUCK_PUBLIC_POOL
     wait_started = time.perf_counter()
-    # Two public HTTP handlers must not turn into two public fallback scans.
-    # Keep a shared analytical reader available for non-public work.
+    # The physical pool still caps analytical scans at two. Expensive private
+    # HTTP reads are admitted one at a time before acquiring a worker thread.
     with nullcontext() if public_lookup else public_analytical_slot():
         try:
-            c = pool.get(timeout=float(os.getenv("DUCK_POOL_TIMEOUT", "60")))
+            remaining = remaining_query_budget()
+            pool_timeout = float(os.getenv("DUCK_POOL_TIMEOUT", "60"))
+            try:
+                c = pool.get(timeout=pool_timeout if remaining is None else min(pool_timeout, remaining))
+            except Empty:
+                remaining_query_budget()
+                raise HTTPException(status_code=503, detail="Database readers are busy. Retry shortly.")
             wait_seconds = time.perf_counter() - wait_started
             # Use a cursor for isolation of statement state
             query_started = time.perf_counter()
             cursor = c.cursor()
             try:
-                df = cursor.execute(sql, params).fetchdf()
+                with query_deadline(cursor):
+                    df = cursor.execute(sql, params).fetchdf()
             finally:
                 cursor.close()
                 query_seconds = time.perf_counter() - query_started
@@ -310,10 +320,12 @@ def programme_read_df(sql, params):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("API starting up (Hybrid V5 Mode)...")
-    logger.info("Public serving configured: active_limit=%s pending_limit=4 memory_ceiling_mb=%s fallback_readers=1",
+    logger.info("Public serving configured: active_limit=%s pending_limit=%s memory_ceiling_mb=%s fallback_readers=%s analytical_jobs=1",
                 os.getenv("PUBLIC_SERVING_LIMIT", "2"),
+                os.getenv("PUBLIC_SERVING_PENDING_LIMIT", "12"),
                 min(int(os.getenv("PUBLIC_SERVING_MEMORY_CEILING_MB", "5120")),
-                    int(os.getenv("DUCK_PUBLIC_MEMORY_CEILING_MB", "6144"))))
+                    int(os.getenv("DUCK_PUBLIC_MEMORY_CEILING_MB", "6144"))),
+                os.getenv("DUCK_PUBLIC_FALLBACK_CONCURRENCY", "2"))
 
     if os.getenv("MIMIR_MAIN_FOLLOW_ROOT", "0").strip().lower() in {"1", "true", "yes"}:
         global LOCAL_CACHE_DIR, DUCKDB_PATH, RELEASE_PINNED_CACHE, PINNED_PLATFORM_BUNDLE
@@ -607,13 +619,14 @@ allow_all = os.getenv("CORS_ALLOW_ALL", "false").lower() == "true"
 if allow_all:
     origins = ["*"]
 
+app.add_middleware(AnalyticalAdmissionMiddleware)
 app.add_middleware(ApiTrafficProtectionMiddleware)
 app.add_middleware(
     PublicServingCapacityMiddleware,
     limit=int(os.getenv("PUBLIC_SERVING_LIMIT", "2")),
     capacity_ok=public_admission_memory_ok,
-    pending_limit=4,
-    pending_timeout=8,
+    pending_limit=int(os.getenv("PUBLIC_SERVING_PENDING_LIMIT", "12")),
+    pending_timeout=float(os.getenv("PUBLIC_SERVING_PENDING_TIMEOUT", "12")),
     cache_generation=lambda: (
         GLOBAL_CACHE.get("last_loaded"),
         (GLOBAL_CACHE.get("public_intelligence_release") or {}).get("release_id"),
@@ -5496,6 +5509,8 @@ def private_programme_coverage(payload: Dict[str, Any], request: Request, respon
             lambda sql, params: df_sanitize_for_json(programme_read_df(sql, params)).to_dict(orient="records"))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    except HTTPException:
+        raise
     except Exception as error:
         logger.exception("Programme coverage lookup failed")
         raise HTTPException(status_code=503, detail="Programme coverage is temporarily unavailable.") from error
@@ -7397,6 +7412,8 @@ def get_platform_parts(
         raise HTTPException(status_code=422, detail=str(error)) from error
     try:
         df = programme_read_df(sql, params)
+    except HTTPException:
+        raise
     except Exception as error:
         logger.exception("Programme item funding lookup failed")
         raise HTTPException(status_code=503, detail="Programme item funding is temporarily unavailable.") from error
@@ -7425,6 +7442,8 @@ def get_platform_parts_count(
         df = programme_read_df(sql, params)
         first_fy = df["buyer_history_start_fy"].iloc[0]
         return {"count": int(df["count"].iloc[0]), "buyer_history_start_fy": None if pd.isna(first_fy) else int(first_fy)}
+    except HTTPException:
+        raise
     except Exception as error:
         logger.exception("Programme item count failed")
         raise HTTPException(status_code=503, detail="Programme item count is temporarily unavailable.") from error
