@@ -37,6 +37,12 @@ class PrivateV7Reference(unittest.TestCase):
             ('same-contract-different-award',2025,'DEPARTMENT OF THE AIR FORCE','DEPARTMENT OF DEFENSE',90000,None,None),
             ('reviewed-cleared',2025,'DEPARTMENT OF THE AIR FORCE','DEPARTMENT OF DEFENSE',200,None,None)])
         self.columns={'award_key','year','sub_agency','parent_agency','spend_amount','niin','nsn'}
+    def test_reviewed_items_respect_market_domain_filter(self):
+        self.db.execute("ALTER TABLE v_transactions ADD COLUMN market_segment VARCHAR")
+        self.db.execute("UPDATE v_transactions SET market_segment='AIR'")
+        out=self.reference.coverage({'program':'AMRAAM','years':[2025],'domain':'NAVAL'},self.read,self.columns|{'market_segment'})
+        self.assertEqual(out['reviewed_award_count'],0);self.assertEqual(out['reviewed_items'],[])
+
     def test_effective_scope_excludes_reviewed_clear_and_keeps_unreviewed_primary(self):
         self.db.execute("ALTER TABLE v_transactions ADD COLUMN contract_id VARCHAR")
         self.db.execute("ALTER TABLE v_transactions ADD COLUMN platform_family VARCHAR")

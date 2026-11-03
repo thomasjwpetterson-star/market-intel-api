@@ -97,6 +97,7 @@ class Reference:
         clauses=['award_key IN (SELECT json_extract_string(value,\'$\') FROM json_each(?))']
         params=[json.dumps(sorted(selected))]
         years=sorted(set(payload.get('years')or[]));agency=buyer_name(payload.get('agency'))
+        if payload.get('domain'):clauses.append('UPPER(TRIM(market_segment))=?');params.append(payload['domain'].strip().upper())
         if years:clauses.append('year IN ('+','.join('?'for _ in years)+')');params.extend(years)
         if agency:clauses.append('(UPPER(TRIM(sub_agency))=? OR UPPER(TRIM(parent_agency))=?)');params.extend([agency,agency])
         usable="COALESCE(NULLIF(TRIM(CAST(niin AS VARCHAR)),''),NULLIF(TRIM(CAST(nsn AS VARCHAR)),''))"
