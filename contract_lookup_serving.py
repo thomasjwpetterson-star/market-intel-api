@@ -1,9 +1,17 @@
 """Register an optional disk-only award lookup; retain the analytical view."""
 from pathlib import Path
+import logging
+import shutil
 
 
 def register_contract_lookup(connection, cache_dir: Path, *, enabled: bool) -> bool:
     connection.execute("DROP VIEW IF EXISTS v_contracts_lookup")
+    if cache_dir.exists():
+        disk = shutil.disk_usage(cache_dir)
+        logging.getLogger("mimir-api").info(
+            "Contract lookup storage: filesystem_free_bytes=%s filesystem_total_bytes=%s",
+            disk.free, disk.total,
+        )
     path = cache_dir / "contracts_lookup.parquet"
     if not enabled or not path.exists():
         return False
