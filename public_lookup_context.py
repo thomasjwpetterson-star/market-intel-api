@@ -22,6 +22,10 @@ _POINT_LOOKUPS = frozenset(" ".join(sql.split()).casefold() for sql in (
     "SELECT payload_json FROM public_platform_profile WHERE slug = ? LIMIT 1",
     "SELECT payload_json FROM public_nsn_profile WHERE entity_id = ? LIMIT 1",
     "SELECT payload_json FROM public_nsn_profile WHERE niin = ? LIMIT 1",
+    """SELECT entity_type, entity_id, canonical_path, display_name,
+        richness_score, decision_reasons, last_modified, quality_gate_version,
+        sitemap_batch FROM public_intelligence_manifest
+        WHERE entity_type = ? AND entity_id = ? LIMIT 1""",
 ))
 
 

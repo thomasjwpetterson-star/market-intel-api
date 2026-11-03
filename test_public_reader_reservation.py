@@ -17,6 +17,7 @@ from httpx import ASGITransport, AsyncClient
 from public_lookup_context import PUBLIC_LOOKUP_REQUEST, is_reserved_public_lookup
 from public_serving_capacity import PublicServingCapacityMiddleware
 from test_public_serving_capacity import production_functions
+from test_public_award_serving import route_namespace
 import public_lookup_context
 
 
@@ -162,6 +163,44 @@ def test_memory_tripwire_routes_back_to_analytical_pool(readers):
     finally:
         public.put(public_connection)
         PUBLIC_LOOKUP_REQUEST.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_real_cold_award_and_publication_metadata_avoid_analytical_wait(readers):
+    namespace, analytical, public = readers
+    connection = public.get_nowait()
+    connection.execute("""CREATE TABLE public_intelligence_manifest AS SELECT
+        'contract_award' AS entity_type, 'A'||i AS entity_id,
+        '/intelligence/awards/A'||i AS canonical_path, 'Award' AS display_name,
+        1.0 AS richness_score, 'approved' AS decision_reasons,
+        '2026-11-03' AS last_modified, 'v1' AS quality_gate_version,
+        0 AS sitemap_batch FROM range(100) t(i)""")
+    connection.execute("CREATE INDEX manifest_entity ON public_intelligence_manifest(entity_type, entity_id)")
+    public.put(connection)
+    route = route_namespace()
+    wanted = {'_get_public_intelligence_manifest_entry_cached',
+              'get_public_intelligence_manifest_entry', 'attach_publication_metadata'}
+    nodes = [node for node in ast.parse(Path('main.py').read_text()).body
+             if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    for node in nodes:
+        node.decorator_list = []
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), 'main.py', 'exec'), route)
+    route.update(duck_fetch_df=namespace['duck_fetch_df'], GLOBAL_CACHE=namespace['GLOBAL_CACHE'])
+    held = [analytical.get_nowait(), analytical.get_nowait()]
+    app = FastAPI()
+    app.add_middleware(PublicServingCapacityMiddleware)
+    app.get('/api/public/intelligence/awards/{contract_id}')(route['get_public_award_page_snapshot'])
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            for index in range(10):
+                response = await asyncio.wait_for(client.get(f'/api/public/intelligence/awards/A{index}'), 1)
+                assert response.status_code == 200
+                assert response.json()['seo_indexable'] is True
+                assert response.json()['public_quality_gate_version'] == 'v1'
+        assert analytical.qsize() == 0 and public.qsize() == 1
+    finally:
+        for held_connection in held:
+            analytical.put(held_connection)
 
 
 @pytest.mark.parametrize("reserved", [0, 1])

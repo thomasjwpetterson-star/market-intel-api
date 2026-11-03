@@ -5,9 +5,10 @@ DUCK_PUBLIC_POOL_SIZE reserved public projection readers (default: one; allowed
 values zero or one). It continues to run one Uvicorn process with the existing
 DuckDB thread/memory settings and existing public HTTP admission limits.
 
-Only six exact parameterized single-row projection query shapes can use the
+Only seven exact parameterized single-row projection query shapes can use the
 additional reader, and only while serving a public intelligence HTTP request.
-These cover indexed award, solicitation, company, platform and NSN projections.
+These cover indexed award, solicitation, company, platform and NSN projections,
+plus their indexed publication-metadata lookup.
 Fallbacks and analytical queries keep the existing analytical pool. A caller's
 User-Agent or custom header cannot select the reserved reader.
 
