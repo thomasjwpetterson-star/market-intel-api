@@ -93,18 +93,22 @@ class Reference:
                     'mapping_release_id':self.manifest['release_id'],'alias_inference_applied':False,'reviewed_awards':[],'reviewed_items':[]}
         eid=entity['canonical_entity_id']
         selected={r['award_key']:r for r in self.rows if eid in self.targets(r)}
-        if selected and 'award_key'not in columns:raise ValueError('The action source lacks agency-qualified award keys.')
+        reviewed_by_key={r['award_key']:r for r in self.rows}
+        item_keys={r['award_key']for r in self.items if r['canonical_entity_id']==eid and (r['award_key']not in reviewed_by_key or eid in self.targets(reviewed_by_key[r['award_key']]))}
+        evidence_keys=set(selected)|item_keys
+        if evidence_keys and 'award_key'not in columns:raise ValueError('The action source lacks agency-qualified award keys.')
         clauses=['award_key IN (SELECT json_extract_string(value,\'$\') FROM json_each(?))']
-        params=[json.dumps(sorted(selected))]
+        params=[json.dumps(sorted(evidence_keys))]
         years=sorted(set(payload.get('years')or[]));agency=buyer_name(payload.get('agency'))
         if payload.get('domain'):clauses.append('UPPER(TRIM(market_segment))=?');params.append(payload['domain'].strip().upper())
         if years:clauses.append('year IN ('+','.join('?'for _ in years)+')');params.extend(years)
         if agency:clauses.append('(UPPER(TRIM(sub_agency))=? OR UPPER(TRIM(parent_agency))=?)');params.extend([agency,agency])
         usable="COALESCE(NULLIF(TRIM(CAST(niin AS VARCHAR)),''),NULLIF(TRIM(CAST(nsn AS VARCHAR)),''))"
         amounts=read('SELECT award_key, COUNT(*) AS action_count, COUNT('+usable+') AS actions_with_native_item_number, '
-            'COALESCE(SUM(spend_amount),0) AS source_net_obligations_usd FROM v_transactions WHERE '+' AND '.join(clauses)+' GROUP BY award_key',params)if selected else[]
+            'COALESCE(SUM(spend_amount),0) AS source_net_obligations_usd FROM v_transactions WHERE '+' AND '.join(clauses)+' GROUP BY award_key',params)if evidence_keys else[]
         scoped={r['award_key']:r for r in amounts};awards=[]
         for key,value in sorted(scoped.items()):
+            if key not in selected:continue
             row=selected[key];meta=self.by_key.get(key,{})
             awards.append({'award_key':key,'contract_id':meta.get('contract_id')or key.split('_')[2],
                 'canonical_entity_ids':self.targets(row),'association_scope':row['association_scope'],

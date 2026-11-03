@@ -64,6 +64,13 @@ class PrivateV7Reference(unittest.TestCase):
             ns['GLOBAL_CACHE']['is_loading']=True
             self.assertEqual(client.post('/records',json=payload,headers=headers).status_code,503)
 
+    def test_item_links_on_accepted_base_awards_do_not_require_manual_overrides(self):
+        self.reference.items.append({'award_key':'same-contract-different-award','canonical_entity_id':'AMRAAM','nsn':'6150015006962','niin':'015006962','item_name':'CABLE'})
+        out=self.reference.coverage({'program':'AMRAAM','agency':'Air Force','years':[2025]},self.read,self.columns)
+        self.assertEqual(out['reviewed_award_count'],0)
+        self.assertEqual(out['reviewed_items'][0]['niin'],'015006962')
+        self.assertEqual(out['reviewed_items'][0]['evidence_count'],1)
+
     def test_reviewed_items_respect_market_domain_filter(self):
         self.db.execute("ALTER TABLE v_transactions ADD COLUMN market_segment VARCHAR")
         self.db.execute("UPDATE v_transactions SET market_segment='AIR'")
