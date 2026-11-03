@@ -43,6 +43,7 @@ import hmac
 import csv
 import json
 import hashlib
+from programme_read_cache import ProgrammeReadCache
 from fastapi import APIRouter
 from dotenv import load_dotenv
 
@@ -294,6 +295,14 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
                 public_reader_memory_ok()
 
 
+
+
+_PROGRAMME_READ_CACHE = ProgrammeReadCache()
+
+
+def programme_read_df(sql, params):
+    generation = GLOBAL_CACHE.get("last_loaded") if not GLOBAL_CACHE.get("is_loading", False) else None
+    return _PROGRAMME_READ_CACHE.read(generation, sql, params, lambda: duck_fetch_df(sql, params))
 
 
 # ✅ FIX: SINGLE SOURCE OF TRUTH STARTUP
@@ -5484,7 +5493,7 @@ def private_programme_coverage(payload: Dict[str, Any], request: Request, respon
         raise HTTPException(status_code=503, detail="Research data is updating. Retry shortly.")
     try:
         value = run_coverage(payload, get_duck_table_columns("v_transactions"),
-            lambda sql, params: df_sanitize_for_json(duck_fetch_df(sql, params)).to_dict(orient="records"))
+            lambda sql, params: df_sanitize_for_json(programme_read_df(sql, params)).to_dict(orient="records"))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
@@ -7387,7 +7396,7 @@ def get_platform_parts(
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     try:
-        df = duck_fetch_df(sql, params)
+        df = programme_read_df(sql, params)
     except Exception as error:
         logger.exception("Programme item funding lookup failed")
         raise HTTPException(status_code=503, detail="Programme item funding is temporarily unavailable.") from error
@@ -7413,7 +7422,7 @@ def get_platform_parts_count(
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     try:
-        df = duck_fetch_df(sql, params)
+        df = programme_read_df(sql, params)
         first_fy = df["buyer_history_start_fy"].iloc[0]
         return {"count": int(df["count"].iloc[0]), "buyer_history_start_fy": None if pd.isna(first_fy) else int(first_fy)}
     except Exception as error:

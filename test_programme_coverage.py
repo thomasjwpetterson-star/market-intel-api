@@ -100,17 +100,27 @@ class ProgrammeCoverage(unittest.TestCase):
         node=next(n for n in ast.parse(Path('main.py').read_text()).body if isinstance(n,ast.FunctionDef) and n.name=='private_programme_coverage');node.decorator_list=[]
         ns=dict(Dict=Dict,Any=Any,Request=Request,Response=Response,HTTPException=HTTPException,os=os,hmac=hmac,logger=Mock(),GLOBAL_CACHE={'last_loaded':1,'is_loading':False},get_duck_table_columns=lambda _:self.columns,duck_fetch_df=lambda sql,params:self.db.execute(sql,params).fetchdf(),df_sanitize_for_json=lambda df:df)
         exec(compile(ast.Module(body=[node],type_ignores=[]),'main.py','exec'),ns)
+        ns['programme_read_df']=lambda sql,params:ns['duck_fetch_df'](sql,params)
         app=FastAPI();app.post('/coverage')(ns['private_programme_coverage'])
         return TestClient(app),ns
 
     def test_route_requires_existing_proxy_key_and_retains_private_cache_control(self):
         client,ns=self.route_client()
+        from programme_read_cache import ProgrammeReadCache
+        cache=ProgrammeReadCache(); reads=Mock(side_effect=ns['duck_fetch_df'])
+        ns['programme_read_df']=lambda sql,params:cache.read(ns['GLOBAL_CACHE']['last_loaded'],sql,params,lambda:reads(sql,params))
         with patch.dict(os.environ,{'MIMIR_EXPORT_PROXY_SECRET':'fixture-only-key'}):
             self.assertEqual(client.post('/coverage',json={'program':'AMRAAM'}).status_code,401)
             self.assertEqual(client.post('/coverage',json={'program':'AMRAAM'},headers={'X-Mimir-Export-Key':'wrong'}).status_code,401)
             r=client.post('/coverage',json={'program':'AMRAAM','agency':'Navy','years':[2025]},headers={'X-Mimir-Export-Key':'fixture-only-key'})
             self.assertEqual(r.status_code,200);self.assertEqual(r.json()['source_generation'],'1')
             self.assertIn('private, no-store',r.headers['Cache-Control'])
+            payload={'program':'AMRAAM','agency':'Navy','years':[2025]}
+            self.assertEqual(client.post('/coverage',json=payload,headers={'X-Mimir-Export-Key':'fixture-only-key'}).status_code,200)
+            self.assertEqual(reads.call_count,1)
+            # A warm analytical result never bypasses proxy authentication.
+            self.assertEqual(client.post('/coverage',json=payload).status_code,401)
+            self.assertEqual(reads.call_count,1)
             ns['GLOBAL_CACHE']['is_loading']=True
             self.assertEqual(client.post('/coverage',json={'program':'AMRAAM'},headers={'X-Mimir-Export-Key':'fixture-only-key'}).status_code,503)
 

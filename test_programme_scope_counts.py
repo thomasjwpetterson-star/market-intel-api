@@ -28,6 +28,7 @@ def namespace():
               EXPLORER_DEFAULT_COLUMNS={'v_contract_awards_enriched':['contract_id']},
               CONTRACT_AWARD_SYNTHETIC_COLUMNS={'contract_id'})
     exec(compile(ast.Module(body=nodes, type_ignores=[]), 'main.py', 'exec'), ns)
+    ns['programme_read_df']=lambda sql,params:ns['duck_fetch_df'](sql,params)
     return ns
 
 
