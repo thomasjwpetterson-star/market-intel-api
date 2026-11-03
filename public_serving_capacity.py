@@ -12,6 +12,7 @@ import asyncio
 import re
 import time
 from collections import OrderedDict, deque
+from public_lookup_context import PUBLIC_LOOKUP_REQUEST
 
 logger = logging.getLogger("mimir-api")
 
@@ -148,6 +149,7 @@ class PublicServingCapacityMiddleware:
                 break
 
     async def _serve(self, scope, receive, send, key):
+        lookup_token = PUBLIC_LOOKUP_REQUEST.set(True)
         messages, size = [], 0
         async def capture(message):
             nonlocal size
@@ -182,6 +184,7 @@ class PublicServingCapacityMiddleware:
                         self.cache_bytes += weight
                         return entry
         finally:
+            PUBLIC_LOOKUP_REQUEST.reset(lookup_token)
             self._release()
 
     async def _respond(self, entry, send, status):

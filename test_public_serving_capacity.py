@@ -14,6 +14,7 @@ from fastapi import FastAPI, Response
 from httpx import ASGITransport, AsyncClient
 
 from public_serving_capacity import PublicServingCapacityMiddleware
+from public_lookup_context import is_reserved_public_lookup, public_reader_memory_ok
 
 
 def production_functions():
@@ -29,6 +30,8 @@ def production_functions():
               GLOBAL_CACHE={'profiles_df': pd.DataFrame({'cage':['ABCDE']}),
                             'last_loaded':1, 'is_loading':False},
               DUCK_CONN=object(), ensure_duck_conn=lambda: None,
+              _DUCK_PUBLIC_POOL=None, is_reserved_public_lookup=is_reserved_public_lookup,
+              public_reader_memory_ok=public_reader_memory_ok,
               df_sanitize_for_json=lambda df: df)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), 'main.py', 'exec'), ns)
     return ns

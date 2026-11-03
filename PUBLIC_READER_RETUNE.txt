@@ -1,0 +1,57 @@
+Public reader reservation — 3 November 2026
+
+The API keeps DUCK_POOL_SIZE analytical readers (existing default: two), plus
+DUCK_PUBLIC_POOL_SIZE reserved public projection readers (default: one; allowed
+values zero or one). It continues to run one Uvicorn process with the existing
+DuckDB thread/memory settings and existing public HTTP admission limits.
+
+Only six exact parameterized single-row projection query shapes can use the
+additional reader, and only while serving a public intelligence HTTP request.
+These cover indexed award, solicitation, company, platform and NSN projections.
+Fallbacks and analytical queries keep the existing analytical pool. A caller's
+User-Agent or custom header cannot select the reserved reader.
+
+The ASGI request context propagates to FastAPI's synchronous worker through
+AnyIO. Reader selection happens at actual database lease acquisition, which
+prevents an analytical request from consuming the public reservation. Every
+success and failure returns its lease to the same pool. Shutdown closes both.
+
+Validation
+  python -m pytest -q test_public_reader_reservation.py test_public_serving_capacity.py
+  python -m pytest -q test_public_result_cache.py test_public_award_serving.py test_api_traffic_protection.py
+  python rehearse_public_readers.py --reserved 0
+  python rehearse_public_readers.py --reserved 1
+
+The rehearsal uses synthetic indexed records, two active analytical workers and
+distinct public URLs at one per second, without a response cache. Its 128 MB
+DuckDB cap and 600 MiB process abort threshold protect the local test machine;
+those are rehearsal limits, not new production settings. Production-data memory
+behavior must be measured during rollout; DuckDB's memory setting does not cap
+all process allocations.
+
+Automatic memory fallback
+  DUCK_PUBLIC_MEMORY_CEILING_MB defaults to 6144 MiB (6 GiB). Before and after
+  reserved reads, the API checks its process peak resident memory. Crossing the
+  ceiling disables use of the extra reader until restart, routing queries through
+  the previous shared pool. It logs one error explaining the fallback. This limits
+  additional concurrency; it cannot cancel an existing query or guarantee against
+  an abrupt allocation larger than the remaining margin. Render's service memory
+  also includes memory outside process RSS, so rollout monitoring remains required.
+
+Rollout acceptance
+  - Startup confirms analytical=2 public_lookup=1 and unchanged memory/threads.
+  - Readiness remains healthy and bounded public point reads return correct data.
+  - Production memory remains below the initial 6 GiB acceptance ceiling.
+  - No new readiness failures, OOM/restart events, query errors or material
+    customer latency regression attributable to this change.
+  - Observe natural traffic and a small, paced mixed-read check; stop additional
+    probes and revert on a regression. Do not run an unbounded production load test.
+
+Rollback
+  - Preferred source rollback: revert the isolated reader-reservation commit,
+    preserving later unrelated commits, and let Render's existing auto-deploy run.
+  - Fast operational rollback: use the recorded preceding Render deploy artifact.
+    Check automatic-deploy state afterward; a source revert prevents reintroduction.
+  - Configuration switch: DUCK_PUBLIC_POOL_SIZE=0 followed by a normal redeploy
+    restores shared-reader routing. Analytical size, DuckDB memory/thread values,
+    instance count, paid compute plan, crawler policy and dataset remain unchanged.

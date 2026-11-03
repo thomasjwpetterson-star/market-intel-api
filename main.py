@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks, Req
 from fastapi.middleware.cors import CORSMiddleware
 from api_traffic_protection import ApiTrafficProtectionMiddleware
 from public_serving_capacity import PublicServingCapacityMiddleware
+from public_lookup_context import is_reserved_public_lookup, public_reader_memory_ok
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
@@ -147,6 +148,13 @@ DUCK_INIT_LOCK = threading.RLock()
 # aggregations to compete for a small Render instance at the same time.
 DUCK_POOL_SIZE = int(os.getenv("DUCK_POOL_SIZE", "2"))
 _DUCK_POOL = None  # will be a queue.Queue of connections
+# Reserve one additional indexed public lookup on the 8 GiB service. Preserve
+# the existing analytical limit; this is not permission for a third large scan.
+# Set DUCK_PUBLIC_POOL_SIZE=0 and redeploy to restore the previous reader policy.
+DUCK_PUBLIC_POOL_SIZE = int(os.getenv("DUCK_PUBLIC_POOL_SIZE", "1"))
+if DUCK_PUBLIC_POOL_SIZE not in (0, 1):
+    raise ValueError("DUCK_PUBLIC_POOL_SIZE must be 0 or 1")
+_DUCK_PUBLIC_POOL = None
 
 def _apply_duck_pragmas(conn: duckdb.DuckDBPyConnection):
     duck_tmp = str((LOCAL_CACHE_DIR / "duckdb_tmp").resolve())
@@ -170,9 +178,10 @@ def ensure_duck_conn() -> duckdb.DuckDBPyConnection:
     Backwards-compatible initializer. Returns a connection.
     Also initializes a small pool used for query execution.
     """
-    global DUCK_CONN, _DUCK_POOL
+    global DUCK_CONN, _DUCK_POOL, _DUCK_PUBLIC_POOL
 
-    if DUCK_CONN is not None and _DUCK_POOL is not None:
+    if (DUCK_CONN is not None and _DUCK_POOL is not None
+            and (DUCK_PUBLIC_POOL_SIZE == 0 or _DUCK_PUBLIC_POOL is not None)):
         return DUCK_CONN
 
     with DUCK_INIT_LOCK:
@@ -191,6 +200,16 @@ def ensure_duck_conn() -> duckdb.DuckDBPyConnection:
                 _apply_duck_pragmas(c)
                 _DUCK_POOL.put(c)
 
+        if DUCK_PUBLIC_POOL_SIZE and _DUCK_PUBLIC_POOL is None:
+            import queue
+            _DUCK_PUBLIC_POOL = queue.Queue(maxsize=1)
+            c = duckdb.connect(str(DUCKDB_PATH), read_only=False)
+            _apply_duck_pragmas(c)
+            _DUCK_PUBLIC_POOL.put(c)
+        logger.info("DuckDB readers configured: analytical=%s public_lookup=%s threads=%s memory_limit=%s",
+                    DUCK_POOL_SIZE, DUCK_PUBLIC_POOL_SIZE,
+                    os.getenv("DUCKDB_THREADS", "1"), os.getenv("DUCKDB_MEM", "650MB"))
+
     return DUCK_CONN
 
 # ✅ New names you referenced in lifespan/reload — now they exist.
@@ -200,18 +219,21 @@ def ensure_duck_write_conn() -> duckdb.DuckDBPyConnection:
 
 def _close_all_duck_read_conns():
     # In low-memory mode, pool conns are the "read conns".
-    global _DUCK_POOL, DUCK_CONN
-    if _DUCK_POOL is not None:
+    global _DUCK_POOL, _DUCK_PUBLIC_POOL, DUCK_CONN
+    for pool in (_DUCK_POOL, _DUCK_PUBLIC_POOL):
+        if pool is None:
+            continue
         try:
             while True:
-                c = _DUCK_POOL.get_nowait()
+                c = pool.get_nowait()
                 try:
                     c.close()
                 except Exception:
                     pass
         except Exception:
             pass
-        _DUCK_POOL = None
+    _DUCK_POOL = None
+    _DUCK_PUBLIC_POOL = None
 
 def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool = False) -> pd.DataFrame:
     """
@@ -231,9 +253,15 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
 
     # Read mode: use pool
     c = None
+    pool = _DUCK_POOL
+    public_lookup = _DUCK_PUBLIC_POOL is not None and is_reserved_public_lookup(sql)
+    if public_lookup and not public_reader_memory_ok():
+        public_lookup = False
+    if public_lookup:
+        pool = _DUCK_PUBLIC_POOL
     wait_started = time.perf_counter()
     try:
-        c = _DUCK_POOL.get(timeout=float(os.getenv("DUCK_POOL_TIMEOUT", "60")))
+        c = pool.get(timeout=float(os.getenv("DUCK_POOL_TIMEOUT", "60")))
         wait_seconds = time.perf_counter() - wait_started
         # Use a cursor for isolation of statement state
         query_started = time.perf_counter()
@@ -245,16 +273,19 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
             query_seconds = time.perf_counter() - query_started
             if wait_seconds >= 1 or query_seconds >= 2:
                 # No SQL parameters, user identities or row contents in logs.
-                logger.warning("Slow DuckDB read query=%s wait_ms=%.1f execute_ms=%.1f pool_available=%s",
+                logger.warning("Slow DuckDB read query=%s wait_ms=%.1f execute_ms=%.1f pool_available=%s pool=%s",
                                hashlib.sha256(sql.encode()).hexdigest()[:12],
-                               wait_seconds * 1000, query_seconds * 1000, _DUCK_POOL.qsize())
+                               wait_seconds * 1000, query_seconds * 1000, pool.qsize(),
+                               "public_lookup" if public_lookup else "analytical")
         return df_sanitize_for_json(df)
     finally:
         if c is not None:
             try:
-                _DUCK_POOL.put(c)
+                pool.put(c)
             except Exception:
                 pass
+        if public_lookup:
+            public_reader_memory_ok()
 
 
 
