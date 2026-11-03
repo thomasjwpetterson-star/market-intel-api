@@ -37,6 +37,33 @@ class PrivateV7Reference(unittest.TestCase):
             ('same-contract-different-award',2025,'DEPARTMENT OF THE AIR FORCE','DEPARTMENT OF DEFENSE',90000,None,None),
             ('reviewed-cleared',2025,'DEPARTMENT OF THE AIR FORCE','DEPARTMENT OF DEFENSE',200,None,None)])
         self.columns={'award_key','year','sub_agency','parent_agency','spend_amount','niin','nsn'}
+    def test_private_record_route_uses_v7_clears_and_requires_proxy_auth(self):
+        import ast,os,hmac
+        from typing import Any,Dict
+        from pathlib import Path
+        from unittest.mock import Mock,patch
+        from fastapi import FastAPI,Request,Response,HTTPException
+        from fastapi.testclient import TestClient
+        for column in ['contract_id','platform_family','vendor_cage','vendor_name','description']:
+            self.db.execute('ALTER TABLE v_transactions ADD COLUMN '+column+' VARCHAR')
+        self.db.execute("UPDATE v_transactions SET contract_id=award_key,platform_family='AMRAAM',vendor_cage='12345',vendor_name='SOURCE VENDOR'")
+        columns=self.columns|{'contract_id','platform_family','vendor_cage','vendor_name','description'}
+        node=next(n for n in ast.parse(Path('main.py').read_text()).body if isinstance(n,ast.FunctionDef)and n.name=='private_programme_records');node.decorator_list=[]
+        ns=dict(Dict=Dict,Any=Any,Request=Request,Response=Response,HTTPException=HTTPException,os=os,hmac=hmac,logger=Mock(),
+            GLOBAL_CACHE={'last_loaded':1,'is_loading':False,'platform_release':{'components':{'main':{'release_id':'main-fixture'}}}},
+            get_duck_table_columns=lambda _:columns,programme_read_df=lambda sql,params:self.db.execute(sql,params).fetchdf(),df_sanitize_for_json=lambda df:df.astype(object).where(df.notna(),None))
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'main.py','exec'),ns);app=FastAPI();app.post('/records')(ns['private_programme_records']);client=TestClient(app)
+        payload={'program':'AMRAAM','years':[2025],'section':'contractors'}
+        with patch.dict(os.environ,{'MIMIR_EXPORT_PROXY_SECRET':'fixture-key'}),patch('private_platform_reference.reference_for',return_value=self.reference):
+            self.assertEqual(client.post('/records',json=payload).status_code,401)
+            headers={'X-Mimir-Export-Key':'fixture-key'}
+            response=client.post('/records',json=payload,headers=headers);self.assertEqual(response.status_code,200,response.json())
+            self.assertEqual(sum(r['total']for r in response.json()),94000)
+            self.assertIn('private, no-store',response.headers['Cache-Control'])
+            self.assertEqual(client.post('/records',json={**payload,'sql':'arbitrary'},headers=headers).status_code,400)
+            ns['GLOBAL_CACHE']['is_loading']=True
+            self.assertEqual(client.post('/records',json=payload,headers=headers).status_code,503)
+
     def test_reviewed_items_respect_market_domain_filter(self):
         self.db.execute("ALTER TABLE v_transactions ADD COLUMN market_segment VARCHAR")
         self.db.execute("UPDATE v_transactions SET market_segment='AIR'")
