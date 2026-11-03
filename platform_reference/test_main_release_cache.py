@@ -76,12 +76,15 @@ class MainReleaseCacheTests(unittest.TestCase):
             stage_main_cache(FakeS3(self.objects), "bucket", self.manifest, root)
 
     def test_optional_lookup_is_bound_to_source_and_staged_with_hash_verification(self):
+        root = Path(self.temp.name) / "lookup-release"
+        original = stage_main_cache(FakeS3(self.objects), "bucket", self.manifest, root)
         source = next(row for row in self.manifest["files"] if row["local_path"] == "contracts_rolled.parquet")
         lookup = {**source, "local_path": "contracts_lookup.parquet",
                   "source_asset_sha256": asset_fingerprint(source)}
         self.manifest["files"].append(lookup)
-        release = stage_main_cache(FakeS3(self.objects), "bucket", self.manifest,
-                                   Path(self.temp.name) / "lookup-release")
+        release = stage_main_cache(FakeS3(self.objects), "bucket", self.manifest, root)
+        self.assertNotEqual(release, original)
+        self.assertTrue(original.exists())
         self.assertTrue((release / "contracts_lookup.parquet").is_file())
         lookup["source_asset_sha256"] = "0" * 64
         with self.assertRaisesRegex(ValueError, "does not match"):

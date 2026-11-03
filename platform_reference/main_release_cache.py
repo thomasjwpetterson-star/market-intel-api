@@ -150,9 +150,13 @@ def stage_main_cache(s3: Any, bucket: str, manifest: dict, release_root: Path) -
     release_id = manifest["release_id"]
     if release_id != Path(release_id).name:
         raise ValueError("unsafe Main release ID")
-    final = release_root / release_id
-    marker = final / ".verified-manifest.json"
     fingerprint = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+    # A disk-layout annex retains the logical analytical release identity. Give
+    # its exact manifest a separate local directory so both variants can coexist
+    # and rollback never collides with an already verified source directory.
+    directory = release_id + "-lookup-" + fingerprint[:16] if "contracts_lookup.parquet" in entries else release_id
+    final = release_root / directory
+    marker = final / ".verified-manifest.json"
     if marker.exists():
         try:
             if json.loads(marker.read_text()).get("fingerprint") == fingerprint:
@@ -172,7 +176,7 @@ def stage_main_cache(s3: Any, bucket: str, manifest: dict, release_root: Path) -
             pass
     if final.exists():
         raise ValueError("existing unverified Main cache directory must be inspected")
-    staging = release_root / (release_id + ".staging")
+    staging = release_root / (directory + ".staging")
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
