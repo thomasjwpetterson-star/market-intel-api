@@ -1,0 +1,12 @@
+{
+  "accepted_main_release_id": "mimir-main-platform-v7-f1061f419b2c48c1",
+  "base_platform_reference_release_id": "2026-10-15-hellfire-jagm-split-v7",
+  "manifest": {
+    "bucket": "a-and-d-intel-lake-newaccount",
+    "key": "governance/platform_reference/candidates/2026-11-04-amraam-navy-awards-v7-private/manifest.json",
+    "s3_version_id": "Rvle92HzbN6zCfBT2EWrpZQxC5SPciId",
+    "sha256": "127b690f9bc83f6aa467e9c892c8026390513fbf03a243451b239e2d4e8caee4",
+    "bytes": 24797
+  },
+  "binding_basis": "Selected shared v7 methodology; verified private seven-award successor. Public Main pointer is unchanged."
+}

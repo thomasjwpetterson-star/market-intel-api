@@ -66,7 +66,7 @@ class ResearchQueries(unittest.TestCase):
         query=build_queries({'dataset':'contract_actions','filters':{'psc':'5840'},'group_by':['year','company']})
         plan=json.loads(self.db.execute('EXPLAIN (FORMAT JSON) '+query['combined_sql'],query['combined_params']).fetchone()[1])
         def scans(nodes):
-            return sum((1 if node.get('extra_info',{}).get('Table','').endswith('.v_transactions') else 0)+scans(node.get('children',[])) for node in nodes)
+            return sum((1 if node.get('extra_info',{}).get('Table','').split('.')[-1]=='v_transactions' else 0)+scans(node.get('children',[])) for node in nodes)
         self.assertEqual(scans(plan),1)
 
     def test_missing_series_is_null(self):

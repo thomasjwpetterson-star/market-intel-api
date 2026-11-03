@@ -27,6 +27,33 @@ class BuyerItemFunding(unittest.TestCase):
         cursor=self.db.execute(sql,params)
         return [dict(zip([c[0] for c in cursor.description],r)) for r in cursor.fetchall()]
 
+    def test_private_route_authentication_and_reviewed_item_null_money(self):
+        import ast,hmac,os
+        from typing import Any,Dict
+        from fastapi import HTTPException,Request,Response
+        from unittest.mock import patch
+        from pathlib import Path
+        node=next(n for n in ast.parse(Path('main.py').read_text()).body if isinstance(n,ast.FunctionDef)and n.name=='private_programme_parts');node.decorator_list=[]
+        ns=dict(Dict=Dict,Any=Any,Request=Request,Response=Response,HTTPException=HTTPException,os=os,hmac=hmac,logger=Mock(),GLOBAL_CACHE={'last_loaded':1,'is_loading':False},
+            df_sanitize_for_json=lambda df:df.astype(object).where(df.notna(),None),programme_read_df=lambda sql,params:self.db.execute(sql,params).fetchdf(),
+            private_v7_coverage=lambda payload:{'reviewed_items':[{'niin':'014812863','nsn':'5999014812863','item_name':'ADAPTER,TEST,AMRAAM','evidence_count':2}]})
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'main.py','exec'),ns)
+        app=FastAPI();app.post('/items')(ns['private_programme_parts']);client=TestClient(app)
+        payload={'name':'AMRAAM','years':[2025],'agency':'Navy','include_zero':True,'min_spend':0}
+        with patch.dict(os.environ,{'MIMIR_EXPORT_PROXY_SECRET':'fixture-key'}):
+            self.assertEqual(client.post('/items',json=payload).status_code,401)
+            headers={'X-Mimir-Export-Key':'fixture-key'}
+            response=client.post('/items',json=payload,headers=headers);self.assertEqual(response.status_code,200)
+            item=next(r for r in response.json()if r['niin']=='014812863')
+            self.assertIsNone(item['amount']);self.assertIsNone(item['total_units_sold'])
+            self.assertEqual(item['financial_grain'],'ITEM_REFERENCE_ONLY')
+            self.assertIn('private, no-store',response.headers['Cache-Control'])
+            count=client.post('/items',json={**payload,'count_only':True},headers=headers)
+            self.assertEqual(count.json()['count'],len(response.json()))
+            self.assertEqual(client.post('/items',json={**payload,'sql':'SELECT 1'},headers=headers).status_code,400)
+            ns['GLOBAL_CACHE']['is_loading']=True
+            self.assertEqual(client.post('/items',json=payload,headers=headers).status_code,503)
+
     def test_buyers_get_different_real_values_and_matching_items(self):
         navy=self.read(agency='Navy',years=[2025]);air=self.read(agency='Air Force',years=[2025])
         self.assertEqual([(r['niin'],r['amount']) for r in navy],[('000000001',80),('000000002',0)])
@@ -81,6 +108,20 @@ class BuyerItemFunding(unittest.TestCase):
         sql,params=build_parts_query("AMRAAM' OR 1=1 --",agency="NAVY' OR 1=1 --")
         self.assertNotIn("OR 1=1 --",sql);self.assertIn("AMRAAM' OR 1=1 --",params)
         self.assertEqual(self.read(agency="NAVY' OR 1=1 --"),[])
+
+    def test_reviewed_award_item_link_is_visible_without_inventing_item_funding(self):
+        evidence=[{'niin':'014812863','nsn':'5999014812863','item_name':'ADAPTER,TEST,AMRAAM','evidence_count':2}]
+        rows=self.read(agency='Navy',years=[2025],reviewed_items=evidence)
+        row=next(r for r in rows if r['niin']=='014812863')
+        self.assertEqual(row['nsn'],'5999014812863');self.assertEqual(row['reviewed_award_item_evidence_count'],2)
+        self.assertEqual(row['financial_record_count'],0);self.assertIsNone(row['amount']);self.assertIsNone(row['total_units_sold'])
+        self.assertEqual(row['matching_item_count'],3)
+        self.assertEqual(self.read(agency='Navy',years=[2025],reviewed_items=evidence,count_only=True)[0]['count'],3)
+        self.assertTrue(all(r['niin']!='014812863'for r in self.read(agency='Navy',years=[2025],reviewed_items=evidence,min_spend=1)))
+
+    def test_native_funding_is_not_duplicated_when_reviewed_link_matches_existing_item(self):
+        rows=self.read(agency='Navy',years=[2025],reviewed_items=[{'niin':'000000001','evidence_count':2}])
+        self.assertEqual(len(rows),2);self.assertEqual(rows[0]['amount'],80)
 
     def test_real_http_routes_return_buyer_filtered_json_and_matching_count(self):
         ns=namespace();ns['duck_fetch_df']=lambda sql,params:self.db.execute(sql,params).fetchdf();ns['logger']=Mock()

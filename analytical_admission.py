@@ -11,6 +11,8 @@ logger = logging.getLogger("mimir-api")
 READ_BUDGETS = {
     ("POST", "/api/research/aggregate"): 38,
     ("POST", "/api/research/programme-coverage"): 28,
+    ("POST", "/api/research/programme-parts"): 28,
+    ("POST", "/api/research/programme-records"): 28,
     ("POST", "/api/explorer/page"): 16,
     ("POST", "/api/explorer/count"): 16,
     ("GET", "/api/platform/parts"): 28,

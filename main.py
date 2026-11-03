@@ -5496,7 +5496,8 @@ def private_research_aggregate(payload: Dict[str, Any], request: Request, respon
 
 @app.post("/api/research/programme-coverage")
 def private_programme_coverage(payload: Dict[str, Any], request: Request, response: Response):
-    from programme_coverage import run_coverage
+    from programme_coverage import run_coverage, build_coverage_query
+    from private_platform_reference import summary_coverage
     expected = os.getenv("MIMIR_EXPORT_PROXY_SECRET", "").strip()
     supplied = request.headers.get("X-Mimir-Export-Key", "").strip()
     if not expected or not supplied or not hmac.compare_digest(expected, supplied):
@@ -5505,8 +5506,23 @@ def private_programme_coverage(payload: Dict[str, Any], request: Request, respon
     if not before or GLOBAL_CACHE.get("is_loading", False):
         raise HTTPException(status_code=503, detail="Research data is updating. Retry shortly.")
     try:
-        value = run_coverage(payload, get_duck_table_columns("v_transactions"),
-            lambda sql, params: df_sanitize_for_json(programme_read_df(sql, params)).to_dict(orient="records"))
+        payload=dict(payload);mode=payload.pop('mode','detailed')
+        if mode not in {'summary','detailed'}:raise ValueError('Choose summary or detailed programme coverage.')
+        build_coverage_query(payload,get_duck_table_columns('v_transactions'))
+        try:
+            current = private_v7_coverage(payload)
+        except ValueError as error:
+            raise RuntimeError("Private v7 authority is unavailable or bound to another source.") from error
+        if mode=='summary' and current and current.get('effective_programme_scope'):
+            value=summary_coverage(payload,current)
+        else:
+            value = run_coverage(payload, get_duck_table_columns("v_transactions"),
+                lambda sql, params: df_sanitize_for_json(programme_read_df(sql, params)).to_dict(orient="records"))
+        if current is not None:
+            value["reviewed_v7_context"] = current
+            value["primary_label_count_interpretation"] = "Detailed primary-label metrics describe the accepted Main source snapshot. Use reviewed_v7_context for current authoritative programme associations."
+            if current.get("reviewed_award_count") and not value["selected_scope"]["programme_action_count"]:
+                value["reason"] = "current_v7_associations_available_outside_main_primary_labels"
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except HTTPException:
@@ -5519,6 +5535,85 @@ def private_programme_coverage(payload: Dict[str, Any], request: Request, respon
     value["source_generation"] = str(before)
     response.headers["Cache-Control"] = "private, no-store"
     return value
+
+
+def private_v7_coverage(payload):
+    from private_platform_reference import programme_context
+    release=GLOBAL_CACHE.get("platform_release") or {}
+    main_release=release.get("components",{}).get("main",{}).get("release_id")
+    return programme_context(payload,
+        lambda sql,params:df_sanitize_for_json(programme_read_df(sql,params)).to_dict(orient="records"),
+        get_duck_table_columns("v_transactions"),main_release)
+
+
+@app.post("/api/research/programme-parts")
+def private_programme_parts(payload: Dict[str, Any],request: Request,response: Response):
+    expected=os.getenv("MIMIR_EXPORT_PROXY_SECRET","").strip()
+    supplied=request.headers.get("X-Mimir-Export-Key","").strip()
+    if not expected or not supplied or not hmac.compare_digest(expected,supplied):
+        raise HTTPException(status_code=401,detail="An authenticated Mimir research proxy is required.")
+    before=GLOBAL_CACHE.get("last_loaded")
+    if not before or GLOBAL_CACHE.get("is_loading",False):raise HTTPException(status_code=503,detail="Research data is updating.")
+    from programme_parts import build_parts_query
+    try:
+        payload=dict(payload);count_only=payload.pop('count_only',False)
+        if type(count_only)is not bool:raise ValueError('Choose a valid count operation.')
+        if set(payload)-{'name','years','agency','domain','include_zero','min_spend','limit','offset'}:
+            raise ValueError("Choose documented programme item filters.")
+        build_parts_query(**payload)
+        context_payload={'program':payload['name'],**{k:payload[k]for k in ['years','agency','domain']if k in payload}}
+        current=private_v7_coverage(context_payload)
+        evidence={}
+        for item in (current or {}).get('reviewed_items',[]):
+            row=evidence.setdefault(item['niin'],{'niin':item['niin'],'nsn':item['nsn'],'item_name':item['item_name'],'evidence_count':0})
+            row['evidence_count']+=item['evidence_count']
+        if count_only:
+            payload.pop('limit',None);payload.pop('offset',None)
+        sql,params=build_parts_query(**payload,reviewed_items=list(evidence.values()),count_only=count_only)
+        rows=df_sanitize_for_json(programme_read_df(sql,params)).to_dict(orient='records')
+        for row in []if count_only else rows:
+            item_only=not row.get('financial_record_count') and row.get('reviewed_award_item_evidence_count',0)>0
+            row['financial_grain']='ITEM_REFERENCE_ONLY'if item_only else'NIIN_BUYER_FISCAL_YEAR'
+            row['funding_basis']='reviewed_v7_award_item_link_without_item_funding_allocation'if item_only else'recorded_actions_with_pre_cache_item_history'
+            row['shared_platform_exposure']=int(row.get('platform_count')or 0)>1
+            if row.get('last_sold')is not None:row['last_sold']=str(row['last_sold'])
+    except (ValueError,TypeError,KeyError)as error:
+        raise HTTPException(status_code=400,detail=str(error))from error
+    except Exception as error:
+        logger.exception("Private v7 programme item lookup failed")
+        raise HTTPException(status_code=503,detail="Programme item evidence is temporarily unavailable.")from error
+    if GLOBAL_CACHE.get('last_loaded')!=before or GLOBAL_CACHE.get('is_loading',False):
+        raise HTTPException(status_code=503,detail="Research data changed. Retry the query.")
+    response.headers['Cache-Control']='private, no-store'
+    return rows[0]if count_only else rows
+
+
+@app.post("/api/research/programme-records")
+def private_programme_records(payload: Dict[str, Any],request: Request,response: Response):
+    expected=os.getenv("MIMIR_EXPORT_PROXY_SECRET","").strip()
+    supplied=request.headers.get("X-Mimir-Export-Key","").strip()
+    if not expected or not supplied or not hmac.compare_digest(expected,supplied):
+        raise HTTPException(status_code=401,detail="An authenticated Mimir research proxy is required.")
+    before=GLOBAL_CACHE.get('last_loaded')
+    if not before or GLOBAL_CACHE.get('is_loading',False):raise HTTPException(status_code=503,detail="Research data is updating.")
+    try:
+        if set(payload)-{'program','years','agency','section','limit','offset'}:raise ValueError('Choose documented programme filters.')
+        from programme_coverage import build_coverage_query
+        from private_platform_reference import programme_records
+        columns=get_duck_table_columns('v_transactions')
+        build_coverage_query({k:v for k,v in payload.items()if k in {'program','years','agency'}},columns)
+        release=GLOBAL_CACHE.get('platform_release')or{}
+        rows=programme_records(payload,lambda sql,params:df_sanitize_for_json(programme_read_df(sql,params)).to_dict(orient='records'),
+            columns,release.get('components',{}).get('main',{}).get('release_id'))
+    except (ValueError,TypeError,KeyError)as error:
+        raise HTTPException(status_code=400,detail=str(error))from error
+    except Exception as error:
+        logger.exception('Private v7 programme records failed')
+        raise HTTPException(status_code=503,detail='Programme records are temporarily unavailable.')from error
+    if GLOBAL_CACHE.get('last_loaded')!=before or GLOBAL_CACHE.get('is_loading',False):
+        raise HTTPException(status_code=503,detail='Research data changed. Retry the query.')
+    response.headers['Cache-Control']='private, no-store'
+    return rows
 
 
 @app.post("/api/explorer/count")

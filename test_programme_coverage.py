@@ -110,8 +110,20 @@ class ProgrammeCoverage(unittest.TestCase):
         ns=dict(Dict=Dict,Any=Any,Request=Request,Response=Response,HTTPException=HTTPException,os=os,hmac=hmac,logger=Mock(),GLOBAL_CACHE={'last_loaded':1,'is_loading':False},get_duck_table_columns=lambda _:self.columns,duck_fetch_df=lambda sql,params:self.db.execute(sql,params).fetchdf(),df_sanitize_for_json=lambda df:df)
         exec(compile(ast.Module(body=[node],type_ignores=[]),'main.py','exec'),ns)
         ns['programme_read_df']=lambda sql,params:ns['duck_fetch_df'](sql,params)
+        ns['private_v7_coverage']=lambda payload:None
         app=FastAPI();app.post('/coverage')(ns['private_programme_coverage'])
         return TestClient(app),ns
+
+    def test_summary_route_uses_current_v7_counts_without_full_description_scan(self):
+        client,ns=self.route_client()
+        ns['private_v7_coverage']=lambda p:{'effective_programme_scope':{'action_count':22,'actions_with_native_item_number':0,'source_net_obligations_usd':4420542.77},'reviewed_award_count':7}
+        ns['programme_read_df']=Mock(side_effect=AssertionError('Full description scan should not run'))
+        with patch.dict(os.environ,{'MIMIR_EXPORT_PROXY_SECRET':'fixture-key'}):
+            r=client.post('/coverage',json={'program':'AMRAAM','agency':'Navy','years':[2025],'mode':'summary'},headers={'X-Mimir-Export-Key':'fixture-key'})
+            self.assertEqual(r.status_code,200);self.assertEqual(r.json()['selected_scope']['programme_action_count'],22)
+            self.assertEqual(r.json()['count_basis'],'CURRENT_V7_ASSOCIATED_ACTIONS')
+            self.assertFalse(r.json()['description_candidates_evaluated'])
+            ns['programme_read_df'].assert_not_called()
 
     def test_route_requires_existing_proxy_key_and_retains_private_cache_control(self):
         client,ns=self.route_client()
