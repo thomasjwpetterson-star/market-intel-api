@@ -5858,28 +5858,38 @@ def get_filter_options(
 # --- UPDATE IN API.PY ---
 
 def get_recompete_kpi(filters):
-    where_sql, params = build_summary_where(None, filters)
-
     try:
+        # The risk sidecar has `psc`, while the summary has `psc_code` and
+        # `psc_description`. Resolve description selections through the summary.
+        psc = filters.get("psc")
+        where_sql, params = build_summary_where(None, {**filters, "psc": None})
+        if psc:
+            where_sql += """ AND (
+                upper(psc) LIKE ? ESCAPE '\\'
+                OR upper(psc) IN (
+                    SELECT upper(psc_code) FROM v_summary
+                    WHERE upper(psc_description) LIKE ? ESCAPE '\\'
+                )
+            )"""
+            p = _like_param_contains(psc)
+            params.extend([p, p])
+
         risk_schema = duck_fetch_df("DESCRIBE v_risk")
         risk_columns = {
             str(value).strip().lower()
             for value in risk_schema.get("column_name", pd.Series(dtype=str)).dropna().tolist()
         }
-    except Exception:
-        risk_columns = set()
-    risk_identity = "award_key" if "award_key" in risk_columns else "contract_id"
-    
-    query = f"""
-        SELECT 
-            SUM(spend_amount) as total_value,
-            COUNT(DISTINCT {risk_identity}) as count
-        FROM v_risk
-        WHERE {where_sql}
-          AND try_cast(completion_date as date) >= current_date()
-          AND try_cast(completion_date as date) <= current_date() + INTERVAL 90 DAY
-    """
-    try:
+        risk_identity = "award_key" if "award_key" in risk_columns else "contract_id"
+
+        query = f"""
+            SELECT
+                SUM(spend_amount) as total_value,
+                COUNT(DISTINCT {risk_identity}) as count
+            FROM v_risk
+            WHERE {where_sql}
+              AND try_cast(completion_date as date) >= current_date()
+              AND try_cast(completion_date as date) <= current_date() + INTERVAL 90 DAY
+        """
         df = duck_fetch_df(query, params)
         if df.empty or pd.isna(df['total_value'].iloc[0]):
             return {"label": "Obligations on Awards Ending (90d)", "value": "N/A", "sub_label": "No Data"}
@@ -5894,8 +5904,8 @@ def get_recompete_kpi(filters):
             "status": "warning"
         }
     except Exception as e:
-        logger.error(f"Risk KPI Error: {e}")
-        return {"label": "Obligations on Awards Ending (90d)", "value": "N/A", "sub_label": "No Data"}
+        logger.exception("Risk KPI calculation failed")
+        raise HTTPException(status_code=500, detail="Risk KPI calculation failed") from e
     
 
 @app.get("/api/dashboard/kpis")
