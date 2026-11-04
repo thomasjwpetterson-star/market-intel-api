@@ -1,13 +1,30 @@
 {
-  "accepted_main_release_id": "mimir-main-platform-v7-17e2482d60fbb5ed",
-  "base_platform_reference_release_id": "2026-10-15-hellfire-jagm-split-v7",
-  "main_source_fingerprint": "d46898e722c095b9d26c3a153be8fc69d485b93bf6b038e74a6427c41673c8e9",
-  "manifest": {
-    "bucket": "a-and-d-intel-lake-newaccount",
-    "key": "governance/platform_reference/candidates/2026-11-04-native-item-crosswalk-v7-private-main-17e2482d60fb/manifest.json",
-    "s3_version_id": "vHprpo075Ep2ebhqJQ2RQHGvzCbgB3SI",
-    "sha256": "ba832245fac24b6b2407a86d8199782bbe9bfa469336abcc458a5415cffc0813",
-    "bytes": 27899
-  },
-  "binding_basis": "Explicit exact-native-key compatibility with unchanged reviewed v7 authority; both Athena checks passed. No new mapping, financial allocation or item link."
+  "schema_version": 2,
+  "bindings": [
+    {
+      "accepted_main_release_id": "mimir-main-platform-v7-f1061f419b2c48c1",
+      "base_platform_reference_release_id": "2026-10-15-hellfire-jagm-split-v7",
+      "manifest": {
+        "bucket": "a-and-d-intel-lake-newaccount",
+        "key": "governance/platform_reference/candidates/2026-11-04-native-item-crosswalk-v7-private/manifest.json",
+        "s3_version_id": "WwymyY_NXHo9ZO.X.uyT2sW27PCeSSo.",
+        "sha256": "5d25c0021f388b09c0a3b054923b0580e9a2880a8a45a861fc2653ded22980df",
+        "bytes": 25941
+      },
+      "binding_basis": "Selected shared private v7 authority; exact native item crosswalk successor."
+    },
+    {
+      "accepted_main_release_id": "mimir-main-platform-v7-17e2482d60fbb5ed",
+      "base_platform_reference_release_id": "2026-10-15-hellfire-jagm-split-v7",
+      "main_source_fingerprint": "d46898e722c095b9d26c3a153be8fc69d485b93bf6b038e74a6427c41673c8e9",
+      "manifest": {
+        "bucket": "a-and-d-intel-lake-newaccount",
+        "key": "governance/platform_reference/candidates/2026-11-04-native-item-crosswalk-v7-private-main-17e2482d60fb/manifest.json",
+        "s3_version_id": "vHprpo075Ep2ebhqJQ2RQHGvzCbgB3SI",
+        "sha256": "ba832245fac24b6b2407a86d8199782bbe9bfa469336abcc458a5415cffc0813",
+        "bytes": 27899
+      },
+      "binding_basis": "Explicit exact-native-key compatibility with unchanged reviewed v7 authority; both Athena checks passed. No new mapping, financial allocation or item link."
+    }
+  ]
 }

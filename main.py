@@ -47,6 +47,7 @@ import csv
 import json
 import hashlib
 from programme_read_cache import ProgrammeReadCache
+from private_platform_reference import PrivateReferenceUnavailable
 from fastapi import APIRouter
 from dotenv import load_dotenv
 
@@ -346,6 +347,11 @@ async def lifespan(app: FastAPI):
             allow_candidate_preview=(os.getenv("MIMIR_PLATFORM_ALLOW_CANDIDATE_PREVIEW", "0") == "1"),
         )
         manifest = bundle["components"]["main"]
+        from private_platform_reference import validate_release_binding
+        private_binding = await asyncio.to_thread(validate_release_binding, bundle, s3_release)
+        if private_binding:
+            logger.info("Private reference preflight passed: main=%s mapping=%s",
+                        private_binding['main_release_id'], private_binding['mapping_release_id'])
         release_root = Path(os.getenv("MIMIR_MAIN_RELEASE_ROOT", str(LOCAL_CACHE_DIR.parent / "main-releases")))
         LOCAL_CACHE_DIR = await asyncio.to_thread(
             stage_main_cache, s3_release, bucket, manifest, release_root
@@ -649,6 +655,13 @@ app.add_middleware(
 def live_check():
     return {"status": "ok"}
 
+@app.exception_handler(PrivateReferenceUnavailable)
+async def private_reference_unavailable(request: Request, error: Exception):
+    logger.error("Private research reference unavailable: path=%s reason=%s", request.url.path, type(error).__name__)
+    return JSONResponse(status_code=503,content={'detail':'Private research reference is temporarily unavailable.'},
+        headers={'Cache-Control':'private, no-store','Retry-After':'30'})
+
+
 def get_readiness_state() -> Dict[str, Any]:
     cache = GLOBAL_CACHE
 
@@ -657,15 +670,17 @@ def get_readiness_state() -> Dict[str, Any]:
 
     profiles_ok = not cache.get("profiles_df", pd.DataFrame()).empty
     duck_ok = DUCK_CONN is not None
+    private_reference_ok = bool(cache.get('private_reference_ready', True))
 
     # geo_df is now handled by DuckDB, so we remove it from the strict readiness check
-    ready = bool(duck_ok and profiles_ok and (not is_loading) and (last_loaded and last_loaded > 0))
+    ready = bool(duck_ok and profiles_ok and private_reference_ok and (not is_loading) and (last_loaded and last_loaded > 0))
 
     return {
         "ready": ready,
         "duck_ok": bool(duck_ok),
         "geo_ok": True, # Hardcoded to true for backwards compatibility with UI
         "profiles_ok": bool(profiles_ok),
+        "private_reference_ok": private_reference_ok,
         "is_loading": bool(is_loading),
         "last_loaded": last_loaded,
     }
@@ -686,6 +701,7 @@ async def ready_check(response: Response):
         "duck_ok": bool(s["duck_ok"]),
         "geo_ok": bool(s["geo_ok"]),
         "profiles_ok": bool(s["profiles_ok"]),
+        "private_reference_ok": bool(s["private_reference_ok"]),
     }
 
 
@@ -3211,6 +3227,9 @@ def reload_all_data():
                 platform_bundle["platform"]["etl_run_id"],
             )
 
+        from private_platform_reference import validate_release_binding
+        private_binding = validate_release_binding(platform_bundle, s3)
+
         # 1. PREPARE TEMPORARY STATE
         new_global_cache = {
             "is_loading": True,
@@ -3234,6 +3253,7 @@ def reload_all_data():
                 dict(platform_bundle["platform"]) if platform_bundle else None
             ),
             "public_page_projections_ready": False,
+            "private_reference_ready": bool(private_binding) if platform_bundle and platform_bundle['platform'].get('schema_version')==2 else True,
         }
 
         # 2. DOWNLOAD FILES

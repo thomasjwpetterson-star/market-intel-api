@@ -17,6 +17,76 @@ BUCKET='a-and-d-intel-lake-newaccount'
 PREFIX='governance/platform_reference/candidates/'
 _lock=threading.Lock()
 _cached=None
+BINDING_PATH=Path(__file__).with_name('private_v7_binding.json')
+
+
+class PrivateReferenceUnavailable(RuntimeError):
+    """A selected private authority cannot safely serve the active source."""
+
+
+def binding_for(main_release_id):
+    if not BINDING_PATH.exists():return None
+    try:
+        config=json.loads(BINDING_PATH.read_text())
+        if 'schema_version' not in config:
+            bindings=[config]
+        elif config.get('schema_version')==2:
+            bindings=config.get('bindings')
+        else:raise ValueError('Unsupported private binding catalog.')
+        if not isinstance(bindings,list)or not 1<=len(bindings)<=16:
+            raise ValueError('Private bindings must be a bounded release catalog.')
+        ids=[b['accepted_main_release_id']for b in bindings]
+        if len(set(ids))!=len(ids):raise ValueError('Duplicate private source binding.')
+        matches=[b for b in bindings if b['accepted_main_release_id']==main_release_id]
+        if len(matches)!=1:
+            raise PrivateReferenceUnavailable('The private v7 mapping is bound to a different Main source release.')
+        return matches[0]
+    except PrivateReferenceUnavailable:raise
+    except Exception as error:
+        raise PrivateReferenceUnavailable('The private v7 binding catalog is invalid.')from error
+
+
+def main_source_fingerprint(main):
+    # An independently rebuilt lookup must not invalidate an unchanged source.
+    source={'release_id':main['release_id'],'platform_reference_release_id':main['platform_reference_release_id'],
+        'files':sorted([f for f in main['files']if f['local_path']!='contracts_lookup.parquet'],key=lambda f:f['local_path'])}
+    return hashlib.sha256(json.dumps(source,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def _manifest_for(client,binding):
+    m=json.loads(read_pin(client,binding['manifest']))
+    if (m.get('schema_version')!='platform-award-remap-cloud-candidate-v1'
+        or m.get('accepted_main_release_id')!=binding['accepted_main_release_id']
+        or m.get('base_platform_reference_release_id')!=binding['base_platform_reference_release_id']
+        or m.get('customer_publication_eligible')is not False
+        or binding.get('main_source_fingerprint')and m.get('main_source_fingerprint')!=binding['main_source_fingerprint']):
+        raise ValueError('Private mapping authority does not match the selected v7 source.')
+    return m
+
+
+def validate_release_binding(bundle,client):
+    """Check the exact source/authority pair before staging or marking it ready.
+
+    Reads one small manifest only; never loads another corpus or reader pool.
+    """
+    if not bundle or bundle.get('platform',{}).get('schema_version')!=2:return None
+    try:
+        main=bundle['components']['main'];base=bundle['components']['platform_reference']
+        binding=binding_for(main['release_id'])
+        if binding is None:raise ValueError('Private source binding is missing.')
+        if binding['base_platform_reference_release_id']!=main['platform_reference_release_id']or base['release_id']!=main['platform_reference_release_id']:
+            raise ValueError('Private and Main platform references disagree.')
+        if binding.get('main_source_fingerprint')and main_source_fingerprint(main)!=binding['main_source_fingerprint']:
+            raise ValueError('Main analytical source differs from its private binding.')
+        manifest=_manifest_for(client,binding)
+        if manifest.get('parent_platform_reference_manifest')!=base.get('source_reference')or not base.get('source_reference'):
+            raise ValueError('Private and Main reference manifest pins disagree.')
+        if base.get('rebuilt_main_release_id')!=main['release_id']:
+            raise ValueError('Platform reference was built for another Main source.')
+        return {'main_release_id':main['release_id'],'mapping_release_id':manifest['release_id']}
+    except PrivateReferenceUnavailable:raise
+    except Exception as error:
+        raise PrivateReferenceUnavailable('The private v7 authority is incompatible with the selected Main source.')from error
 
 
 def read_pin(client,pin,limit=8*1024*1024):
@@ -35,13 +105,8 @@ class Reference:
         import pyarrow as pa
         import pyarrow.parquet as pq
         self.binding=binding
-        self.manifest=json.loads(read_pin(client,binding['manifest']))
+        self.manifest=_manifest_for(client,binding)
         m=self.manifest
-        if (m.get('schema_version')!='platform-award-remap-cloud-candidate-v1'
-            or m.get('accepted_main_release_id')!=binding['accepted_main_release_id']
-            or m.get('base_platform_reference_release_id')!=binding['base_platform_reference_release_id']
-            or m.get('customer_publication_eligible')is not False):
-            raise ValueError('Private mapping authority does not match the selected v7 source.')
         def table(pin):return pq.read_table(pa.BufferReader(read_pin(client,pin))).to_pylist()
         self.rows=table(m['tables']['award_mapping_authority'])
         self.registry=table(m['tables']['canonical_registry'])
@@ -143,16 +208,13 @@ class Reference:
 
 def reference_for(main_release_id):
     global _cached
-    path=Path(__file__).with_name('private_v7_binding.json')
-    if not path.exists():return None
-    binding=json.loads(path.read_text())
-    if main_release_id!=binding['accepted_main_release_id']:
-        raise RuntimeError('The private v7 mapping is bound to a different Main source release.')
+    binding=binding_for(main_release_id)
+    if binding is None:return None
     with _lock:
         if _cached is None or _cached.binding!=binding:
             import boto3
             try:_cached=Reference(boto3.client('s3',region_name='us-east-1'),binding)
-            except Exception as error:raise RuntimeError('The selected private v7 authority could not be verified.')from error
+            except Exception as error:raise PrivateReferenceUnavailable('The selected private v7 authority could not be verified.')from error
         reference=_cached
     return reference
 
