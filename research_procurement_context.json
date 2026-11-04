@@ -1,0 +1,327 @@
+[
+  {
+    "programme": "F-35",
+    "full_name": "F-35 Lightning II",
+    "aliases": [
+      "F-35"
+    ],
+    "facts": [
+      "NAVAIR identifies Lockheed Martin as the prime contractor and Northrop Grumman and BAE Systems as principal partners.",
+      "GAO describes tactical-aircraft sustainment funding as buying spare parts and maintenance, alongside aircraft production activity."
+    ],
+    "analytical_implications": [
+      "Separate aircraft production from engines, upgrades and sustainment when explaining recipients; a single service filter does not describe every F-35 user.",
+      "Concentrated prime funding can coexist with a much broader repair, support and subcontract market."
+    ],
+    "sources": [
+      {
+        "title": "NAVAIR - F-35",
+        "url": "https://www.navair.navy.mil/product/F-35-Lightning-II",
+        "checked_on": "2026-11-04"
+      },
+      {
+        "title": "GAO - Tactical aircraft operation and maintenance",
+        "url": "https://www.gao.gov/products/gao-25-107870",
+        "checked_on": "2026-11-04",
+        "published_on": "2024-10-21"
+      }
+    ],
+    "source": {
+      "title": "NAVAIR - F-35",
+      "url": "https://www.navair.navy.mil/product/F-35-Lightning-II",
+      "checked_on": "2026-11-04"
+    },
+    "context_scope": "Sourced background and analytical implications; no financial allocation, programme remapping, live opportunity verification or current budget figure is inferred."
+  },
+  {
+    "programme": "F/A-18",
+    "full_name": "F/A-18 Hornet and Super Hornet programme context",
+    "aliases": [
+      "F/A-18"
+    ],
+    "facts": [
+      "GAO's tactical-aircraft work includes F/A-18 variants and describes sustainment as spare parts and maintenance."
+    ],
+    "analytical_implications": [
+      "Distinguish airframe procurement, equipment integration and fleet support before interpreting the leading recipients.",
+      "Missing stock-item numbers on large contracts do not imply an absence of component or sustainment demand."
+    ],
+    "sources": [
+      {
+        "title": "GAO - Tactical aircraft operation and maintenance",
+        "url": "https://www.gao.gov/products/gao-25-107870",
+        "checked_on": "2026-11-04",
+        "published_on": "2024-10-21"
+      }
+    ],
+    "source": {
+      "title": "GAO - Tactical aircraft operation and maintenance",
+      "url": "https://www.gao.gov/products/gao-25-107870",
+      "checked_on": "2026-11-04",
+      "published_on": "2024-10-21"
+    },
+    "context_scope": "Sourced background and analytical implications; no financial allocation, programme remapping, live opportunity verification or current budget figure is inferred."
+  },
+  {
+    "programme": "M1 Abrams",
+    "full_name": "M1 Abrams tank",
+    "aliases": [
+      "M1 Abrams",
+      "Abrams"
+    ],
+    "facts": [
+      "The Army describes Abrams and Bradley as long-serving fleets with periodic upgrades and continuing maintenance requirements."
+    ],
+    "analytical_implications": [
+      "Read vehicle funding as a mix of production or upgrades, major assemblies and fleet support until the contract scope establishes which activity is being bought.",
+      "For component suppliers, combine exact item evidence with repair and sustainment contracts; contract funding alone does not measure vehicles delivered."
+    ],
+    "sources": [
+      {
+        "title": "U.S. Army - Abrams and Bradley service optimisation",
+        "url": "https://www.army.mil/article/282973/combat_vehicle_service_optimization_efforts_to_streamline_services_for_abrams_and_bradley_family_of_vehicles",
+        "checked_on": "2026-11-04",
+        "published_on": "2025-02-11"
+      }
+    ],
+    "source": {
+      "title": "U.S. Army - Abrams and Bradley service optimisation",
+      "url": "https://www.army.mil/article/282973/combat_vehicle_service_optimization_efforts_to_streamline_services_for_abrams_and_bradley_family_of_vehicles",
+      "checked_on": "2026-11-04",
+      "published_on": "2025-02-11"
+    },
+    "context_scope": "Sourced background and analytical implications; no financial allocation, programme remapping, live opportunity verification or current budget figure is inferred."
+  },
+  {
+    "programme": "Bradley",
+    "full_name": "Bradley fighting vehicle",
+    "aliases": [
+      "Bradley"
+    ],
+    "facts": [
+      "The Army describes Abrams and Bradley as long-serving fleets with periodic upgrades and continuing maintenance requirements."
+    ],
+    "analytical_implications": [
+      "Read vehicle funding as a mix of production or upgrades, major assemblies and fleet support until the contract scope establishes which activity is being bought.",
+      "For component suppliers, combine exact item evidence with repair and sustainment contracts; contract funding alone does not measure vehicles delivered."
+    ],
+    "sources": [
+      {
+        "title": "U.S. Army - Abrams and Bradley service optimisation",
+        "url": "https://www.army.mil/article/282973/combat_vehicle_service_optimization_efforts_to_streamline_services_for_abrams_and_bradley_family_of_vehicles",
+        "checked_on": "2026-11-04",
+        "published_on": "2025-02-11"
+      }
+    ],
+    "source": {
+      "title": "U.S. Army - Abrams and Bradley service optimisation",
+      "url": "https://www.army.mil/article/282973/combat_vehicle_service_optimization_efforts_to_streamline_services_for_abrams_and_bradley_family_of_vehicles",
+      "checked_on": "2026-11-04",
+      "published_on": "2025-02-11"
+    },
+    "context_scope": "Sourced background and analytical implications; no financial allocation, programme remapping, live opportunity verification or current budget figure is inferred."
+  },
+  {
+    "programme": "JASSM",
+    "full_name": "Joint Air-to-Surface Standoff Missile",
+    "aliases": [
+      "JASSM"
+    ],
+    "facts": [
+      "GAO's historical programme assessment describes JASSM as an air-to-ground precision missile and discusses the baseline and extended-range variants separately."
+    ],
+    "analytical_implications": [
+      "Keep variant and related-family identities separate when comparing funding; common technology does not justify rolling their totals together.",
+      "Explain prime concentration alongside production, integration and support contract scope rather than inferring component manufacture from a programme association."
+    ],
+    "sources": [
+      {
+        "title": "GAO - Selected weapon programmes, historical JASSM background",
+        "url": "https://www.gao.gov/assets/a302395.html",
+        "checked_on": "2026-11-04",
+        "published_on": "2010-03-30"
+      }
+    ],
+    "source": {
+      "title": "GAO - Selected weapon programmes, historical JASSM background",
+      "url": "https://www.gao.gov/assets/a302395.html",
+      "checked_on": "2026-11-04",
+      "published_on": "2010-03-30"
+    },
+    "context_scope": "Sourced background and analytical implications; no financial allocation, programme remapping, live opportunity verification or current budget figure is inferred."
+  },
+  {
+    "programme": "Long Range Anti-Ship Missile (LRASM)",
+    "full_name": "Long Range Anti-Ship Missile",
+    "aliases": [
+      "Long Range Anti-Ship Missile (LRASM)",
+      "LRASM"
+    ],
+    "facts": [
+      "NAVAIR describes LRASM as an air-launched, long-range anti-surface capability for maritime targets."
+    ],
+    "analytical_implications": [
+      "Its maritime mission helps distinguish the programme from the related JASSM air-to-ground family.",
+      "Review shared production, integration and support awards before treating associated funding as an exclusive LRASM market total."
+    ],
+    "sources": [
+      {
+        "title": "NAVAIR - LRASM",
+        "url": "https://www.navair.navy.mil/lrasm",
+        "checked_on": "2026-11-04"
+      }
+    ],
+    "source": {
+      "title": "NAVAIR - LRASM",
+      "url": "https://www.navair.navy.mil/lrasm",
+      "checked_on": "2026-11-04"
+    },
+    "context_scope": "Sourced background and analytical implications; no financial allocation, programme remapping, live opportunity verification or current budget figure is inferred."
+  },
+  {
+    "programme": "PAC-3",
+    "full_name": "Patriot Advanced Capability-3",
+    "aliases": [
+      "PAC-3"
+    ],
+    "facts": [
+      "The Army identifies PAC-3 MSE as an interceptor used within the Patriot system and describes it as an enhanced variant."
+    ],
+    "analytical_implications": [
+      "Keep the base PAC-3 and MSE identities separate; a variant description does not allocate a mixed contract's funding.",
+      "Distinguish interceptor production from system support and capacity investment before comparing suppliers or years."
+    ],
+    "sources": [
+      {
+        "title": "U.S. Army - PAC-3 MSE production context",
+        "url": "https://www.army.mil/article/291670/u_s_army_advances_accelerated_pac_3_mse_production_through_contract_action",
+        "checked_on": "2026-11-04",
+        "published_on": "2026-04-10"
+      }
+    ],
+    "source": {
+      "title": "U.S. Army - PAC-3 MSE production context",
+      "url": "https://www.army.mil/article/291670/u_s_army_advances_accelerated_pac_3_mse_production_through_contract_action",
+      "checked_on": "2026-11-04",
+      "published_on": "2026-04-10"
+    },
+    "context_scope": "Sourced background and analytical implications; no financial allocation, programme remapping, live opportunity verification or current budget figure is inferred."
+  },
+  {
+    "programme": "PAC-3 MSE",
+    "full_name": "Patriot Advanced Capability-3 Missile Segment Enhancement",
+    "aliases": [
+      "PAC-3 MSE"
+    ],
+    "facts": [
+      "The Army identifies PAC-3 MSE as an interceptor used within the Patriot system and describes it as an enhanced variant."
+    ],
+    "analytical_implications": [
+      "Keep the base PAC-3 and MSE identities separate; a variant description does not allocate a mixed contract's funding.",
+      "Distinguish interceptor production from system support and capacity investment before comparing suppliers or years."
+    ],
+    "sources": [
+      {
+        "title": "U.S. Army - PAC-3 MSE production context",
+        "url": "https://www.army.mil/article/291670/u_s_army_advances_accelerated_pac_3_mse_production_through_contract_action",
+        "checked_on": "2026-11-04",
+        "published_on": "2026-04-10"
+      }
+    ],
+    "source": {
+      "title": "U.S. Army - PAC-3 MSE production context",
+      "url": "https://www.army.mil/article/291670/u_s_army_advances_accelerated_pac_3_mse_production_through_contract_action",
+      "checked_on": "2026-11-04",
+      "published_on": "2026-04-10"
+    },
+    "context_scope": "Sourced background and analytical implications; no financial allocation, programme remapping, live opportunity verification or current budget figure is inferred."
+  },
+  {
+    "programme": "Tomahawk",
+    "full_name": "Tomahawk cruise missile",
+    "aliases": [
+      "Tomahawk",
+      "TOMAHAWK",
+      "Tactical Tomahawk (TACTOM)",
+      "BGM-109 TOMAHAWK"
+    ],
+    "facts": [
+      "NAVAIR describes Tomahawk as a long-range cruise missile and distinguishes Tactical Tomahawk Block IV from newer variants."
+    ],
+    "analytical_implications": [
+      "Check the exact programme identity and variant before labelling a narrow funding view as the whole Tomahawk market.",
+      "Production, upgrades and support can be separate commercial channels; background on the family does not merge current v7 identities."
+    ],
+    "sources": [
+      {
+        "title": "NAVAIR - Tomahawk",
+        "url": "https://www.navair.navy.mil/product/Tomahawk",
+        "checked_on": "2026-11-04"
+      }
+    ],
+    "source": {
+      "title": "NAVAIR - Tomahawk",
+      "url": "https://www.navair.navy.mil/product/Tomahawk",
+      "checked_on": "2026-11-04"
+    },
+    "context_scope": "Sourced background and analytical implications; no financial allocation, programme remapping, live opportunity verification or current budget figure is inferred."
+  },
+  {
+    "programme": "Virginia Class (SSN 774)",
+    "full_name": "Virginia-class attack submarine",
+    "aliases": [
+      "Virginia Class (SSN 774)"
+    ],
+    "facts": [
+      "GAO describes a nuclear-submarine industrial base centred on Electric Boat and Newport News, with construction and maintenance involving specialised shipyards and suppliers."
+    ],
+    "analytical_implications": [
+      "A prime-contract ranking does not reveal every industrial-base participant or subcontractor.",
+      "Separate new construction from maintenance and support; supplier capacity and schedule constraints can matter alongside the annual funding figure."
+    ],
+    "sources": [
+      {
+        "title": "GAO - Attack submarine maintenance and construction",
+        "url": "https://files.gao.gov/reports/GAO-26-109256/index.html",
+        "checked_on": "2026-11-04",
+        "published_on": "2026-08-27"
+      }
+    ],
+    "source": {
+      "title": "GAO - Attack submarine maintenance and construction",
+      "url": "https://files.gao.gov/reports/GAO-26-109256/index.html",
+      "checked_on": "2026-11-04",
+      "published_on": "2026-08-27"
+    },
+    "context_scope": "Sourced background and analytical implications; no financial allocation, programme remapping, live opportunity verification or current budget figure is inferred."
+  },
+  {
+    "programme": "DDG-51 Arleigh Burke",
+    "full_name": "Arleigh Burke-class guided-missile destroyer",
+    "aliases": [
+      "DDG-51 Arleigh Burke"
+    ],
+    "facts": [
+      "GAO describes a distinct DDG Modernization 2.0 effort for Arleigh Burke-class destroyers, alongside the wider surface-fleet work."
+    ],
+    "analytical_implications": [
+      "Separate ship construction from combat-system upgrades, maintenance and integration when explaining a supplier ranking.",
+      "Funding to a shipbuilder, equipment company and support contractor can reflect different work packages, rather than competing bids for the same product."
+    ],
+    "sources": [
+      {
+        "title": "GAO - Ship modernisation context",
+        "url": "https://files.gao.gov/reports/GAO-25-106749/index.html",
+        "checked_on": "2026-11-04",
+        "published_on": "2024-12-17"
+      }
+    ],
+    "source": {
+      "title": "GAO - Ship modernisation context",
+      "url": "https://files.gao.gov/reports/GAO-25-106749/index.html",
+      "checked_on": "2026-11-04",
+      "published_on": "2024-12-17"
+    },
+    "context_scope": "Sourced background and analytical implications; no financial allocation, programme remapping, live opportunity verification or current budget figure is inferred."
+  }
+]

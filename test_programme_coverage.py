@@ -91,7 +91,8 @@ class ProgrammeCoverage(unittest.TestCase):
     def test_identifier_gap_also_resolves_for_other_programmes(self):
         r=self.coverage(program='F-35',agency='Air Force')
         self.assertEqual(r['reason'],'programme_actions_have_no_item_numbers')
-        self.assertIsNone(r['programme_context'])
+        self.assertEqual(r['programme_context']['programme'],'F-35')
+        self.assertTrue(r['programme_context']['sources'])
 
     def test_sourced_joint_programme_context_has_no_invented_financial_split(self):
         context=self.coverage()['programme_context']

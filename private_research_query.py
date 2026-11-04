@@ -84,7 +84,7 @@ def build_queries(payload):
     order='year ASC' if groups==['year'] else 'observed_obligations_usd DESC, '+', '.join(g+' ASC NULLS LAST' for g in groups)
     total_sql=prefix+f'SELECT {metric} AS observed_obligations_usd, COUNT(*) AS source_row_count'+base
     grouped_sql=prefix+f'SELECT {select}, {metric} AS observed_obligations_usd'+base+f' GROUP BY {group} ORDER BY {order} LIMIT ? OFFSET ?'
-    query={'dataset':dataset,'filters':normal,'group_by':groups,'limit':limit,'offset':offset,'total_sql':total_sql,'total_params':params,'grouped_sql':grouped_sql,'grouped_params':params+[limit+1,offset]}
+    query={'dataset':dataset,'filters':normal,'group_by':groups,'limit':limit,'offset':offset,'where_sql':where,'where_params':params,'total_sql':total_sql,'total_params':params,'grouped_sql':grouped_sql,'grouped_params':params+[limit+1,offset]}
     if dataset=='contract_actions':
         # Compute the whole-scope total and the group page in one source scan.
         # GROUPING distinguishes the total from genuine NULL-valued dimensions.

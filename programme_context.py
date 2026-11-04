@@ -1,5 +1,8 @@
 """Small sourced context notes; programme amounts always come from live records."""
 import re
+import json
+from pathlib import Path
+from copy import deepcopy
 from ask_mimir_beta.platform_description_mapping import DEFAULT_RULES
 
 AMRAAM = {
@@ -21,8 +24,13 @@ def normalized(value):
     return ' '.join(re.findall(r'[A-Z0-9]+', str(value).upper()))
 
 
+REVIEWED_CONTEXTS=json.loads(Path(__file__).with_name('research_procurement_context.json').read_text())
+
+
 def context_for(programme):
-    return AMRAAM if normalized(programme) in {'AMRAAM', 'AIM 120', 'AIM120'} else None
+    key=normalized(programme)
+    if key in {'AMRAAM','AIM 120','AIM120'}:return deepcopy(AMRAAM)
+    return next((deepcopy(row)for row in REVIEWED_CONTEXTS if key in {normalized(a)for a in row['aliases']}),None)
 
 
 def aliases_for(programme):
@@ -33,6 +41,6 @@ def aliases_for(programme):
             break
     else:
         aliases = [programme]
-    if context_for(programme):
+    if key in {'AMRAAM','AIM 120','AIM120'}:
         aliases += ['AIM-120', 'AIM 120', 'AIM120']
     return list(dict.fromkeys(a.strip().upper() for a in aliases))[:8]

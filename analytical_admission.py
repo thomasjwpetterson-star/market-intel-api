@@ -12,6 +12,7 @@ READ_BUDGETS = {
     ("POST", "/api/research/aggregate"): 38,
     ("POST", "/api/research/query"): 38,
     ("POST", "/api/research/item-history"): 28,
+    ("POST", "/api/research/action-history"): 38,
     ("POST", "/api/research/programme-coverage"): 28,
     ("POST", "/api/research/programme-parts"): 28,
     ("POST", "/api/research/programme-records"): 28,

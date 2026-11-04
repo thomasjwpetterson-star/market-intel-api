@@ -5570,6 +5570,26 @@ def private_research_dataset(payload: Dict[str,Any],request: Request,response: R
     return value
 
 
+@app.post('/api/research/action-history')
+def private_action_history(payload: Dict[str,Any],request: Request,response: Response):
+    expected=os.getenv('MIMIR_EXPORT_PROXY_SECRET','').strip();supplied=request.headers.get('X-Mimir-Export-Key','').strip()
+    if not expected or not supplied or not hmac.compare_digest(expected,supplied):raise HTTPException(status_code=401,detail='An authenticated Mimir research proxy is required.')
+    before=GLOBAL_CACHE.get('last_loaded')
+    if not before or GLOBAL_CACHE.get('is_loading',False):raise HTTPException(status_code=503,detail='Research data is updating.')
+    try:
+        from funding_action_history import action_history
+        from private_research_context import wrap_action_read,metadata
+        from private_platform_reference import reference_for
+        reference=reference_for((GLOBAL_CACHE.get('platform_release')or{}).get('components',{}).get('main',{}).get('release_id'))
+        if reference is None:raise RuntimeError('Current private v7 mapping is not configured.')
+        reader=lambda sql,params:df_sanitize_for_json(programme_read_df(sql,params)).to_dict(orient='records')
+        value=action_history(payload,wrap_action_read(reference,reader));value.update(metadata(reference))
+    except (ValueError,TypeError,KeyError)as error:raise HTTPException(status_code=400,detail=str(error))from error
+    if GLOBAL_CACHE.get('last_loaded')!=before or GLOBAL_CACHE.get('is_loading',False):raise HTTPException(status_code=503,detail='Research data changed. Retry the query.')
+    value['source_generation']=str(before);response.headers['Cache-Control']='private, no-store'
+    return value
+
+
 @app.post('/api/research/item-history')
 def private_item_history(payload: Dict[str,Any],request: Request,response: Response):
     expected=os.getenv('MIMIR_EXPORT_PROXY_SECRET','').strip();supplied=request.headers.get('X-Mimir-Export-Key','').strip()
