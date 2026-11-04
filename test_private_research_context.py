@@ -20,6 +20,10 @@ class CurrentV7Scopes(unittest.TestCase):
             self.assertEqual(out['observed_obligations_usd'],100);self.assertEqual(out['mapping_basis'],'CURRENT_V7')
         out=aggregate({'dataset':'contract_actions','filters':{'program':'AMRAAM','department':'DoD','years':[2025]},'group_by':['year']},self.ref,self.read)
         self.assertEqual(out['observed_obligations_usd'],115)
+        self.assertFalse(out['programme_groups_additive'])
+        grouped=aggregate({'dataset':'contract_actions','filters':{'years':[2025]},'group_by':['program']},self.ref,self.read)
+        self.assertTrue(grouped['programme_groups_additive'])
+        self.assertEqual(grouped['observed_obligations_usd'],1015)
     def test_parent_mapping_deduplicates_site_year_context(self):
         out=aggregate({'dataset':'funding_summary','filters':{'program':'AMRAAM','years':[2025]},'group_by':['company']},self.ref,self.read)
         self.assertEqual(out['observed_obligations_usd'],115);self.assertEqual({r['company']for r in out['groups']},{'PARENT','NAVY PARENT'})

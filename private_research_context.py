@@ -79,8 +79,8 @@ def aggregate(payload,reference,read):
     if scope:
         result.update(meta);result['source_grain']='AVAILABLE_CONTRACT_ACTIONS';result['company_grouping']='unambiguous_recorded_site_year_parent_else_recorded_vendor'if payload.get('dataset','funding_summary')=='funding_summary'else'recorded_vendor'
         result['measure']='v7_programme_associated_net_contract_obligations'
-        result['programme_groups_additive']=True
-        result['shared_support_grouping']='Shared programmes retain one combined label; amounts are counted once.'
+        result['programme_groups_additive']=not bool(program)
+        result['shared_support_grouping']='This programme-associated total can overlap other programme totals; shared support is not allocated exclusively.'if program else'Shared programmes retain one combined label; amounts are counted once.'
     return result
 
 
