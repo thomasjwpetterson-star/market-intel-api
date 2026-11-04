@@ -20,9 +20,10 @@ import boto3
 
 REQUIRED_COMPONENTS = {"main", "public", "ask_mimir", "platform_reference"}
 REQUIRED_GATES = {"source_lineage", "complete_serving_graph", "main_dual_read",
-                  "ask_dual_read", "public_dual_read", "rollback_rehearsal"}
+                  "ask_dual_read", "public_dual_read", "rollback_rehearsal", "contract_lookup"}
 
 from main_release_cache import validate_manifest as validate_main_manifest
+from contract_lookup_release import validate_automated_lookup
 
 
 def digest(body: bytes) -> str:
@@ -96,6 +97,14 @@ def validate_candidate_children(s3, bucket: str, candidate: dict) -> None:
     ask = children["ask_mimir"]
     reference = children["platform_reference"]
     validate_main_manifest(main)
+    proof = candidate.get("contract_lookup_validation", {})
+    if not all(proof.get(k) for k in ("s3_key", "s3_version_id", "sha256")):
+        raise ValueError("lookup validation must be version and hash pinned")
+    response = s3.get_object(Bucket=bucket, Key=proof["s3_key"], VersionId=proof["s3_version_id"])
+    body = response["Body"].read()
+    if digest(body) != proof["sha256"]:
+        raise ValueError("lookup validation hash differs")
+    validate_automated_lookup(main, json.loads(body))
     if main["platform_reference_release_id"] != reference["release_id"]:
         raise ValueError("Main uses another platform reference")
     if public.get("source_main_release_id") != main["release_id"]:

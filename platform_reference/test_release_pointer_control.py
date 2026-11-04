@@ -10,6 +10,21 @@ from pathlib import Path
 from release_pointer_control import (REQUIRED_COMPONENTS, REQUIRED_GATES,
                                      promote, rollback, snapshot, verify_snapshot)
 from main_release_cache import PLATFORM_FILES, REQUIRED_FILES
+from main_release_cache import asset_fingerprint
+
+
+def lookup_evidence(main):
+    source = next(row for row in main["files"] if row["local_path"] == "contracts_rolled.parquet")
+    lookup = next(row for row in main["files"] if row["local_path"] == "contracts_lookup.parquet")
+    return {"source_asset_sha256": asset_fingerprint(source), "exact_parity": {
+        "state": "ALL_PARTS_EXACT_PARITY_PASSED", "release_id": main["release_id"],
+        "parts": [{"index": 0, "source": source, "candidate": lookup["parts"][0],
+            "all_values_equal": True, "duplicate_id_selection_order_preserved": True,
+            "rows_compared": 2, "exit_code": 0, "stop_guard": None}]},
+        "offline_queries": {"state": "PASSED", "all_values_equal": True,
+            "analytic_source_unchanged": True, "actual_profile_dto_parity": 3,
+            "mixed": {"count": 2}}, "query_resources": {"exit_code": 0,
+            "stop_guard": None, "peak_process_rss_bytes": 10}}
 
 
 def child_body(name, reference_status="BUILT_FRIDAY"):
@@ -21,6 +36,12 @@ def child_body(name, reference_status="BUILT_FRIDAY"):
                              **({"platform_reference_release_id": "platform_reference-v2"}
                                 if filename in PLATFORM_FILES else {})}
                             for filename in sorted(REQUIRED_FILES)])
+        source = next(row for row in child["files"] if row["local_path"] == "contracts_rolled.parquet")
+        child["files"].append({"local_path": "contracts_lookup.parquet",
+            "platform_reference_release_id": child["platform_reference_release_id"],
+            "source_asset_sha256": asset_fingerprint(source), "parts": [{
+                "s3_key": "lookup/part.parquet", "s3_version_id": "lookup-v1",
+                "size": 10, "etag": "lookup", "sha256": "b" * 64}]})
     elif name == "public":
         child["source_main_release_id"] = "main-v2"
     elif name == "ask_mimir":
@@ -39,6 +60,8 @@ class FakeS3:
 
     def get_object(self, **kwargs):
         key = kwargs.get("Key", "")
+        if key == "lookup-proof.json":
+            return {"Body": io.BytesIO(json.dumps(lookup_evidence(json.loads(child_body("main")))).encode())}
         if key.startswith("releases/"):
             name = key.split("/")[1]
             if kwargs.get("VersionId") != "version-" + name:
@@ -62,6 +85,8 @@ def candidate(ready=True, reference_status="BUILT_FRIDAY"):
     return {"schema_version": 2, "release_id": "release-new",
             "etl_run_id": "run-new", "ask_metric_release_id": "metric-v2",
             "promotion_ready": ready,
+            "contract_lookup_validation": {"s3_key": "lookup-proof.json", "s3_version_id": "proof-v1",
+                "sha256": hashlib.sha256(json.dumps(lookup_evidence(json.loads(child_body("main")))).encode()).hexdigest()},
             "components": {name: {"release_id": name + "-v2",
                                   "etl_run_id": "run-new",
                                   "immutable_manifest_key": "releases/" + name + "/manifest.json",

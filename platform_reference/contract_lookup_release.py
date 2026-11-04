@@ -5,7 +5,32 @@ lookup is backwards compatible; a lookup from a different source is rejected.
 """
 from copy import deepcopy
 
-from .main_release_cache import asset_fingerprint, validate_manifest
+try:
+    from .main_release_cache import asset_fingerprint, validate_manifest
+except ImportError:  # Standalone promotion CLI uses this directory on sys.path.
+    from main_release_cache import asset_fingerprint, validate_manifest
+
+
+def validate_automated_lookup(manifest: dict, evidence: dict) -> None:
+    """Require fresh source-bound parity and bounded offline handler/load proof."""
+    entries = validate_manifest(manifest)
+    lookup = entries.get("contracts_lookup.parquet")
+    source_sha = asset_fingerprint(entries["contracts_rolled.parquet"])
+    if not lookup or evidence.get("source_asset_sha256") != source_sha:
+        raise ValueError("promotion requires a lookup bound to this Main source")
+    rebuilt = with_contract_lookup(manifest, evidence.get("exact_parity", {}), manifest["release_id"])
+    expected = next(row for row in rebuilt["files"] if row["local_path"] == "contracts_lookup.parquet")
+    if expected != lookup:
+        raise ValueError("lookup manifest differs from parity proof")
+    timing = evidence.get("offline_queries", {})
+    resources = evidence.get("query_resources", {})
+    if (timing.get("state") != "PASSED" or timing.get("all_values_equal") is not True or
+            timing.get("analytic_source_unchanged") is not True or
+            timing.get("actual_profile_dto_parity", 0) < 1 or
+            timing.get("mixed", {}).get("count", 0) < 1 or
+            resources.get("exit_code") != 0 or resources.get("stop_guard") or
+            resources.get("peak_process_rss_bytes", 2**63) > 1536 * 1024**2):
+        raise ValueError("lookup offline handler/load or memory proof failed")
 
 
 def with_contract_lookup(manifest: dict, proof: dict, release_id: str) -> dict:
