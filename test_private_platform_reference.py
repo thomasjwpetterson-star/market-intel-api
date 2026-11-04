@@ -44,7 +44,7 @@ class PrivateV7Reference(unittest.TestCase):
         from unittest.mock import Mock,patch
         from fastapi import FastAPI,Request,Response,HTTPException
         from fastapi.testclient import TestClient
-        for column in ['contract_id','platform_family','vendor_cage','vendor_name','description']:
+        for column in ['contract_id','platform_family','vendor_cage','vendor_name','description','action_date']:
             self.db.execute('ALTER TABLE v_transactions ADD COLUMN '+column+' VARCHAR')
         self.db.execute("UPDATE v_transactions SET contract_id=award_key,platform_family='AMRAAM',vendor_cage='12345',vendor_name='SOURCE VENDOR'")
         columns=self.columns|{'contract_id','platform_family','vendor_cage','vendor_name','description'}
@@ -70,6 +70,21 @@ class PrivateV7Reference(unittest.TestCase):
         self.assertEqual(out['reviewed_award_count'],0)
         self.assertEqual(out['reviewed_items'][0]['niin'],'015006962')
         self.assertEqual(out['reviewed_items'][0]['evidence_count'],1)
+
+    def test_programme_ranking_groups_exact_sites_before_paging_without_merging_unknowns(self):
+        from unittest.mock import patch
+        from private_platform_reference import programme_records
+        for column in ['platform_family','vendor_cage','vendor_name','action_date']:
+            self.db.execute('ALTER TABLE v_transactions ADD COLUMN '+column+' VARCHAR')
+        self.db.execute("UPDATE v_transactions SET platform_family='AMRAAM',vendor_cage='04939',vendor_name='OLD NAME',action_date='2025-01-01'")
+        self.db.execute("UPDATE v_transactions SET vendor_name='LATEST NAME',action_date='2025-06-01' WHERE award_key='qualified-shared'")
+        self.db.execute("UPDATE v_transactions SET vendor_cage='UNKNO',vendor_name='UNKNOWN A' WHERE award_key='same-contract-different-award'")
+        self.db.execute("INSERT INTO v_transactions VALUES ('unreviewed',2025,'DEPARTMENT OF THE NAVY','DEPARTMENT OF DEFENSE',10,NULL,NULL,'AMRAAM','UNKNO','UNKNOWN B','2025-06-02')")
+        with patch('private_platform_reference.reference_for',return_value=self.reference):
+            rows=programme_records({'program':'AMRAAM','years':[2025],'limit':10},self.read,self.columns|{'platform_family','vendor_cage','vendor_name','action_date'},'main-fixture')
+        site=next(r for r in rows if r['cage']=='04939')
+        self.assertEqual(site['total'],4000);self.assertEqual(site['name'],'LATEST NAME')
+        self.assertEqual(len([r for r in rows if r['cage']is None]),2)
 
     def test_reviewed_items_respect_market_domain_filter(self):
         self.db.execute("ALTER TABLE v_transactions ADD COLUMN market_segment VARCHAR")

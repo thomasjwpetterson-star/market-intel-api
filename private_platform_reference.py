@@ -171,7 +171,10 @@ def programme_records(payload,read,columns,main_release_id):
         raise ValueError('Choose a valid programme page.')
     section=payload.get('section','contractors')
     if section=='contractors':
-        sql="SELECT vendor_name AS name,vendor_cage AS cage,COALESCE(SUM(spend_amount),0) AS total,'PRIME' AS role FROM v_transactions WHERE "+where+" GROUP BY vendor_name,vendor_cage ORDER BY total DESC,name,cage LIMIT ? OFFSET ?"
+        # Resolve spelling/history variants at the exact supplier site before
+        # ranking and pagination. Missing/placeholder CAGEs remain name-specific.
+        site="CASE WHEN REGEXP_FULL_MATCH(UPPER(TRIM(COALESCE(vendor_cage,''))),'[A-Z0-9]{5}') AND UPPER(TRIM(vendor_cage)) NOT IN ('UNKNO','00000') THEN UPPER(TRIM(vendor_cage)) END"
+        sql="WITH scoped AS (SELECT *,"+site+" AS site_cage FROM v_transactions WHERE "+where+") SELECT MAX_BY(vendor_name,STRUCT_PACK(date:=COALESCE(CAST(action_date AS VARCHAR),''),name:=COALESCE(vendor_name,''))) AS name,site_cage AS cage,COALESCE(SUM(spend_amount),0) AS total,'PRIME' AS role FROM scoped GROUP BY site_cage,CASE WHEN site_cage IS NULL THEN UPPER(TRIM(vendor_name)) END ORDER BY total DESC,name,cage LIMIT ? OFFSET ?"
     elif section=='awards':
         order=",transaction_key"if'transaction_key'in columns else''
         sql="SELECT contract_id,action_date,vendor_name,vendor_cage,sub_agency AS agency,description,spend_amount AS spend,naics_code AS naics,? AS platform_family,platform_family AS recorded_source_primary_label FROM v_transactions WHERE "+where+" ORDER BY spend DESC,action_date,contract_id"+order+" LIMIT ? OFFSET ?"
