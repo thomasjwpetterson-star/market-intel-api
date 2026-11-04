@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks, Req
 from fastapi.middleware.cors import CORSMiddleware
 from api_traffic_protection import ApiTrafficProtectionMiddleware
 from public_serving_capacity import PublicServingCapacityMiddleware
-from analytical_admission import AnalyticalAdmissionMiddleware
+from analytical_admission import AnalyticalAdmissionMiddleware, ANALYTICAL_TRACE_ID
 from analytical_deadline import query_deadline, remaining_query_budget
 from queue import Empty
 from public_lookup_context import (
@@ -291,10 +291,10 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
                 query_seconds = time.perf_counter() - query_started
                 if wait_seconds >= 1 or query_seconds >= 2:
                     # No SQL parameters, user identities or row contents in logs.
-                    logger.warning("Slow DuckDB read query=%s wait_ms=%.1f execute_ms=%.1f pool_available=%s pool=%s",
+                    logger.warning("Slow DuckDB read query=%s wait_ms=%.1f execute_ms=%.1f pool_available=%s pool=%s trace=%s",
                                    hashlib.sha256(sql.encode()).hexdigest()[:12],
                                    wait_seconds * 1000, query_seconds * 1000, pool.qsize(),
-                                   "public_lookup" if public_lookup else "analytical")
+                                   "public_lookup" if public_lookup else "analytical", ANALYTICAL_TRACE_ID.get() or "-")
             return df_sanitize_for_json(df)
         finally:
             if c is not None:

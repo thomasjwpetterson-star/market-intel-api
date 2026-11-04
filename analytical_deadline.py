@@ -6,7 +6,7 @@ import time
 
 import duckdb
 from fastapi import HTTPException
-from analytical_admission import ANALYTICAL_DEADLINE
+from analytical_admission import ANALYTICAL_DEADLINE, ANALYTICAL_TRACE_ID
 
 
 def remaining_query_budget():
@@ -36,7 +36,7 @@ def query_deadline(cursor):
     except duckdb.InterruptException as error:
         if not expired.is_set():
             raise
-        logging.getLogger("mimir-api").warning("Analytical query interrupted at execution deadline")
+        logging.getLogger("mimir-api").warning("Analytical query interrupted at execution deadline trace=%s", ANALYTICAL_TRACE_ID.get() or "-")
         raise HTTPException(status_code=504, detail="The analysis exceeded its execution limit. Narrow the query and retry.") from error
     finally:
         if timer is not None:

@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 from fastapi import FastAPI, Response, HTTPException
 from analytical_deadline import query_deadline, remaining_query_budget
+from analytical_admission import ANALYTICAL_TRACE_ID
 from httpx import ASGITransport, AsyncClient
 
 from public_serving_capacity import PublicServingCapacityMiddleware
@@ -29,7 +30,7 @@ def production_functions():
     ns = dict(Optional=__import__('typing').Optional, List=list, Any=object, Dict=dict,
               time=time, hashlib=__import__('hashlib'), logger=__import__('logging').getLogger('capacity-test'),
               pd=pd, Response=Response, HTTPException=HTTPException, Empty=queue.Empty,
-              query_deadline=query_deadline, remaining_query_budget=remaining_query_budget, os=__import__('os'),
+              query_deadline=query_deadline, remaining_query_budget=remaining_query_budget, ANALYTICAL_TRACE_ID=ANALYTICAL_TRACE_ID, os=__import__('os'),
               GLOBAL_CACHE={'profiles_df': pd.DataFrame({'cage':['ABCDE']}),
                             'last_loaded':1, 'is_loading':False},
               DUCK_CONN=object(), ensure_duck_conn=lambda: None,
