@@ -6221,6 +6221,14 @@ def health() -> Dict[str, Any]:
     }
 
 
+from research_session_api import create_research_session_router
+# Explicit flag + existing proxy authentication + a separate private subject
+# allowlist. Website billing remains unchanged until both adapters migrate.
+app.include_router(create_research_session_router(
+    lambda: runtime.beta_state.path, access_from_request,
+))
+
+
 @app.get("/api/beta/policy")
 def beta_policy(request: Request) -> Dict[str, Any]:
     access = access_from_request(request)
