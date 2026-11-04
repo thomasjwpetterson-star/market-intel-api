@@ -153,3 +153,22 @@ async def test_cancelled_waiter_leaves_queue_and_cancelled_running_caller_keeps_
     assert guard.active==1
     release.set(); await asyncio.gather(*list(guard.inflight))
     assert guard.active==guard.waiting==0
+
+
+@pytest.mark.asyncio
+async def test_platform_followups_obey_trusted_deadline_without_changing_public_access(monkeypatch):
+    monkeypatch.setenv('MIMIR_EXPORT_PROXY_SECRET','fixture')
+    seen=[]
+    async def app(scope,receive,send):
+        seen.append((ANALYTICAL_DEADLINE.get()-time.monotonic(),ANALYTICAL_TRACE_ID.get()))
+        await send({'type':'http.response.start','status':200,'headers':[]})
+        await send({'type':'http.response.body','body':b'{}'})
+    path='/api/platform/shared-exposure'
+    guard=AnalyticalAdmissionMiddleware(app,budgets={('GET',path):.4})
+    async with AsyncClient(transport=ASGITransport(app=guard),base_url='http://test') as client:
+        assert (await client.get(path,headers=headers(50))).status_code==200
+        assert 0<seen[-1][0]<=.05 and seen[-1][1]==TRACE
+        # Unauthenticated headers cannot change public admission or cause errors.
+        forged={**headers(),'X-Mimir-Export-Key':'wrong','X-Mimir-Research-Budget-Ms':'0','X-Mimir-Research-Deadline-Ms':'invalid'}
+        assert (await client.get(path,headers=forged)).status_code==200
+        assert .3<seen[-1][0]<=.4 and seen[-1][1] is None

@@ -46,17 +46,18 @@ class AnalyticalAdmissionMiddleware:
         # The route retains its normal 401 response and constant-time check.
         trace_id = None
         queue_timeout = min(self.pending_timeout, budget)
-        if scope["path"].startswith("/api/research/"):
-            expected = os.getenv("MIMIR_EXPORT_PROXY_SECRET", "").strip()
-            headers = dict(scope.get("headers", []))
-            supplied = headers.get(b"x-mimir-export-key", b"").decode("latin1").strip()
-            if not expected or not supplied or not hmac.compare_digest(expected, supplied):
-                return await self.app(scope, receive, send)
+        expected = os.getenv("MIMIR_EXPORT_PROXY_SECRET", "").strip()
+        headers = dict(scope.get("headers", []))
+        supplied = headers.get(b"x-mimir-export-key", b"").strip()
+        trusted = bool(expected and supplied and hmac.compare_digest(expected.encode(), supplied))
+        if scope["path"].startswith("/api/research/") and not trusted:
+            return await self.app(scope, receive, send)
+        if trusted:
             raw_trace = headers.get(b"x-mimir-research-trace", b"").decode("latin1")
             if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", raw_trace):
                 trace_id = raw_trace
-            # Only authenticated research callers can opt into deadline-aware
-            # waiting. Older clients and non-research routes retain their queue.
+            # Only authenticated proxy reads opt into deadline-aware waiting.
+            # Ordinary public callers and older clients retain their queue.
             caller_budget = headers.get(b"x-mimir-research-budget-ms")
             if caller_budget is not None:
                 if not re.fullmatch(rb"[0-9]{1,6}", caller_budget):
