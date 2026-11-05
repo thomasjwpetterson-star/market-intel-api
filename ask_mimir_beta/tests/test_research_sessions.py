@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from research_sessions import ResearchSessions, SessionLimit, SessionConflict
+from research_sessions import ResearchSessions, SessionLimit, SessionConflict, WORK_BUDGET
 
 
 class ResearchSessionTests(unittest.TestCase):
@@ -56,7 +56,7 @@ class ResearchSessionTests(unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             rows=list(pool.map(run,range(8)))
         self.assertTrue(all(row['remaining_today']==1 for row in rows))
-        self.assertEqual(self.store.status('user:one','free')['remaining_work_calls'],12)
+        self.assertEqual(self.store.status('user:one','free')['remaining_work_calls'],WORK_BUDGET-8)
 
     def test_parallel_first_failures_preserve_other_pending_success(self):
         self.admit('request-a'); self.admit('request-b')
@@ -74,9 +74,9 @@ class ResearchSessionTests(unittest.TestCase):
         self.assertEqual(e.exception.usage['next_available_at'],'2026-11-06T00:00:00+00:00')
 
     def test_work_guard_never_silently_starts_another_session(self):
-        for i in range(20):
+        for i in range(WORK_BUDGET):
             self.admit(f'request-{i:03}'); self.finish(f'request-{i:03}')
-        with self.assertRaises(SessionLimit) as e: self.admit('request-021')
+        with self.assertRaises(SessionLimit) as e: self.admit('request-over-budget')
         self.assertEqual(e.exception.code,'session_work_limit')
         self.assertEqual(e.exception.usage['remaining_today'],1)
 

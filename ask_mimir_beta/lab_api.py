@@ -261,10 +261,7 @@ def access_snapshot(
 ) -> Dict[str, Any]:
     """Return quota display data without making answer delivery depend on it."""
     try:
-        return access.public_dict(
-            runtime.beta_state.used_today(access.subject_id),
-            runtime.beta_state.used_this_month(access.subject_id),
-        )
+        return runtime.beta_state.public_access(access)
     except Exception:
         LOGGER.exception(
             "Ask Mimir could not refresh allowance display for %s",
@@ -4630,10 +4627,7 @@ def finalize_customer_result(
     safe_result["request_id"] = request_id
     safe_result["release_binding_id"] = runtime.release_guard.release_binding_id
     safe_result["citation_validation"] = citation_validation
-    safe_result["access"] = access.public_dict(
-        runtime.beta_state.used_today(access.subject_id),
-        runtime.beta_state.used_this_month(access.subject_id),
-    )
+    safe_result["access"] = runtime.beta_state.public_access(access)
     return safe_result
 
 
@@ -5545,10 +5539,7 @@ class AskJobManager:
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "result": None,
                 "error": None,
-                "access": access.public_dict(
-                    used,
-                    runtime.beta_state.used_this_month(access.subject_id),
-                ),
+                "access": runtime.beta_state.public_access(access),
                 "allowance_exempt": allowance_exempt,
                 "clarification_continuation": clarification_continuation,
                 "continuation_eligible": continuation_eligible,
@@ -6246,10 +6237,7 @@ def beta_policy(request: Request) -> Dict[str, Any]:
             }
             for tier, policy in TIER_POLICIES.items()
         },
-        "current_access": access.public_dict(
-            runtime.beta_state.used_today(access.subject_id),
-            runtime.beta_state.used_this_month(access.subject_id),
-        ),
+        "current_access": runtime.beta_state.public_access(access),
         "test_identities_enabled": os.getenv("ASK_MIMIR_ALLOW_TEST_IDENTITIES", "0") == "1",
     }
 
@@ -6346,10 +6334,7 @@ def accept_ask_job(payload: AskRequest, request: Request, response: Response) ->
             detail={
                 "message": str(exc),
                 "workflow": routing.workflow,
-                "access": access.public_dict(
-                    runtime.beta_state.used_today(access.subject_id),
-                    runtime.beta_state.used_this_month(access.subject_id),
-                ),
+                "access": runtime.beta_state.public_access(access),
             },
             headers=routing_headers,
         ) from exc
@@ -9260,10 +9245,7 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
             status_code=429,
             detail={
                 "message": str(exc),
-                "access": access.public_dict(
-                    runtime.beta_state.used_today(access.subject_id),
-                    runtime.beta_state.used_this_month(access.subject_id),
-                ),
+                "access": runtime.beta_state.public_access(access),
             },
         ) from exc
     if not allowance_exempt:
@@ -9379,10 +9361,7 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
                 ),
             ),
         )
-        customer_result["access"] = access.public_dict(
-            runtime.beta_state.used_today(access.subject_id),
-            runtime.beta_state.used_this_month(access.subject_id),
-        )
+        customer_result["access"] = runtime.beta_state.public_access(access)
         return customer_result
     except Exception:
         performance_snapshot = performance.snapshot(

@@ -13,6 +13,7 @@ import shutil
 import os
 import re
 import sqlite3
+from research_sessions import ResearchSessions, SessionLimit, SessionConflict
 import threading
 import time
 from contextlib import contextmanager
@@ -255,9 +256,13 @@ def record_request_timing(
 
 
 class DailyQuotaExceeded(RuntimeError):
-    def __init__(self, policy: TierPolicy, period: str = "day") -> None:
+    def __init__(self, policy: TierPolicy, period: str = "day", usage=None) -> None:
         self.policy = policy
         self.period = period
+        self.usage = usage
+        if usage is not None:
+            super().__init__('Your Mimir research allowance has been used. You can still discuss existing results.')
+            return
         if period == "month":
             message = (
                 f"The {policy.display_name} allowance of "
@@ -408,6 +413,22 @@ class BetaStateStore:
             [datetime.now(timezone.utc).isoformat()],
         )
         self.connection.commit()
+
+        # The private session pilot shares this file and its SQLite transaction
+        # with job accounting. No independent billing database or second debit.
+        self.research_sessions = ResearchSessions(self.path)
+
+    @staticmethod
+    def session_enabled(subject_id: str) -> bool:
+        allowed={value.strip() for value in os.getenv('ASK_MIMIR_SESSION_SUBJECT_ALLOWLIST','').split(',') if value.strip()}
+        return os.getenv('ASK_MIMIR_RESEARCH_SESSIONS_ENABLED')=='1' and subject_id in allowed
+
+    def public_access(self, access: AccessContext):
+        if not (access.authenticated and self.session_enabled(access.subject_id)):
+            return access.public_dict(self.used_today(access.subject_id), self.used_this_month(access.subject_id))
+        usage=self.research_sessions.status(access.subject_id,access.tier)
+        result=access.public_dict(usage['daily_limit']-usage['remaining_today'],usage['monthly_limit']-usage['remaining_this_month'])
+        return {**result,'usage_unit':'research_session','research_usage':usage}
 
     def load_conversation_scope(
         self,
@@ -729,6 +750,11 @@ class BetaStateStore:
     def assert_allowance_available(self, access: AccessContext) -> None:
         """Reject exhausted subjects without reserving or consuming a credit."""
         policy = access.policy
+        if access.authenticated and self.session_enabled(access.subject_id):
+            usage=self.research_sessions.status(access.subject_id,access.tier)
+            if not usage['can_continue'] and not usage['can_start']:
+                raise DailyQuotaExceeded(policy,usage=usage)
+            return
         with self.lock:
             used = int(
                 self.connection.execute(
@@ -798,6 +824,20 @@ class BetaStateStore:
                         raise DuplicateRequestError(
                             "That research request is already being processed."
                         )
+                session_usage=None
+                if access.authenticated and self.session_enabled(access.subject_id):
+                    try:
+                        session_usage=self.research_sessions.admit(
+                            access.subject_id,access.tier,request_id,
+                            hashlib.sha256((request_fingerprint or request_id).encode()).hexdigest(),
+                            lease_seconds=min(max(int(os.getenv('ASK_MIMIR_MAX_JOB_SECONDS','2700')),300),7200)+120,
+                            _connection=self.connection,
+                        )['usage']
+                    except SessionLimit as exc:
+                        raise DailyQuotaExceeded(policy,usage=exc.usage) from exc
+                    except SessionConflict as exc:
+                        raise DuplicateRequestError('That research identifier is already in use.') from exc
+                    allow_over_limit=True
                 used = int(
                     self.connection.execute(
                         """
@@ -859,7 +899,7 @@ class BetaStateStore:
                         ],
                     )
                 self.connection.commit()
-                return used + 1
+                return session_usage['daily_limit']-session_usage['remaining_today'] if session_usage else used + 1
             except Exception:
                 self.connection.rollback()
                 raise
@@ -878,6 +918,7 @@ class BetaStateStore:
         job: Dict[str, Any] | None = None,
     ) -> None:
         with self.lock:
+            subject=self.connection.execute('SELECT subject_id,tier FROM query_events WHERE request_id=?',(request_id,)).fetchone()
             self.connection.execute(
                 """
                 UPDATE query_events
@@ -895,6 +936,8 @@ class BetaStateStore:
                 ],
             )
             try:
+                if subject and self.session_enabled(subject[0]):
+                    self.research_sessions.finish(subject[0],subject[1],request_id,success=billable,_connection=self.connection)
                 if job is not None:
                     self._save_job_unlocked(job)
                 self.connection.commit()
@@ -1082,6 +1125,7 @@ class BetaStateStore:
         performance: Dict[str, Any] | None = None,
     ) -> None:
         with self.lock:
+            subject=self.connection.execute('SELECT subject_id,tier FROM query_events WHERE request_id=?',(request_id,)).fetchone()
             self.connection.execute(
                 """
                 UPDATE query_events
@@ -1094,7 +1138,13 @@ class BetaStateStore:
                     request_id,
                 ],
             )
-            self.connection.commit()
+            try:
+                if subject and self.session_enabled(subject[0]) and status in ('failed_refunded','failed'):
+                    self.research_sessions.finish(subject[0],subject[1],request_id,success=False,_connection=self.connection)
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def add_feedback(
         self,

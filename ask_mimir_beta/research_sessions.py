@@ -18,7 +18,7 @@ LIMITS = {"free": (2, 30), "trial": (5, 35), "lite": (5, 100),
           "professional": (15, 300), "enterprise": (50, 1000)}
 WINDOW = 900
 LEASE = 120
-WORK_BUDGET = 20
+WORK_BUDGET = 60
 
 
 class SessionLimit(RuntimeError):
@@ -59,7 +59,17 @@ class ResearchSessions:
             """)
 
     @contextmanager
-    def _db(self):
+    def _db(self, connection=None):
+        if connection is not None:
+            if not connection.in_transaction:
+                raise RuntimeError('Session accounting requires an active caller transaction')
+            original_factory=connection.row_factory
+            connection.row_factory=sqlite3.Row
+            try:
+                yield connection
+            finally:
+                connection.row_factory=original_factory
+            return
         db = sqlite3.connect(self.path, timeout=10, isolation_level=None)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
@@ -75,6 +85,13 @@ class ResearchSessions:
 
     def _clean(self, db, now):
         db.execute("UPDATE research_session_calls SET state='failed' WHERE state='pending' AND lease<=?", (now,))
+        # Existing job recovery can refund work before its long-running lease
+        # expires. Reconcile within the same file without touching MCP-only calls.
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='query_events'").fetchone():
+            db.execute("""UPDATE research_session_calls SET state='failed'
+              WHERE state='pending' AND request_key IN (
+                SELECT request_id FROM query_events WHERE status IN ('failed_refunded','completed_unbilled'))""")
+        db.execute('DELETE FROM research_session_windows WHERE COALESCE(ends,created)<?',(now-90*86400,))
 
     def _usage(self, db, owner, tier, now):
         from datetime import datetime, timedelta, timezone
@@ -112,15 +129,17 @@ class ResearchSessions:
                     daily_resets_at=iso(day_end),monthly_resets_at=iso(month_end),
                     next_available_at=iso(max(resets)) if resets else None)
 
-    def status(self, owner, tier):
-        with self._db() as db:
+    def status(self, owner, tier, *, _connection=None):
+        with self._db(_connection) as db:
             now=self.clock(); self._clean(db,now)
             return self._usage(db,owner,tier,now)
 
-    def admit(self, owner, tier, request_key, fingerprint):
+    def admit(self, owner, tier, request_key, fingerprint, *, lease_seconds=LEASE, _connection=None):
         if not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', request_key or '') or not re.fullmatch(r'[a-f0-9]{64}', fingerprint or ''):
             raise ValueError('Use bounded opaque server identifiers')
-        with self._db() as db:
+        if type(lease_seconds) is not int or not LEASE<=lease_seconds<=7500:
+            raise ValueError('Invalid research lease')
+        with self._db(_connection) as db:
             now=self.clock(); self._clean(db,now)
             usage=self._usage(db,owner,tier,now)
             existing=db.execute('SELECT * FROM research_session_calls WHERE request_key=?',(request_key,)).fetchone()
@@ -147,11 +166,11 @@ class ResearchSessions:
                 calls=db.execute("SELECT count(*) FROM research_session_calls WHERE window_id=? AND state IN ('pending','success')",(window_id,)).fetchone()[0]
                 if calls>=WORK_BUDGET:
                     raise SessionLimit('session_work_limit',usage)
-            db.execute("INSERT INTO research_session_calls VALUES (?,?,?,?,'pending',?,?)",(request_key,owner,fingerprint,window_id,now,now+LEASE))
+            db.execute("INSERT INTO research_session_calls VALUES (?,?,?,?,'pending',?,?)",(request_key,owner,fingerprint,window_id,now,now+lease_seconds))
             return dict(replay=False,state='pending',usage=self._usage(db,owner,tier,now))
 
-    def finish(self, owner, tier, request_key, *, success):
-        with self._db() as db:
+    def finish(self, owner, tier, request_key, *, success, _connection=None):
+        with self._db(_connection) as db:
             now=self.clock(); self._clean(db,now)
             row=db.execute('SELECT * FROM research_session_calls WHERE request_key=?',(request_key,)).fetchone()
             if not row or row['owner']!=owner:
