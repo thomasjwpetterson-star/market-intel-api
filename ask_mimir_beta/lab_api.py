@@ -5343,6 +5343,11 @@ class AskJobManager:
                     LOGGER.exception("Ask Mimir lifecycle monitor failed")
                     with self.lock:
                         self.monitor_state = {**self.monitor_state, "status": "error"}
+                try:
+                    if runtime.beta_state.maintain_research_sessions():
+                        LOGGER.info("Mimir research accounting retention maintenance completed")
+                except Exception:
+                    LOGGER.warning("Mimir research accounting retention maintenance failed")
                 self.monitor_stop.wait(60)
 
         self.monitor_thread = threading.Thread(target=monitor, name="mimir-lifecycle", daemon=True)

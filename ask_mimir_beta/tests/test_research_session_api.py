@@ -40,6 +40,19 @@ class ResearchSessionApiTests(unittest.TestCase):
         self.access.subject_id='user:uninvited'
         self.assertEqual(self.post({'action':'status'}).status_code,403)
 
+    def test_prepared_customer_mode_is_trusted_proxy_only_and_does_not_change_website_policy(self):
+        from beta_controls import BetaStateStore
+        self.access.subject_id='user:12345678-1234-4234-8234-123456789abc'
+        self.assertEqual(self.post({'action':'status'}).status_code,403)
+        with patch.dict(os.environ,{'ASK_MIMIR_MCP_ACCOUNTS_ENABLED':'1'}):
+            self.assertEqual(self.post({'action':'status'}).status_code,200)
+            self.assertEqual(self.post({'action':'status'},headers={}).status_code,401)
+            self.assertFalse(BetaStateStore.session_enabled(self.access.subject_id))
+            self.access.subject_id='guest:unregistered'
+            self.assertEqual(self.post({'action':'status'}).status_code,403)
+            self.access.subject_id='user:12345678123442348234123456789abc'
+            self.assertEqual(self.post({'action':'status'}).status_code,403)
+
     def test_status_reserve_and_refund_without_identity_or_content(self):
         r=self.post({'action':'status'})
         self.assertEqual(r.status_code,200); self.assertEqual(r.json()['usage']['remaining_today'],2)

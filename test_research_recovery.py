@@ -8,6 +8,9 @@ import unittest
 from contextlib import closing
 import hashlib
 from unittest.mock import Mock
+from unittest.mock import patch
+import threading
+import sys
 from ask_mimir_beta.research_sessions import ResearchSessions
 from ask_mimir_beta.research_recovery import snapshot,restore,upload
 
@@ -50,3 +53,12 @@ class Recovery(unittest.TestCase):
         with self.assertRaises(ValueError):upload(self.backup,'existing-bucket','customer-accounting-backups/test.sqlite','123456789012',client)
         client.put_object.assert_not_called()
         with self.assertRaises(ValueError):upload(self.db,'existing-bucket','customer-accounting-backups/wrong.sqlite','123456789012',client)
+    def test_idle_maintenance_purges_old_accounting_without_reading_or_changing_conversations(self):
+        with patch.dict(sys.modules,{'research_sessions':sys.modules['ask_mimir_beta.research_sessions']}):
+            from ask_mimir_beta.beta_controls import BetaStateStore
+        store=BetaStateStore.__new__(BetaStateStore);store.lock=threading.Lock()
+        store.research_sessions=ResearchSessions(self.db,clock=lambda:self.now+91*86400)
+        with patch.dict('os.environ',{'ASK_MIMIR_RESEARCH_SESSIONS_ENABLED':'1'}):store.maintain_research_sessions()
+        with closing(sqlite3.connect(self.db)) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM research_session_windows').fetchone(),(0,))
+            self.assertEqual(db.execute('SELECT prompt FROM conversations').fetchone(),('PRIVATE-QUESTION-CANARY',))

@@ -423,6 +423,18 @@ class BetaStateStore:
         allowed={value.strip() for value in os.getenv('ASK_MIMIR_SESSION_SUBJECT_ALLOWLIST','').split(',') if value.strip()}
         return os.getenv('ASK_MIMIR_RESEARCH_SESSIONS_ENABLED')=='1' and subject_id in allowed
 
+    def maintain_research_sessions(self) -> bool:
+        """Expire private accounting metadata even when no customer is active."""
+        if os.getenv('ASK_MIMIR_RESEARCH_SESSIONS_ENABLED') != '1':
+            return False
+        with self.lock:
+            now = time.monotonic()
+            if now < getattr(self, '_next_research_retention_check', 0):
+                return False
+            self.research_sessions.purge_expired()
+            self._next_research_retention_check = now + 3600
+            return True
+
     def public_access(self, access: AccessContext):
         if not (access.authenticated and self.session_enabled(access.subject_id)):
             return access.public_dict(self.used_today(access.subject_id), self.used_this_month(access.subject_id))

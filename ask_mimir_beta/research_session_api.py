@@ -2,6 +2,7 @@
 import hmac
 import os
 import re
+import uuid
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -45,7 +46,11 @@ def create_research_session_router(state_path, resolve_access):
             raise HTTPException(401,'Verified Mimir access is required')
         access=resolve_access(request)
         allowed={x.strip() for x in os.getenv('ASK_MIMIR_SESSION_SUBJECT_ALLOWLIST','').split(',') if x.strip()}
-        if not access.authenticated or access.subject_id not in allowed:
+        customer=False
+        if os.getenv('ASK_MIMIR_MCP_ACCOUNTS_ENABLED')=='1' and access.authenticated and access.subject_id.startswith('user:'):
+            try:customer=str(uuid.UUID(access.subject_id[5:]))==access.subject_id[5:]
+            except ValueError:pass
+        if not access.authenticated or not (customer or access.subject_id in allowed):
             raise HTTPException(403,'Private research-session access is not enabled')
         length=request.headers.get('content-length','0')
         if not length.isdigit(): raise HTTPException(400,'Check the research-session request')
