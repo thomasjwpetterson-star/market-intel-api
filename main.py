@@ -7196,9 +7196,12 @@ def search_public_intelligence_manifest(
     response: Response,
     q: str,
     limit: int = 8,
+    entity_type: Optional[str] = None,
 ):
     """Search only entities included in the current public release."""
     require_public_snapshot_ready()
+    if entity_type is not None and entity_type not in {"cage_company", "platform", "nsn", "contract_award", "solicitation"}:
+        raise HTTPException(status_code=400, detail="Unsupported public intelligence entity type.")
     clean_query = str(q or "").strip()[:100]
     if len(clean_query) < 2:
         return {"query": clean_query, "entries": []}
@@ -7215,6 +7218,7 @@ def search_public_intelligence_manifest(
                 richness_score
             FROM public_intelligence_search
             WHERE STRPOS(search_text, LOWER(?)) > 0
+              AND entity_type = COALESCE(?, entity_type)
             ORDER BY
                 CASE WHEN LOWER(entity_id) = LOWER(?) THEN 0 ELSE 1 END,
                 CASE WHEN STARTS_WITH(LOWER(display_name), LOWER(?)) THEN 0 ELSE 1 END,
@@ -7222,7 +7226,7 @@ def search_public_intelligence_manifest(
                 entity_id
             LIMIT ?
             """,
-            [clean_query, clean_query, clean_query, safe_limit],
+            [clean_query, entity_type, clean_query, clean_query, safe_limit],
         )
         entries = df.to_dict(orient="records") if not df.empty else []
     except Exception:
@@ -7231,6 +7235,54 @@ def search_public_intelligence_manifest(
 
     response.headers["Cache-Control"] = "public, max-age=60, s-maxage=300"
     return {"query": clean_query, "entries": entries}
+
+
+@app.get("/api/public/intelligence/open-notices")
+def search_public_open_notices(response: Response, q: str = ""):
+    """Search live response deadlines for notices in the public release."""
+    require_public_snapshot_ready()
+    query = str(q or "").strip().lower()[:100]
+    if query and len(query) < 2:
+        return {"entries": [], "has_more": False}
+
+    limit = 12 if not query else 24
+    try:
+        df = duck_fetch_df(
+            """
+            WITH notices AS (
+                SELECT m.entity_id, m.canonical_path, m.display_name,
+                       CAST(o.sol_num AS VARCHAR) AS solicitation_number,
+                       COALESCE(NULLIF(TRIM(o.sub_agency), ''), NULLIF(TRIM(o.agency), '')) AS buyer,
+                       o.source_system, CAST(o.psc AS VARCHAR) AS psc,
+                       CAST(o.naics AS VARCHAR) AS naics, o.set_aside_type,
+                       TRY_CAST(o.deadline AS TIMESTAMPTZ) AS deadline_at
+                FROM v_opportunities o
+                JOIN public_intelligence_manifest m
+                  ON m.entity_type = 'solicitation' AND m.entity_id = CAST(o.id AS VARCHAR)
+                WHERE TRY_CAST(o.deadline AS TIMESTAMPTZ) > CURRENT_TIMESTAMP
+                  AND REGEXP_MATCHES(TRIM(CAST(o.deadline AS VARCHAR)), '[T ][0-9]{2}:[0-9]{2}.*([Zz]|[+-][0-9]{2}(:?[0-9]{2})?)$')
+                  AND (? = '' OR STRPOS(LOWER(CONCAT_WS(' ', m.entity_id, m.display_name,
+                      o.sol_num, o.agency, o.sub_agency, o.psc, o.naics, o.set_aside_type,
+                      SUBSTR(CAST(o.description AS VARCHAR), 1, 5000))), ?) > 0)
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY m.entity_id ORDER BY deadline_at) = 1
+            )
+            SELECT entity_id, canonical_path, display_name, solicitation_number, buyer,
+                   source_system, psc, naics, set_aside_type,
+                   STRFTIME(deadline_at AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%M:%SZ') AS deadline
+            FROM notices
+            ORDER BY CASE WHEN LOWER(entity_id) = ? OR LOWER(solicitation_number) = ? THEN 0 ELSE 1 END,
+                     deadline_at, entity_id
+            LIMIT ?
+            """,
+            [query, query, query, query, limit + 1],
+        )
+    except Exception:
+        logger.exception("Public open notice search failed")
+        raise HTTPException(status_code=503, detail="Published notice search is temporarily unavailable")
+
+    entries = df_sanitize_for_json(df).to_dict(orient="records")
+    response.headers["Cache-Control"] = "public, max-age=0, s-maxage=60"
+    return {"entries": entries[:limit], "has_more": len(entries) > limit}
 
 
 @app.get("/api/public/intelligence/awards/{contract_id}")
