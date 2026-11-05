@@ -1,6 +1,7 @@
 """Trusted-adapter-only private pilot. Uses the existing Ask state database."""
 import hmac
 import os
+import re
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -9,6 +10,30 @@ from research_sessions import ResearchSessions, SessionConflict, SessionLimit
 
 def create_research_session_router(state_path, resolve_access):
     router=APIRouter()
+
+    @router.post('/api/research-preview')
+    async def research_preview(request: Request):
+        if os.getenv('ASK_MIMIR_ANON_PREVIEW_ENABLED')!='1':raise HTTPException(404,'Not found')
+        secret=os.getenv('ASK_MIMIR_TRUSTED_PROXY_SECRET','')
+        supplied=request.headers.get('x-ask-mimir-proxy-secret','')
+        if not secret or not hmac.compare_digest(secret.encode(),supplied.encode()):raise HTTPException(401,'Preview access could not be verified')
+        owner=request.headers.get('x-ask-mimir-preview-subject','')
+        if not re.fullmatch(r'preview:[a-f0-9]{64}',owner):raise HTTPException(400,'Invalid preview context')
+        raw=await request.body()
+        if len(raw)>2048:raise HTTPException(413,'Request is too large')
+        import json
+        try:
+            body=json.loads(raw)
+            if not isinstance(body,dict) or set(body)-{'action','request_key','fingerprint'}:raise ValueError()
+            store=ResearchSessions(Path(state_path()))
+            if body.get('action')=='admit':result=store.admit(owner,'preview',body.get('request_key'),body.get('fingerprint'))
+            elif body.get('action') in ('succeed','fail') and set(body)=={'action','request_key'} and isinstance(body.get('request_key'),str) and re.fullmatch(r'[A-Za-z0-9_-]{8,128}',body['request_key']):
+                result={'usage':store.finish(owner,'preview',body['request_key'],success=body['action']=='succeed')}
+            else:raise ValueError()
+        except SessionLimit as exc:return JSONResponse({'error':{'code':exc.code},'usage':exc.usage},status_code=429,headers={'Cache-Control':'private, no-store'})
+        except SessionConflict:raise HTTPException(409,'Preview reservation could not be verified')
+        except (ValueError,TypeError):raise HTTPException(400,'Check the preview request')
+        return JSONResponse(result,headers={'Cache-Control':'private, no-store'})
 
     @router.post('/api/research-session')
     async def research_session(request: Request):

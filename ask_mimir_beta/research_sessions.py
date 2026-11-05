@@ -15,10 +15,12 @@ from pathlib import Path
 
 
 LIMITS = {"free": (2, 30), "trial": (5, 35), "lite": (5, 100),
-          "professional": (15, 300), "enterprise": (50, 1000)}
+          "professional": (15, 300), "enterprise": (50, 1000), "preview": (1, 1)}
 WINDOW = 900
 LEASE = 120
 WORK_BUDGET = 60
+PREVIEW_WORK_BUDGET = 4
+PREVIEW_SERVICE_DAILY_LIMIT = 50
 
 
 class SessionLimit(RuntimeError):
@@ -91,12 +93,17 @@ class ResearchSessions:
             db.execute("""UPDATE research_session_calls SET state='failed'
               WHERE state='pending' AND request_key IN (
                 SELECT request_id FROM query_events WHERE status IN ('failed_refunded','completed_unbilled'))""")
+        # The existing job connection may not enable foreign-key cascades.
+        db.execute('DELETE FROM research_session_calls WHERE window_id IN (SELECT id FROM research_session_windows WHERE COALESCE(ends,created)<?)',(now-90*86400,))
         db.execute('DELETE FROM research_session_windows WHERE COALESCE(ends,created)<?',(now-90*86400,))
 
     def _usage(self, db, owner, tier, now):
         from datetime import datetime, timedelta, timezone
         if tier not in LIMITS or not owner or owner.startswith(('guest:', 'anonymous:')):
             raise ValueError("A verified Mimir account and supported plan are required")
+        preview=tier=='preview'
+        if preview != owner.startswith('preview:'):
+            raise ValueError('Preview and account identities must be kept separate')
         current = datetime.fromtimestamp(now, timezone.utc)
         day = current.replace(hour=0, minute=0, second=0, microsecond=0)
         month = day.replace(day=1)
@@ -110,22 +117,29 @@ class ResearchSessions:
         """, (owner,)).fetchall()
         daily = sum(day.timestamp() <= r['charged'] < day_end for r in counted)
         monthly = sum(month.timestamp() <= r['charged'] < month_end for r in counted)
+        if preview: daily=monthly=len(counted)
         active = db.execute("""SELECT id,ends FROM research_session_windows
           WHERE owner=? AND started IS NOT NULL AND ends>? ORDER BY started DESC LIMIT 1""", (owner,now)).fetchone()
         calls = (db.execute("SELECT count(*) FROM research_session_calls WHERE window_id=? AND state IN ('pending','success')", (active['id'],)).fetchone()[0]
                  if active else 0)
         daily_limit, month_limit = LIMITS[tier]
-        resets = ([day_end] if daily >= daily_limit else []) + ([month_end] if monthly >= month_limit else [])
-        if active and calls >= WORK_BUDGET: resets.append(active['ends'])
+        work_budget=PREVIEW_WORK_BUDGET if preview else WORK_BUDGET
+        resets = [] if preview else ([day_end] if daily >= daily_limit else []) + ([month_end] if monthly >= month_limit else [])
+        if active and calls >= work_budget and not preview: resets.append(active['ends'])
         iso = lambda value: datetime.fromtimestamp(value,timezone.utc).isoformat() if value is not None else None
-        return dict(unit='research_session',plan=tier,
+        if preview:
+            return dict(unit='preview_session',active_until=iso(active['ends']) if active else None,
+                        can_continue=bool(active and calls<work_budget),can_start=not active and not counted,
+                        remaining_work_calls=max(work_budget-calls,0) if active else 0,
+                        lookups_per_preview=work_budget)
+        return dict(unit='preview_session' if preview else 'research_session',plan=tier,
                     daily_limit=daily_limit,monthly_limit=month_limit,
                     remaining_today=max(daily_limit-daily,0),
                     remaining_this_month=max(month_limit-monthly,0),
                     active_until=iso(active['ends']) if active else None,
-                    can_continue=bool(active and calls < WORK_BUDGET),
+                    can_continue=bool(active and calls < work_budget),
                     can_start=not active and daily < daily_limit and monthly < month_limit,
-                    remaining_work_calls=max(WORK_BUDGET-calls,0) if active else 0,
+                    remaining_work_calls=max(work_budget-calls,0) if active else 0,
                     daily_resets_at=iso(day_end),monthly_resets_at=iso(month_end),
                     next_available_at=iso(max(resets)) if resets else None)
 
@@ -159,12 +173,19 @@ class ResearchSessions:
             if not window:
                 if not usage['can_start']:
                     raise SessionLimit('quota_exhausted',usage)
+                if tier=='preview':
+                    from datetime import datetime,timezone
+                    start=datetime.fromtimestamp(now,timezone.utc).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
+                    service_count=db.execute("""SELECT count(*) FROM research_session_windows w
+                      WHERE owner LIKE 'preview:%' AND created>=? AND (started IS NOT NULL
+                        OR EXISTS(SELECT 1 FROM research_session_calls c WHERE c.window_id=w.id AND c.state='pending'))""",(start,)).fetchone()[0]
+                    if service_count>=PREVIEW_SERVICE_DAILY_LIMIT:raise SessionLimit('preview_unavailable',usage)
                 window_id=uuid.uuid4().hex
                 db.execute('INSERT INTO research_session_windows VALUES (?,?,?,NULL,NULL)',(window_id,owner,now))
             else:
                 window_id=window['id']
                 calls=db.execute("SELECT count(*) FROM research_session_calls WHERE window_id=? AND state IN ('pending','success')",(window_id,)).fetchone()[0]
-                if calls>=WORK_BUDGET:
+                if calls>=(PREVIEW_WORK_BUDGET if tier=='preview' else WORK_BUDGET):
                     raise SessionLimit('session_work_limit',usage)
             db.execute("INSERT INTO research_session_calls VALUES (?,?,?,?,'pending',?,?)",(request_key,owner,fingerprint,window_id,now,now+lease_seconds))
             return dict(replay=False,state='pending',usage=self._usage(db,owner,tier,now))
