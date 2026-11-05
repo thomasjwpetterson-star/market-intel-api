@@ -65,6 +65,16 @@ class Repository(DiscoveryRepositoryMixin):
   payload=self.indexed_company('CAGE:'+cage)
   if payload is not None and payload.get('company'):return [dict(payload['company'])]
   return self.rows('SELECT * FROM '+self.table('company_registry')+" WHERE cage_code='"+cage+"'")
+ def company_identity(self,cage):
+  """Read the published parent resolver; never infer ownership from names."""
+  if not isinstance(cage,str) or not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
+  manifest=self.manifest()
+  if not {'company_registry','company_parent_resolution'}<=set(manifest.get('tables',{})):
+   return {'cage':cage,'status':'not_published','as_of':manifest.get('as_of')}
+  registry=self.table('company_registry');parents=self.table('company_parent_resolution')
+  rows=self.rows("SELECT r.cage_code,r.company_name,r.city,r.region,r.country,r.parent_cage,r.dla_last_update,p.resolved_registry_parent_cage,p.resolution_status,p.chain_path_json,p.depth,parent.company_name resolved_parent_name FROM "+registry+" r LEFT JOIN "+parents+" p ON p.company_id=r.company_id LEFT JOIN "+registry+" parent ON parent.cage_code=p.resolved_registry_parent_cage WHERE r.cage_code='"+cage+"'")
+  from .identity import present_identity
+  return present_identity(cage,rows,manifest.get('as_of'))
  def relationships(self,cage,limit=50,offset=0):
   if not re.fullmatch('[A-Z0-9]{5}',cage):raise ValueError('Invalid CAGE')
   if not 1<=limit<=100 or not 0<=offset<=1000000:raise ValueError('Invalid pagination')
@@ -529,6 +539,8 @@ def create_router(verify_principal,repository=None):
  def business_evidence(cage:str,kind:str='actions',limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):return {'records':call(repo.business_evidence,cage,kind,limit,offset),'release':repo.manifest()['run_id'],'kind':kind,'interpretation':'Observed transactions or physical product-market purchase lines. These historical amounts are not added to opportunity value; exact part references do not prove the delivered manufacturer.'}
  @router.get('/companies/{cage}/matching-profile')
  def matching_profile(cage:str,limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):return call(repo.matching_profile,cage,limit,offset)
+ @router.get('/companies/{cage}/identity')
+ def company_identity(cage:str):return call(repo.company_identity,cage)
  @router.get('/companies/{cage}/capability-vocabulary')
  def capability_vocabulary(cage:str,limit:int=Query(25,ge=1,le=100),offset:int=Query(0,ge=0,le=1000000)):
   return {'records':call(repo.capability_vocabulary,cage,limit,offset),'release':repo.manifest()['run_id'],'interpretation':'Reported PSC and source-backed work concepts; classification is not qualification.'}

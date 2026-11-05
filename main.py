@@ -5649,6 +5649,22 @@ def private_item_history(payload: Dict[str,Any],request: Request,response: Respo
     value['source_generation']=str(before);response.headers['Cache-Control']='private, no-store';return value
 
 
+@app.get('/api/research/company-identity')
+def private_company_identity(cage: str,request: Request,response: Response):
+    expected=os.getenv('MIMIR_EXPORT_PROXY_SECRET','').strip();supplied=request.headers.get('X-Mimir-Export-Key','').strip()
+    if not expected or not supplied or not hmac.compare_digest(expected,supplied):raise HTTPException(status_code=401,detail='An authenticated Mimir research proxy is required.')
+    if not re.fullmatch('[A-Z0-9]{5}',cage):raise HTTPException(status_code=400,detail='Use an exact CAGE.')
+    try:
+        from opportunity_intelligence.identity import lookup_identity
+        result=lookup_identity(cage)
+    except ValueError as error:raise HTTPException(status_code=400,detail='The company identity could not be verified.')from error
+    except Exception as error:
+        logger.warning('Private company identity source unavailable')
+        raise HTTPException(status_code=503,detail='Company identity context is temporarily unavailable.')from error
+    response.headers['Cache-Control']='private, no-store'
+    return result
+
+
 @app.post('/api/research/reference-context')
 def private_reference_context(payload: Dict[str,Any],request: Request,response: Response):
     expected=os.getenv('MIMIR_EXPORT_PROXY_SECRET','').strip();supplied=request.headers.get('X-Mimir-Export-Key','').strip()
