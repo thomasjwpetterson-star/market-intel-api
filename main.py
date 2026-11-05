@@ -5516,7 +5516,7 @@ def private_research_aggregate(payload: Dict[str, Any], request: Request, respon
         release=GLOBAL_CACHE.get('platform_release')or{}
         reference=reference_for(release.get('components',{}).get('main',{}).get('release_id'))
         reader=lambda sql,params:df_sanitize_for_json(programme_read_df(sql,params)).to_dict(orient='records')
-        value = aggregate(payload,reference,reader)if reference else run_aggregate(payload,reader)
+        value = aggregate(payload,reference,reader)if reference or payload.get('dataset')=='reported_subcontracts' else run_aggregate(payload,reader)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
     if GLOBAL_CACHE.get("last_loaded") != before or GLOBAL_CACHE.get("is_loading", False):

@@ -7,7 +7,7 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from research_session_api import create_research_session_router
-from research_sessions import ResearchSessions, SessionLimit, PREVIEW_SERVICE_DAILY_LIMIT
+from research_sessions import ResearchSessions, SessionLimit, PREVIEW_SERVICE_DAILY_LIMIT, PREVIEW_WORK_BUDGET
 
 
 class PreviewTests(unittest.TestCase):
@@ -19,8 +19,8 @@ class PreviewTests(unittest.TestCase):
     def tearDown(self):self.temp.cleanup()
     def start(self,owner,key):
         return self.store.admit(owner,'preview',key,hashlib.sha256(key.encode()).hexdigest())
-    def test_one_preview_with_four_lookups_and_no_daily_renewal(self):
-        for i in range(4):
+    def test_one_preview_with_conversational_followups_and_no_daily_renewal(self):
+        for i in range(PREVIEW_WORK_BUDGET):
             self.start(self.owner,f'preview-{i}')
             usage=self.store.finish(self.owner,'preview',f'preview-{i}',success=True)
         self.assertFalse(usage['can_continue']);self.assertEqual(usage['remaining_work_calls'],0)

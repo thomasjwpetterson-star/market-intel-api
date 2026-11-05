@@ -68,6 +68,14 @@ def wrap_action_read(reference,read,program=None,summary=False):
 
 def aggregate(payload,reference,read):
     from private_research_query import run_aggregate
+    if payload.get('dataset')=='reported_subcontracts':
+        # Reuse promoted platform network finance. Programme words on a report
+        # do not inherit an entire parent award's current v7 programme scope.
+        result=run_aggregate(payload,read)
+        result.update(source_grain='PLATFORM_ADJUSTED_REPORTED_SUBCONTRACTS',programme_mapping_basis='SOURCE_REPORTED_SUBCONTRACT_LABELS',parent_award_cascade_enabled=False,
+                      value_interpretation='Adjusted reported subcontract value from the same platform network view. Separate from prime obligations and company revenue.',
+                      programme_interpretation='Programme groups are labels retained on reported subcontract records, not independently verified component-level programme attribution.')
+        return result
     program=payload.get('filters',{}).get('program')
     meta=metadata(reference,program)
     scope=bool(program or 'program'in payload.get('group_by',[]))
