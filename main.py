@@ -4376,6 +4376,14 @@ SUBCONTRACT_INTERNAL_EXPORT_COLUMNS = {
     "subcontract_methodology",
 }
 
+# Read-only financial interpretation fields for the authenticated MCP adapter.
+# Public explorer/export defaults retain their existing narrower projection.
+SUBCONTRACT_RESEARCH_COLUMNS = {
+    'source_report_id','source_report_last_modified_date',
+    'subcontract_value_treatment','included_in_adjusted_total',
+    'subcontract_data_source','subcontract_methodology',
+}
+
 EXPLORER_DEFAULT_COLUMNS = {
     CONTRACT_AWARD_EXPLORER_TABLE: [
         "contract_id", "vendor_name", "vendor_cage",
@@ -5234,7 +5242,8 @@ def build_explorer_query(
     payload: ExplorerRequest,
     row_limit: int,
     offset: int = 0,
-    count_only: bool = False
+    count_only: bool = False,
+    research_columns: bool = False,
 ):
     table = payload.table if payload.table in ALLOWED_EXPLORER_TABLES else "v_contracts_rolled"
 
@@ -5259,7 +5268,10 @@ def build_explorer_query(
 
     for requested_col in requested_cols:
         requested_clean = str(requested_col).strip().lower()
-        if requested_clean not in ALLOWED_EXPLORER_COLUMNS:
+        if requested_clean not in ALLOWED_EXPLORER_COLUMNS and not (
+            research_columns and table == SUBCONTRACT_EXPLORER_TABLE
+            and requested_clean in SUBCONTRACT_RESEARCH_COLUMNS
+        ):
             continue
 
         if requested_clean == "is_multi_platform_component":
@@ -5568,7 +5580,7 @@ def private_research_dataset(payload: Dict[str,Any],request: Request,response: R
             reader=wrap_action_read(reference,reader,program)
             meta['source_grain']='AVAILABLE_ACTIONS_GROUPED_BY_NATIVE_AWARD_KEY'
         else:
-            sql,params=build_explorer_query(query,row_limit=limit,offset=offset,count_only=count_only)
+            sql,params=build_explorer_query(query,row_limit=limit,offset=offset,count_only=count_only,research_columns=True)
             if query.table=='v_transactions':reader=wrap_action_read(reference,reader,program);meta['source_grain']='AVAILABLE_CONTRACT_ACTIONS'
             elif query.table=='v_summary'and program:reader=wrap_action_read(reference,reader,program,summary=True);meta['source_grain']='AVAILABLE_ACTIONS_SUMMARISED'
             elif item_program:reader=wrap_item_read(reference,reader,program,get_duck_table_columns('v_nsn_cage_reference'));meta['source_grain']='V7_ASSOCIATED_ITEM_REFERENCES'

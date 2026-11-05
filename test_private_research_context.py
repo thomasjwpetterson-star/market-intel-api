@@ -48,6 +48,27 @@ if __name__=='__main__':unittest.main()
 class PrivateDatasetRoutes(unittest.TestCase):
     setUp=CurrentV7Scopes.setUp
     read=CurrentV7Scopes.read
+    def test_private_subcontract_read_exposes_financial_treatment_without_widening_public_explorer(self):
+        from unittest.mock import patch
+        import os
+        self.db.execute('CREATE TABLE v_subcontracts(year INTEGER,subcontractor_cage VARCHAR,prime_award_id VARCHAR,subcontract_value_usd DOUBLE,included_in_adjusted_total BOOLEAN,subcontract_value_treatment VARCHAR,subcontract_methodology VARCHAR,source_report_id VARCHAR,source_report_last_modified_date VARCHAR)')
+        self.db.execute("INSERT INTO v_subcontracts VALUES(2025,'19645','AWARD1',100,true,'adjusted_existing_platform_value','Reported subcontract value v3','NATIVE-REPORT','2026-11-01')")
+        client,ns=self.client()
+        body={'table':'v_subcontracts','columns':['subcontract_value_usd','included_in_adjusted_total','subcontract_value_treatment','source_report_id'],'filters':{'subcontractor_cage':'19645'},'limit':2}
+        with patch.dict(os.environ,{'MIMIR_EXPORT_PROXY_SECRET':'fixture'}),patch('private_platform_reference.reference_for',return_value=self.ref):
+            self.assertEqual(client.post('/query',json=body).status_code,401)
+            result=client.post('/query',json=body,headers={'X-Mimir-Export-Key':'fixture'})
+            self.assertEqual(result.status_code,200,result.text)
+            row=result.json()['rows'][0]
+            self.assertTrue(row['included_in_adjusted_total'])
+            self.assertEqual(row['subcontract_value_treatment'],'adjusted_existing_platform_value')
+            self.assertEqual(row['source_report_id'],'NATIVE-REPORT')
+        sql,_=ns['build_explorer_query'](ns['ExplorerRequest'](**body),row_limit=2)
+        self.assertNotIn('included_in_adjusted_total',sql)
+        self.assertNotIn('subcontract_value_treatment',sql)
+        # The public explorer already supports report identity; only financial
+        # treatment metadata is newly available through the private adapter.
+        self.assertIn('source_report_id',sql)
     def client(self):
         import ast,typing,re,os,hmac
         import pandas as pd,numpy as np
