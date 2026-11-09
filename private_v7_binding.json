@@ -25,6 +25,19 @@
         "bytes": 27899
       },
       "binding_basis": "Explicit exact-native-key compatibility with unchanged reviewed v7 authority; both Athena checks passed. No new mapping, financial allocation or item link."
+    },
+    {
+      "accepted_main_release_id": "mimir-main-platform-v7-9e31c83929dd1d5e",
+      "base_platform_reference_release_id": "2026-10-15-hellfire-jagm-split-v7",
+      "main_source_fingerprint": "3b15a9c234addbdb11a8e5e1a12e10414f73b104e3b4f050c0685aad4620df98",
+      "manifest": {
+        "bucket": "a-and-d-intel-lake-newaccount",
+        "bytes": 24917,
+        "key": "governance/platform_reference/candidates/2026-11-10-native-item-crosswalk-v7-private-main-9e31c83929dd/manifest.json",
+        "s3_version_id": "dR6iWMzSrxDYWDSPhLIM2TwjTHLc7kPN",
+        "sha256": "4a7b1706f10d5791a06aa6c09c2d5b0d31d7ec4e7e8771dd23eb4df680376151"
+      },
+      "binding_basis": "Exact Monday Main source and unchanged reviewed v7 private authority; 825 award identities and seven item actions revalidated, no new financial allocation decision."
     }
   ]
 }
