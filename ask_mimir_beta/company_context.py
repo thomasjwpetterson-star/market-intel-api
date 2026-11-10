@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -164,6 +165,37 @@ class CompanyContextBuilder:
             raise ValueError("ASK_MIMIR_DUCKDB_MEMORY_LIMIT must use MB or GB")
         self.connection.execute(f"SET memory_limit = '{memory_limit}'")
         configure_duckdb_scratch(self.connection, 'company')
+        columns = self.connection.execute(
+            "DESCRIBE SELECT * FROM read_parquet(?)", [str(self.paths["transactions"])]
+        ).fetchall()
+        self._has_reviewed_prime_parent = any(column[0] == "reviewed_prime_parent" for column in columns)
+        self._parent_action_names: tuple[str, ...] = ()
+        self._exact_parent_actions = False
+
+    @contextmanager
+    def _using_parent_action_names(self, names: Sequence[str], *, exact: bool = False):
+        previous = self._parent_action_names, self._exact_parent_actions
+        normalize = str.upper if exact else legal_company_core
+        self._parent_action_names = tuple(sorted({normalize(name.strip()) for name in names} - {""}))
+        self._exact_parent_actions = exact
+        try:
+            yield
+        finally:
+            self._parent_action_names, self._exact_parent_actions = previous
+
+    def _transaction_company_filter(self, cages: Sequence[str], alias: str = "") -> str:
+        prefix = f"{alias}." if alias else ""
+        cage_filter = f"{prefix}vendor_cage IN ({placeholders(cages)})"
+        if not getattr(self, "_has_reviewed_prime_parent", False) or not self._parent_action_names:
+            return cage_filter
+        names = ", ".join("'" + name.replace("'", "''") + "'" for name in self._parent_action_names)
+        column = f"{prefix}reviewed_prime_parent"
+        parent = f"trim(regexp_replace(upper({column}), '[^A-Z0-9]+', ' ', 'g'))"
+        parent = f"regexp_replace({parent}, '( (CORP|CORPORATION|INC|LLC|PLC|LTD|LIMITED))+$', '')"
+        if self._exact_parent_actions:
+            column = f"{prefix}clean_parent"
+            parent = f"upper(trim({column}))"
+        return f"(({column} IS NULL AND {cage_filter}) OR {parent} IN ({names}))"
 
     def parent_definition(self, parent_id: str) -> Dict[str, Any]:
         clean = str(parent_id).strip().upper()
@@ -181,14 +213,16 @@ class CompanyContextBuilder:
         parent = self.parent_definition(parent_id)
         site_definitions = parent.get("sites", [])
         cages = sorted({clean_cage(site.get("cage")) for site in site_definitions})
-        context = self._build_context(
-            scope_type="company_parent",
-            scope_id=str(parent["parent_id"]),
-            scope_name=str(parent["parent_name"]),
-            cages=cages,
-            fiscal_years=fiscal_years,
-            site_definitions=site_definitions,
-        )
+        action_names = [parent["parent_name"], *parent.get("aliases", [])]
+        with self._using_parent_action_names(action_names):
+            context = self._build_context(
+                scope_type="company_parent",
+                scope_id=str(parent["parent_id"]),
+                scope_name=str(parent["parent_name"]),
+                cages=cages,
+                fiscal_years=fiscal_years,
+                site_definitions=site_definitions,
+            )
         context["identity"]["parent_resolution"] = {
             "parent_id": parent.get("parent_id"),
             "parent_name": parent.get("parent_name"),
@@ -250,19 +284,23 @@ class CompanyContextBuilder:
         cages: Sequence[str],
         group_kind: str,
         identity_sites: Sequence[Dict[str, Any]] = (),
+        parent_name: str | None = None,
         fiscal_years: Sequence[int] = DEFAULT_FISCAL_YEARS,
     ) -> Dict[str, Any]:
         clean_cages = sorted({clean_cage(cage) for cage in cages if clean_cage(cage)})
         if not clean_cages:
             raise ValueError("a company group requires at least one CAGE")
-        context = self._build_context(
-            scope_type="company_parent",
-            scope_id=scope_id,
-            scope_name=scope_name,
-            cages=clean_cages,
-            fiscal_years=fiscal_years,
-            site_definitions=[],
-        )
+        exact_parent = group_kind == "reviewed_action_parent"
+        action_names = [parent_name or scope_name] if exact_parent or group_kind == "reported_ultimate_parent" else []
+        with self._using_parent_action_names(action_names, exact=exact_parent):
+            context = self._build_context(
+                scope_type="company_parent",
+                scope_id=scope_id,
+                scope_name=scope_name,
+                cages=clean_cages,
+                fiscal_years=fiscal_years,
+                site_definitions=[],
+            )
         context["identity"]["scope_kind"] = group_kind
         if identity_sites:
             existing = {
@@ -341,6 +379,8 @@ class CompanyContextBuilder:
                 "scope_type": scope_type,
                 "scope_id": scope_id,
                 "scope_name": scope_name,
+                "parent_action_names": list(self._parent_action_names),
+                "exact_parent_actions": self._exact_parent_actions,
                 "fiscal_years": years,
                 "observation_window": f"FY{years[0]}-FY{years[-1]} observed records",
             },
@@ -777,7 +817,7 @@ class CompanyContextBuilder:
                 COUNT(DISTINCT transaction_key) AS distinct_actions
             FROM read_parquet(?)
             WHERE source_system = 'USA_SPENDING'
-              AND vendor_cage IN ({placeholders(cages)})
+              AND {self._transaction_company_filter(cages)}
               AND year IN ({placeholders(years)})
               AND COALESCE(TRIM(place_of_performance_city), '') <> ''
             GROUP BY 1, 2, 3, 4
@@ -835,7 +875,7 @@ class CompanyContextBuilder:
                 MAX(TRY_CAST(action_date AS DATE)) AS latest_observed_date
             FROM read_parquet(?)
             WHERE source_system = 'DLA'
-              AND vendor_cage IN ({placeholders(cages)})
+              AND {self._transaction_company_filter(cages)}
               AND year IN ({placeholders(years)})
               AND niin IS NOT NULL AND TRIM(niin) <> ''
             GROUP BY 1
@@ -1035,7 +1075,7 @@ class CompanyContextBuilder:
             f"""SELECT COALESCE(SUM(ABS(value)), 0) FROM (
                 SELECT LPAD(NULLIF(TRIM(niin), ''), 9, '0'), SUM(spend_amount) AS value
                 FROM read_parquet(?) WHERE source_system = 'DLA'
-                  AND vendor_cage IN ({placeholders(cages)}) AND year IN ({placeholders(years)})
+                  AND {self._transaction_company_filter(cages)} AND year IN ({placeholders(years)})
                   AND niin IS NOT NULL AND TRIM(niin) <> '' GROUP BY 1
             )""", [str(self.paths["transactions"]), *cages, *years],
         ).fetchone()[0])
@@ -1253,7 +1293,7 @@ class CompanyContextBuilder:
                 COUNT(DISTINCT award_key) AS distinct_awards,
                 COUNT(DISTINCT transaction_key) AS distinct_actions
             FROM read_parquet(?)
-            WHERE vendor_cage IN ({placeholders(cages)})
+            WHERE {self._transaction_company_filter(cages)}
               AND year IN ({placeholders(years)})
             GROUP BY 1, 2
         """
@@ -1545,7 +1585,7 @@ class CompanyContextBuilder:
                 MIN(TRY_CAST(action_date AS DATE)) AS first_action_date,
                 MAX(TRY_CAST(action_date AS DATE)) AS latest_action_date
             FROM read_parquet(?)
-            WHERE vendor_cage IN ({placeholders(cages)})
+            WHERE {self._transaction_company_filter(cages)}
               AND year IN ({placeholders(years)})
             GROUP BY 1
             ORDER BY 1
@@ -1572,7 +1612,7 @@ class CompanyContextBuilder:
                 COUNT(DISTINCT award_key) AS distinct_awards,
                 MAX(TRY_CAST(action_date AS DATE)) AS latest_action_date
             FROM read_parquet(?)
-            WHERE vendor_cage IN ({placeholders(cages)})
+            WHERE {self._transaction_company_filter(cages)}
               AND year IN ({placeholders(years)})
             GROUP BY 1, 3
             ORDER BY ABS(net_value_usd) DESC
@@ -1605,7 +1645,7 @@ class CompanyContextBuilder:
                     MODE(NULLIF(TRIM(place_of_performance_state), '')) AS place_of_performance_state,
                     MODE(NULLIF(TRIM(nsn), '')) AS sample_nsn
                 FROM read_parquet(?)
-                WHERE vendor_cage IN ({placeholders(cages)})
+                WHERE {self._transaction_company_filter(cages)}
                   AND year IN ({placeholders(years)})
                 GROUP BY 1, 2, 3
             ), ranked AS (
@@ -1709,7 +1749,7 @@ class CompanyContextBuilder:
                     FROM read_parquet(?)
                     GROUP BY 1
                 ) s ON t.psc = s.psc_code
-                WHERE t.vendor_cage IN ({placeholders(cages)})
+                WHERE {self._transaction_company_filter(cages, 't')}
                   AND t.year IN ({placeholders(years)})
                   AND t.psc IS NOT NULL AND TRIM(t.psc) <> ''
                 GROUP BY 1, 2
@@ -1763,7 +1803,7 @@ class CompanyContextBuilder:
                 FROM read_parquet(?) t
                 LEFT JOIN read_parquet(?) c
                   ON c.classification_type = 'PSC' AND t.psc = c.code
-                WHERE t.vendor_cage IN ({placeholders(cages)})
+                WHERE {self._transaction_company_filter(cages, 't')}
                   AND t.year IN ({placeholders(years)})
                   AND t.psc IS NOT NULL AND TRIM(t.psc) <> ''
                 GROUP BY 1, 2
@@ -1793,7 +1833,7 @@ class CompanyContextBuilder:
                 LEFT JOIN read_parquet(?) c
                   ON c.classification_type = 'NAICS' AND t.naics_code = c.code
                 WHERE t.source_system = 'USA_SPENDING'
-                  AND t.vendor_cage IN ({placeholders(cages)})
+                  AND {self._transaction_company_filter(cages, 't')}
                   AND t.year IN ({placeholders(years)})
                   AND t.naics_code IS NOT NULL AND TRIM(t.naics_code) <> ''
                 GROUP BY 1
@@ -1824,7 +1864,7 @@ class CompanyContextBuilder:
                     MIN(TRY_CAST(action_date AS DATE)) AS first_action_date,
                     MAX(TRY_CAST(action_date AS DATE)) AS latest_action_date
                 FROM read_parquet(?)
-                WHERE vendor_cage IN ({placeholders(cages)})
+                WHERE {self._transaction_company_filter(cages)}
                   AND year IN ({placeholders(years)})
                   AND psc IS NOT NULL AND TRIM(psc) <> ''
                 GROUP BY 1, 2
@@ -1845,7 +1885,7 @@ class CompanyContextBuilder:
                     MIN(year) AS first_fiscal_year,
                     MAX(year) AS latest_fiscal_year
                 FROM read_parquet(?)
-                WHERE vendor_cage IN ({placeholders(cages)})
+                WHERE {self._transaction_company_filter(cages)}
                   AND year IN ({placeholders(years)})
                   AND naics_code IS NOT NULL AND TRIM(naics_code) <> ''
                 GROUP BY 1
@@ -1868,7 +1908,7 @@ class CompanyContextBuilder:
                 MAX(TRY_CAST(action_date AS DATE)) AS latest_action_date
             FROM read_parquet(?)
             WHERE source_system = 'DLA'
-              AND vendor_cage IN ({placeholders(cages)})
+              AND {self._transaction_company_filter(cages)}
               AND year IN ({placeholders(years)})
               AND niin IS NOT NULL AND TRIM(niin) <> ''
             GROUP BY 1
@@ -1884,7 +1924,7 @@ class CompanyContextBuilder:
                 MAX(TRY_CAST(action_date AS DATE)) AS latest_action_date
             FROM read_parquet(?)
             WHERE source_system = 'USA_SPENDING'
-              AND vendor_cage IN ({placeholders(cages)})
+              AND {self._transaction_company_filter(cages)}
               AND year IN ({placeholders(years)})
             GROUP BY 1
             HAVING ABS(SUM(spend_amount)) > 0
@@ -1967,7 +2007,7 @@ class CompanyContextBuilder:
                        {recovered_platform_sql('raw', 'transactions')} AS platform_family
                 FROM read_parquet(?) raw
             )
-            WHERE vendor_cage IN ({placeholders(cages)})
+            WHERE {self._transaction_company_filter(cages)}
               AND year IN ({placeholders(years)})
               AND platform_family IS NOT NULL AND TRIM(platform_family) <> ''
             GROUP BY 2, 3
@@ -2024,7 +2064,7 @@ class CompanyContextBuilder:
                 MAX(TRY_CAST(action_date AS DATE)) AS latest_action_date
             FROM read_parquet(?)
             WHERE source_system = 'USA_SPENDING'
-              AND vendor_cage IN ({placeholders(cages)})
+              AND {self._transaction_company_filter(cages)}
               AND year IN ({placeholders(years)})
             GROUP BY 1, 2
             ORDER BY ABS(net_prime_obligations_usd) DESC
@@ -2133,7 +2173,7 @@ class CompanyContextBuilder:
                     AS public_record_url
             FROM read_parquet(?)
             WHERE source_system = 'USA_SPENDING'
-              AND vendor_cage IN ({placeholders(cages)})
+              AND {self._transaction_company_filter(cages)}
               AND year IN ({placeholders(years)})
             GROUP BY 1
             ORDER BY ABS(net_prime_obligations_usd) DESC
@@ -2162,14 +2202,15 @@ class CompanyContextBuilder:
             expanded["export_row_limit_per_table"] = row_limit
             return expanded
 
-        expanded["top_awards"] = self._top_awards(cages, years, row_limit)
+        with self._using_parent_action_names(
+            scope.get("parent_action_names", []), exact=scope.get("exact_parent_actions", False)
+        ):
+            expanded["top_awards"] = self._top_awards(cages, years, row_limit)
+            if not expanded.get("site_capability_evidence"):
+                expanded["site_capability_evidence"] = self._site_capability_evidence(cages, years)
         expanded["reported_subcontract_relationships"] = self._network_context(
             cages, years, row_limit
         )
-        if not expanded.get("site_capability_evidence"):
-            expanded["site_capability_evidence"] = self._site_capability_evidence(
-                cages, years
-            )
         product = expanded.get("product_and_part_evidence", {})
         product["niin_financial_observations"] = list(
             product.get("niin_financial_observations", [])
@@ -2332,7 +2373,7 @@ class CompanyContextBuilder:
                 ) AS platform_mapped_absolute_value_usd,
                 SUM(spend_amount) AS net_value_usd
             FROM read_parquet(?)
-            WHERE vendor_cage IN ({placeholders(cages)})
+            WHERE {self._transaction_company_filter(cages)}
               AND year IN ({placeholders(years)})
               AND source_system IN ('USA_SPENDING', 'DLA')
             GROUP BY 1
@@ -2404,7 +2445,7 @@ class CompanyContextBuilder:
                     MAX(base_award_description) AS base_award_description
                 FROM read_parquet(?)
                 WHERE source_system = 'USA_SPENDING'
-                  AND vendor_cage IN ({placeholders(cages)})
+                  AND {self._transaction_company_filter(cages)}
                   AND year IN ({placeholders(years)})
                 GROUP BY 1, 2
             )

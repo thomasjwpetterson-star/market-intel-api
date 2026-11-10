@@ -38,6 +38,19 @@
         "sha256": "4a7b1706f10d5791a06aa6c09c2d5b0d31d7ec4e7e8771dd23eb4df680376151"
       },
       "binding_basis": "Exact Monday Main source and unchanged reviewed v7 private authority; 825 award identities and seven item actions revalidated, no new financial allocation decision."
+    },
+    {
+      "accepted_main_release_id": "mimir-main-platform-v7-parent-ownership-20261110-v1",
+      "base_platform_reference_release_id": "2026-10-15-hellfire-jagm-split-v7",
+      "main_source_fingerprint": "a19b89abdb698b98bc67a66364963791ac6e70d8056d78eff141b2928b73e984",
+      "manifest": {
+        "bucket": "a-and-d-intel-lake-newaccount",
+        "key": "governance/platform_reference/candidates/mimir-main-platform-v7-parent-ownership-20261110-v1/private-authority.json",
+        "s3_version_id": "SyF16x2eUYLOr.pgsTMASpqkHcnNMmUo",
+        "sha256": "0a8aa522a9e40b7e6ed643d631838c56a7914a3c294417d3a99ebf0dd30e41e5",
+        "bytes": 28820
+      },
+      "binding_basis": "Exact prime-parent reattribution only. The programme authority files and decisions are identical to the pinned Monday v7 release."
     }
   ]
 }

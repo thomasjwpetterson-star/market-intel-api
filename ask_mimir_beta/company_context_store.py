@@ -26,7 +26,7 @@ FYDP_PLATFORM_LINKAGE_VERSION = json.loads(
 DEFAULT_DATA_ROOT = Path(
     "/Users/tompetterson/Documents/my-saas-projects/market-intel-api/local_data"
 )
-DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v14"
+DYNAMIC_CONTEXT_SCHEMA_VERSION = "company-context-v15"
 
 CANONICAL_CONSOLIDATED_PARENT_NAMES = {
     "CURTISS WRIGHT": "CURTISS-WRIGHT CORPORATION",
@@ -999,6 +999,7 @@ class CompanyContextStore:
         self._directory_lock = threading.Lock()
         self._parent_bridge_lock = threading.Lock()
         self._parent_bridge: Dict[str, tuple[str, str | None]] | None = None
+        self._reviewed_action_parents: Dict[str, tuple[str, List[str]]] | None = None
         self._dynamic_lock = threading.Lock()
         self._dynamic_builder = None
         self._dynamic_contexts: Dict[tuple[str, str], Dict[str, Any]] = {}
@@ -1188,6 +1189,11 @@ class CompanyContextStore:
                     matches = self._merge_directory_matches(
                         matches, [consolidated_parent]
                     )
+            if scope_type != "company_site":
+                historical_parent = self._reviewed_action_parent_match(query, matches)
+                if historical_parent:
+                    matches = [row for row in matches if row["scope_type"] != "company_parent"]
+                    matches = self._merge_directory_matches(matches, [historical_parent])
             if scope_type != "company_site" and not any(
                 row["scope_type"] == "company_parent" for row in matches
             ):
@@ -1707,6 +1713,65 @@ class CompanyContextStore:
             "option_label": f"{scope_name} - company-wide ({len(cages)} CAGE sites)",
             "context_available": False,
             "group_kind": "reviewed_company_group",
+        }
+
+    def _reviewed_action_parent_match(
+        self, query: str, current_matches: Sequence[Dict[str, Any]] = ()
+    ) -> Dict[str, Any] | None:
+        """Add historical award ownership to the parent directory and its current sites."""
+        if self._reviewed_action_parents is None:
+            with self._parent_bridge_lock:
+                if self._reviewed_action_parents is None:
+                    path = self.data_root / "transactions.parquet"
+                    rows = []
+                    if path.exists():
+                        with duckdb.connect() as connection:
+                            columns = connection.execute(
+                                "DESCRIBE SELECT * FROM read_parquet(?)", [str(path)]
+                            ).fetchall()
+                            if any(column[0] == "reviewed_prime_parent" for column in columns):
+                                rows = connection.execute(
+                                    """SELECT reviewed_prime_parent, LIST(DISTINCT vendor_cage)
+                                       FROM read_parquet(?)
+                                       WHERE reviewed_prime_parent IS NOT NULL
+                                         AND vendor_cage IS NOT NULL AND vendor_cage <> ''
+                                       GROUP BY 1""",
+                                    [str(path)],
+                                ).fetchall()
+                    self._reviewed_action_parents = {
+                        _company_name_core(name): (name, sorted(cages)) for name, cages in rows
+                    }
+        match = self._reviewed_action_parents.get(_company_name_core(query))
+        if match is None:
+            return None
+        name, historical_cages = match
+        cages = set(historical_cages)
+        identity_sites = {}
+        for current in current_matches:
+            if current.get("scope_type") != "company_parent" or _company_name_core(current.get("scope_name")) != _company_name_core(name):
+                continue
+            cages.update(current.get("resolved_cages") or [])
+            existing = self._dynamic_groups.get(current["scope_id"], {})
+            for site in existing.get("identity_sites", []):
+                cage = _normalize_cage(site.get("cage") or site.get("scope_id"))
+                if cage:
+                    identity_sites[cage] = site
+        cages = sorted(cages)
+        scope_id = f"HISTORICAL_{_reported_parent_id(name)}"
+        kind = "reviewed_action_parent"
+        self._dynamic_groups[scope_id] = {
+            "scope_name": name,
+            "cages": cages,
+            "group_kind": kind,
+            "parent_name": name,
+            "identity_sites": list(identity_sites.values()),
+        }
+        return {
+            "context_id": None, "scope_type": "company_parent", "scope_id": scope_id,
+            "scope_name": name, "observation_window": None, "site_count": len(cages),
+            "resolved_cages": cages, "city": None, "state": None,
+            "option_label": f"{name} - reviewed award history", "context_available": False,
+            "group_kind": kind,
         }
 
     def _reported_parent_matches(self, query: str) -> List[Dict[str, Any]]:
@@ -2240,12 +2305,16 @@ class CompanyContextStore:
                     scope_name=group["scope_name"],
                     cages=group["cages"],
                     group_kind=group["group_kind"],
+                    parent_name=group.get("parent_name"),
                     identity_sites=group.get("identity_sites", []),
                 )
                 if group.get("parent_name"):
                     context["identity"]["parent_resolution"] = {
                         "parent_name": group["parent_name"],
-                        "method": "reported ultimate-parent relationship",
+                        "method": (
+                            "reviewed action-date ownership" if group["group_kind"] == "reviewed_action_parent"
+                            else "reported ultimate-parent relationship"
+                        ),
                     }
             else:
                 context = self._dynamic_builder.build_site(clean_id)

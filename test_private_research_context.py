@@ -27,6 +27,14 @@ class CurrentV7Scopes(unittest.TestCase):
     def test_parent_mapping_deduplicates_site_year_context(self):
         out=aggregate({'dataset':'funding_summary','filters':{'program':'AMRAAM','years':[2025]},'group_by':['company']},self.ref,self.read)
         self.assertEqual(out['observed_obligations_usd'],115);self.assertEqual({r['company']for r in out['groups']},{'PARENT','NAVY PARENT'})
+    def test_action_date_parent_wins_over_ambiguous_site_year(self):
+        self.db.execute("ALTER TABLE v_transactions ADD COLUMN clean_parent VARCHAR")
+        self.db.execute("UPDATE v_transactions SET clean_parent=CASE WHEN spend_amount<0 THEN 'NEW PARENT' ELSE 'OLD PARENT' END WHERE award_key='af'")
+        self.db.execute("INSERT INTO v_summary VALUES (2025,'11111','NEW PARENT','DEFENSE CONTRACT MANAGEMENT AGENCY','AMRAAM',-10,'1410')")
+        out=aggregate({'dataset':'funding_summary','filters':{'program':'AMRAAM','years':[2025]},'group_by':['company']},self.ref,self.read)
+        self.assertEqual(out['observed_obligations_usd'],115)
+        self.assertEqual({r['company'] for r in out['groups']},{'OLD PARENT','NEW PARENT','NAVY PARENT'})
+
     def test_clears_and_shared_context_do_not_duplicate_unfiltered_totals(self):
         reader=wrap_action_read(self.ref,self.read)
         rows=reader('SELECT platform_family,SUM(spend_amount) AS total FROM v_transactions GROUP BY 1',[])

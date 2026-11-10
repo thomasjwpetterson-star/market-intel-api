@@ -25,28 +25,34 @@ def prepend(sql,ctes):
     return 'WITH '+ctes+', '+stripped[5:]if stripped.upper().startswith('WITH ')else'WITH '+ctes+' '+stripped
 
 
-def action_relation(reference,program=None):
+def action_relation(reference,program=None,include_parent=False):
     """Override reviewed prime awards; preserve source-native associations otherwise."""
     names={r['canonical_entity_id']:r['canonical_label']for r in reference.registry}
     decisions=[{'award_key':r['award_key'],'label':' | '.join(names[e]for e in reference.targets(r))or None}for r in reference.rows]
     decision_json=json.dumps(decisions,separators=(',',':'))
+    # UNION BY NAME adds a typed null column to older exports without adding rows.
+    source = "v_transactions"
+    if include_parent:
+        source = "(SELECT * FROM v_transactions UNION ALL BY NAME SELECT NULL::VARCHAR AS clean_parent WHERE FALSE)"
     if program:
         entity,where,params=reference.predicate({'program':program})
-        sql="mimir_v7_actions AS (SELECT t.* EXCLUDE(platform_family),?::VARCHAR AS platform_family,t.platform_family AS recorded_source_primary_label FROM v_transactions t WHERE "+where+')'
+        sql=f"mimir_v7_actions AS (SELECT t.* EXCLUDE(platform_family),?::VARCHAR AS platform_family,t.platform_family AS recorded_source_primary_label FROM {source} t WHERE "+where+')'
         return sql,[entity['canonical_label'],*params]
-    sql="mimir_v7_decisions AS (SELECT json_extract_string(value,'$.award_key') AS native_award_key,json_extract_string(value,'$.label') AS programme_label FROM json_each(?)), mimir_v7_actions AS (SELECT t.* EXCLUDE(platform_family),CASE WHEN d.native_award_key IS NOT NULL THEN d.programme_label ELSE t.platform_family END AS platform_family,t.platform_family AS recorded_source_primary_label FROM v_transactions t LEFT JOIN mimir_v7_decisions d ON t.award_key=d.native_award_key)"
+    sql=f"mimir_v7_decisions AS (SELECT json_extract_string(value,'$.award_key') AS native_award_key,json_extract_string(value,'$.label') AS programme_label FROM json_each(?)), mimir_v7_actions AS (SELECT t.* EXCLUDE(platform_family),CASE WHEN d.native_award_key IS NOT NULL THEN d.programme_label ELSE t.platform_family END AS platform_family,t.platform_family AS recorded_source_primary_label FROM {source} t LEFT JOIN mimir_v7_decisions d ON t.award_key=d.native_award_key)"
     return sql,[decision_json]
 
 
 def summary_relation():
-    # The same site/year parent mapping as the platform's financial summary,
-    # using a parent only when that site/year resolves unambiguously.
+    # Older action exports lack an action-level parent. Use the legacy
+    # site/year assignment only when it resolves unambiguously.
     return """mimir_v7_parents AS (
         SELECT UPPER(TRIM(cage_code)) AS cage,year,
                CASE WHEN COUNT(DISTINCT NULLIF(TRIM(clean_parent),''))=1 THEN MAX(clean_parent) END AS parent
         FROM v_summary s WHERE EXISTS(SELECT 1 FROM mimir_v7_actions a WHERE UPPER(TRIM(a.vendor_cage))=UPPER(TRIM(s.cage_code)) AND a.year=s.year) GROUP BY 1,2
     ), mimir_v7_summary AS (
-        SELECT t.year,t.vendor_name,t.vendor_cage AS cage_code,COALESCE(p.parent,t.vendor_name) AS clean_parent,
+        SELECT t.year,t.vendor_name,t.vendor_cage AS cage_code,CASE WHEN UPPER(TRIM(COALESCE(t.clean_parent,p.parent,t.vendor_name))) IN
+                         ('THE BOEING','BOEING','BOEING CO') THEN 'THE BOEING COMPANY'
+                    ELSE COALESCE(t.clean_parent,p.parent,t.vendor_name) END AS clean_parent,
                t.sub_agency,t.psc AS psc_code,CAST(NULL AS VARCHAR) AS psc_description,t.naics_code,
                t.platform_family,t.market_segment,SUM(t.spend_amount) AS total_spend,
                COUNT(DISTINCT """+effective_award_key('t')+""") AS contract_count
@@ -56,7 +62,7 @@ def summary_relation():
 
 
 def wrap_action_read(reference,read,program=None,summary=False):
-    ctes,extra=action_relation(reference,program)
+    ctes,extra=action_relation(reference,program,include_parent=summary)
     if summary:ctes+=', '+summary_relation()
     def scoped(sql,params):
         # SQL comes only from fixed server builders; caller text is parameterised.
