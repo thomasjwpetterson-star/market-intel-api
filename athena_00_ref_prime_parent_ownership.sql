@@ -3,7 +3,10 @@
 -- Javelin is an independently awarded JV. The two acquisition boundaries
 -- are the announced closing dates. Aerojet uses L3Harris from closing
 -- until the commercial space business sale on August 4, 2026. After that
--- date, retain the warehouse assignment pending successor-level review.
+-- date, retain those legacy award assignments pending successor-level review.
+-- Aerojet Ordnance Tennessee was acquired by BWXT on January 3, 2025.
+-- AE Industrial gained control of the new Rocketdyne entity on August 3,
+-- 2026. Its exact awardee UEI forms its own operating group.
 CREATE OR REPLACE VIEW "market_intel_gold"."ref_prime_parent_ownership" AS
 SELECT *
 FROM (VALUES
@@ -24,6 +27,8 @@ FROM (VALUES
     ('CE87CA8WNWA1', '2023-07-28', '2026-08-04', 'SJULQDJ8NZU7', 'L3HARRIS TECHNOLOGIES, INC.'),
     ('MJLVU5WMX9M9', '2023-07-28', '2026-08-04', 'SJULQDJ8NZU7', 'L3HARRIS TECHNOLOGIES, INC.'),
     ('XSEFW2JFVLW4', '2023-07-28', '2026-08-04', 'SJULQDJ8NZU7', 'L3HARRIS TECHNOLOGIES, INC.'),
+    ('MMACD85DT5D5', '2025-01-03', '9999-12-31', 'CMT4S6G76QB5', 'BWX TECHNOLOGIES, INC.'),
+    ('WA18VPBF5NY5', '2026-08-03', '9999-12-31', 'WA18VPBF5NY5', 'ROCKETFORCE TECHNOLOGIES LLC'),
     ('C8ZLJ61YJ528', '0001-01-01', '2024-02-16', 'H4LJM894M2J3', 'BALL CORP'),
     ('GM94J2EL8T19', '0001-01-01', '2024-02-16', 'H4LJM894M2J3', 'BALL CORP'),
     ('C8ZLJ61YJ528', '2024-02-16', '9999-12-31', 'UVUTB62B9AV3', 'BAE SYSTEMS PLC'),

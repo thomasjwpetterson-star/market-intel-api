@@ -33,6 +33,15 @@ class Identity(unittest.TestCase):
         self.assertEqual(parent['freshness'],'historical_reference');self.assertFalse(parent['current_ownership_verified'])
         row['dla_last_update']='2026-10-01'
         self.assertEqual(present_identity('11111',[row],'2026-11-01')['parent_relationship']['freshness'],'recent_registry_reference')
+    def test_reviewed_ownership_preserves_the_registry_and_exact_cage_scope(self):
+        rocketdyne = present_identity(
+            "18ZX6", [{"cage_code": "18ZX6", "company_name": "ROCKETFORCE TECHNOLOGIES LLC"}], "2026-11-11"
+        )
+        self.assertEqual(rocketdyne["reviewed_ownership"]["owner_name"], "AE INDUSTRIAL PARTNERS")
+        self.assertEqual(rocketdyne["reviewed_ownership"]["minority_ownership_percent"], 40)
+        self.assertEqual(rocketdyne["parent_relationship"]["status"], "no_parent_chain_recorded")
+        self.assertNotIn("reviewed_ownership", present_identity("02602", [], "2026-11-11"))
+
     def test_repository_reads_exact_company_and_existing_resolver_only(self):
         repo=Repository.__new__(Repository);seen=[]
         repo.manifest=lambda:{'as_of':'2026-11-01','tables':{'company_registry':{},'company_parent_resolution':{}}}

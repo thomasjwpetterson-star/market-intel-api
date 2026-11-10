@@ -51,6 +51,19 @@
         "bytes": 28820
       },
       "binding_basis": "Exact prime-parent reattribution only. The programme authority files and decisions are identical to the pinned Monday v7 release."
+    },
+    {
+      "accepted_main_release_id": "mimir-main-platform-v7-bwxt-ownership-20261111-v1",
+      "base_platform_reference_release_id": "2026-10-15-hellfire-jagm-split-v7",
+      "main_source_fingerprint": "7ab5c964953729ec1af91fb7fbf36f1d0929cc0a0a8c99ca85c386ca7d6eed56",
+      "manifest": {
+        "bucket": "a-and-d-intel-lake-newaccount",
+        "key": "governance/platform_reference/candidates/mimir-main-platform-v7-bwxt-ownership-20261111-v1/private-authority.json",
+        "s3_version_id": "ptbst6e4LLKgwyiytMaOc1t3IeofuyJK",
+        "sha256": "e9e0da03eec30832107287cfd5a089b85516b09526ff26a9cb97cad851f8c95e",
+        "bytes": 28789
+      },
+      "binding_basis": "Same reviewed programme associations, with the verified BWXT ownership correction and one retired prime transaction alias."
     }
   ]
 }

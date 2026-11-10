@@ -785,6 +785,13 @@ def optimize_and_upload():
         df_profiles["ultimate_parent_uei"] = df_profiles[
             "ultimate_parent_uei"
         ].fillna("")
+        from opportunity_intelligence.identity import reviewed_ownership
+
+        for cage in ("7U273", "18ZX6"):
+            ownership = reviewed_ownership(cage)
+            match = df_profiles["cage_code"] == cage
+            df_profiles.loc[match, "ultimate_parent_name"] = ownership["owner_name"]
+            df_profiles.loc[match, "ultimate_parent_uei"] = ownership.get("owner_uei", "")
         df_profiles = df_profiles[
             [
                 "cage_code",

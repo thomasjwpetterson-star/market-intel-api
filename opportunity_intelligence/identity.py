@@ -4,12 +4,41 @@ import re
 import datetime as dt
 
 
+_REVIEWED_OWNERSHIP = {
+    "7U273": {
+        "owner_name": "BWX TECHNOLOGIES, INC.",
+        "owner_uei": "CMT4S6G76QB5",
+        "effective_from": "2025-01-03",
+        "ownership_percent": 100,
+        "source_url": "https://www.sec.gov/Archives/edgar/data/1486957/000148695725000026/bwxt-20250331.htm",
+    },
+    "18ZX6": {
+        "owner_name": "AE INDUSTRIAL PARTNERS",
+        "effective_from": "2026-08-03",
+        "ownership_percent": 60,
+        "minority_owner_name": "L3HARRIS TECHNOLOGIES, INC.",
+        "minority_ownership_percent": 40,
+        "operating_name": "Rocketdyne",
+        "source_url": "https://www.sec.gov/Archives/edgar/data/202058/000020205826000087/R22.htm",
+    },
+}
+
+
+def reviewed_ownership(cage):
+    """Return transaction-verified ownership for an exact registry identity."""
+    ownership = _REVIEWED_OWNERSHIP.get(cage)
+    return dict(ownership) if ownership else None
+
+
 def _cage(value):
     return value if isinstance(value,str) and re.fullmatch('[A-Z0-9]{5}',value) and value not in {'00000','99999','XXXXX','ZZZZZ'} else None
 
 
 def present_identity(cage,rows,as_of):
     result={'cage':cage,'as_of':as_of,'source':'published_company_registry_and_parent_resolution'}
+    ownership = reviewed_ownership(cage)
+    if ownership:
+        result['reviewed_ownership'] = ownership
     if not rows:return dict(result,status='not_in_registry')
     if len(rows)!=1 or rows[0].get('cage_code')!=cage:raise ValueError('Inconsistent company identity')
     row=rows[0]
