@@ -8852,6 +8852,13 @@ def get_public_company_page_snapshot(cage: str, response: Response):
     if not payload.get("found"):
         raise HTTPException(status_code=404, detail=payload.get("message") or "Company not found.")
 
+    from opportunity_intelligence.identity import reviewed_ownership
+
+    ownership = reviewed_ownership(clean_cage)
+    if ownership:
+        payload["reviewed_ownership"] = ownership
+        payload["ultimate_parent_name"] = ownership["owner_name"]
+        payload["ultimate_parent_uei"] = ownership.get("owner_uei")
     complete_public_company_copy(payload)
     payload.pop("remaining_lookups", None)
     payload["entity_type"] = "cage_company"

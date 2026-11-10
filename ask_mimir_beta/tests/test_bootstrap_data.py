@@ -116,6 +116,34 @@ class BootstrapReleaseMarkerTests(unittest.TestCase):
             self.assertEqual((ready / "data/changed.parquet").read_bytes(), b"new")
             self.assertTrue(verified_release_is_ready(ready, new, ready / ".verified-release.json"))
 
+    def test_atomic_stage_evicts_oldest_verified_cache_only_when_space_is_needed(self):
+        class CandidateS3(RecordingDownloadS3):
+            def head_object(self, Bucket, Key, VersionId):
+                return {"ContentLength": 3, "VersionId": VersionId}
+
+        def manifest(release):
+            return {"release_id": release, "files": [{
+                "local_path": "data/transactions.parquet", "s3_key": f"releases/{release}",
+                "s3_version_id": release, "size": 3,
+            }]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = CandidateS3(b"old")
+            older = _stage_atomic_release(store, "bucket", manifest("older"), root)
+            current = _stage_atomic_release(store, "bucket", manifest("current"), root)
+            os.utime(older, (1, 1))
+            unrelated = root / "releases" / "unrelated"
+            unrelated.mkdir()
+            with patch.dict(os.environ, {"ASK_MIMIR_DOWNLOAD_FREE_SPACE_RESERVE_BYTES": "0"}):
+                with patch("bootstrap_data.shutil.disk_usage",
+                           side_effect=lambda _: SimpleNamespace(free=0 if older.exists() else 100)):
+                    ready = _stage_atomic_release(store, "bucket", manifest("next"), root)
+            self.assertFalse(older.exists())
+            self.assertTrue(current.is_dir())
+            self.assertTrue(unrelated.is_dir())
+            self.assertEqual((ready / "data" / "transactions.parquet").read_bytes(), b"old")
+
     def test_atomic_bootstrap_selects_only_completed_release(self):
         class CandidateS3(RecordingDownloadS3):
             def __init__(self, manifest):

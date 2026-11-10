@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Dict
@@ -294,6 +295,56 @@ def _reuse_verified_atomic_files(
     return reused
 
 
+def _reserve_atomic_staging_space(
+    s3: Any,
+    bucket: str,
+    releases_root: Path,
+    staging_root: Path,
+    manifest: Dict[str, Any],
+    signatures: Dict[str, str],
+) -> None:
+    """Reclaim verified local cache copies at process startup if necessary."""
+    pending = [
+        entry for entry in manifest["files"]
+        if signatures.get(entry["local_path"]) != manifest_entry_signature(entry)
+    ]
+    reserve = int(os.getenv(
+        "ASK_MIMIR_DOWNLOAD_FREE_SPACE_RESERVE_BYTES",
+        str(DEFAULT_DOWNLOAD_FREE_SPACE_RESERVE_BYTES),
+    ))
+    needed = reserve + sum(int(entry["size"]) for entry in pending)
+    if shutil.disk_usage(staging_root).free >= needed:
+        return
+
+    # Only evict cached releases after confirming the replacement objects are
+    # readable at their exact pinned versions. S3 retains the rollback copies.
+    for entry in pending:
+        version = entry.get("s3_version_id")
+        if not version:
+            raise RuntimeError("Cannot reclaim Ask cache for an unpinned runtime")
+        remote = s3.head_object(Bucket=bucket, Key=entry["s3_key"], VersionId=version)
+        if remote.get("VersionId") != version or int(remote["ContentLength"]) != int(entry["size"]):
+            raise RuntimeError(f"Replacement object differs from manifest: {entry['local_path']}")
+
+    cached = [
+        path for path in releases_root.iterdir()
+        if not path.is_symlink() and path.is_dir() and re.fullmatch(r"[0-9a-f]{64}", path.name)
+    ]
+    for path in sorted(cached, key=lambda candidate: candidate.stat().st_mtime):
+        try:
+            old_manifest = json.loads((path / "runtime_manifest.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (manifest_fingerprint(old_manifest) != path.name
+                or not verified_release_is_ready(path, old_manifest, path / ".verified-release.json")
+                or any(not entry.get("s3_version_id") for entry in old_manifest["files"])):
+            continue
+        shutil.rmtree(path)
+        if shutil.disk_usage(staging_root).free >= needed:
+            return
+    raise RuntimeError(f"Insufficient disk space to stage the pinned Ask runtime ({needed} bytes needed)")
+
+
 def _stage_atomic_release(
     s3: Any,
     bucket: str,
@@ -321,6 +372,7 @@ def _stage_atomic_release(
             prior_marker = {}
         signatures = prior_marker.get("file_signatures") or {}
         signatures.update(_reuse_verified_atomic_files(releases_root, staging_root, manifest))
+        _reserve_atomic_staging_space(s3, bucket, releases_root, staging_root, manifest, signatures)
         for entry in manifest["files"]:
             _download_verified(
                 s3, bucket, entry, staging_root,
