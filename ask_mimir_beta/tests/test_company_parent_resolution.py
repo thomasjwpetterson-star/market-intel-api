@@ -153,6 +153,13 @@ class CompanyParentResolutionTests(unittest.TestCase):
                 """, [str(path)])
                 result = store.search("Ball Corporation", scope_type="company_parent")["matches"][0]
                 self.assertEqual(result["resolved_cages"], ["11111"])
+                retained = store._reviewed_action_parent_match("Ball Corporation", [
+                    {"scope_type": "company_parent", "scope_name": "BALL CORP",
+                     "scope_id": "CURRENT_BALL", "resolved_cages": ["22222"]},
+                    {"scope_type": "company_parent", "scope_name": "UNRELATED",
+                     "scope_id": "UNRELATED", "resolved_cages": ["33333"]},
+                ])
+                self.assertEqual(retained["resolved_cages"], ["11111", "22222"])
                 builder = CompanyContextBuilder.__new__(CompanyContextBuilder)
                 builder.connection = db
                 builder.paths = {"transactions": path}

@@ -1190,7 +1190,7 @@ class CompanyContextStore:
                         matches, [consolidated_parent]
                     )
             if scope_type != "company_site":
-                historical_parent = self._reviewed_action_parent_match(query)
+                historical_parent = self._reviewed_action_parent_match(query, matches)
                 if historical_parent:
                     matches = [row for row in matches if row["scope_type"] != "company_parent"]
                     matches = self._merge_directory_matches(matches, [historical_parent])
@@ -1715,8 +1715,10 @@ class CompanyContextStore:
             "group_kind": "reviewed_company_group",
         }
 
-    def _reviewed_action_parent_match(self, query: str) -> Dict[str, Any] | None:
-        """Discover reviewed historical parents that have no current CAGE group."""
+    def _reviewed_action_parent_match(
+        self, query: str, current_matches: Sequence[Dict[str, Any]] = ()
+    ) -> Dict[str, Any] | None:
+        """Add historical award ownership to the parent directory and its current sites."""
         if self._reviewed_action_parents is None:
             with self._parent_bridge_lock:
                 if self._reviewed_action_parents is None:
@@ -1742,7 +1744,19 @@ class CompanyContextStore:
         match = self._reviewed_action_parents.get(_company_name_core(query))
         if match is None:
             return None
-        name, cages = match
+        name, historical_cages = match
+        cages = set(historical_cages)
+        identity_sites = {}
+        for current in current_matches:
+            if current.get("scope_type") != "company_parent" or _company_name_core(current.get("scope_name")) != _company_name_core(name):
+                continue
+            cages.update(current.get("resolved_cages") or [])
+            existing = self._dynamic_groups.get(current["scope_id"], {})
+            for site in existing.get("identity_sites", []):
+                cage = _normalize_cage(site.get("cage") or site.get("scope_id"))
+                if cage:
+                    identity_sites[cage] = site
+        cages = sorted(cages)
         scope_id = f"HISTORICAL_{_reported_parent_id(name)}"
         kind = "reviewed_action_parent"
         self._dynamic_groups[scope_id] = {
@@ -1750,6 +1764,7 @@ class CompanyContextStore:
             "cages": cages,
             "group_kind": kind,
             "parent_name": name,
+            "identity_sites": list(identity_sites.values()),
         }
         return {
             "context_id": None, "scope_type": "company_parent", "scope_id": scope_id,
