@@ -11469,16 +11469,32 @@ def get_top_nsns(
 
 
 # --- UPDATE THIS FUNCTION ---
+_NATIVE_AWARD_KEY = re.compile(r"CONT_(?:AWD|IDV)_[A-Z0-9_.-]{1,196}\Z")
+
+
+def _award_lookup_identity(value: str):
+    raw = str(value or "").strip().upper()
+    if raw.startswith(("CONT_AWD_", "CONT_IDV_")):
+        return ("award_key", raw) if _NATIVE_AWARD_KEY.fullmatch(raw) else (None, "")
+    return "contract_id", sanitize(raw)
+
+
 @app.get("/api/award/profile")
 def get_award_profile(id: str):
-    if not id:
+    column, safe_id = _award_lookup_identity(id)
+    if not safe_id:
         return None
 
-    safe_id = sanitize(id)
-
     try:
-        lookup_view = "v_contracts_lookup" if GLOBAL_CACHE.get("contract_lookup_ready") else "v_contracts_rolled"
         rolled_cols = get_duck_table_columns("v_contracts_rolled")
+        if column == "award_key" and column not in rolled_cols:
+            return None
+        lookup_view = (
+            "v_contracts_lookup"
+            if column == "contract_id" and GLOBAL_CACHE.get("contract_lookup_ready")
+            else "v_contracts_rolled"
+        )
+        row_limit = 2 if column == "award_key" else 1
         description_expr = (
             "COALESCE(NULLIF(TRIM(base_award_description), ''), description)"
             if "base_award_description" in rolled_cols
@@ -11509,10 +11525,10 @@ def get_award_profile(id: str):
                 start_date,
                 last_action_date
             FROM {lookup_view}
-            WHERE contract_id = ?
-            LIMIT 1
+            WHERE {column} = ?
+            LIMIT {row_limit}
         """, [safe_id])
-        if df.empty:
+        if len(df) != 1:
             return None
         
         # Convert safely, handling potential NaNs
@@ -11525,6 +11541,7 @@ def get_award_profile(id: str):
 
         # Exact match to your original business logic return
         return {
+            **({"award_key": safe_id} if column == "award_key" else {}),
             "contract_id": r.get("contract_id"),
             "vendor_name": r.get("vendor_name"),
             "vendor_cage": r.get("vendor_cage"),
@@ -11558,9 +11575,28 @@ def get_award_profile(id: str):
 
 @app.get("/api/award/announcements")
 def get_award_announcements(id: str):
-    if not id:
+    column, safe_id = _award_lookup_identity(id)
+    if not safe_id:
         return []
     try:
+        if column == "award_key":
+            if column not in get_duck_table_columns("v_contracts_rolled"):
+                return []
+            # Announcement evidence is indexed by PIID. Attach it only when
+            # the loaded release ties that PIID to one exact award.
+            matches = duck_fetch_df("""
+                SELECT a.contract_id FROM v_contracts_rolled a
+                WHERE a.award_key = ? AND NOT EXISTS (
+                    SELECT 1 FROM v_contracts_rolled b
+                    WHERE b.contract_id = a.contract_id AND b.award_key IS DISTINCT FROM a.award_key
+                )
+                LIMIT 2
+            """, [safe_id])
+            if len(matches) != 1:
+                return []
+            id = matches.iloc[0]["contract_id"]
+            if not isinstance(id, str) or not id:
+                return []
         return lookup_contract_announcements(
             LOCAL_CACHE_DIR / "dod_contract_announcements.parquet",
             id,
@@ -11638,18 +11674,17 @@ def get_solicitation_lookup(sol_num: str):
 
 @app.get("/api/award/history")
 def get_award_history(id: str):
-    if not id:
+    column, safe_id = _award_lookup_identity(id)
+    if not safe_id or (column == "award_key" and column not in get_duck_table_columns("v_transactions")):
         return []
 
-    safe_id = sanitize(id)
-
-    df = duck_fetch_df("""
+    df = duck_fetch_df(f"""
         SELECT
             action_date,
             spend_amount,
             COALESCE(NULLIF(TRIM(action_description), ''), description) AS description
         FROM v_transactions
-        WHERE contract_id = ?
+        WHERE {column} = ?
         ORDER BY action_date ASC
         LIMIT 200
     """, [safe_id])
