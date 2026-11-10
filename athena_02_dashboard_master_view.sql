@@ -194,8 +194,9 @@ SELECT
         CASE WHEN t.source_system <> 'DLA' THEN NULLIF(TRIM(CAST(m.capability_name AS VARCHAR)), '') END
     ) AS capability_name,
     t.join_key_mapping AS raw_data_input,
-    COALESCE(p.parent_name, COALESCE(t.standardized_vendor_name, t.vendor_name_raw)) AS ultimate_parent_name,
-    p.parent_uei AS ultimate_parent_uei,
+    COALESCE(ownership.parent_name, p.parent_name, t.standardized_vendor_name, t.vendor_name_raw) AS ultimate_parent_name,
+    COALESCE(ownership.parent_uei, p.parent_uei) AS ultimate_parent_uei,
+    ownership.parent_name AS reviewed_prime_parent,
     d.current_end_date AS completion_date,
     n.title AS naics_description,
     d.pricing_type,
@@ -270,6 +271,11 @@ LEFT JOIN fsc_domain fsc_map
     ON t.fsc_code_clean = fsc_map.fsc_code
 LEFT JOIN "market_intel_gold"."ref_parent_child" p
     ON t.vendor_cage = p.child_cage
+LEFT JOIN "market_intel_gold"."ref_prime_parent_ownership" ownership
+    ON t.source_system = 'USA_SPENDING'
+   AND t.awardee_uei = ownership.awardee_uei
+   AND SUBSTR(t.action_date, 1, 10) >= ownership.effective_from
+   AND SUBSTR(t.action_date, 1, 10) < ownership.effective_until
 LEFT JOIN contract_metadata d
     ON t.award_key = d.award_key
 LEFT JOIN "market_intel_silver"."ref_naics" n

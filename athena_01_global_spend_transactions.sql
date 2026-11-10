@@ -187,7 +187,8 @@ usaspending AS (
         CAST(0 AS INTEGER) AS associated_platform_count,
         'NOT_APPLICABLE' AS item_platform_attribution_status,
         CAST(NULL AS VARCHAR) AS item_unique_platform_family,
-        CAST(NULL AS VARCHAR) AS platform_attribution_source
+        CAST(NULL AS VARCHAR) AS platform_attribution_source,
+        NULLIF(UPPER(TRIM(t.recipient_uei)), '') AS awardee_uei
     FROM usaspending_ranked t
     LEFT JOIN vendor_sites vs
         ON UPPER(REGEXP_REPLACE(t.cage_code, '[^A-Za-z0-9]', '')) = vs.cage_norm
@@ -323,7 +324,8 @@ dla AS (
         COALESCE(p.platform_count, 0) AS associated_platform_count,
         COALESCE(p.platform_attribution_status, 'UNMAPPED') AS item_platform_attribution_status,
         p.unique_platform_family AS item_unique_platform_family,
-        p.attribution_source AS platform_attribution_source
+        p.attribution_source AS platform_attribution_source,
+        CAST(NULL AS VARCHAR) AS awardee_uei
     FROM "market_intel_silver"."view_dla_contract_history_financial" h
     LEFT JOIN vendor_sites vs
         ON UPPER(REGEXP_REPLACE(h.cage, '[^A-Za-z0-9]', '')) = vs.cage_norm

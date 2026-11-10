@@ -399,7 +399,8 @@ def optimize_and_upload():
                 platform_attribution_status, platform_attribution_source,
                 psc_code, psc_description, CAST(naics_code AS VARCHAR) as naics_code,
                 naics_description, city, state, country, month, year, total_spend,
-                platform_attributed_spend, shared_use_exposure, contract_count
+                platform_attributed_spend, shared_use_exposure, contract_count,
+                parent_name AS resolved_parent_name
             FROM dashboard_summary_v2
         """)
 
@@ -1250,6 +1251,8 @@ def optimize_and_upload():
                 d.nsn_derivation_method,
                 d.nsn_resolution_status,
                 d.action_date,
+                d.ultimate_parent_name AS clean_parent,
+                d.reviewed_prime_parent,
                 d.vendor_name,
                 d.vendor_cage,
                 d.sub_agency,
@@ -1335,6 +1338,8 @@ def optimize_and_upload():
                     nsn_resolution_status,
                     action_date,
                     UPPER(TRIM(vendor_name)) as vendor_name,
+                    UPPER(TRIM(clean_parent)) AS clean_parent,
+                    reviewed_prime_parent,
                     UPPER(TRIM(vendor_cage)) as vendor_cage,
                     UPPER(TRIM(sub_agency)) as sub_agency,
                     UPPER(TRIM(parent_agency)) as parent_agency,

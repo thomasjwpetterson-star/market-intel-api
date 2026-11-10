@@ -5,6 +5,7 @@ from pathlib import Path
 
 import duckdb
 
+from company_context import CompanyContextBuilder
 from company_context_store import CompanyContextStore
 
 
@@ -135,6 +136,40 @@ class CompanyParentResolutionTests(unittest.TestCase):
         )
         connection.close()
         return CompanyContextStore(context_dir=context_dir, data_root=data_root)
+
+    def test_historical_parent_scope_reassigns_finance_without_changing_site_totals(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = self._store(root)
+            path = root / "data" / "transactions.parquet"
+            with duckdb.connect() as db:
+                db.execute("""
+                    COPY (SELECT * FROM (VALUES
+                        ('USA_SPENDING', 'FIRST', 'A1', '11111', 2024, '2024-02-15', 100, 'BALL CORP', 'BALL CORP'),
+                        ('USA_SPENDING', 'FIRST', 'A2', '11111', 2024, '2024-02-16', -10, 'BAE SYSTEMS PLC', 'BAE SYSTEMS PLC'),
+                        ('USA_SPENDING', 'SECOND', 'A3', '11111', 2024, '2024-02-17', 20, 'BAE SYSTEMS PLC', NULL)
+                    ) t(source_system, award_key, transaction_key, vendor_cage, year, action_date, spend_amount, clean_parent, reviewed_prime_parent))
+                    TO ? (FORMAT PARQUET)
+                """, [str(path)])
+                result = store.search("Ball Corporation", scope_type="company_parent")["matches"][0]
+                self.assertEqual(result["resolved_cages"], ["11111"])
+                builder = CompanyContextBuilder.__new__(CompanyContextBuilder)
+                builder.connection = db
+                builder.paths = {"transactions": path}
+                builder._has_reviewed_prime_parent = True
+                builder._parent_action_names = ()
+                builder._exact_parent_actions = False
+
+                def totals(cage):
+                    rows = builder._financial_summary([cage], [2024])
+                    return rows[0]["net_value_usd"]
+
+                self.assertEqual(totals("11111"), 110)
+                with builder._using_parent_action_names(["BAE Systems plc"]):
+                    self.assertEqual(totals("11111"), 10)
+                with builder._using_parent_action_names([result["scope_name"]], exact=True):
+                    self.assertEqual(totals("99999"), 100)
+                self.assertEqual(totals("11111"), 110)
 
     def test_reported_parent_collects_sites_with_different_legal_names_and_ueis(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -3876,10 +3876,15 @@ def reload_all_data():
             with DUCK_INIT_LOCK:
                 conn = ensure_duck_conn()
                 
-                # 1. Register the Athena cage_map as a temporary table so DuckDB can use it
-                map_df = pd.DataFrame(list(cage_map.items()), columns=['cage', 'parent']) if cage_map else pd.DataFrame(columns=['cage', 'parent'])
-                conn.register('temp_cage_map', map_df)
-
+                columns = conn.execute("DESCRIBE SELECT * FROM read_parquet(?)", [summary_in_path]).fetchall()
+                parent_join = ""
+                if any(column[0] == "resolved_parent_name" for column in columns):
+                    parent_value = "COALESCE(NULLIF(TRIM(s.resolved_parent_name), ''), s.vendor_name)"
+                else:
+                    map_df = pd.DataFrame(list(cage_map.items()), columns=["cage", "parent"], dtype="string")
+                    conn.register("temp_cage_map", map_df)
+                    parent_join = "LEFT JOIN temp_cage_map m ON upper(trim(s.cage_code)) = m.cage"
+                    parent_value = "COALESCE(m.parent, s.vendor_name)"
                 logger.info("Cleaning summary.parquet using DuckDB streaming (OOM-Safe)...")
 
                 # 2. Let DuckDB read, clean, map, and write the parquet file entirely out-of-core
@@ -3907,19 +3912,19 @@ def reload_all_data():
                             CASE WHEN upper(trim(s.sub_agency)) IN ('NAN', 'NAN.0', 'NONE', '', 'UNKNOWN') THEN NULL ELSE upper(trim(s.sub_agency)) END AS sub_agency,
                             CASE WHEN upper(trim(s.psc_description)) IN ('NAN', 'NAN.0', 'NONE', '', 'UNKNOWN') THEN NULL ELSE upper(trim(s.psc_description)) END AS psc_description,
 
-                            -- Map the parent dynamically
-                            CASE 
-                                WHEN upper(trim(COALESCE(m.parent, s.vendor_name))) IN ('THE BOEING', 'BOEING', 'BOEING CO') THEN 'THE BOEING COMPANY'
-                                ELSE upper(trim(COALESCE(m.parent, s.vendor_name)))
+                            -- Preserve the warehouse parent; legacy releases use the CAGE map.
+                            CASE
+                                WHEN upper(trim({parent_value})) IN ('THE BOEING', 'BOEING', 'BOEING CO') THEN 'THE BOEING COMPANY'
+                                ELSE upper(trim({parent_value}))
                             END AS clean_parent
 
                         FROM read_parquet('{summary_in_path}') s
-                        LEFT JOIN temp_cage_map m ON upper(trim(s.cage_code)) = m.cage
+                        {parent_join}
                     ) TO '{summary_temp_path}' (FORMAT PARQUET, COMPRESSION ZSTD);
                 """)
 
-                # Cleanup the virtual table mapping
-                conn.unregister('temp_cage_map')
+                if parent_join:
+                    conn.unregister("temp_cage_map")
 
                 # 3. Atomic Swap
                 if os.path.exists(summary_temp_path):
