@@ -11,7 +11,7 @@ VIEWS = {
     'subcontracts': 'FIRST_TIER_REPORT', 'subcontractors': 'FIRST_TIER_REPORT',
     'parts': 'DLA_AWARD', 'award-nsns': 'PRIME_AWARD',
 }
-PAGE_SIZE = 50
+PAGE_SIZE = 25
 DB = 'market_intel_platform_candidate'
 KEY = r'[A-Z0-9_]{1,128}'
 TABLE = r'market_professional_detail_([0-9a-f]{20})'
@@ -93,7 +93,7 @@ def read_token(value, secret, context):
 def read_page(athena, payload, secret, bucket, owner, workgroup='primary'):
     sql, table_id = query_for(payload)
     context = hashlib.sha256(json.dumps([payload['mainRelease'], payload['candidateId'], payload['market'],
-        payload['view'], sql], separators=(',', ':')).encode()).hexdigest()
+        payload['view'], PAGE_SIZE, sql], separators=(',', ':')).encode()).hexdigest()
     cursor = payload.get('cursor')
     if cursor:
         qid, position, page = read_token(cursor, secret, context)
