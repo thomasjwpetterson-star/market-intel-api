@@ -82,6 +82,40 @@ class BootstrapReleaseMarkerTests(unittest.TestCase):
             self.assertTrue(verified_release_is_ready(ready, manifest, ready / ".verified-release.json"))
             self.assertEqual(active.read_bytes(), b"old")
 
+    def test_atomic_stage_reuses_verified_files_and_reclaims_duplicate_partial_copies(self):
+        unchanged = {
+            "local_path": "data/unchanged.parquet", "s3_key": "releases/shared",
+            "s3_version_id": "same-version", "size": 3,
+        }
+        old = {"release_id": "old", "files": [unchanged]}
+        new = {"release_id": "new", "files": [
+            {"local_path": "data/changed.parquet", "s3_key": "releases/changed",
+             "s3_version_id": "new-version", "size": 3},
+            unchanged,
+        ]}
+
+        class CandidateS3(RecordingDownloadS3):
+            def download_file(self, bucket, key, destination, **kwargs):
+                if key == "releases/shared":
+                    raise AssertionError("verified shared file should be reused")
+                super().download_file(bucket, key, destination, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_root = _stage_atomic_release(RecordingDownloadS3(b"old"), "bucket", old, root)
+            staging = root / "releases" / (manifest_fingerprint(new) + ".staging")
+            duplicate = staging / "data/unchanged.parquet"
+            duplicate.parent.mkdir(parents=True)
+            duplicate.write_bytes(b"old")
+            original = old_root / unchanged["local_path"]
+            self.assertFalse(original.samefile(duplicate))
+
+            ready = _stage_atomic_release(CandidateS3(b"new"), "bucket", new, root)
+            self.assertTrue(original.samefile(ready / unchanged["local_path"]))
+            self.assertEqual(original.read_bytes(), b"old")
+            self.assertEqual((ready / "data/changed.parquet").read_bytes(), b"new")
+            self.assertTrue(verified_release_is_ready(ready, new, ready / ".verified-release.json"))
+
     def test_atomic_bootstrap_selects_only_completed_release(self):
         class CandidateS3(RecordingDownloadS3):
             def __init__(self, manifest):

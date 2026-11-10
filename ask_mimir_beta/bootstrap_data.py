@@ -245,6 +245,55 @@ def _download_verified(
     return destination
 
 
+def _reuse_verified_atomic_files(
+    releases_root: Path,
+    staging_root: Path,
+    manifest: Dict[str, Any],
+) -> Dict[str, str]:
+    """Reuse identical read-only files from an already verified release."""
+    entries = {
+        entry["local_path"]: manifest_entry_signature(entry)
+        for entry in manifest["files"]
+        if entry.get("s3_version_id")
+    }
+    reused: Dict[str, str] = {}
+    for prior_root in releases_root.iterdir():
+        if prior_root.is_symlink() or not prior_root.is_dir() or prior_root.name.endswith(".staging"):
+            continue
+        marker_path = prior_root / ".verified-release.json"
+        try:
+            prior_manifest = json.loads((prior_root / "runtime_manifest.json").read_text())
+            marker = json.loads(marker_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not verified_release_is_ready(prior_root, prior_manifest, marker_path):
+            continue
+        signatures = marker.get("file_signatures") or {}
+        for relative, signature in entries.items():
+            if relative in reused or signatures.get(relative) != signature:
+                continue
+            source = (prior_root / relative).resolve()
+            destination = (staging_root / relative).resolve()
+            if prior_root.resolve() not in source.parents or staging_root.resolve() not in destination.parents:
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists() and source.samefile(destination):
+                reused[relative] = signature
+                continue
+            temporary = destination.with_suffix(destination.suffix + ".reuse")
+            temporary.unlink(missing_ok=True)
+            try:
+                os.link(source, temporary)
+                temporary.replace(destination)
+            except OSError:
+                temporary.unlink(missing_ok=True)
+                continue
+            reused[relative] = signature
+        if len(reused) == len(entries):
+            break
+    return reused
+
+
 def _stage_atomic_release(
     s3: Any,
     bucket: str,
@@ -271,6 +320,7 @@ def _stage_atomic_release(
         except (OSError, json.JSONDecodeError):
             prior_marker = {}
         signatures = prior_marker.get("file_signatures") or {}
+        signatures.update(_reuse_verified_atomic_files(releases_root, staging_root, manifest))
         for entry in manifest["files"]:
             _download_verified(
                 s3, bucket, entry, staging_root,
