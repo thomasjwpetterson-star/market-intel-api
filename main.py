@@ -5607,6 +5607,26 @@ def private_research_dataset(payload: Dict[str,Any],request: Request,response: R
     return value
 
 
+@app.post('/api/research/market-detail')
+def private_market_detail(payload: Dict[str,Any], request: Request, response: Response):
+    expected = os.getenv('MIMIR_EXPORT_PROXY_SECRET', '').strip()
+    supplied = request.headers.get('X-Mimir-Export-Key', '').strip()
+    if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+        raise HTTPException(status_code=401, detail='An authenticated Mimir research proxy is required.')
+    response.headers['Cache-Control'] = 'private, no-store'
+    owner = payload.get('owner')
+    if not isinstance(owner, str) or not re.fullmatch(r'[0-9]{12}', owner):
+        raise HTTPException(status_code=400, detail='Invalid market release.')
+    from market_professional_detail import read_page
+    try:
+        return read_page(athena, payload, expected, BUCKET_NAME, owner)
+    except (ValueError, TypeError, KeyError) as error:
+        raise HTTPException(status_code=400, detail='Invalid or expired market detail request.') from error
+    except (ClientError, RuntimeError) as error:
+        logger.exception('Verified market detail reader unavailable.')
+        raise HTTPException(status_code=503, detail='Market records are temporarily unavailable.') from error
+
+
 @app.post('/api/research/action-history')
 def private_action_history(payload: Dict[str,Any],request: Request,response: Response):
     expected=os.getenv('MIMIR_EXPORT_PROXY_SECRET','').strip();supplied=request.headers.get('X-Mimir-Export-Key','').strip()
