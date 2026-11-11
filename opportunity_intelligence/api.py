@@ -14,14 +14,24 @@ from opportunity_worker.opportunity_engine.discovery_read_model import Discovery
 _REQUEST_RELEASE=contextvars.ContextVar("mimir_opportunity_request_release",default=None)
 
 class Repository(DiscoveryRepositoryMixin):
- def __init__(self,aws=None):self.aws=aws or AWS();self._manifest=None;self._expires=0
+ def __init__(self,aws=None,*,private=False):
+  self.aws=aws or AWS();self._manifest=None;self._expires=0;self._private=private
  def manifest(self):
   pinned=_REQUEST_RELEASE.get()
   if pinned and pinned[0] is self:return pinned[1]
   if self._manifest is None or time.monotonic()>=self._expires:
-   p=json.loads(self.aws.s3.get_object(Bucket=BUCKET,Key=PREFIX+'/current.json')['Body'].read());key=p['manifest_key']
+   def read(key):
+    with self.aws.s3.get_object(Bucket=BUCKET,Key=key)['Body'] as body:return body.read()
+   pointer_name='releases/private-current.json' if self._private else 'current.json'
+   p=json.loads(read(PREFIX+'/'+pointer_name));key=p['manifest_key']
    if not key.startswith(PREFIX+'/releases/'):raise ValueError('Invalid engine release pointer')
-   self._manifest=json.loads(self.aws.s3.get_object(Bucket=BUCKET,Key=key)['Body'].read());self._manifest['_company_index']=p.get('company_index');self._expires=time.monotonic()+30
+   raw=read(key);manifest=json.loads(raw)
+   if self._private and (p.get('private') is not True
+     or p.get('run_id')!=manifest.get('run_id')
+     or manifest.get('public_release_approved') is not False
+     or p.get('manifest_sha256')!=hashlib.sha256(raw).hexdigest()):
+    raise IndexUnavailable('Private opportunity release does not match its verified pointer')
+   self._manifest=manifest;self._manifest['_company_index']=p.get('company_index');self._expires=time.monotonic()+30
   return self._manifest
  def indexed_company(self,company):
   from .company_index import CompanyIndex
@@ -517,7 +527,9 @@ def create_router(verify_principal,repository=None):
    yield;return
   # Pin metadata for the entire request, including slow Athena reads and the
   # response release tag. Atomic publication must not mix table generations.
-  manifest=await run_in_threadpool(concrete.manifest);token=_REQUEST_RELEASE.set((concrete,manifest))
+  try:manifest=await run_in_threadpool(concrete.manifest)
+  except IndexUnavailable:raise HTTPException(status_code=503,detail='Company feed is temporarily unavailable')
+  token=_REQUEST_RELEASE.set((concrete,manifest))
   try:yield
   finally:_REQUEST_RELEASE.reset(token)
  router=APIRouter(prefix='/opportunity-intelligence',tags=['opportunity-intelligence'],dependencies=[Depends(require_principal),Depends(pin_source_release)])

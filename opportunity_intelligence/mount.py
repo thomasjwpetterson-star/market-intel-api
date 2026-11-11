@@ -26,14 +26,15 @@ def verified_application_principal(request: Request):
 
 class LazyRepository:
     """Do not make AWS availability a condition of the main API starting."""
-    def __init__(self):
+    def __init__(self, *, private=False):
+        self.private = private
         self.repository = None
         self.lock = threading.Lock()
 
     def resolve_repository(self):
         with self.lock:
             if self.repository is None:
-                self.repository = Repository()
+                self.repository = Repository(private=True) if self.private else Repository()
             return self.repository
 
     def __getattr__(self, name):
@@ -41,4 +42,4 @@ class LazyRepository:
 
 
 def mount(app):
-    app.include_router(create_router(verified_application_principal, LazyRepository()))
+    app.include_router(create_router(verified_application_principal, LazyRepository(private=True)))
