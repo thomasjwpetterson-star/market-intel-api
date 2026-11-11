@@ -88,6 +88,7 @@ from platform_reference.main_release_cache import (
     stage_main_cache,
 )
 from public_page_projections import build_public_page_projections
+from solicitation_deadlines import active_solicitation_deadline_sql
 from public_nsn_policy import (
     PUBLIC_NSN_ACTIVE_SOLICITATION_LIMIT,
     PUBLIC_NSN_CACHE_EPOCH,
@@ -6763,13 +6764,13 @@ def get_market_opportunities(
     vendor: Optional[str] = None,
 ):
     # ✅ OPTIMIZED: Query the local DuckDB view instead of AWS Athena!
-    query_base = """
+    query_base = f"""
     SELECT 
         id as noticeid, sol_num, title, agency, deadline, 
         naics as naicscode, set_aside_type as setaside, 
         poc_email as primarycontactemail, COUNT(*) OVER() as total_matches
     FROM v_opportunities
-    WHERE try_cast(deadline as date) >= current_date()
+    WHERE {active_solicitation_deadline_sql()}
     """
 
     conditions = []
@@ -8055,7 +8056,7 @@ def get_company_opportunities(
         SELECT id, title, sol_num, agency, deadline, set_aside_type, poc_email
         FROM v_opportunities
         WHERE {where_clause}
-          AND try_cast(deadline as date) >= current_date()
+          AND {active_solicitation_deadline_sql()}
         ORDER BY try_cast(deadline as date) ASC
         LIMIT 50
     """
@@ -9915,7 +9916,7 @@ def get_company_opportunities_recommended(
         SELECT id, title, sol_num, agency, deadline, set_aside_type, poc_email
         FROM v_opportunities
         WHERE {where_clause}
-          AND try_cast(deadline as date) >= current_date()
+          AND {active_solicitation_deadline_sql()}
         ORDER BY try_cast(deadline as date) ASC
         LIMIT 50
     """
@@ -10409,6 +10410,7 @@ def get_nsn_opportunities(
                 material_requirements
             FROM {NSN_OPPORTUNITY_DETAIL_TABLE}
             WHERE niin = ?
+              AND {active_solicitation_deadline_sql("response_deadline")}
             ORDER BY response_deadline, solicitation_number, solicitation_line_number
             LIMIT ? OFFSET ?
             """,
@@ -11968,7 +11970,7 @@ def get_pipeline_live(
     limit: int = 50,
     offset: int = 0
 ):
-    conds = ["try_cast(deadline as date) >= current_date()"]
+    conds = [active_solicitation_deadline_sql()]
     params = []
     
     # Matches original data quality filter: Accept rows with EITHER a Sol Num OR a Notice ID
@@ -12049,16 +12051,15 @@ def get_pipeline_live(
     today = date.today()
     for row in df.itertuples():
         
-        # Matches original Date Logic and race condition safety precisely
+        # The query already filters elapsed notices at their source deadline.
         days_left = 0
         try:
             dt_str = str(row.deadline)[:10]
             dt_obj = datetime.strptime(dt_str, "%Y-%m-%d").date()
-            days_left = (dt_obj - today).days
+            days_left = max(0, (dt_obj - today).days)
         except:
             pass
             
-        if days_left < 0: continue
         
         # Matches original Smart Identifier logic precisely
         display_sol = getattr(row, 'sol_num', '')
