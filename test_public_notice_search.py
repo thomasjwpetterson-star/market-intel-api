@@ -2,13 +2,15 @@
 import ast
 import logging
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
+from zoneinfo import ZoneInfo
 from unittest.mock import Mock
 
 import duckdb
-from fastapi import HTTPException, Response
+from fastapi import HTTPException, Query, Response
+from solicitation_deadlines import active_solicitation_deadline_sql
 
 
 class PublicNoticeSearchTests(unittest.TestCase):
@@ -26,12 +28,14 @@ class PublicNoticeSearchTests(unittest.TestCase):
             entity_type VARCHAR, entity_id VARCHAR, canonical_path VARCHAR, display_name VARCHAR,
             richness_score INTEGER, search_text VARCHAR
         )""")
-        functions = {"search_public_open_notices", "search_public_intelligence_manifest"}
+        functions = {"search_public_open_notices", "search_public_intelligence_manifest", "get_pipeline_live", "get_market_opportunities"}
         nodes = [node for node in ast.parse(Path(__file__).with_name("main.py").read_text()).body
                  if isinstance(node, ast.FunctionDef) and node.name in functions]
         for node in nodes:
             node.decorator_list = []
-        self.ns = dict(Response=Response, HTTPException=HTTPException, Optional=Optional,
+        self.ns = dict(Response=Response, HTTPException=HTTPException, Optional=Optional, List=List,
+                       Query=Query, date=date, datetime=datetime,
+                       active_solicitation_deadline_sql=active_solicitation_deadline_sql,
                        require_public_snapshot_ready=Mock(), df_sanitize_for_json=lambda df: df,
                        duck_fetch_df=lambda sql, params: self.db.execute(sql, params).fetchdf(),
                        logger=logging.getLogger(__name__))
@@ -59,6 +63,23 @@ class PublicNoticeSearchTests(unittest.TestCase):
         self.assertEqual(result["entries"][0]["buyer"], "Army office")
         self.assertTrue(result["entries"][0]["deadline"].endswith("Z"))
         self.assertFalse(result["has_more"])
+
+    def test_active_dashboard_search_excludes_same_day_expiry_before_count_and_limit(self):
+        now = datetime.now(timezone.utc)
+        eastern_today = now.astimezone(ZoneInfo("America/New_York")).date()
+        self.add_notice("same-day-expired", (now - timedelta(seconds=30)).isoformat())
+        self.add_notice("same-day-open", (now + timedelta(minutes=20)).isoformat())
+        self.add_notice("date-only-today", eastern_today.isoformat())
+        self.add_notice("date-only-past", (eastern_today - timedelta(days=1)).isoformat())
+        self.add_notice("unknown", "not a date")
+        self.db.execute("ALTER TABLE v_opportunities ADD COLUMN poc_email VARCHAR")
+        self.db.execute("ALTER TABLE v_opportunities ADD COLUMN title VARCHAR")
+
+        pipeline = self.ns["get_pipeline_live"](limit=2)
+        self.assertEqual({entry["id"] for entry in pipeline}, {"same-day-open", "date-only-today"})
+        self.assertEqual({entry["total_matches"] for entry in pipeline}, {2})
+        dashboard = self.ns["get_market_opportunities"]()
+        self.assertEqual({entry["noticeid"] for entry in dashboard}, {"same-day-open", "date-only-today"})
 
     def test_exact_notice_number_and_browse_cap(self):
         now = datetime.now(timezone.utc)

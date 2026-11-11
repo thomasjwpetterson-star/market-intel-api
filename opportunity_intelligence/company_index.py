@@ -71,7 +71,7 @@ def open_at(row,now):
     if info.get('source_response_deadline_precision')=='timestamp_utc':
         try:
             deadline=dt.datetime.fromisoformat(info['source_response_deadline_utc'].replace('Z','+00:00'))
-            if deadline.tzinfo and deadline<now:return False
+            if deadline.tzinfo and deadline<=now:return False
         except (ValueError,KeyError,TypeError):pass
     return True
 

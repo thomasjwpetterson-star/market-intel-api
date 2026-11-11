@@ -229,7 +229,7 @@ class Repository(DiscoveryRepositoryMixin):
   # retain calendar precision and do not acquire a midnight deadline.
   if not monitoring_only and not _materialize:
    where+=" AND (d.stage NOT IN ('published_requirement','qualification_opening','teaming_opening') OR try_cast(substr(o.window_end,1,10) AS date) IS NULL OR try_cast(substr(o.window_end,1,10) AS date)>=current_date)"
-   where+=" AND (coalesce(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_precision'),'')<>'timestamp_utc' OR try(from_iso8601_timestamp(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_utc'))) IS NULL OR try(from_iso8601_timestamp(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_utc')))>=current_timestamp)"
+   where+=" AND (coalesce(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_precision'),'')<>'timestamp_utc' OR try(from_iso8601_timestamp(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_utc'))) IS NULL OR try(from_iso8601_timestamp(json_extract_scalar(o.value_inputs_json,'$.source_response_deadline_utc')))>current_timestamp)"
   if 'dla_forecasts' in self.manifest()['tables']:
    asof=self.manifest().get('as_of')
    if not asof or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',asof):raise ValueError('Invalid release as-of date')
