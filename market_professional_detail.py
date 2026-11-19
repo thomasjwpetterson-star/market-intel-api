@@ -14,7 +14,10 @@ VIEWS = {
 PAGE_SIZE = 25
 DB = 'market_intel_platform_candidate'
 KEY = r'[A-Z0-9_]{1,128}'
+AWARD_ID = r'[A-Z0-9_-]{1,128}'
 TABLE = r'market_professional_detail_([0-9a-f]{20})'
+NATIVE_FACT = r'market_native_financial_facts_([0-9a-f]{20})'
+NATIVE_STOCK = r'market_native_stock_links_([0-9a-f]{20})'
 QID = r'[0-9a-f-]{36}'
 
 
@@ -25,13 +28,47 @@ def query_for(payload):
     nodes = payload['nodes']
     table = payload['table']
     match = re.fullmatch(TABLE, table)
-    if (not source or not match or not isinstance(years, list) or not 1 <= len(years) <= 8
+    if ((not source and view != 'contract-actions') or not match or not isinstance(years, list) or not 1 <= len(years) <= 8
         or any(type(y) is not int or not 2019 <= y <= 2026 for y in years)
         or not isinstance(nodes, list) or not 1 <= len(nodes) <= 512
         or any(not isinstance(n, str) or not re.fullmatch(KEY, n) for n in nodes)):
         raise ValueError('Invalid market detail filters.')
     selected = ','.join(map(str, sorted(set(years))))
     scope = ','.join(f"'{n}'" for n in sorted(set(nodes)))
+    if view == 'contract-actions':
+        native = payload.get('nativeDetail')
+        award = payload.get('award')
+        if not isinstance(native, dict) or not isinstance(award, str) or not re.fullmatch(AWARD_ID, award):
+            raise ValueError('Invalid native contract action selection.')
+        fact = re.fullmatch(NATIVE_FACT, native.get('factTable', ''))
+        stock = re.fullmatch(NATIVE_STOCK, native.get('stockTable', ''))
+        if (not fact or not stock or fact[1] != match[1] or stock[1] != match[1]
+            or not re.fullmatch(r'[0-9a-f]{64}', native.get('inventorySha256', ''))):
+            raise ValueError('Native action tables do not match this Market release.')
+        sql = f"""WITH actions AS (
+          SELECT native_record_id AS id, SUM(net_usd) AS net,
+                 arbitrary(contract_id) AS contract_id,
+                 arbitrary(parent_award_key) AS parent_award_key,
+                 arbitrary(modification_number) AS modification_number,
+                 arbitrary(CAST(action_date AS varchar)) AS action_date,
+                 arbitrary(description) AS description,
+                 arbitrary(nsn) AS nsn,
+                 arbitrary(fiscal_year) AS report_year,
+                 json_format(CAST(array_sort(array_distinct(flatten(array_agg(platform_ids)))) AS JSON)) AS platforms
+          FROM "{DB}"."{native['factTable']}"
+          WHERE source_kind='PRIME_AWARD' AND source_record_id='{award}'
+            AND fiscal_year IN ({selected}) AND market_node IN ({scope})
+          GROUP BY 1
+        ), stock AS (
+          SELECT native_record_id AS id,
+                 json_format(CAST(array_sort(array_distinct(array_agg(nsn))) AS JSON)) AS stock_nsns
+          FROM "{DB}"."{native['stockTable']}"
+          WHERE source_kind='PRIME_AWARD' AND source_record_id='{award}'
+            AND fiscal_year IN ({selected})
+          GROUP BY 1
+        ) SELECT actions.*, stock.stock_nsns FROM actions
+          LEFT JOIN stock ON actions.id=stock.id"""
+        return sql + ' ORDER BY ABS(net) DESC, actions.id ASC', match[1]
     fields = ('contract_id', 'parent_award_key', 'company', 'cage', 'uei', 'prime_company',
               'description', 'customer', 'nsn', 'report_year')
     # Metadata is one verified row (or null) per native ID in the immutable fact table.
