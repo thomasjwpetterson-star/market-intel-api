@@ -1,5 +1,6 @@
 """A data cutover must select and verify a private authority before readiness."""
 import ast
+import asyncio
 import copy
 import hashlib
 import io
@@ -7,6 +8,7 @@ import json
 import os
 import hmac
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import Mock, patch
 
@@ -209,3 +211,58 @@ def test_readiness_does_not_hide_failed_private_binding():
     assert state['ready'] is False and state['private_reference_ok'] is False
     cache['private_reference_ready']=True
     assert ns['get_readiness_state']()['ready'] is True
+
+
+@pytest.mark.parametrize('reject_binding',[False,True])
+def test_actual_api_lifespan_checks_selected_private_authority_before_staging(
+    tmp_path,monkeypatch,reject_binding
+):
+    events=[]
+    bundle={'platform':{'schema_version':2,'release_id':'candidate'},
+            'components':{'main':{'release_id':'main-new',
+                                  'platform_reference_release_id':'v7'}}}
+    async def immediate(function,*args,**kwargs):
+        return function(*args,**kwargs)
+    def select(*args,**kwargs):
+        events.append('select')
+        return bundle
+    def bind(*args,**kwargs):
+        events.append('bind')
+        if reject_binding:
+            raise authority.PrivateReferenceUnavailable('source differs')
+        return {'main_release_id':'main-new','mapping_release_id':'authority-new'}
+    def stage(*args,**kwargs):
+        events.append('stage')
+        return tmp_path/'main-releases'/'main-new'
+    def cancel_background(coroutine):
+        coroutine.close()
+        events.append('background-scheduled')
+    namespace=dict(FastAPI=FastAPI,Path=Path,os=os,logger=Mock(),platform_manifest_enabled=lambda:True,
+        boto3=SimpleNamespace(client=lambda *a,**k:Mock()),BotoConfig=lambda **k:None,
+        asyncio=SimpleNamespace(to_thread=immediate,create_task=cancel_background),
+        resolve_platform_release=select,DEFAULT_PLATFORM_MANIFEST_KEY='current.json',
+        LOCAL_CACHE_DIR=tmp_path/'cache',DUCKDB_PATH=tmp_path/'cache'/'mimir.duckdb',
+        RELEASE_PINNED_CACHE=False,PINNED_PLATFORM_BUNDLE=None,stage_main_cache=stage,
+        anyio=SimpleNamespace(to_thread=SimpleNamespace(
+            current_default_thread_limiter=lambda:SimpleNamespace(total_tokens=0))),
+        ensure_duck_conn=lambda:events.append('duckdb'),gc=Mock(),
+        _close_all_duck_read_conns=Mock(),DUCK_CONN=None)
+    lifespan=extracted('lifespan',namespace)
+    monkeypatch.setenv('MIMIR_MAIN_FOLLOW_ROOT','1')
+    monkeypatch.setenv('MIMIR_USE_PLATFORM_MANIFEST','1')
+    with patch.object(authority,'validate_release_binding',side_effect=bind):
+        async def run():
+            generator=lifespan(FastAPI())
+            if reject_binding:
+                with pytest.raises(authority.PrivateReferenceUnavailable):
+                    await generator.__anext__()
+            else:
+                await generator.__anext__()
+                assert namespace['PINNED_PLATFORM_BUNDLE'] is bundle
+                assert namespace['RELEASE_PINNED_CACHE'] is True
+                await generator.aclose()
+        asyncio.run(run())
+    if reject_binding:
+        assert events==['select','bind']
+    else:
+        assert events[:3]==['select','bind','stage']
