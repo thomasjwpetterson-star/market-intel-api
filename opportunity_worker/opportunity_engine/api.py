@@ -6,6 +6,7 @@ from pathlib import Path
 from functools import lru_cache
 from .aws import AWS,BUCKET,PREFIX,DATABASE
 from . import rules
+from .price_evidence import procurement_price_sql
 from .financial_readiness import guard as guard_finance,risk_sql as finance_risk_sql,status as finance_status
 from .discovery_read_model import DiscoveryRepositoryMixin,register_routes as register_discovery_routes
 class Repository(DiscoveryRepositoryMixin):
@@ -91,7 +92,7 @@ class Repository(DiscoveryRepositoryMixin):
   return self.rows('SELECT * FROM '+self.table('company_work')+" WHERE doc_id='"+doc_id+"' LIMIT 1")
  def price_lines(self,episode_id):
   if not re.fullmatch('[a-f0-9]{64}',episode_id):raise ValueError('Invalid opportunity identifier')
-  return self.rows('SELECT * FROM '+self.table('notice_price_links')+" WHERE episode_id='"+episode_id+"' ORDER BY pricing_record_id LIMIT 100")
+  return self.rows('SELECT * FROM '+self.table('notice_price_links')+" WHERE episode_id='"+episode_id+"' AND "+procurement_price_sql()+" ORDER BY pricing_record_id LIMIT 100")
 
  def value_evidence(self,episode_id):
   rows=self.detail(episode_id)
