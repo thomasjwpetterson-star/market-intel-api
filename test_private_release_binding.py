@@ -87,6 +87,80 @@ def test_preflight_checks_lineage_without_loading_parquet(releases):
     assert client.get_object.call_count==1
 
 
+def test_root_pinned_private_authority_selects_new_main_and_restores_old_catalog(releases):
+    path,binding,manifest,main,bundle,client=releases
+    old={**binding,'accepted_main_release_id':'main-old'}
+    path.write_text(json.dumps({'schema_version':2,'bindings':[old]}))
+    manifest['main_source_fingerprint']=authority.main_source_fingerprint(main)
+    manifest['compatibility_validation']={'state':'PASSED'}
+    raw=json.dumps(manifest).encode()
+    pin={**binding['manifest'],'sha256':hashlib.sha256(raw).hexdigest()}
+    bundle['platform']['private_v7_authority_manifest']=pin
+    client.get_object.return_value={'Body':io.BytesIO(raw),'VersionId':'manifest-v1'}
+    try:
+        assert authority.validate_release_binding(bundle,client)['mapping_release_id']=='authority-new'
+        assert authority.binding_for('main-new')['manifest']==pin
+        del bundle['platform']['private_v7_authority_manifest']
+        bundle['components']['main']['release_id']='main-old'
+        bundle['components']['platform_reference']['rebuilt_main_release_id']='main-old'
+        old_manifest={**manifest,'accepted_main_release_id':'main-old'}
+        old_manifest['main_source_fingerprint']=authority.main_source_fingerprint(main)
+        old_raw=json.dumps(old_manifest).encode()
+        old['manifest']={**pin,'sha256':hashlib.sha256(old_raw).hexdigest()}
+        old['main_source_fingerprint']=old_manifest['main_source_fingerprint']
+        path.write_text(json.dumps({'schema_version':2,'bindings':[old]}))
+        client.get_object.return_value={'Body':io.BytesIO(old_raw),'VersionId':'manifest-v1'}
+        assert authority.validate_release_binding(bundle,client)['main_release_id']=='main-old'
+        assert authority.binding_for('main-old')==old
+    finally:
+        authority._selected_binding=None
+        authority._cached=None
+
+
+@pytest.mark.parametrize('change',['wrong_main','bad_hash','unreviewed'])
+def test_root_pinned_private_authority_fails_closed(releases,change):
+    path,binding,manifest,main,bundle,client=releases
+    path.write_text(json.dumps({'schema_version':2,'bindings':[]}))
+    manifest['main_source_fingerprint']=authority.main_source_fingerprint(main)
+    manifest['compatibility_validation']={'state':'PASSED'}
+    if change=='wrong_main':manifest['accepted_main_release_id']='other-main'
+    if change=='unreviewed':manifest['compatibility_validation']['state']='PENDING'
+    raw=json.dumps(manifest).encode()
+    pin={**binding['manifest'],'sha256':hashlib.sha256(raw).hexdigest()}
+    if change=='bad_hash':pin['sha256']='0'*64
+    bundle['platform']['private_v7_authority_manifest']=pin
+    client.get_object.return_value={'Body':io.BytesIO(raw),'VersionId':'manifest-v1'}
+    with pytest.raises(authority.PrivateReferenceUnavailable):
+        authority.validate_release_binding(bundle,client)
+
+
+def test_current_item_alias_annex_requires_exact_source_and_zero_financial_allocation(releases):
+    _,binding,manifest,_,_,client=releases
+    rows=[{'review_link_id':f'link-{i if i<6 else 5}',
+           'prior_transaction_key':f'old-{i}',
+           'current_transaction_key':f'new-{i}',
+           'financial_allocation_eligible':False,
+           'pricing_evidence_eligible':False} for i in range(7)]
+    annex={'status':'VERIFIED_SEVEN_ACTION_ALIASES_AND_SIX_REVIEWED_ITEM_RELATIONSHIPS',
+           'main_release_id':'main-new','etl_run_id':'run-new',
+           'summary':{'source_amount_change_usd':'0.00'},'aliases':rows}
+    raw=json.dumps(annex).encode()
+    manifest['current_action_alias_annex']={**binding['manifest'],
+        'sha256':hashlib.sha256(raw).hexdigest()}
+    client.get_object.return_value={'Body':io.BytesIO(raw),'VersionId':'manifest-v1'}
+    selected=authority._current_item_aliases(client,manifest,'main-new','run-new')
+    assert len(selected)==6 and sum(map(len,selected.values()))==7
+    with pytest.raises(ValueError):authority._current_item_aliases(
+        Mock(get_object=Mock(return_value={'Body':io.BytesIO(raw),'VersionId':'manifest-v1'})),
+        manifest,'wrong-main','run-new')
+    rows[0]['financial_allocation_eligible']=True
+    bad=json.dumps(annex).encode()
+    manifest['current_action_alias_annex']['sha256']=hashlib.sha256(bad).hexdigest()
+    with pytest.raises(ValueError):authority._current_item_aliases(
+        Mock(get_object=Mock(return_value={'Body':io.BytesIO(bad),'VersionId':'manifest-v1'})),
+        manifest,'main-new','run-new')
+
+
 @pytest.mark.parametrize('change',['actions','base_reference','source_reference','authority_hash','unselected'])
 def test_preflight_rejects_incompatible_pairs(releases,change):
     path,binding,manifest,main,bundle,client=releases

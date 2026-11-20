@@ -17,6 +17,7 @@ BUCKET='a-and-d-intel-lake-newaccount'
 PREFIX='governance/platform_reference/candidates/'
 _lock=threading.Lock()
 _cached=None
+_selected_binding=None
 BINDING_PATH=Path(__file__).with_name('private_v7_binding.json')
 
 
@@ -25,6 +26,9 @@ class PrivateReferenceUnavailable(RuntimeError):
 
 
 def binding_for(main_release_id):
+    selected=_selected_binding
+    if selected is not None and selected['accepted_main_release_id']==main_release_id:
+        return selected
     if not BINDING_PATH.exists():return None
     try:
         config=json.loads(BINDING_PATH.read_text())
@@ -53,8 +57,8 @@ def main_source_fingerprint(main):
     return hashlib.sha256(json.dumps(source,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
 
-def _manifest_for(client,binding):
-    m=json.loads(read_pin(client,binding['manifest']))
+def _manifest_for(client,binding,preloaded=None):
+    m=preloaded if preloaded is not None else json.loads(read_pin(client,binding['manifest']))
     if (m.get('schema_version')!='platform-award-remap-cloud-candidate-v1'
         or m.get('accepted_main_release_id')!=binding['accepted_main_release_id']
         or m.get('base_platform_reference_release_id')!=binding['base_platform_reference_release_id']
@@ -62,6 +66,31 @@ def _manifest_for(client,binding):
         or binding.get('main_source_fingerprint')and m.get('main_source_fingerprint')!=binding['main_source_fingerprint']):
         raise ValueError('Private mapping authority does not match the selected v7 source.')
     return m
+
+
+def _current_item_aliases(client,manifest,main_release_id,etl_run_id=None):
+    pin=manifest.get('current_action_alias_annex')
+    if pin is None:return {}
+    annex=json.loads(read_pin(client,pin))
+    if (annex.get('status')!='VERIFIED_SEVEN_ACTION_ALIASES_AND_SIX_REVIEWED_ITEM_RELATIONSHIPS'
+        or annex.get('main_release_id')!=main_release_id
+        or (etl_run_id is not None and annex.get('etl_run_id')!=etl_run_id)
+        or annex.get('summary',{}).get('source_amount_change_usd')!='0.00'):
+        raise ValueError('The current item-action alias annex is incompatible.')
+    rows=annex.get('aliases')
+    if not isinstance(rows,list) or len(rows)!=7:
+        raise ValueError('The reviewed item-action alias inventory is incomplete.')
+    current=set();prior=set();links={}
+    for row in rows:
+        link=row.get('review_link_id');old=row.get('prior_transaction_key');new=row.get('current_transaction_key')
+        if (not link or not old or not new or old in prior or new in current
+            or row.get('financial_allocation_eligible') is not False
+            or row.get('pricing_evidence_eligible') is not False):
+            raise ValueError('The reviewed item-action alias is ambiguous or financially eligible.')
+        prior.add(old);current.add(new);links.setdefault(link,[]).append(new)
+    if len(links)!=6:
+        raise ValueError('The reviewed item relationships are incomplete.')
+    return links
 
 
 def validate_release_binding(bundle,client):
@@ -72,17 +101,36 @@ def validate_release_binding(bundle,client):
     if not bundle or bundle.get('platform',{}).get('schema_version')!=2:return None
     try:
         main=bundle['components']['main'];base=bundle['components']['platform_reference']
-        binding=binding_for(main['release_id'])
+        root_pin=bundle['platform'].get('private_v7_authority_manifest')
+        if root_pin is not None:
+            if not isinstance(root_pin,dict) or not root_pin.get('sha256') or len(root_pin['sha256'])!=64:
+                raise ValueError('Private v7 authority root pin is incomplete.')
+            pinned_manifest=json.loads(read_pin(client,root_pin))
+            if pinned_manifest.get('compatibility_validation',{}).get('state')!='PASSED':
+                raise ValueError('Private v7 authority has no passed source compatibility gate.')
+            binding={'accepted_main_release_id':pinned_manifest['accepted_main_release_id'],
+                'base_platform_reference_release_id':pinned_manifest['base_platform_reference_release_id'],
+                'main_source_fingerprint':pinned_manifest['main_source_fingerprint'],
+                'manifest':root_pin}
+        else:
+            binding=binding_for(main['release_id'])
         if binding is None:raise ValueError('Private source binding is missing.')
+        if binding['accepted_main_release_id']!=main['release_id']:
+            raise ValueError('Private source binding names another Main release.')
         if binding['base_platform_reference_release_id']!=main['platform_reference_release_id']or base['release_id']!=main['platform_reference_release_id']:
             raise ValueError('Private and Main platform references disagree.')
         if binding.get('main_source_fingerprint')and main_source_fingerprint(main)!=binding['main_source_fingerprint']:
             raise ValueError('Main analytical source differs from its private binding.')
-        manifest=_manifest_for(client,binding)
+        manifest=_manifest_for(client,binding,pinned_manifest if root_pin is not None else None)
+        _current_item_aliases(client,manifest,main['release_id'],bundle['platform'].get('etl_run_id'))
         if manifest.get('parent_platform_reference_manifest')!=base.get('source_reference')or not base.get('source_reference'):
             raise ValueError('Private and Main reference manifest pins disagree.')
         if base.get('rebuilt_main_release_id')!=main['release_id']:
             raise ValueError('Platform reference was built for another Main source.')
+        global _selected_binding,_cached
+        with _lock:
+            _selected_binding=binding if root_pin is not None else None
+            _cached=None
         return {'main_release_id':main['release_id'],'mapping_release_id':manifest['release_id']}
     except PrivateReferenceUnavailable:raise
     except Exception as error:
@@ -112,6 +160,10 @@ class Reference:
         self.registry=table(m['tables']['canonical_registry'])
         self.metadata=table(m['files']['data/award_resolution_decisions.parquet'])
         self.items=table(m['tables']['award_item_associations'])if m['tables'].get('award_item_associations')else[]
+        self.current_item_aliases=_current_item_aliases(client,m,binding['accepted_main_release_id'])
+        if self.current_item_aliases and not set(self.current_item_aliases).issubset(
+                {r['link_id'] for r in self.items}):
+            raise ValueError('The current action aliases name missing reviewed item links.')
         alias_pin=m['files'].get('data/canonical_label_mappings_reviewed_overlay.parquet')
         self.aliases=table(alias_pin)if alias_pin else[]
         if len({r['award_key']for r in self.rows})!=len(self.rows):raise ValueError('Duplicate v7 award identity.')
@@ -184,7 +236,9 @@ class Reference:
         items=[]
         for item in self.items:
             if item['award_key']in scoped and item['canonical_entity_id']==eid:
-                items.append({**item,'evidence_count':int(scoped[item['award_key']]['action_count'])})
+                current=getattr(self,'current_item_aliases',{}).get(item.get('link_id'))
+                items.append({**item,'evidence_count':int(scoped[item['award_key']]['action_count']),
+                    **({'current_source_transaction_keys':current} if current else {})})
         effective=None
         if {'award_key','contract_id','platform_family','vendor_cage'}.issubset(columns):
             _,where,query_params=self.predicate(payload)
