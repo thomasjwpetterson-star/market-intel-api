@@ -14,23 +14,37 @@ def enrich(directory,commercial_manifest=None):
   c.execute("COPY result TO '"+str(p).replace("'","''")+"' (FORMAT PARQUET,COMPRESSION ZSTD)");cols=[dict(Name=n,Type='bigint' if t in ('BIGINT','INTEGER') else 'double' if t in ('DOUBLE','FLOAT') else 'boolean' if t=='BOOLEAN' else 'string') for n,t,*_ in c.execute('DESCRIBE result').fetchall()];m['tables'][name]=dict(path=str(p),sha256=hashlib.sha256(p.read_bytes()).hexdigest(),rows=c.execute('select count(*) from result').fetchone()[0],columns=cols)
  if commercial_manifest:
   c.create_function('non_procurement_document_class',price_evidence.non_procurement_document_class,['VARCHAR','VARCHAR','VARCHAR'],'VARCHAR',null_handling='special')
+  c.create_function('document_value_basis',price_evidence.document_value_basis,['VARCHAR'],'VARCHAR',null_handling='special')
+  c.create_function('retain_document_clin',price_evidence.retain_document_clin,['VARCHAR'],'BOOLEAN',null_handling='special')
+  c.create_function('document_quality_status',price_evidence.document_quality_status,['VARCHAR'],'VARCHAR',null_handling='special')
   extra={n:s for n,s in json.loads(Path(commercial_manifest).read_text())['sources'].items() if n in ('governed_price_lines','dla_forecasts','dla_inventory')}
   for name,source in extra.items():
    for f in source['files']:
     if hashlib.sha256(Path(f['path']).read_bytes()).hexdigest()!=f['sha256']:raise ValueError('Source hash mismatch')
    paths=[f['path'] for f in source['files']];c.read_parquet(paths).create_view(name)
    if name=='governed_price_lines':
-    output(name,"""SELECT * EXCLUDE (_excluded_document_class) REPLACE (
+    columns={row[0] for row in c.execute('DESCRIBE governed_price_lines').fetchall()}
+    metadata_columns=[col for col in ('source_document_role','source_value_basis') if col in columns]
+    excluded_columns=','.join(['_excluded_document_class']+metadata_columns)
+    existing_role='source_document_role' if 'source_document_role' in columns else 'NULL::VARCHAR'
+    existing_basis='source_value_basis' if 'source_value_basis' in columns else 'NULL::VARCHAR'
+    output(name,"""SELECT * EXCLUDE ("""+excluded_columns+""") REPLACE (
      coalesce(_excluded_document_class,item_class) AS item_class,
-     CASE WHEN _excluded_document_class IS NOT NULL THEN 'EXCLUDED_NON_PROCUREMENT_DOCUMENT' ELSE quality_status END AS quality_status,
-     CASE WHEN _excluded_document_class IS NOT NULL THEN NULL ELSE clin END AS clin,
+     CASE WHEN _excluded_document_class IS NOT NULL THEN document_quality_status(_excluded_document_class) ELSE quality_status END AS quality_status,
+     CASE WHEN retain_document_clin(_excluded_document_class) THEN clin ELSE NULL END AS clin,
      CASE WHEN _excluded_document_class IS NOT NULL THEN false ELSE include_in_mimir_range END AS include_in_mimir_range,
-     CASE WHEN _excluded_document_class IS NOT NULL THEN false ELSE promotion_eligible_without_review END AS promotion_eligible_without_review)
+     CASE WHEN _excluded_document_class IS NOT NULL THEN false ELSE promotion_eligible_without_review END AS promotion_eligible_without_review),
+     coalesce(_excluded_document_class,"""+existing_role+""",'SOURCE_ATTACHMENT_LINE_UNREVIEWED') AS source_document_role,
+     CASE WHEN _excluded_document_class IS NOT NULL THEN document_value_basis(_excluded_document_class)
+       ELSE coalesce("""+existing_basis+""",document_value_basis(NULL)) END AS source_value_basis
      FROM (SELECT *,non_procurement_document_class(attachment_sha256,attachment_name,attachment_source_row_text) _excluded_document_class FROM governed_price_lines)""")
+    # Downstream links must use the corrected copy, not the source view left
+    # behind by output(); otherwise new semantic fields/flags are bypassed.
+    c.read_parquet(m['tables'][name]['path']).create_view(name,replace=True)
    else:output(name,'SELECT * FROM '+name)
    m['sources'][name]=source
   c.read_parquet(m['tables']['published_calls']['path']).create_view('published_calls')
-  output('notice_price_links',"""SELECT p.episode_id,p.record_hash notice_record_hash,g.pricing_record_id,g.physical_source_line_key,g.notice_id,g.clin,g.priced_item_name,g.quantity,g.quantity_unit,g.unit_price_usd,g.price_basis,g.line_amount_usd,g.quality_status,g.include_in_mimir_range,g.promotion_eligible_without_review,g.attachment_s3_uri,g.attachment_sha256,g.attachment_source_locator,g.attachment_source_row_text,g.action_date,
+  output('notice_price_links',"""SELECT p.episode_id,p.record_hash notice_record_hash,g.pricing_record_id,g.physical_source_line_key,g.notice_id,g.clin,g.priced_item_name,g.quantity,g.quantity_unit,g.unit_price_usd,g.price_basis,g.line_amount_usd,g.quality_status,g.include_in_mimir_range,g.promotion_eligible_without_review,g.attachment_s3_uri,g.attachment_sha256,g.attachment_source_locator,g.attachment_source_row_text,g.action_date,g.source_document_role,g.source_value_basis,
  'Exact notice ID; historical line evidence, not a current requirement total. Verify units, configuration, quantity scope and observation date.' interpretation
  FROM published_calls p JOIN governed_price_lines g ON p.source_locator=g.notice_id WHERE """+procurement_price_sql('g',dialect='duckdb'))
  # Avoid F-1/F-15 or C-1/C-130 prefix collisions in platform context.

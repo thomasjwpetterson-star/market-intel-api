@@ -19,6 +19,12 @@ class OpportunityPriceTests(unittest.TestCase):
    ('a'*64,'d-new-inventory',True,True,'AUTO','new','Government_Furnished_Property_List.pdf','1 EA 5 5',5,1)])
  def tearDown(self):self.c.close()
  def test_actual_repository_filters_before_limit(self):
+  # Legacy frozen rows can still carry true eligibility flags. More than one
+  # page of such rows must not hide the valid row after ORDER BY/LIMIT.
+  estimate='aa8abebbd6e303032eb32a1a63568275147577139783e2b2558cb212c7454169'
+  self.c.executemany('INSERT INTO links VALUES (?,?,?,?,?,?,?,?,?,?)',[
+   ('a'*64,'aa-stale-'+str(i).zfill(3),True,True,'AUTO',estimate,'renamed.pdf','0016 DEVICE',1614.62,1)
+   for i in range(120)])
   for path in [P/'api.py',ROOT/'opportunity_intelligence/api.py']:
    with self.subTest(path=path):
     tree=ast.parse(path.read_text());klass=next(n for n in tree.body if isinstance(n,ast.ClassDef)and n.name=='Repository');fn=next(n for n in klass.body if isinstance(n,ast.FunctionDef)and n.name=='price_lines')
@@ -50,6 +56,13 @@ class OpportunityPriceTests(unittest.TestCase):
    links=self.c.read_parquet(result['tables']['notice_price_links']['path']).fetchall()
    self.assertEqual(len(links),1)
    self.assertEqual(self.c.execute("SELECT count(*) FROM read_parquet('"+result['tables']['governed_price_lines']['path']+"') WHERE pricing_record_id IN ('a-bad','d-new-inventory') AND NOT include_in_mimir_range AND clin IS NULL").fetchone()[0],2)
+   corrected=Path(result['tables']['governed_price_lines']['path'])
+   (root/'sources.json').write_text(json.dumps({'sources':{'governed_price_lines':{'files':[{'path':str(corrected),'sha256':hashlib.sha256(corrected.read_bytes()).hexdigest()}]}}}))
+   repeated=enrich(root,root/'sources.json')
+   columns=[r[0] for r in self.c.execute("DESCRIBE SELECT * FROM read_parquet('"+repeated['tables']['governed_price_lines']['path']+"')").fetchall()]
+   self.assertEqual(len(columns),len(set(columns)))
+   self.assertIn('source_document_role',columns);self.assertIn('source_value_basis',columns)
+   self.assertEqual(repeated['tables']['notice_price_links']['rows'],1)
 
  def test_alias_is_internal_validated_input(self):
   with self.assertRaises(ValueError):policy.procurement_price_sql('g; DROP TABLE links')

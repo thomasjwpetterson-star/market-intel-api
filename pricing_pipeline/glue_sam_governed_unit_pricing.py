@@ -30,10 +30,16 @@ def non_procurement_document_class(attachment_sha256, attachment_name, source_ro
     """
     import re
 
-    if attachment_sha256 == (
-        "84075394258b3f88d553c39b5950b58e045113c016aaaf4f270b5005f268a967"
-    ):
-        return "GOVERNMENT_FURNISHED_PROPERTY_INVENTORY"
+    reviewed = {
+        "84075394258b3f88d553c39b5950b58e045113c016aaaf4f270b5005f268a967":
+            "GOVERNMENT_FURNISHED_PROPERTY_INVENTORY",
+        "aa8abebbd6e303032eb32a1a63568275147577139783e2b2558cb212c7454169":
+            "PREAWARD_PLANNING_ESTIMATE_REFERENCE",
+        "6f2e0fc4bb73993ba7c0f0cd226a38bd85bc9dca33a67c55efe27de1999b14bf":
+            "VALUE_BASIS_UNESTABLISHED_REFERENCE",
+    }
+    if attachment_sha256 in reviewed:
+        return reviewed[attachment_sha256]
     name = re.sub(r"[^A-Z0-9]+", " ", str(attachment_name or "").upper()).strip()
     row = re.sub(r"[^A-Z0-9]+", " ", str(source_row_text or "").upper()).strip()
     if re.search(r"\bGOVERNMENT FURNISHED PROPERTY\b|\bGFP\b", name):
@@ -42,10 +48,33 @@ def non_procurement_document_class(attachment_sha256, attachment_name, source_ro
         r"\b(IN STOCK|IN REPAIR|UNIT COST|EXTENDED COST|SERIAL NBR|BATCH VALUATION)\b", row
     ):
         return "NON_PROCUREMENT_DOCUMENT_REQUIRES_REVIEW"
+    if re.search(r"\b(PRE ?SOLICITATION|PLANNING ESTIMATE|IGCE)\b", name):
+        return "PREAWARD_DOCUMENT_VALUE_REQUIRES_REVIEW"
     return None
 
+def document_value_basis(document_class):
+    """Economic meaning is separate from the unchanged extraction price_basis."""
+    if document_class == "GOVERNMENT_FURNISHED_PROPERTY_INVENTORY":
+        return "GOVERNMENT_PROPERTY_ACCOUNTING_UNIT_COST"
+    if document_class == "PREAWARD_PLANNING_ESTIMATE_REFERENCE":
+        return "SOURCE_PLANNING_ESTIMATE_UNIT_PRICE"
+    if document_class:
+        return "SOURCE_VALUE_BASIS_UNESTABLISHED"
+    return "OBSERVED_SOURCE_LINE_PRICE_UNREVIEWED"
 
-TRANSFORM_VERSION = "mimir-sam-governed-unit-pricing-2026-11-v13-document-role"
+def retain_document_clin(document_class):
+    """An estimate can have real schedule CLINs; inventory item codes cannot."""
+    return document_class in (None, "PREAWARD_PLANNING_ESTIMATE_REFERENCE", "PREAWARD_DOCUMENT_VALUE_REQUIRES_REVIEW")
+
+def document_quality_status(document_class):
+    if document_class in ("PREAWARD_PLANNING_ESTIMATE_REFERENCE", "VALUE_BASIS_UNESTABLISHED_REFERENCE", "PREAWARD_DOCUMENT_VALUE_REQUIRES_REVIEW"):
+        return "REFERENCE_ONLY_SOURCE_VALUE"
+    if document_class:
+        return "EXCLUDED_NON_PROCUREMENT_DOCUMENT"
+    return "AUTO_ADMITTED_BY_COHORT_RULE"
+
+
+TRANSFORM_VERSION = "mimir-sam-governed-unit-pricing-2026-11-v14-source-value-basis"
 ARGS = getResolvedOptions(sys.argv, ["JOB_NAME", "BUCKET", "RUN_ID"])
 BUCKET = ARGS["BUCKET"]
 STARTED_AT = datetime.now(timezone.utc)
@@ -82,6 +111,9 @@ physical_units = [
 ]
 
 evidence = spark.table(SOURCE)
+for column in ("attachment_document_role", "attachment_source_value_basis"):
+    if column not in evidence.columns:
+        evidence = evidence.withColumn(column, F.lit(None).cast("string"))
 award_notice_versions = (
     spark.table(NOTICE_VERSION_SOURCE)
     .where(F.col("notice_type") == "Award Notice")
@@ -105,7 +137,14 @@ direct_rows = (
     .where(F.col("line_candidate_id").isNotNull())
     .where(F.col("priced_item_name").isNotNull() & (F.trim("priced_item_name") != ""))
     .where(F.col("quantity") > 0)
-    .where(F.col("quantity_scope_status") == "PROCUREMENT_LINE_QUANTITY_CANDIDATE")
+    .where(
+        (F.col("quantity_scope_status") == "PROCUREMENT_LINE_QUANTITY_CANDIDATE")
+        # Preserve the reviewed schedule as reference evidence even when a
+        # legacy noun-only service classifier dropped a physical item. The
+        # document guard below keeps every estimate out of procurement ranges.
+        | (F.col("attachment_sha256") ==
+           "aa8abebbd6e303032eb32a1a63568275147577139783e2b2558cb212c7454169")
+    )
     .where(F.upper(F.trim("quantity_unit")).isin(*physical_units))
     .where(
         F.col("attachment_s3_uri").isNotNull()
@@ -634,7 +673,14 @@ classified = (
 document_class = F.udf(non_procurement_document_class, "string")
 classified = classified.withColumn(
     "excluded_document_class",
-    document_class("attachment_sha256", "attachment_name", "attachment_source_row_text"),
+    F.coalesce(
+        document_class("attachment_sha256", "attachment_name", "attachment_source_row_text"),
+        F.when(F.col("attachment_document_role").isin(
+            "GOVERNMENT_FURNISHED_PROPERTY_INVENTORY", "NON_PROCUREMENT_DOCUMENT_REQUIRES_REVIEW",
+            "PREAWARD_PLANNING_ESTIMATE_REFERENCE", "VALUE_BASIS_UNESTABLISHED_REFERENCE",
+            "PREAWARD_DOCUMENT_VALUE_REQUIRES_REVIEW",
+        ), F.col("attachment_document_role")),
+    ),
 )
 text = F.col("classification_text")
 template_pattern = (
@@ -704,6 +750,8 @@ records = (
     .where(F.col("item_class").isin(
         "PROCUREMENT_EQUIPMENT_LINE", "GOVERNMENT_FURNISHED_PROPERTY_INVENTORY",
         "NON_PROCUREMENT_DOCUMENT_REQUIRES_REVIEW",
+        "PREAWARD_PLANNING_ESTIMATE_REFERENCE", "VALUE_BASIS_UNESTABLISHED_REFERENCE",
+        "PREAWARD_DOCUMENT_VALUE_REQUIRES_REVIEW",
     ))
     .withColumn(
         "pricing_record_id",
@@ -716,14 +764,16 @@ records = (
     .withColumn("line_amount_usd", F.col("extended_line_amount_usd").cast("decimal(30,6)"))
     .withColumn(
         "quality_status",
-        F.when(F.col("item_class") == "PROCUREMENT_EQUIPMENT_LINE",
-               F.lit("AUTO_ADMITTED_BY_COHORT_RULE"))
-        .otherwise(F.lit("EXCLUDED_NON_PROCUREMENT_DOCUMENT")),
+        F.udf(document_quality_status, "string")("excluded_document_class"),
     )
     .withColumn(
-        "clin", F.when(F.col("item_class") == "PROCUREMENT_EQUIPMENT_LINE", F.col("clin"))
+        "clin", F.when(F.col("item_class").isin(
+            "PROCUREMENT_EQUIPMENT_LINE", "PREAWARD_PLANNING_ESTIMATE_REFERENCE",
+            "PREAWARD_DOCUMENT_VALUE_REQUIRES_REVIEW"), F.col("clin"))
         .otherwise(F.lit(None).cast("string")),
     )
+    .withColumn("source_document_role", F.coalesce(F.col("excluded_document_class"), F.lit("SOURCE_ATTACHMENT_LINE_UNREVIEWED")))
+    .withColumn("source_value_basis", F.udf(document_value_basis, "string")("excluded_document_class"))
     .withColumn("provenance_status", F.lit("FULL_ATTACHMENT_SOURCE_LINE_PROVENANCE"))
     .withColumn("include_in_mimir_range", F.col("item_class") == "PROCUREMENT_EQUIPMENT_LINE")
     .withColumn("promotion_eligible_without_review", F.col("item_class") == "PROCUREMENT_EQUIPMENT_LINE")
@@ -741,7 +791,7 @@ records = (
         F.when(unique_action, F.col("action_date")).alias("action_date"),
         "linked_action_context_count", "linked_award_context_count", "clin", "priced_item_name",
         "quantity", "quantity_unit", "unit_price_usd", "price_basis", "line_amount_usd",
-        "item_class", "quality_status", "product_or_service_code",
+        "item_class", "quality_status", "source_document_role", "source_value_basis", "product_or_service_code",
         "product_or_service_code_description", "awarding_agency_name",
         "awarding_sub_agency_name", "awarding_office_name", "recipient_name", "cage_code",
         F.when(unique_action, F.col("transaction_description")).alias("transaction_description"),
@@ -778,8 +828,11 @@ unsafe_promotion_count = records.where(
     "(item_class = 'PROCUREMENT_EQUIPMENT_LINE' AND "
     "(NOT include_in_mimir_range OR NOT promotion_eligible_without_review OR unit_price_usd <= 0)) "
     "OR (item_class <> 'PROCUREMENT_EQUIPMENT_LINE' AND "
-    "(include_in_mimir_range OR promotion_eligible_without_review OR clin IS NOT NULL "
-    "OR quality_status <> 'EXCLUDED_NON_PROCUREMENT_DOCUMENT'))"
+    "(include_in_mimir_range OR promotion_eligible_without_review "
+    "OR (item_class NOT IN ('PREAWARD_PLANNING_ESTIMATE_REFERENCE', 'PREAWARD_DOCUMENT_VALUE_REQUIRES_REVIEW') AND clin IS NOT NULL) "
+    "OR quality_status <> CASE WHEN item_class IN ('PREAWARD_PLANNING_ESTIMATE_REFERENCE', "
+    "'VALUE_BASIS_UNESTABLISHED_REFERENCE', 'PREAWARD_DOCUMENT_VALUE_REQUIRES_REVIEW') THEN 'REFERENCE_ONLY_SOURCE_VALUE' "
+    "ELSE 'EXCLUDED_NON_PROCUREMENT_DOCUMENT' END))"
 ).count()
 missing_notice_version_provenance_count = records.where(
     "sam_notice_record_payload_sha256 IS NULL OR sam_notice_source_occurrences IS NULL"
@@ -843,7 +896,8 @@ manifest = {
     "policy": (
         "Only reconciled source-stated attachment prices and exact same-row amount/quantity "
         "equipment lines are admitted to procurement ranges. Non-procurement document "
-        "observations are retained with explicit exclusion, no CLIN and false eligibility. "
+        "observations are retained with source value basis and false eligibility. "
+        "Planning estimates retain real schedule CLINs; inventory item codes are not CLINs. "
         "Price basis preserves the extraction method and stable record identity. "
         "Award totals are context only."
     ),
