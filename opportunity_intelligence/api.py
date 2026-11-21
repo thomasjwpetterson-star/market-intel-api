@@ -6,6 +6,7 @@ from pathlib import Path
 from functools import lru_cache
 from .aws import AWS,BUCKET,PREFIX,DATABASE
 from . import rules
+from opportunity_worker.opportunity_engine.price_evidence import procurement_price_sql
 from .company_index import IndexUnavailable
 from .notice_facts import quantity_fact,price_scenario_fact
 from opportunity_worker.opportunity_engine.financial_readiness import guard as guard_finance,risk_sql as finance_risk_sql,status as finance_status
@@ -457,7 +458,7 @@ class Repository(DiscoveryRepositoryMixin):
   return [guard_finance(r,self.manifest(),source_report=kind=='subaward_report') for r in self.rows('SELECT a.* FROM '+self.table(name)+' a WHERE '+condition+' ORDER BY '+ordering+' OFFSET '+str(offset)+' LIMIT '+str(limit))]
  def price_lines(self,episode_id):
   if not re.fullmatch('[a-f0-9]{64}',episode_id):raise ValueError('Invalid opportunity identifier')
-  return self.rows('SELECT * FROM '+self.table('notice_price_links')+" WHERE episode_id='"+episode_id+"' ORDER BY pricing_record_id LIMIT 100")
+  return self.rows('SELECT * FROM '+self.table('notice_price_links')+" WHERE episode_id='"+episode_id+"' AND "+procurement_price_sql()+" ORDER BY pricing_record_id LIMIT 100")
 
  def value_evidence(self,episode_id):
   rows=self.detail(episode_id)
