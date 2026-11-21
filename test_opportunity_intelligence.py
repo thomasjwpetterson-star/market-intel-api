@@ -124,10 +124,10 @@ class OpportunityPilotTests(unittest.TestCase):
         aws=CaptureAWS();repo=Repository(aws);repo.table=lambda name:'safe.'+name;repo.manifest=lambda:{'as_of':'2026-10-31','tables':{}}
         repo.opportunities('CAGE:45934',24,0,False,'work')
         self.assertIn("source_response_deadline_precision'),'')<>'timestamp_utc'",aws.sql)
-        self.assertIn("source_response_deadline_utc')))>=current_timestamp",aws.sql)
+        self.assertIn("source_response_deadline_utc')))>current_timestamp",aws.sql)
         self.assertNotIn("cast(o.window_end AS timestamp)",aws.sql)
         repo.opportunities('CAGE:45934',24,0,True,'all')
-        self.assertNotIn('>=current_timestamp',aws.sql)
+        self.assertNotIn('>current_timestamp',aws.sql)
 
     def test_price_scenarios_inform_review_order_without_inventing_contract_values(self):
         aws = CaptureAWS(); repo = Repository(aws); repo.table = lambda name: 'safe.' + name
