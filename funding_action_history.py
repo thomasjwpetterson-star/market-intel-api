@@ -18,9 +18,13 @@ def action_history(payload, read):
     sql="""WITH selected AS MATERIALIZED (
         SELECT award_key,transaction_key,source_system,contract_id,action_date,year,
                vendor_cage,vendor_name,parent_agency,sub_agency,psc,naics_code,
-               description,platform_family,spend_amount,
+               CASE WHEN NULLIF(TRIM(action_description),'') IS NOT NULL
+                    THEN action_description ELSE description END AS description,
+               platform_family,spend_amount,
                """+effective_award_key()+""" AS native_identity
-        FROM v_transactions WHERE """+q['where_sql']+"""
+        FROM (SELECT * FROM v_transactions UNION ALL BY NAME
+              SELECT NULL::VARCHAR AS action_description WHERE FALSE)
+        WHERE """+q['where_sql']+"""
     ), totals AS (
         SELECT COUNT(*) AS action_count,COUNT(DISTINCT native_identity) AS contract_count,
                SUM(spend_amount) AS net_obligations_usd,

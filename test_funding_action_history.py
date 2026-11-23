@@ -14,7 +14,7 @@ class FundingActionHistory(unittest.TestCase):
         for i in range(60):self.add('ZERO'+str(i),'2025-09-30',0)
         self.add('OUTSIDE','2025-07-15',999999,cage='99999')
     def add(self,key,date,value,cage='15090'):
-        self.db.execute('INSERT INTO v_transactions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',['NATIVE',key,'USA_SPENDING','TEST',date,2025,cage,'VENDOR','DEPARTMENT OF DEFENSE','DEPARTMENT OF THE NAVY','1410','336414','Description','AMRAAM',value])
+        self.db.execute('INSERT INTO v_transactions(award_key,transaction_key,source_system,contract_id,action_date,year,vendor_cage,vendor_name,parent_agency,sub_agency,psc,naics_code,description,platform_family,spend_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',['NATIVE',key,'USA_SPENDING','TEST',date,2025,cage,'VENDOR','DEPARTMENT OF DEFENSE','DEPARTMENT OF THE NAVY','1410','336414','Description','AMRAAM',value])
     def read(self,sql,params):
         r=self.db.execute(sql,params);return [dict(zip([c[0]for c in r.description],row))for row in r.fetchall()]
     def test_large_positive_modifications_reconcile_with_negative_offset(self):
@@ -28,11 +28,46 @@ class FundingActionHistory(unittest.TestCase):
         r=action_history({'filters':{'contract_id':'TEST','cage':'15090','years':[2025]},'offset':60,'limit':10},self.read)
         self.assertEqual(len(r['rows']),4);self.assertEqual(len({x['transaction_key']for x in r['rows']}),4)
         self.assertEqual(r['scope_summary']['action_count'],64)
+    def test_source_action_purpose_precedes_generic_award_text_without_merging_actions(self):
+        # Both native IDs are literal publisher records. Correcting their
+        # displayed purpose must not merge them or change source funding.
+        self.db.execute('ALTER TABLE v_transactions ADD COLUMN action_description VARCHAR')
+        purpose='COST PLUS FIXED FEE TASK ORDER FOR FLIGHT ACTIVITY MAINTENANCE AND MODIFICATION SUPPORT SERVICES'
+        keys=['9700_9700_W56KGU24F0002_P00045_W56KGU19D0002_'+suffix for suffix in ('14','16')]
+        for key in keys:
+            self.add(key,'2025-09-17',74727.74)
+            self.db.execute('UPDATE v_transactions SET contract_id=?,description=?,action_description=? WHERE transaction_key=?',
+                ['W56KGU24F0002','FUNDS USED FOR LABOR AND MATERIALS',purpose,key])
+        result=action_history({'filters':{'contract_id':'W56KGU24F0002','years':[2025]},'limit':10},self.read)
+        self.assertEqual({r['transaction_key']for r in result['rows']},set(keys))
+        self.assertTrue(all(r['description']==purpose for r in result['rows']))
+        self.assertEqual(result['scope_summary']['action_count'],2)
+        self.assertAlmostEqual(result['scope_summary']['net_obligations_usd'],149455.48,places=2)
+    def test_blank_action_text_falls_back_and_nonblank_source_text_is_preserved(self):
+        self.db.execute('ALTER TABLE v_transactions ADD COLUMN action_description VARCHAR')
+        for i,own in enumerate((None,'','   ','  Action-specific purpose\nwith source formatting  ')):
+            key='DESCRIPTION'+str(i);self.add(key,'2025-09-17',0)
+            self.db.execute('UPDATE v_transactions SET contract_id=?,description=?,action_description=? WHERE transaction_key=?',
+                ['DESCRIPTIONS','Fallback '+str(i),own,key])
+        result=action_history({'filters':{'contract_id':'DESCRIPTIONS'},'limit':10},self.read)
+        by_id={r['transaction_key']:r['description']for r in result['rows']}
+        self.assertEqual([by_id['DESCRIPTION'+str(i)]for i in range(3)],['Fallback 0','Fallback 1','Fallback 2'])
+        self.assertEqual(by_id['DESCRIPTION3'],'  Action-specific purpose\nwith source formatting  ')
     def test_reviewed_clear_changes_attribution_without_changing_funding(self):
         from private_platform_reference import Reference
         from private_research_context import wrap_action_read
         ref=Reference.__new__(Reference);ref.registry=[];ref.rows=[{'award_key':'NATIVE','target_entity_ids':''}]
         r=action_history({'filters':{'cage':'15090'},'offset':60,'limit':10},wrap_action_read(ref,self.read))
+        self.assertTrue(all(x['platform_family']is None for x in r['rows']))
+        self.assertAlmostEqual(r['scope_summary']['net_obligations_usd'],1652160,places=2)
+    def test_reviewed_v7_wrapper_preserves_own_action_purpose(self):
+        from private_platform_reference import Reference
+        from private_research_context import wrap_action_read
+        self.db.execute('ALTER TABLE v_transactions ADD COLUMN action_description VARCHAR')
+        self.db.execute("UPDATE v_transactions SET action_description='Source action purpose' WHERE transaction_key='KEY0'")
+        ref=Reference.__new__(Reference);ref.registry=[];ref.rows=[{'award_key':'NATIVE','target_entity_ids':''}]
+        r=action_history({'filters':{'cage':'15090'},'offset':60,'limit':10},wrap_action_read(ref,self.read))
+        self.assertEqual(next(x['description']for x in r['rows']if x['transaction_key']=='KEY0'),'Source action purpose')
         self.assertTrue(all(x['platform_family']is None for x in r['rows']))
         self.assertAlmostEqual(r['scope_summary']['net_obligations_usd'],1652160,places=2)
     def test_filters_empty_scope_and_invalid_input(self):
