@@ -22,6 +22,10 @@ QID = r'[0-9a-f-]{36}'
 
 
 def query_for(payload):
+    if 'scopeMembership' in payload:
+        from market_scope_detail import compile_scope_query
+        query = compile_scope_query(payload)
+        return query.sql, query.table_id
     view = payload['view']
     source = VIEWS.get(view)
     years = payload['years']
@@ -128,9 +132,17 @@ def read_token(value, secret, context):
 
 
 def read_page(athena, payload, secret, bucket, owner, workgroup='primary'):
-    sql, table_id = query_for(payload)
-    context = hashlib.sha256(json.dumps([payload['mainRelease'], payload['candidateId'], payload['market'],
-        payload['view'], PAGE_SIZE, sql], separators=(',', ':')).encode()).hexdigest()
+    selection = None
+    if 'scopeMembership' in payload:
+        from market_scope_detail import compile_scope_query
+        compiled = compile_scope_query(payload)
+        sql, table_id = compiled.sql, compiled.table_id
+        selection = compiled.selection
+        context = hashlib.sha256(f'{PAGE_SIZE}/{compiled.context_sha256}'.encode()).hexdigest()
+    else:
+        sql, table_id = query_for(payload)
+        context = hashlib.sha256(json.dumps([payload['mainRelease'], payload['candidateId'], payload['market'],
+            payload['view'], PAGE_SIZE, sql], separators=(',', ':')).encode()).hexdigest()
     cursor = payload.get('cursor')
     if cursor:
         qid, position, page = read_token(cursor, secret, context)
@@ -151,7 +163,10 @@ def read_page(athena, payload, secret, bucket, owner, workgroup='primary'):
         if status not in ('QUEUED', 'RUNNING'):
             break
         if time.monotonic() >= deadline:
-            return {'status':'pending', 'retry':token(secret, context, qid, position, page)}
+            result = {'status':'pending', 'retry':token(secret, context, qid, position, page)}
+            if selection is not None:
+                result['selection'] = selection
+            return result
         time.sleep(.4)
     if status != 'SUCCEEDED':
         raise RuntimeError(f'Market detail query {qid} ended with state {status}.')
@@ -163,5 +178,8 @@ def read_page(athena, payload, secret, bucket, owner, workgroup='primary'):
     rows = result['ResultSet']['Rows'] if position else result['ResultSet']['Rows'][1:]
     rows = [dict(zip(names,(cell.get('VarCharValue') for cell in row['Data']))) for row in rows]
     next_token = result.get('NextToken')
-    return {'status':'ready', 'rows':rows, 'page':page,
-            'next':token(secret, context, qid, next_token, page+1) if next_token else None}
+    value = {'status':'ready', 'rows':rows, 'page':page,
+             'next':token(secret, context, qid, next_token, page+1) if next_token else None}
+    if selection is not None:
+        value['selection'] = selection
+    return value
