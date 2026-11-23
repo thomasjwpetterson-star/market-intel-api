@@ -11,6 +11,7 @@ from botocore.config import Config
 import warnings
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
+from opportunity_identifiers import normalize_opportunity_naics, validate_opportunity_naics_codes
 
 from etl_automation.athena_retry import (
     AthenaQueryFailure,
@@ -375,7 +376,8 @@ def run_query(query):
     local_filename = f"{TEMP_DIR}/{qid}.csv"
     try:
         s3.download_file(BUCKET_NAME, key, local_filename)
-        return pd.read_csv(local_filename, low_memory=False)
+        # NAICS is an identifier; nullable numeric inference changes it to DOUBLE.
+        return pd.read_csv(local_filename, low_memory=False, dtype={"naics": "string"})
     except Exception as e:
         print(f"❌ Download Error: {e}")
         raise e
@@ -2562,6 +2564,8 @@ def optimize_and_upload():
         """)
         
     if not df_opportunities.empty:
+        df_opportunities['naics'] = df_opportunities['naics'].map(normalize_opportunity_naics).astype('string')
+        validate_opportunity_naics_codes(df_opportunities['naics'])
         # Create a "Search Text" column for super-fast text filtering
         df_opportunities['search_text'] = (
             df_opportunities['title'].fillna('') + " " + 

@@ -89,6 +89,9 @@ from platform_reference.main_release_cache import (
 )
 from public_page_projections import build_public_page_projections
 from solicitation_deadlines import active_solicitation_deadline_sql
+from opportunity_identifiers import (
+    normalize_opportunity_naics, opportunity_naics_sql, opportunity_view_sql,
+)
 from public_nsn_policy import (
     PUBLIC_NSN_ACTIVE_SOLICITATION_LIMIT,
     PUBLIC_NSN_CACHE_EPOCH,
@@ -2444,6 +2447,10 @@ def build_public_intelligence_release(conn):
         ),
     }
 
+    # Historical pages intentionally survive the active feed. Correct their
+    # identifier representation too, without changing native identity or scope.
+    conn.execute("UPDATE public_solicitation_profile_next SET naics = " + opportunity_naics_sql())
+
     conn.execute("""
         CREATE OR REPLACE TABLE public_intelligence_search_next AS
         WITH released_nsns AS (
@@ -3486,7 +3493,10 @@ def reload_all_data():
                 if os.path.exists(file_path):
                     conn.execute(f"DROP VIEW IF EXISTS {view_name};")
                     conn.execute(f"DROP TABLE IF EXISTS {view_name};")
-                    conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{file_path}');")
+                    if view_name == "v_opportunities":
+                        conn.execute(opportunity_view_sql(file_path))
+                    else:
+                        conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{file_path}');")
                 elif file_name in optional_release_files:
                     conn.execute(f"DROP VIEW IF EXISTS {view_name};")
                     conn.execute(f"DROP TABLE IF EXISTS {view_name};")
@@ -7473,7 +7483,7 @@ def get_public_solicitation_page_snapshot(opportunity_id: str, response: Respons
         "sub_agency": _clean_optional_value(row.get("sub_agency")),
         "deadline": _clean_optional_value(row.get("deadline")),
         "set_aside_type": _clean_optional_value(row.get("set_aside_type")),
-        "naics": _clean_optional_value(row.get("naics")),
+        "naics": normalize_opportunity_naics(_clean_optional_value(row.get("naics"))),
         "psc": _clean_optional_value(row.get("psc")),
         "description": _clean_optional_value(row.get("description")),
         "source_system": _clean_optional_value(row.get("source_system")),
