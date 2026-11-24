@@ -93,6 +93,18 @@ def compile_scope_query(payload):
         platforms=p.get('platforms', []), activity=mode == 'activity', include_shared=shared)
     if award:
         selected = f"SELECT * FROM ({selected}) eligible WHERE source_record_id='{award}'"
+    # Preserve financial platform_ids while exposing approved related platform
+    # links. Aggregate the money-free bridge to one row per full allocation key
+    # before joining, so multiple platform memberships cannot repeat money.
+    from market_scope_membership import KEY
+    platform_join=' AND '.join(f'links.{key}=native.{key}'for key in KEY)
+    selected=f"""WITH native AS({selected}),links AS(
+      SELECT {','.join(KEY)},array_sort(array_distinct(array_agg(target_id)))related_platform_ids
+      FROM {DB}.{d['membershipTable']}
+      WHERE target_dimension='platform' AND binding_sha256='{binding.sha256}'
+      GROUP BY {','.join(KEY)})
+      SELECT native.*,coalesce(links.related_platform_ids,ARRAY[])related_platform_ids
+      FROM native LEFT JOIN links ON {platform_join}"""
     selection = {'mainRelease': d['mainRelease'], 'candidateId': d['candidateId'],
         'bindingSha256': binding.sha256, 'proofSha256': d['proofSha256'],
         'outputBindingSha256':d['outputBindingSha256'],'policySha256':d['policySha256'],
@@ -101,8 +113,9 @@ def compile_scope_query(payload):
         'sources': [source], 'activityMode': mode, 'includeShared': shared, 'award': award}
     # Group AFTER membership union. Never sum distinct amounts or join money to
     # multiple memberships/NSNs. Native actions retain the full source/year key.
-    metadata = ','.join(f'arbitrary({field}) AS {field}' for field in METADATA)
-    platforms = 'json_format(CAST(array_sort(array_distinct(flatten(array_agg(platform_ids)))) AS JSON)) AS platforms'
+    metadata = ','.join((f'max_by({field},abs(net_usd)) AS {field}'if field=='description'
+                         else f'arbitrary({field}) AS {field}')for field in METADATA)
+    platforms = 'json_format(CAST(array_sort(array_distinct(flatten(array_agg(concat(platform_ids,related_platform_ids))))) AS JSON)) AS platforms'
     if p['view'] == 'contract-actions':
         sql = f"""WITH selected AS ({selected}), actions AS (
           SELECT source_kind,source_record_id,fiscal_year,native_record_id,
@@ -119,7 +132,8 @@ def compile_scope_query(payload):
             AND fiscal_year IN ({','.join(map(str, selection['years']))})
           GROUP BY source_kind,source_record_id,fiscal_year,native_record_id
         ) SELECT actions.*,stock.stock_nsns FROM actions LEFT JOIN stock
-          USING (source_kind,source_record_id,fiscal_year,native_record_id)"""
+          ON actions.source_kind=stock.source_kind AND actions.source_record_id=stock.source_record_id
+            AND actions.fiscal_year=stock.fiscal_year AND actions.native_record_id=stock.native_record_id"""
     else:
         sql = f"""WITH selected AS ({selected}), records AS (
           SELECT source_record_id AS id,sum(net_usd) AS net,{metadata},{platforms}
