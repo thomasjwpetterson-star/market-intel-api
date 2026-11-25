@@ -18,6 +18,7 @@ MEMBERSHIP_COLUMNS = frozenset((*KEY, 'scope_sha256', 'target_dimension', 'targe
     'decision_id', 'decision_revision', 'extent_sha256', 'evidence_sha256', 'binding_sha256'))
 IDENTIFIER = re.compile(r'[a-z][a-z0-9_]{0,120}\Z')
 MARKET = re.compile(r'(?:[A-Z][A-Z0-9_]{0,120}|domain:(?:air|naval|ground|space|joint|support))\Z')
+PLATFORM = re.compile(r'[A-Z0-9][A-Z0-9_]{0,120}\Z')
 HASH = re.compile(r'[a-f0-9]{64}\Z')
 
 
@@ -197,7 +198,8 @@ class NativeMarketSelection:
             raise ValueError('Market, year, source and platform filters must be collections')
         markets, years, sources, platforms = (tuple(values) for values in filters)
         if (not markets and not platforms) or len(markets) + len(platforms) > 512 or any(
-                not isinstance(n, str) or not MARKET.fullmatch(n) for n in (*markets, *platforms)):
+                not isinstance(n, str) or not MARKET.fullmatch(n) for n in markets) or any(
+                not isinstance(n, str) or not PLATFORM.fullmatch(n) for n in platforms):
             raise ValueError('Invalid market union')
         if not years or len(years) > 82 or any(type(y) is not int or not 2019 <= y <= 2100 for y in years):
             raise ValueError('Invalid fiscal years')
