@@ -32,8 +32,8 @@ def query_for(payload):
     nodes = payload['nodes']
     table = payload['table']
     match = re.fullmatch(TABLE, table)
-    if ((not source and view != 'contract-actions') or not match or not isinstance(years, list) or not 1 <= len(years) <= 8
-        or any(type(y) is not int or not 2019 <= y <= 2026 for y in years)
+    if ((not source and view != 'contract-actions') or not match or not isinstance(years, list) or not 1 <= len(years) <= 82
+        or any(type(y) is not int or not 2019 <= y <= 2100 for y in years)
         or not isinstance(nodes, list) or not 1 <= len(nodes) <= 512
         or any(not isinstance(n, str) or not re.fullmatch(KEY, n) for n in nodes)):
         raise ValueError('Invalid market detail filters.')

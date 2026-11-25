@@ -40,6 +40,23 @@ class MarketNativeDetailTests(unittest.TestCase):
         self.assertIn('market_professional_detail_' + 'a' * 20, sql)
         self.assertNotIn('market_native_financial_facts_', sql)
 
+    def test_release_year_inventory_can_include_fy2027(self):
+        self.request['view'] = 'contracts'
+        self.request['years'] = list(range(2019, 2028))
+        sql, _ = query_for(self.request)
+        self.assertIn('fiscal_year IN (2019,2020,2021,2022,2023,2024,2025,2026,2027)', sql)
+        self.request['years'] = [2027]
+        sql, _ = query_for(self.request)
+        self.assertIn('fiscal_year IN (2027)', sql)
+
+    def test_invalid_future_year_filters_still_reject(self):
+        self.request['view'] = 'contracts'
+        for years in ([2101], [2018], ['2027'], [True], list(range(2019, 2102))):
+            with self.subTest(years=years[:3]):
+                self.request['years'] = years
+                with self.assertRaisesRegex(ValueError, 'Invalid market detail filters'):
+                    query_for(self.request)
+
 
 if __name__ == '__main__':
     unittest.main()
