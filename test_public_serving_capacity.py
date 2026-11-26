@@ -32,7 +32,7 @@ def production_functions():
               pd=pd, Response=Response, HTTPException=HTTPException, Empty=queue.Empty,
               query_deadline=query_deadline, remaining_query_budget=remaining_query_budget, ANALYTICAL_TRACE_ID=ANALYTICAL_TRACE_ID, os=__import__('os'),
               GLOBAL_CACHE={'profiles_df': pd.DataFrame({'cage':['ABCDE']}),
-                            'last_loaded':1, 'is_loading':False},
+                            'last_loaded':1, 'is_loading':False, 'dashboard_projection_ready':True},
               DUCK_CONN=object(), ensure_duck_conn=lambda: None,
               _DUCK_PUBLIC_POOL=None, is_reserved_public_lookup=is_reserved_public_lookup,
               public_reader_memory_ok=public_reader_memory_ok,

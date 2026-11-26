@@ -22,13 +22,14 @@ def namespace():
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
             node.decorator_list = []
             nodes.append(node)
-    ns = dict(pd=pd, np=np, re=re, Any=Any, List=List, Optional=Optional, Query=Query,
+    ns = dict(GLOBAL_CACHE={}, pd=pd, np=np, re=re, Any=Any, List=List, Optional=Optional, Query=Query,
               HTTPException=HTTPException, ExplorerRequest=lambda **kw: SimpleNamespace(columns=[], **kw),
               CONTRACT_AWARD_EXPLORER_TABLE='v_contract_awards_enriched',
               EXPLORER_DEFAULT_COLUMNS={'v_contract_awards_enriched':['contract_id']},
               CONTRACT_AWARD_SYNTHETIC_COLUMNS={'contract_id'})
     exec(compile(ast.Module(body=nodes, type_ignores=[]), 'main.py', 'exec'), ns)
     ns['programme_read_df']=lambda sql,params:ns['duck_fetch_df'](sql,params)
+    ns['platform_scoped_read']=ns['programme_read_df']
     return ns
 
 
@@ -53,6 +54,8 @@ class ProgrammeScopeCounts(unittest.TestCase):
             ('A','FPDS','AMRAAM','SAME NAME','11111','NAVY',0.,'2025-01-01'),
             ('B','FPDS','AMRAAM','SAME NAME','22222','NAVY',200.,'2025-02-01'))
             t(award_key,source_system,platform_family,vendor_name,vendor_cage,sub_agency,spend_amount,action_date)""")
+        self.db.execute('ALTER TABLE v_transactions ADD COLUMN year INTEGER')
+        self.db.execute('UPDATE v_transactions SET year=CAST(LEFT(action_date,4) AS INTEGER)')
         self.db.execute('ALTER TABLE v_transactions ADD COLUMN parent_agency VARCHAR')
         self.db.execute('ALTER TABLE v_transactions ADD COLUMN contract_id VARCHAR')
         self.db.execute('UPDATE v_transactions SET contract_id=award_key')
@@ -103,6 +106,7 @@ class ProgrammeScopeCounts(unittest.TestCase):
 
     def test_programme_parts_buyer_filter_is_forwarded_to_real_query(self):
         self.ns['duck_fetch_df'] = Mock(return_value=pd.DataFrame())
+        self.ns['platform_scoped_read'] = self.ns['programme_read_df']
         self.ns['df_sanitize_for_json'] = lambda df: df
         self.ns['logger'] = Mock()
         app = FastAPI()

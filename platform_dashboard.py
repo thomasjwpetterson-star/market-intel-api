@@ -2,7 +2,7 @@
 from programme_parts import buyer_name
 
 
-def action_scope(name, years=None, agency=None, domain=None, psc=None, reference=None):
+def action_scope(name, years=None, agency=None, domain=None, psc=None, reference=None, prepared=False):
     programme = str(name or '').strip()
     if not programme:
         raise ValueError('Choose a programme.')
@@ -11,7 +11,19 @@ def action_scope(name, years=None, agency=None, domain=None, psc=None, reference
         raise ValueError('Use valid fiscal years.')
     payload = dict(program=programme, years=years, agency=agency, domain=domain)
     entity = reference.resolve(programme) if reference else None
-    if entity:
+    if prepared:
+        label = entity['canonical_label'] if entity else programme
+        where, params = 'programme_key=?', [label.upper()]
+        if years:
+            where += ' AND year IN (' + ','.join('?' for _ in years) + ')'
+            params.extend(years)
+        if agency:
+            where += ' AND (UPPER(TRIM(sub_agency))=? OR UPPER(TRIM(parent_agency))=?)'
+            params.extend([buyer_name(agency)] * 2)
+        if domain:
+            where += ' AND UPPER(TRIM(market_segment))=?'
+            params.append(domain.strip().upper())
+    elif entity:
         _, where, params = reference.predicate(payload)
         label = entity['canonical_label']
     else:
@@ -43,8 +55,8 @@ SITE_KEY = "COALESCE(NULLIF(UPPER(TRIM(vendor_cage)),''),'NAME:'||UPPER(TRIM(ven
 
 
 def subcontracts_scope(name, years=None, agency=None, domain=None, psc=None,
-                      prime_vendor=None, sub_vendor=None):
-    clauses = ['UPPER(TRIM(n.platform_family))=?']
+                      prime_vendor=None, sub_vendor=None, prepared=False):
+    clauses = ['n.programme_key=?' if prepared else 'UPPER(TRIM(n.platform_family))=?']
     params = [name.strip().upper()]
     if years:
         ys = sorted(set(years))
@@ -63,7 +75,7 @@ def subcontracts_scope(name, years=None, agency=None, domain=None, psc=None,
     if agency:
         # Scope to the recorded buyer on the agency-qualified parent award,
         # without multiplying reports or inventing inherited v7 membership.
-        clauses.append('''EXISTS (SELECT 1 FROM v_transactions t
+        clauses.append('''EXISTS (SELECT 1 FROM ''' + ('dashboard_award_buyers' if prepared else 'v_transactions') + ''' t
             WHERE t.award_key=n.award_key
               AND (UPPER(TRIM(t.sub_agency))=? OR UPPER(TRIM(t.parent_agency))=?))''')
         params.extend([buyer_name(agency)] * 2)

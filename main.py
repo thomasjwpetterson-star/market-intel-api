@@ -680,7 +680,7 @@ def get_readiness_state() -> Dict[str, Any]:
     private_reference_ok = bool(cache.get('private_reference_ready', True))
 
     # geo_df is now handled by DuckDB, so we remove it from the strict readiness check
-    ready = bool(duck_ok and profiles_ok and private_reference_ok and (not is_loading) and (last_loaded and last_loaded > 0))
+    ready = bool(duck_ok and profiles_ok and private_reference_ok and cache.get("dashboard_projection_ready", False) and (not is_loading) and (last_loaded and last_loaded > 0))
 
     return {
         "ready": ready,
@@ -688,6 +688,7 @@ def get_readiness_state() -> Dict[str, Any]:
         "geo_ok": True, # Hardcoded to true for backwards compatibility with UI
         "profiles_ok": bool(profiles_ok),
         "private_reference_ok": private_reference_ok,
+        "dashboard_projection_ok": bool(cache.get("dashboard_projection_ready", False)),
         "is_loading": bool(is_loading),
         "last_loaded": last_loaded,
     }
@@ -709,6 +710,7 @@ async def ready_check(response: Response):
         "geo_ok": bool(s["geo_ok"]),
         "profiles_ok": bool(s["profiles_ok"]),
         "private_reference_ok": bool(s["private_reference_ok"]),
+        "dashboard_projection_ok": bool(s["dashboard_projection_ok"]),
     }
 
 
@@ -3197,7 +3199,7 @@ def reload_all_data():
 
     try:
         # Update loading state immediately
-        GLOBAL_CACHE = {**GLOBAL_CACHE, "is_loading": True}
+        GLOBAL_CACHE = {**GLOBAL_CACHE, "is_loading": True, "dashboard_projection_ready": False}
     except Exception:
         pass
 
@@ -4171,6 +4173,18 @@ def reload_all_data():
             new_global_cache["public_intelligence_index"] = {}
 
         gc.collect()
+
+        # Build interactive reads before readiness, under the same release and
+        # existing DuckDB writer/memory limits. HTTP cache misses never build it.
+        from dashboard_projection import build_dashboard_projection
+        from private_platform_reference import reference_for
+        source_release = (platform_bundle or {}).get('components', {}).get('main', {}).get('release_id')
+        dashboard_reference = reference_for(source_release) if source_release else None
+        with DUCK_INIT_LOCK:
+            projection = build_dashboard_projection(conn, dashboard_reference, source_release)
+        new_global_cache['dashboard_projection_ready'] = True
+        new_global_cache['dashboard_projection'] = projection
+        logger.info('DASHBOARD PROJECTION READY %s', json.dumps(projection, sort_keys=True))
 
         # 10. ATOMIC POINTER SWAP
         new_global_cache["is_loading"] = False
@@ -7010,7 +7024,7 @@ def platform_action_scope(name, years=None, agency=None, domain=None, psc=None):
     release = GLOBAL_CACHE.get('platform_release') or {}
     try:
         reference = reference_for(release.get('components', {}).get('main', {}).get('release_id'))
-        return action_scope(name, years, agency, domain, psc, reference)
+        return action_scope(name, years, agency, domain, psc, reference, prepared=GLOBAL_CACHE.get('dashboard_projection_ready', False))
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
@@ -7022,6 +7036,14 @@ def platform_scoped_read(sql, params):
     before = GLOBAL_CACHE.get('last_loaded')
     if not before or GLOBAL_CACHE.get('is_loading', False):
         raise HTTPException(status_code=503, detail='Platform data is updating. Retry shortly.')
+    if GLOBAL_CACHE.get('dashboard_projection_ready') is False:
+        raise HTTPException(status_code=503, detail='Platform reads are preparing. Retry shortly.')
+    if GLOBAL_CACHE.get('dashboard_projection_ready'):
+        sql = sql.replace('FROM v_transactions WHERE', 'FROM dashboard_actions WHERE')
+        sql = sql.replace('SELECT n.* FROM v_network n', 'SELECT n.* EXCLUDE(programme_key) FROM dashboard_network n')
+        sql = sql.replace('FROM v_network n', 'FROM dashboard_network n')
+        sql = sql.replace('SELECT CAST(psc_code AS VARCHAR) AS psc_code,MAX(psc_description) AS psc_desc FROM v_summary GROUP BY 1',
+                          'SELECT psc_code,psc_desc FROM dashboard_psc')
     try:
         result = programme_read_df(sql, params)
     except HTTPException:
@@ -7077,6 +7099,8 @@ def get_platform_profile(name: str, years: Optional[List[int]] = Query(None),
         contract_count_basis='current_v7_distinct_awards',
         mapping_basis='current_v7_when_available',
         top_vendors=vendors, top_agencies=agencies['agency'].dropna().tolist(),
+        spend_trend=df_sanitize_for_json(platform_scoped_read(
+            'SELECT CAST(year AS INTEGER) AS label,SUM(spend_amount) AS spend FROM v_transactions WHERE '+where+' GROUP BY 1 ORDER BY 1',params)).to_dict(orient='records'),
         count_definitions={'contract_count':'Distinct agency-qualified awards in the selected programme, years and buyer scope.',
             'funding_action_count':'All recorded funding actions, including zero amounts and reductions.',
             'contractor_count':'Supplier sites; records without a site identifier remain name-specific.'})
@@ -7626,7 +7650,7 @@ def get_platform_shared_exposure(name: str, years: Optional[List[int]] = Query(N
         agency: Optional[str] = None, domain: Optional[str] = None, psc: Optional[str] = None):
     from programme_parts import build_parts_query
     try:
-        sql,params = build_parts_query(name,years,agency,domain,psc=psc,shared_exposure=True)
+        sql,params = build_parts_query(name,years,agency,domain,psc=psc,shared_exposure=True,prepared=GLOBAL_CACHE.get('dashboard_projection_ready',False))
     except ValueError as error:
         raise HTTPException(status_code=422,detail=str(error)) from error
     row = platform_scoped_read(sql,params).iloc[0]
@@ -7658,11 +7682,11 @@ def get_platform_parts(
 ):
     from programme_parts import build_parts_query
     try:
-        sql, params = build_parts_query(name, years, agency, domain, include_zero, min_spend, limit, offset, psc=psc)
+        sql, params = build_parts_query(name, years, agency, domain, include_zero, min_spend, limit, offset, psc=psc, prepared=GLOBAL_CACHE.get('dashboard_projection_ready',False))
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     try:
-        df = programme_read_df(sql, params)
+        df = platform_scoped_read(sql, params)
     except HTTPException:
         raise
     except Exception as error:
@@ -7686,11 +7710,11 @@ def get_platform_parts_count(
 ):
     from programme_parts import build_parts_query
     try:
-        sql, params = build_parts_query(name, years, agency, domain, include_zero, min_spend, count_only=True, psc=psc)
+        sql, params = build_parts_query(name, years, agency, domain, include_zero, min_spend, count_only=True, psc=psc, prepared=GLOBAL_CACHE.get('dashboard_projection_ready',False))
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     try:
-        df = programme_read_df(sql, params)
+        df = platform_scoped_read(sql, params)
         first_fy = df["buyer_history_start_fy"].iloc[0]
         return {"count": int(df["count"].iloc[0]), "buyer_history_start_fy": None if pd.isna(first_fy) else int(first_fy)}
     except HTTPException:
@@ -7730,7 +7754,7 @@ def get_platform_subcontracts(name: str, psc: Optional[str] = None,
         raise HTTPException(status_code=422, detail='Choose rollup or lines.')
     # Native subcontract labels remain separate from reviewed prime-award maps.
     try:
-        where,params = subcontracts_scope(name,years,agency,domain,psc,prime_vendor,sub_vendor)
+        where,params = subcontracts_scope(name,years,agency,domain,psc,prime_vendor,sub_vendor,prepared=GLOBAL_CACHE.get('dashboard_projection_ready',False))
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     if mode == 'lines':

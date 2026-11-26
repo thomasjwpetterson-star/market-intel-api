@@ -205,12 +205,15 @@ def test_private_release_incompatibility_is_503_not_an_unhandled_500(releases):
 
 
 def test_readiness_does_not_hide_failed_private_binding():
-    cache={'last_loaded':1,'is_loading':False,'profiles_df':pd.DataFrame({'x':[1]}),'private_reference_ready':False}
+    cache={'last_loaded':1,'is_loading':False,'profiles_df':pd.DataFrame({'x':[1]}),'private_reference_ready':False,'dashboard_projection_ready':True}
     ns=dict(Dict=Dict,Any=Any,GLOBAL_CACHE=cache,pd=pd,DUCK_CONN=object())
     state=extracted('get_readiness_state',ns)()
     assert state['ready'] is False and state['private_reference_ok'] is False
     cache['private_reference_ready']=True
     assert ns['get_readiness_state']()['ready'] is True
+    cache['dashboard_projection_ready']=False
+    assert ns['get_readiness_state']()['ready'] is False
+    assert ns['get_readiness_state']()['dashboard_projection_ok'] is False
 
 
 @pytest.mark.parametrize('reject_binding',[False,True])
