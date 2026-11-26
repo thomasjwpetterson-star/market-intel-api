@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
 import json
 import os
 import re
@@ -80,6 +81,60 @@ def selected_runtime_manifest(s3: Any, bucket: str) -> tuple[Dict[str, Any], Dic
     except (KeyError, TypeError, json.JSONDecodeError) as error:
         raise RuntimeError(f"Invalid Ask Mimir runtime manifest: {manifest_key}") from error
     return manifest, None
+
+
+def stage_shared_market_explorer(s3: Any, bucket: str, platform_release: Dict[str, Any], release_root: Path) -> Path:
+    """Pin Ask market evidence to the same immutable Market Explorer child as Main."""
+    root = platform_release["platform"]
+    reference = root["components"].get("market_explorer")
+    main = root["components"]["main"]
+    if not isinstance(reference, dict) or not reference.get("immutable_manifest_key"):
+        raise RuntimeError("Platform root has no Market Explorer component")
+    if reference.get("source_main_release_id") != main["release_id"]:
+        raise RuntimeError("Market Explorer and Main release IDs differ")
+    response = s3.get_object(
+        Bucket=bucket,
+        Key=reference["immutable_manifest_key"],
+        VersionId=reference["immutable_manifest_version_id"],
+    )
+    body = response["Body"].read()
+    if hashlib.sha256(body).hexdigest() != reference["immutable_manifest_sha256"]:
+        raise RuntimeError("Market Explorer manifest differs from platform root")
+    manifest = json.loads(body)
+    if manifest.get("candidateId") != reference["release_id"] or manifest.get("mainRelease") != main["release_id"]:
+        raise RuntimeError("Market Explorer manifest has a different release binding")
+    objects = manifest.get("objects") or {}
+    names = ["public.json", "technology-corpus.json"] + sorted(
+        name for name in objects if name.startswith("private/details/")
+    )
+    if len(names) <= 2:
+        raise RuntimeError("Market Explorer manifest has no market details")
+    directory = release_root / "artifacts" / "market-explorer"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        entry = objects[name]
+        target = directory / ("details/" + name.split("/")[-1] if name.startswith("private/details/") else name)
+        target = target.with_suffix(target.suffix + ".gz")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or file_sha256(target) != entry["sha256"]:
+            content = s3.get_object(Bucket=bucket, Key=entry["key"], VersionId=entry["version"])["Body"].read()
+            if len(content) != entry["size"] or hashlib.sha256(content).hexdigest() != entry["sha256"]:
+                raise RuntimeError(f"Market Explorer artifact changed: {name}")
+            decoded = json.loads(gzip.decompress(content))
+            if decoded.get("candidateId") != reference["release_id"] or decoded.get("mainRelease") != main["release_id"]:
+                raise RuntimeError(f"Market Explorer artifact has a different release: {name}")
+            temporary = target.with_suffix(target.suffix + ".tmp")
+            temporary.write_bytes(content)
+            temporary.replace(target)
+    pin = {
+        "platform_release_id": root["release_id"],
+        "platform_version_id": platform_release["platform_object"]["version_id"],
+        "main_release_id": main["release_id"],
+        "market_release_id": reference["release_id"],
+        "market_manifest_sha256": reference["immutable_manifest_sha256"],
+    }
+    (directory / "pin.json").write_text(json.dumps(pin, sort_keys=True))
+    return directory
 
 
 def file_sha256(path: Path) -> str:
@@ -432,6 +487,9 @@ def bootstrap() -> Dict[str, Any]:
         platform = platform_release["platform"]
         os.environ["MIMIR_PLATFORM_RELEASE_ID"] = str(platform["release_id"])
         os.environ["MIMIR_PLATFORM_ETL_RUN_ID"] = str(platform["etl_run_id"])
+        os.environ["ASK_MIMIR_MARKET_EXPLORER_DIR"] = str(
+            stage_shared_market_explorer(s3, bucket, platform_release, release_root)
+        )
     os.environ["ASK_MIMIR_RELEASE_DIR"] = str(artifact_root / "metric-release")
     os.environ["ASK_MIMIR_TRANSACTIONS"] = str(data_root / "transactions.parquet")
     os.environ["ASK_MIMIR_COMPANY_CONTEXT_DIR"] = str(artifact_root / "company-context")

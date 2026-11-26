@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "source_path": "lib/market-explorer/renderer/taxonomy.mjs",
+  "source_commit": "60a4b663ae64b56352c1b64fda3b1ce30a9f39f3",
+  "source_sha256": "71154083b54a945235d9b682d9bb59afa4c58e6faecf56d2a5e89373b25d0529",
+  "changes": {
+    "US_FIGHTER_AIRCRAFT": {
+      "name": "Tactical combat aircraft"
+    },
+    "FIGHTER_AIRCRAFT_FIFTH_GENERATION": {
+      "parent": "FIGHTER_AIRCRAFT_FIGHTERS",
+      "facet": "Generation and programme stage"
+    },
+    "FIGHTER_AIRCRAFT_LEGACY": {
+      "parent": "FIGHTER_AIRCRAFT_FIGHTERS",
+      "facet": "Generation and programme stage"
+    },
+    "FIGHTER_AIRCRAFT_NEXT_GENERATION": {
+      "name": "Future air combat programmes",
+      "facet": "Generation and programme stage"
+    },
+    "FIGHTER_AIRCRAFT_ATTACK": {
+      "name": "Dedicated attack aircraft"
+    },
+    "US_MILITARY_ROTORCRAFT": {
+      "name": "Rotorcraft"
+    },
+    "US_BOMBER_AIRCRAFT": {
+      "name": "Long-range bombers"
+    },
+    "BOMBER_AIRCRAFT_CURRENT": {
+      "facet": "Fleet and programme stage"
+    },
+    "BOMBER_AIRCRAFT_NEXT_GENERATION": {
+      "facet": "Fleet and programme stage"
+    },
+    "US_UNCREWED_AIRCRAFT": {
+      "name": "Uncrewed aircraft systems (UAS)"
+    },
+    "UNCREWED_AIRCRAFT_SMALL": {
+      "name": "Small UAS, group unspecified"
+    },
+    "UNCREWED_AIRCRAFT_LARGE": {
+      "name": "Larger UAS, group unspecified"
+    },
+    "UNCREWED_AIRCRAFT_CONTROL": {
+      "name": "Shared UAS control systems"
+    },
+    "US_ISR_AIRCRAFT": {
+      "name": "Airborne ISR and special-mission aircraft"
+    },
+    "US_AIRCRAFT_PROPULSION": {
+      "name": "Aircraft engines and propulsion support",
+      "description": "Separately purchased engines, propulsion components and engine support. Aircraft programme purchases are shown under their verified buying scope."
+    },
+    "US_AIRCRAFT_GROUND_SUPPORT": {
+      "name": "Aviation ground support equipment",
+      "description": "Ground equipment for servicing, testing and handling aircraft. Platform-specific support can be attributed to its aircraft when the purchase identifies the programme."
+    },
+    "SUBMARINES_ATTACK": {
+      "name": "Attack submarines (SSN)"
+    },
+    "SUBMARINES_STRATEGIC": {
+      "name": "Fleet ballistic missile submarines (SSBN)"
+    },
+    "SUBMARINES_SUBMARINE_SUPPORT": {
+      "name": "Common submarine maintenance and support"
+    },
+    "SUBMARINES_GUIDED_MISSILE": {
+      "name": "Guided missile submarines (SSGN)"
+    },
+    "US_NAVAL_WEAPONS_AND_LAUNCH_SYSTEMS": {
+      "name": "Common naval weapons and launch systems",
+      "description": "Separately purchased naval guns, launch systems and defensive equipment with shared or unspecified ship-class scope."
+    },
+    "US_LAND_FIRES_AND_ARTILLERY": {
+      "name": "Field artillery and rocket systems"
+    },
+    "LAND_FIRES_AND_ARTILLERY_ROCKET_LAUNCHERS": {
+      "name": "Multiple-launch rocket systems"
+    },
+    "SOLDIER_SYSTEMS_CLOTHING": {
+      "parent": "TROOP_SUPPORT_CLOTHING_EQUIPMENT",
+      "name": "Combat uniforms and field clothing"
+    },
+    "SMALL_ARMS_SHOULDER_LAUNCHERS": {
+      "name": "Man-portable direct-fire and anti-armour weapons"
+    },
+    "US_AIR_AND_MISSILE_DEFENSE": {
+      "name": "Integrated Air and Missile Defence",
+      "description": "Counter-UAS, air defence, ballistic missile defence and the sensors and battle management that connect them."
+    },
+    "AIR_AND_MISSILE_DEFENSE_TACTICAL": {
+      "name": "Tactical air defence, including SHORAD"
+    },
+    "AIR_AND_MISSILE_DEFENSE_INTEGRATION": {
+      "name": "Sensors, battle management and integration"
+    },
+    "US_COUNTER_UAS": {
+      "parent": "US_AIR_AND_MISSILE_DEFENSE",
+      "name": "Counter-UAS",
+      "facet": "Buying segments"
+    },
+    "US_MAINTENANCE_SUSTAINMENT": {
+      "name": "Common maintenance and sustainment",
+      "description": "Depot overhaul, field maintenance and through-life support serving several programmes or where the funded platform is unspecified. Verified aircraft, ship and ground-system maintenance belongs under the programme it supports."
+    },
+    "US_FOOD_CLOTHING_GENERAL_SUPPLIES": {
+      "name": "Troop support",
+      "description": "Subsistence, clothing, individual equipment and general supplies."
+    },
+    "FOOD_CLOTHING_GENERAL_SUPPLIES_CLOTHING": {
+      "parent": "TROOP_SUPPORT_CLOTHING_EQUIPMENT",
+      "name": "General clothing and textiles"
+    }
+  },
+  "added": [
+    {
+      "id": "FIGHTER_AIRCRAFT_FIGHTERS",
+      "parent": "US_FIGHTER_AIRCRAFT",
+      "level": "subsegment",
+      "name": "Fighters and multirole aircraft",
+      "description": "Fighter and multirole aircraft programmes. Explore existing spending by generation below."
+    },
+    {
+      "id": "TROOP_SUPPORT_CLOTHING_EQUIPMENT",
+      "parent": "US_FOOD_CLOTHING_GENERAL_SUPPLIES",
+      "level": "subsegment",
+      "name": "Clothing and individual equipment",
+      "description": "Separately identified clothing and uniform procurement for service members."
+    }
+  ]
+}

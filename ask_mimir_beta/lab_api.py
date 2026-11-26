@@ -51,11 +51,7 @@ from geographic_market import (
     resolve_state,
     state_market_follow_up_intent,
 )
-from market_segment import (
-    MarketSegmentStore,
-    market_segment_follow_up_intent,
-    resolve_market_segment,
-)
+from shared_market_explorer import SharedMarketExplorerStore, market_segment_follow_up_intent
 from market_record_search import (
     MarketRecordSearchStore,
     record_search_follow_up_intent,
@@ -1310,17 +1306,22 @@ When web research materially improves a facility-role description, apply this so
 
 MARKET_SEGMENT_PROMPT = f"""
 You are Ask Mimir, an evidence-led US defense-market research assistant. The final user message is
-followed by a defined multi-platform market-segment evidence set.
+followed by a release-pinned Market Explorer market or technology segment. This is the same
+taxonomy and signed fiscal-year evidence used by Mimir's Market Explorer, not an independent
+Ask dossier. Answer the user's question directly and at the selected scope, including subsegments,
+source activity, leading records and technologies when supported by the supplied evidence.
 
-Answer at the market level rather than substituting one platform. Start with the programs driving
-the most observed activity, then identify the material prime-recipient and reported supplier sites.
-Keep prime obligations, Mimir-modelled reported subcontract value and DLA procurement as separate
-measures. Every financial figure must include the FY2021-FY2026 observation window.
+For market scopes, source_totals include all descendant buying scopes. Subsegment figures can
+overlap through shared records; never add them to produce a market total. Keep PRIME_AWARD,
+FIRST_TIER_REPORT and DLA_AWARD separate. For technology scopes, annual_activity_usd contains
+allocated technology measures by source, and buying_markets may overlap. Never sum related
+technologies as though they partition a market. Present only observed fiscal years in the data;
+do not impose an FY2026 cutoff. Distinguish a missing or unmapped lane from zero activity.
 
-Use annual_activity to describe direction and changing activity across fiscal years. Treat FY2026
-as a partial observed year. Use capability_activity, including PSC/FSC descriptions, to identify
-the technologies and services with the strongest visible activity; do not reduce a broad market to
-one familiar platform or one award.
+Use leading_records and examples for named companies or contracts. If the pack lacks records for
+a requested claim, say that the shared Market Explorer pack does not establish it. Do not infer a
+supplier relationship from a technology label or market membership alone. Do not substitute a
+different market report's totals for Market Explorer totals.
 
 When a program is discussed using both published budget or FYDP funding and observed prime obligations, label
 the measures clearly and add one short note only if the figures could appear contradictory: published program
@@ -2845,7 +2846,7 @@ class LabRuntime:
             ),
         )
         self.state_industrial_base = StateIndustrialBaseStore(data_root)
-        self.market_segments = MarketSegmentStore(data_root)
+        self.market_segments = SharedMarketExplorerStore()
         self.market_records = MarketRecordSearchStore(data_root)
         self.product_intelligence = ProductIntelligenceStore(
             data_root,
@@ -2876,7 +2877,9 @@ class LabRuntime:
             self.capability_discovery.ontology_path,
             *self.capability_discovery.paths.values(),
             *self.state_industrial_base.paths.values(),
-            *self.market_segments.paths.values(),
+            self.market_segments.root / "pin.json",
+            self.market_segments.root / "public.json.gz",
+            self.market_segments.root / "technology-corpus.json.gz",
             *self.market_records.paths.values(),
             self.product_intelligence.definitions_path,
             *self.product_intelligence.paths.values(),
@@ -2887,10 +2890,7 @@ class LabRuntime:
             )
             if platform_context_manifest.exists():
                 release_sources.add(platform_context_manifest)
-        if self.market_segments.precomputed_dir is not None:
-            market_segment_manifest = self.market_segments.precomputed_dir / "manifest.json"
-            if market_segment_manifest.exists():
-                release_sources.add(market_segment_manifest)
+        release_sources.update((self.market_segments.root / "details").glob("*.json.gz"))
         if self.capability_discovery.precomputed_dir is not None:
             capability_manifest = (
                 self.capability_discovery.precomputed_dir / "manifest.json"
@@ -3851,7 +3851,7 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
             "defined_competitive_market",
             0.98,
         ))
-    segment_id = resolve_market_segment(latest)
+    segment_id = runtime.market_segments.resolve(latest)
     if segment_id and not record_search:
         add(_routing_candidate(
             "market_segment_intelligence",
@@ -7161,7 +7161,7 @@ def _generate_answer_impl(
         else None
     )
     segment_id = (
-        resolve_market_segment(latest_question)
+        runtime.market_segments.resolve(latest_question)
         if selected_workflow == "market_segment_intelligence"
         else None
     )
