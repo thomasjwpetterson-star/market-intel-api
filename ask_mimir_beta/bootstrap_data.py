@@ -83,7 +83,8 @@ def selected_runtime_manifest(s3: Any, bucket: str) -> tuple[Dict[str, Any], Dic
     return manifest, None
 
 
-def stage_shared_market_explorer(s3: Any, bucket: str, platform_release: Dict[str, Any], release_root: Path) -> Path:
+def stage_shared_market_explorer(s3: Any, bucket: str, platform_release: Dict[str, Any], release_root: Path,
+                                 ask_release_id: str) -> Path:
     """Pin Ask market evidence to the same immutable Market Explorer child as Main."""
     root = platform_release["platform"]
     reference = root["components"].get("market_explorer")
@@ -132,6 +133,8 @@ def stage_shared_market_explorer(s3: Any, bucket: str, platform_release: Dict[st
         "main_release_id": main["release_id"],
         "market_release_id": reference["release_id"],
         "market_manifest_sha256": reference["immutable_manifest_sha256"],
+        "ask_release_id": ask_release_id,
+        "ask_matches_platform_root": ask_release_id == root["components"]["ask_mimir"]["release_id"],
     }
     (directory / "pin.json").write_text(json.dumps(pin, sort_keys=True))
     return directory
@@ -483,12 +486,22 @@ def bootstrap() -> Dict[str, Any]:
     artifact_root = release_root / "artifacts"
     os.environ["ASK_MIMIR_DATA_ROOT"] = str(data_root)
     os.environ["ASK_MIMIR_RELEASE_ID"] = str(manifest["release_id"])
+    market_pilot = os.getenv("ASK_MIMIR_MARKET_EXPLORER_PILOT", "0") == "1"
+    market_platform = platform_release
+    if market_pilot and market_platform is None:
+        market_platform = resolve_platform_release(
+            s3, bucket,
+            platform_key=os.getenv("MIMIR_PLATFORM_MANIFEST_KEY", DEFAULT_PLATFORM_MANIFEST_KEY),
+            components=("ask_mimir",),
+        )
     if platform_release is not None:
         platform = platform_release["platform"]
         os.environ["MIMIR_PLATFORM_RELEASE_ID"] = str(platform["release_id"])
         os.environ["MIMIR_PLATFORM_ETL_RUN_ID"] = str(platform["etl_run_id"])
+    if market_platform is not None and (market_pilot or platform_release is not None):
         os.environ["ASK_MIMIR_MARKET_EXPLORER_DIR"] = str(
-            stage_shared_market_explorer(s3, bucket, platform_release, release_root)
+            stage_shared_market_explorer(s3, bucket, market_platform, release_root,
+                                         str(manifest["release_id"]))
         )
     os.environ["ASK_MIMIR_RELEASE_DIR"] = str(artifact_root / "metric-release")
     os.environ["ASK_MIMIR_TRANSACTIONS"] = str(data_root / "transactions.parquet")

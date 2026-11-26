@@ -137,13 +137,28 @@ class SharedMarketExplorerStore:
         if detail.get("candidateId") != self.pin["market_release_id"] or detail.get("mainRelease") != self.pin["main_release_id"]:
             raise ValueError("Market Explorer detail has a different release pin")
         rows = detail.get("scopes", {}).get(scope_id, {})
-        result = {}
+        result = {"leading_records": {}, "leading_companies": {}}
         for source, group in rows.items():
             records = list(group.get("records", {}).values())
             records.sort(key=lambda item: abs(float(item.get("net") or 0)), reverse=True)
-            result[source] = [{key: item.get(key) for key in (
+            result["leading_records"][source] = [{key: item.get(key) for key in (
                 "id", "contract", "company", "companyId", "description", "net", "annual",
             )} for item in records[:limit]]
+            companies: dict[str, dict[str, Any]] = {}
+            for record in records:
+                company_id = str(record.get("companyId") or record.get("company") or "")
+                if not company_id:
+                    continue
+                company = companies.setdefault(company_id, {
+                    "company_id": company_id, "name": record.get("company"),
+                    "net_usd": Decimal(0), "record_count": 0,
+                })
+                company["net_usd"] += Decimal(str(record.get("net") or 0))
+                company["record_count"] += 1
+            result["leading_companies"][source] = [
+                {**company, "net_usd": str(company["net_usd"])}
+                for company in sorted(companies.values(), key=lambda item: abs(item["net_usd"]), reverse=True)[:limit]
+            ]
         return result
 
     def _related_technologies(self, scope_ids: list[str], limit: int) -> list[dict[str, Any]]:
@@ -201,16 +216,18 @@ class SharedMarketExplorerStore:
         if node is None:
             raise KeyError(segment_id)
         scope_ids = self._descendants(segment_id)
+        details = self._details(segment_id, min(bounded, 12))
         return {
             "context_type": "shared_market_explorer_segment",
             "scope": {"segment_id": segment_id, "display_name": node["name"], "level": node["level"], "parent": node.get("parent")},
             "source_totals": self._market_totals(scope_ids),
             "subsegments": [{"id": child, "name": self.nodes[child]["name"], "source_totals": self._market_totals(self._descendants(child))}
                             for child in self.children.get(segment_id, ())],
-            "leading_records": self._details(segment_id, min(bounded, 12)),
+            "leading_records": details.get("leading_records", {}),
+            "leading_companies": details.get("leading_companies", {}),
             "related_technologies": self._related_technologies(scope_ids, 12),
             "source_release": self.pin,
-            "methodology": "Signed, fiscal-year source measures from Market Explorer. Prime awards, first-tier reports and DLA awards are separate lanes. Child scopes may share records; do not sum their totals.",
+            "methodology": "Signed, fiscal-year source measures from Market Explorer. Prime awards, first-tier reports and DLA awards are separate lanes. Child scopes may share records; do not sum their totals. Leading companies aggregate only the supporting detail records available for this scope, not every record in the market.",
         }
 
 

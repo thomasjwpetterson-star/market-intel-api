@@ -31,6 +31,7 @@ from capability_discovery import (
 )
 from company_context_store import build_precomputed_parent_contexts
 from geographic_market import build_precomputed_state_markets
+from market_segment import build_precomputed_market_segments
 from platform_context import build_precomputed_platform_contexts
 from product_intelligence import build_precomputed_product_families
 
@@ -934,12 +935,10 @@ def publish(
         shutil.rmtree(STATE_MARKET_DIR, ignore_errors=True)
 
     if "segments" in selected_domains:
-        # Market and technology segments are read from the root's pinned Market
-        # Explorer component at runtime. No Ask-specific financial dossier is built.
-        derived_release["market_segments"] = {
-            "authority": "platform_market_explorer",
-            "binding": "runtime_platform_root",
-        }
+        derived_release["market_segments"] = build_precomputed_market_segments(
+            DATA_ROOT,
+            MARKET_SEGMENT_DIR,
+        )
     if "capabilities" in selected_domains:
         if reuse_prebuilt_capabilities:
             derived_release["capability_markets"] = refresh_prebuilt_capability_metadata(
@@ -990,7 +989,6 @@ def publish(
         for domain in selected_domains
         for destination in DOMAIN_ARTIFACT_DESTINATIONS.get(domain, ())
     }
-    artifact_destinations.discard("market-segments")
     for path, local_path in artifact_files(artifact_destinations):
         print(f"Publishing artifact: {local_path}", file=sys.stderr)
         key = f"{prefix}/{local_path}"
