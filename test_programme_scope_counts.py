@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 
 def namespace():
-    wanted = {'programme_award_record_count', 'get_platform_profile', 'get_platform_parts', 'get_platform_parts_count', 'df_sanitize_for_json',
+    wanted = {'programme_award_record_count', 'get_platform_profile', 'get_platform_contractors', 'get_platform_parts', 'get_platform_parts_count', 'df_sanitize_for_json',
               'build_contract_awards_explorer_query', 'build_contract_awards_explorer_query_from_rollup',
               '_rolled_contract_years', 'quote_ident', 'safe_int'}
     nodes = []
@@ -48,6 +48,17 @@ class ProgrammeScopeCounts(unittest.TestCase):
             ('D','AMRAAM','NAVY','OTHER',0,50,0,1)""")
         self.ns['get_duck_table_columns'] = lambda table: {r[0] for r in self.db.execute('DESCRIBE '+table).fetchall()}
         self.ns['duck_fetch_df'] = lambda sql, params: self.db.execute(sql, params).fetchdf()
+        self.db.execute("""CREATE TABLE v_transactions AS SELECT * FROM (VALUES
+            ('A','FPDS','AMRAAM','SAME NAME','11111','NAVY',100.,'2024-01-01'),
+            ('A','FPDS','AMRAAM','SAME NAME','11111','NAVY',0.,'2025-01-01'),
+            ('B','FPDS','AMRAAM','SAME NAME','22222','NAVY',200.,'2025-02-01'))
+            t(award_key,source_system,platform_family,vendor_name,vendor_cage,sub_agency,spend_amount,action_date)""")
+        self.db.execute('ALTER TABLE v_transactions ADD COLUMN parent_agency VARCHAR')
+        self.db.execute('ALTER TABLE v_transactions ADD COLUMN contract_id VARCHAR')
+        self.db.execute('UPDATE v_transactions SET contract_id=award_key')
+        self.ns['platform_action_scope'] = lambda *args: ('AMRAAM','1=1',[])
+        self.ns['platform_scoped_read'] = self.ns['duck_fetch_df']
+
 
     def test_award_records_are_counted_once_across_years(self):
         self.assertEqual(self.ns['programme_award_record_count']('AMRAAM', [2024,2025]), 3)
@@ -74,19 +85,20 @@ class ProgrammeScopeCounts(unittest.TestCase):
             dict(platform_family='AMRAAM',vendor_name='SAME NAME',cage_code='11111',sub_agency='NAVY',total_spend=100,contract_count=7),
             dict(platform_family='AMRAAM',vendor_name='SAME NAME',cage_code='22222',sub_agency='NAVY',total_spend=200,contract_count=4)])
         value = self.ns['get_platform_profile']('AMRAAM', years=[2024,2025])
-        self.assertEqual(value['contract_count'], 3)
-        self.assertEqual(value['award_record_count'], 3)
+        self.assertEqual(value['contract_count'], 2)
+        self.assertEqual(value['funding_action_count'], 3)
+        self.assertEqual(value['award_record_count'], 2)
         self.assertNotIn('summary_group_contract_count', value)
         self.assertEqual(value['recorded_company_name_count'], 1)
         self.assertEqual(value['supplier_site_count'], 2)
         self.assertEqual(value['total_obligations'], 300)
-        self.assertEqual(value['contract_count_basis'], 'enriched_award_records')
+        self.assertEqual(value['contract_count_basis'], 'current_v7_distinct_awards')
 
     def test_empty_funding_summary_does_not_erase_available_awards(self):
         self.ns['build_summary_where'] = lambda years, filters: ('1=1', [])
         self.ns['query_summary_df'] = lambda **kw: pd.DataFrame()
         value = self.ns['get_platform_profile']('AMRAAM', years=[2024,2025])
-        self.assertEqual(value['award_record_count'], 3)
+        self.assertEqual(value['award_record_count'], 2)
         self.assertNotIn('summary_group_contract_count', value)
 
     def test_programme_parts_buyer_filter_is_forwarded_to_real_query(self):

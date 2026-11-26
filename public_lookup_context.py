@@ -6,6 +6,7 @@ import os
 import resource
 import sys
 import threading
+from dashboard_routes import BACKGROUND_ANALYSIS, READERS
 
 
 PUBLIC_LOOKUP_REQUEST = ContextVar("mimir_public_lookup_request", default=False)
@@ -25,12 +26,14 @@ _PUBLIC_ANALYTICAL_SLOT = threading.BoundedSemaphore(_PUBLIC_FALLBACK_CONCURRENC
 
 @contextmanager
 def public_analytical_slot():
-    """Use idle analytical readers without exceeding the existing pool size."""
+    """Keep one of the two analytical readers available to browser requests."""
     if PUBLIC_LOOKUP_REQUEST.get():
         with _PUBLIC_ANALYTICAL_SLOT:
-            yield
+            with READERS.read(background=True):
+                yield
     else:
-        yield
+        with READERS.read(background=BACKGROUND_ANALYSIS.get()):
+            yield
 
 
 def public_admission_memory_ok():

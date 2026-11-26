@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api_traffic_protection import ApiTrafficProtectionMiddleware
 from public_serving_capacity import PublicServingCapacityMiddleware
 from analytical_admission import AnalyticalAdmissionMiddleware, ANALYTICAL_TRACE_ID
+from dashboard_capacity import DashboardCapacityMiddleware
 from analytical_deadline import query_deadline, remaining_query_budget
 from queue import Empty
 from public_lookup_context import (
@@ -631,6 +632,7 @@ if allow_all:
     origins = ["*"]
 
 app.add_middleware(AnalyticalAdmissionMiddleware)
+app.add_middleware(DashboardCapacityMiddleware, generation=lambda: GLOBAL_CACHE.get('last_loaded'))
 app.add_middleware(ApiTrafficProtectionMiddleware)
 app.add_middleware(
     PublicServingCapacityMiddleware,
@@ -651,6 +653,7 @@ app.add_middleware(
     allow_credentials=False if origins == ["*"] else True,
     allow_methods=["GET", "POST", "HEAD", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
+    expose_headers=["Retry-After", "X-Mimir-Analytical-Capacity", "X-Mimir-Data-Generation"],
 )
 
 
@@ -6411,6 +6414,11 @@ def get_spend_trend(
         "domain": domain, "agency": agency, "platform": platform, "psc": psc,
     }
 
+    if platform and mode == 'yearly' and not (vendor or parent or cage):
+        _,where,params = platform_action_scope(platform,years,agency,domain,psc)
+        frame = platform_scoped_read('SELECT CAST(year AS INTEGER) AS label,SUM(spend_amount) AS spend FROM v_transactions WHERE '+where+' GROUP BY 1 ORDER BY 1',params)
+        return df_sanitize_for_json(frame).to_dict(orient='records')
+
     # ✅ Let DuckDB handle the year filtering instantly
     where_sql, params = build_summary_where(years, filters)
 
@@ -6995,6 +7003,36 @@ def get_top_platforms(
     return out
 
 
+
+def platform_action_scope(name, years=None, agency=None, domain=None, psc=None):
+    from private_platform_reference import reference_for
+    from platform_dashboard import action_scope
+    release = GLOBAL_CACHE.get('platform_release') or {}
+    try:
+        reference = reference_for(release.get('components', {}).get('main', {}).get('release_id'))
+        return action_scope(name, years, agency, domain, psc, reference)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        logger.exception('Programme scope is unavailable')
+        raise HTTPException(status_code=503, detail='Programme mappings are temporarily unavailable. Retry shortly.') from error
+
+
+def platform_scoped_read(sql, params):
+    before = GLOBAL_CACHE.get('last_loaded')
+    if not before or GLOBAL_CACHE.get('is_loading', False):
+        raise HTTPException(status_code=503, detail='Platform data is updating. Retry shortly.')
+    try:
+        result = programme_read_df(sql, params)
+    except HTTPException:
+        raise
+    except Exception as error:
+        logger.exception('Platform query failed')
+        raise HTTPException(status_code=503, detail='This platform section is temporarily unavailable. Retry shortly.') from error
+    if GLOBAL_CACHE.get('last_loaded') != before or GLOBAL_CACHE.get('is_loading', False):
+        raise HTTPException(status_code=503, detail='Platform data changed. Retry shortly.')
+    return result
+
 def programme_award_record_count(name, years=None, agency=None, domain=None):
     """Count the same award records as Explorer, not summed summary counts."""
     filters = {"platform_family": name}
@@ -7018,103 +7056,30 @@ def programme_award_record_count(name, years=None, agency=None, domain=None):
 
 
 @app.get("/api/platform/profile")
-def get_platform_profile(
-    name: str,
-    years: Optional[List[int]] = Query(None),
-    agency: Optional[str] = None,
-    domain: Optional[str] = None
-):
-    if not name:
-        return {"found": False}
-
-    search_upper = name.strip().upper()
-
-    filters = {
-        "vendor": None,
-        "parent": None,
-        "cage": None,
-        "domain": domain,
-        "agency": agency,
-        "platform": search_upper,
-        "psc": None
-    }
-
-    # ✅ 1. Let DuckDB handle the exact years filter instantly
-    where_sql, params = build_summary_where(years, filters)
-
-    # ✅ 2. Single optimized DuckDB query handles everything
-    df = query_summary_df(
-        where_sql=where_sql,
-        params=params,
-        select_sql="""
-            platform_family,
-            vendor_name,
-            cage_code,
-            sub_agency,
-            SUM(total_spend) AS total_spend,
-            SUM(contract_count) AS contract_count
-        """,
-        group_by_sql="platform_family, vendor_name, cage_code, sub_agency",
-        order_by_sql="total_spend DESC",
-        limit=0
-    )
-
-    award_count = programme_award_record_count(search_upper, years, agency, domain)
-    count_metadata = {
-        "award_record_count": award_count,
-        "contract_count_basis": "enriched_award_records",
-        "count_definitions": {
-            "award_record_count": "Enriched award records in the selected programme, fiscal years and buyer scope; the same grain as the contract_awards research dataset.",
-            "recorded_company_name_count": "Distinct recorded company names; not consolidated parent groups or supplier sites.",
-            "supplier_site_count": "Distinct nonempty CAGE supplier-site identifiers in the funding summary scope.",
-        },
-    }
-    if df.empty:
-        return {
-            "found": True, "name": name, "total_obligations": 0.0,
-            "contractor_count": 0, "contract_count": award_count, "top_vendors": [], "top_agencies": [],
-            "recorded_company_name_count": 0, "supplier_site_count": 0,
-            **count_metadata,
-        }
-
-    # Funding and counts retain their distinct source grains.
-    official_name = name
-    try:
-        official_name = df["platform_family"].mode()[0]
-    except Exception:
-        official_name = name
-
-    total_obligations = float(pd.to_numeric(df["total_spend"], errors="coerce").fillna(0).sum())
-    contractor_count = int(df["vendor_name"].nunique())
-    site_codes = df["cage_code"].dropna().astype(str).str.strip().str.upper()
-    supplier_site_count = int(site_codes[site_codes != ""].nunique())
-
-    top_vendors_df = (
-        df.groupby(["cage_code", "vendor_name"], dropna=False)["total_spend"]
-        .sum().reset_index().sort_values("total_spend", ascending=False).head(10)
-    )
-    top_vendors = [
-        {"name": r["vendor_name"], "cage": r["cage_code"], "total": float(r["total_spend"])}
-        for _, r in top_vendors_df.iterrows()
-    ]
-
-    top_agencies = (
-        df.groupby("sub_agency", dropna=False)["total_spend"]
-        .sum().sort_values(ascending=False).head(5).index.astype(str).tolist()
-    )
-
-    return {
-        "found": True,
-        "name": official_name,
-        "total_obligations": total_obligations,
-        "contractor_count": contractor_count,
-        "contract_count": award_count,
-        "recorded_company_name_count": contractor_count,
-        "supplier_site_count": supplier_site_count,
-        **count_metadata,
-        "top_vendors": top_vendors,
-        "top_agencies": top_agencies,
-    }
+def get_platform_profile(name: str, years: Optional[List[int]] = Query(None),
+                         agency: Optional[str] = None, domain: Optional[str] = None,
+                         psc: Optional[str] = None):
+    from platform_dashboard import AWARD_KEY, SITE_KEY
+    label, where, params = platform_action_scope(name, years, agency, domain, psc)
+    totals = platform_scoped_read(f"""SELECT COUNT(*) AS funding_action_count,
+        COUNT(DISTINCT {AWARD_KEY}) AS contract_count,
+        COUNT(DISTINCT vendor_name) AS recorded_company_name_count,
+        COUNT(DISTINCT {SITE_KEY}) AS contractor_count,
+        COUNT(DISTINCT NULLIF(TRIM(vendor_cage),'')) AS supplier_site_count,
+        COALESCE(SUM(spend_amount),0) AS total_obligations
+        FROM v_transactions WHERE {where}""", params).iloc[0].to_dict()
+    vendors = get_platform_contractors(name, limit=10, offset=0, years=years, agency=agency, domain=domain, psc=psc)
+    agencies = platform_scoped_read(f"""SELECT COALESCE(sub_agency,parent_agency) AS agency,
+        SUM(spend_amount) AS total FROM v_transactions WHERE {where}
+        GROUP BY 1 ORDER BY total DESC,agency LIMIT 5""", params)
+    return dict(found=True, name=label, **{key: float(value) if key=='total_obligations' else int(value) for key,value in totals.items()},
+        award_record_count=int(totals['contract_count']),
+        contract_count_basis='current_v7_distinct_awards',
+        mapping_basis='current_v7_when_available',
+        top_vendors=vendors, top_agencies=agencies['agency'].dropna().tolist(),
+        count_definitions={'contract_count':'Distinct agency-qualified awards in the selected programme, years and buyer scope.',
+            'funding_action_count':'All recorded funding actions, including zero amounts and reductions.',
+            'contractor_count':'Supplier sites; records without a site identifier remain name-specific.'})
 
 
 def _public_entity_slug(value: str) -> str:
@@ -7657,117 +7622,31 @@ def get_public_platform_page_snapshot(slug: str, response: Response):
 
 
 @app.get("/api/platform/shared-exposure")
-def get_platform_shared_exposure(
-    name: str,
-    years: Optional[List[int]] = Query(None),
-):
-    """Return non-additive DLA value for shared-use NIINs associated with a platform."""
-    if not name:
-        return {"platform": name, "shared_use_exposure": 0.0, "niin_count": 0}
-
-    safe_plat = sanitize(name).upper()
-    ys = safe_years(years, min_year=2019, max_year=2200, max_len=50)
-    year_clause = ""
-    params: List[Any] = [safe_plat]
-    if ys:
-        placeholders = ",".join(["?"] * len(ys))
-        year_clause = f"AND TRY_CAST(s.year AS INTEGER) IN ({placeholders})"
-        params.extend(ys)
-
-    query = f"""
-        WITH platform_niins AS (
-            SELECT DISTINCT LPAD(TRIM(CAST(niin AS VARCHAR)), 9, '0') AS niin
-            FROM v_platform_bom
-            WHERE UPPER(TRIM(CAST(platform_family AS VARCHAR))) = ?
-        )
-        SELECT
-            COALESCE(SUM(TRY_CAST(s.spend_amount AS DOUBLE)), 0) AS shared_use_exposure,
-            COUNT(DISTINCT LPAD(TRIM(CAST(s.niin AS VARCHAR)), 9, '0')) AS niin_count
-        FROM v_nsn_summary s
-        INNER JOIN platform_niins p
-            ON LPAD(TRIM(CAST(s.niin AS VARCHAR)), 9, '0') = p.niin
-        WHERE TRY_CAST(s.platform_count AS INTEGER) > 1
-          {year_clause}
-    """
-
+def get_platform_shared_exposure(name: str, years: Optional[List[int]] = Query(None),
+        agency: Optional[str] = None, domain: Optional[str] = None, psc: Optional[str] = None):
+    from programme_parts import build_parts_query
     try:
-        df = duck_fetch_df(query, params)
-    except Exception as exc:
-        logger.error("Failed to fetch shared-use platform exposure: %s", exc)
-        return {"platform": name, "shared_use_exposure": 0.0, "niin_count": 0}
-
-    if df.empty:
-        return {"platform": name, "shared_use_exposure": 0.0, "niin_count": 0}
-
-    row = df.iloc[0]
-    return {
-        "platform": name,
-        "shared_use_exposure": float(row.get("shared_use_exposure", 0) or 0),
-        "niin_count": int(row.get("niin_count", 0) or 0),
-        "additive": False,
-        "basis": "SHARED_USE_NIIN_ASSOCIATION",
-    }
+        sql,params = build_parts_query(name,years,agency,domain,psc=psc,shared_exposure=True)
+    except ValueError as error:
+        raise HTTPException(status_code=422,detail=str(error)) from error
+    row = platform_scoped_read(sql,params).iloc[0]
+    return dict(platform=name,shared_use_exposure=float(row['shared_use_exposure']),
+        niin_count=int(row['niin_count']),additive=False,basis='SHARED_USE_NIIN_ASSOCIATION')
 
 
 @app.get("/api/platform/contractors")
-def get_platform_contractors(
-    name: str,
-    limit: int = 100,
-    offset: int = 0,
-    years: Optional[List[int]] = Query(None),
-    agency: Optional[str] = None
-):
-    if not name:
-        return []
-
-    limit = max(1, min(int(limit), 500))
-    offset = max(0, int(offset))
-
-    safe_plat = sanitize(name)
-
-    # Same strict platform filter, strict sub_agency filter
-    filters = {
-        "vendor": None,
-        "parent": None,
-        "cage": None,
-        "domain": None,
-        "agency": agency,
-        "platform": safe_plat,
-        "psc": None
-    }
-
-    where_sql, params = build_summary_where(years, filters)
-
-    df = query_summary_df(
-        where_sql=where_sql,
-        params=params,
-        select_sql="""
-            cage_code,
-            vendor_name,
-            SUM(total_spend) AS total_spend,
-            SUM(contract_count) AS contract_count
-        """,
-        group_by_sql="cage_code, vendor_name",  # ✅ ADDED
-        order_by_sql="total_spend DESC",
-        limit=0
-    )
-
-    if df.empty:
-        return []
-
-    grouped = df.sort_values("total_spend", ascending=False, kind="mergesort")
-    page = grouped.iloc[offset: offset + limit]
-
-    return [
-        {
-            "name": r["vendor_name"],
-            "cage": r["cage_code"],
-            "total": float(r["total_spend"]),
-            "contracts": int(r["contract_count"]),
-            "role": "PRIME"
-        }
-        for _, r in page.iterrows()
-    ]
+def get_platform_contractors(name: str, limit: int = 100, offset: int = 0,
+        years: Optional[List[int]] = Query(None), agency: Optional[str] = None,
+        domain: Optional[str] = None, psc: Optional[str] = None):
+    from platform_dashboard import AWARD_KEY, SITE_KEY
+    _, where, params = platform_action_scope(name, years, agency, domain, psc)
+    sql = f"""SELECT MAX_BY(vendor_name,STRUCT_PACK(date:=COALESCE(CAST(action_date AS VARCHAR),''),name:=COALESCE(vendor_name,''))) AS name,
+        NULLIF(UPPER(TRIM(vendor_cage)),'') AS cage, SUM(spend_amount) AS total,
+        COUNT(DISTINCT {AWARD_KEY}) AS contracts, 'PRIME' AS role
+        FROM v_transactions WHERE {where}
+        GROUP BY {SITE_KEY},NULLIF(UPPER(TRIM(vendor_cage)),'')
+        ORDER BY total DESC,name,cage LIMIT ? OFFSET ?"""
+    return df_sanitize_for_json(platform_scoped_read(sql, params+[max(1,min(limit,500)),max(0,offset)])).to_dict(orient='records')
 
 
 
@@ -7775,11 +7654,11 @@ def get_platform_contractors(
 def get_platform_parts(
     name: str, include_zero: bool = True, limit: int = 100, offset: int = 0,
     min_spend: float = 0, years: Optional[List[int]] = Query(None),
-    agency: Optional[str] = None, domain: Optional[str] = None
+    agency: Optional[str] = None, domain: Optional[str] = None, psc: Optional[str] = None
 ):
     from programme_parts import build_parts_query
     try:
-        sql, params = build_parts_query(name, years, agency, domain, include_zero, min_spend, limit, offset)
+        sql, params = build_parts_query(name, years, agency, domain, include_zero, min_spend, limit, offset, psc=psc)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     try:
@@ -7803,11 +7682,11 @@ def get_platform_parts(
 def get_platform_parts_count(
     name: str, years: Optional[List[int]] = Query(None), agency: Optional[str] = None,
     domain: Optional[str] = None, platform: Optional[str] = None,
-    include_zero: bool = True, min_spend: float = 0
+    include_zero: bool = True, min_spend: float = 0, psc: Optional[str] = None
 ):
     from programme_parts import build_parts_query
     try:
-        sql, params = build_parts_query(name, years, agency, domain, include_zero, min_spend, count_only=True)
+        sql, params = build_parts_query(name, years, agency, domain, include_zero, min_spend, count_only=True, psc=psc)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     try:
@@ -7822,159 +7701,54 @@ def get_platform_parts_count(
 
 
 @app.get("/api/platform/awards")
-def get_platform_awards(
-    name: str,
-    limit: int = 50,
-    offset: int = 0,
-    years: Optional[List[int]] = Query(None),
-    agency: Optional[str] = None,
-    threshold: Optional[float] = 0.5,
-):
-    safe_plat = sanitize(name)
-    limit_i = max(1, min(int(limit), 500))
-    offset_i = max(0, int(offset))
-
-    where_parts = ["platform_family = ?"]
-    params = [safe_plat]
-
-    if agency:
-        where_parts.append("(sub_agency = ? OR parent_agency = ?)")
-        safe_ag = sanitize(agency)
-        params.extend([safe_ag, safe_ag])
-
-    if years:
-        placeholders = ",".join(["?"] * len(years))
-        where_parts.append(f"year IN ({placeholders})")
-        params.extend(years)
-
-    if threshold and threshold > 0:
-        where_parts.append("spend_amount >= ?")
+def get_platform_awards(name: str, limit: int = 50, offset: int = 0,
+        years: Optional[List[int]] = Query(None), agency: Optional[str] = None,
+        threshold: Optional[float] = 0, domain: Optional[str] = None, psc: Optional[str] = None):
+    label, where, params = platform_action_scope(name, years, agency, domain, psc)
+    if threshold:
+        if not math.isfinite(threshold) or threshold < 0:
+            raise HTTPException(status_code=422, detail='Use a finite nonnegative threshold.')
+        where += ' AND spend_amount >= ?'
         params.append(threshold * 1_000_000)
-
-    where_clause = " AND ".join(where_parts)
-
-    query = f"""
-        SELECT 
-            contract_id,
-            action_date,
-            vendor_name,
-            vendor_cage,
-            COALESCE(sub_agency, parent_agency) AS agency,
-            description,
-            spend_amount AS spend,
-            naics_code AS naics,
-            platform_family
-        FROM v_transactions
-        WHERE {where_clause}
-        ORDER BY action_date DESC
-        LIMIT ? OFFSET ?
-    """
-    params.extend([limit_i, offset_i])
-
-    try:
-        df = duck_fetch_df(query, params)
-        if df.empty: return []
-        
-        # Replace NaN with safe JSON nulls/empty strings
-        df = df.fillna("")
-        return df.to_dict(orient="records")
-    except Exception as e:
-        logger.error(f"Awards query failed: {e}")
-        return []
+    sql = f"""SELECT contract_id,action_date,vendor_name,vendor_cage,
+        COALESCE(sub_agency,parent_agency) AS agency,description,spend_amount AS spend,
+        naics_code AS naics,? AS platform_family,COUNT(*) OVER() AS total_actions
+        FROM v_transactions WHERE {where}
+        ORDER BY action_date DESC NULLS LAST,award_key,transaction_key
+        LIMIT ? OFFSET ?"""
+    return df_sanitize_for_json(platform_scoped_read(sql, [label]+params+[max(1,min(limit,500)),max(0,offset)])).to_dict(orient='records')
 
 
 @app.get("/api/platform/subcontracts")
-def get_platform_subcontracts(
-    name: str,
-    psc: Optional[str] = None,
-    prime_vendor: Optional[str] = None,
-    sub_vendor: Optional[str] = None,
-    mode: str = "rollup", # "rollup" or "lines"
-    limit: int = 50,
-    offset: int = 0,
-):
-    safe_plat = sanitize(name)
-    limit_i = max(1, min(int(limit), 500))
-    offset_i = max(0, int(offset))
-
-    path = LOCAL_CACHE_DIR / "network.parquet"
-    if not path.exists():
-        return []
-
-    # Build WHERE clause dynamically
-    where_parts = ["platform_family = ?"]
-    params = [safe_plat]
-
-    if psc:
-        # ✅ FIX: The frontend sends "1620 - AIRCRAFT COMPONENTS", we extract just the 4-digit code to filter
-        raw_psc = str(psc).split(" - ")[0].strip()
-        where_parts.append("psc = ?")
-        params.append(sanitize(raw_psc))
-    if prime_vendor:
-        where_parts.append("prime_name = ?")
-        params.append(sanitize(prime_vendor))
-    if sub_vendor:
-        # ✅ FIX: Match against the exact site name
-        where_parts.append("sub_name = ?")
-        params.append(sanitize(sub_vendor))
-
-    where_clause = " AND ".join(where_parts)
-
-    global DUCK_CONN
+def get_platform_subcontracts(name: str, psc: Optional[str] = None,
+        prime_vendor: Optional[str] = None, sub_vendor: Optional[str] = None,
+        mode: str = 'rollup', limit: int = 50, offset: int = 0,
+        years: Optional[List[int]] = Query(None), agency: Optional[str] = None,
+        domain: Optional[str] = None):
+    from platform_dashboard import subcontracts_scope
+    if mode not in ('rollup','lines'):
+        raise HTTPException(status_code=422, detail='Choose rollup or lines.')
+    # Native subcontract labels remain separate from reviewed prime-award maps.
     try:
-        with DUCK_LOCK:
-            ensure_duck_conn()
-            
-            if mode == "rollup":
-                sql = f"""
-                    WITH psc_mapping AS (
-                        SELECT psc_code, MAX(psc_description) as psc_desc 
-                        FROM v_summary 
-                        WHERE psc_code IS NOT NULL 
-                        GROUP BY psc_code
-                    ),
-                    grouped_network AS (
-                        SELECT 
-                            sub_name as sub_vendor,
-                            sub_cage as sub_cage,
-                            prime_name as prime_vendor,
-                            prime_cage as prime_cage,
-                            MAX(psc) as raw_psc,
-                            array_to_string((array_agg(DISTINCT description))[1:3], ' | ') as description,
-                            COUNT(*) as contract_count,
-                            SUM(subaward_value) as subaward_value,
-                            MAX(action_date) as action_date
-                        FROM v_network
-                        WHERE {where_clause}
-                        GROUP BY sub_name, sub_cage, prime_name, prime_cage
-                    )
-                    SELECT 
-                        g.sub_vendor, g.sub_cage, g.prime_vendor, g.prime_cage,
-                        g.description, g.contract_count, g.subaward_value, g.action_date,
-                        COALESCE(g.raw_psc, 'UNKNOWN') || ' - ' || COALESCE(m.psc_desc, 'Unclassified Component') as psc
-                    FROM grouped_network g
-                    LEFT JOIN psc_mapping m ON g.raw_psc = m.psc_code
-                    ORDER BY g.subaward_value DESC
-                    LIMIT ? OFFSET ?
-                """
-            else:
-                sql = f"""
-                    SELECT * FROM v_network 
-                    WHERE {where_clause} 
-                    ORDER BY subaward_value DESC 
-                    LIMIT ? OFFSET ?
-                """
-                
-            # Removed the str(path) from parameters since we aren't using read_parquet anymore
-            all_params = tuple(params) + (limit_i, offset_i)
-            df = DUCK_CONN.execute(sql, all_params).fetchdf()
-            df = df_sanitize_for_json(df)
-            
-            return df.to_dict(orient="records")
-            
-    except Exception as e:
-        logger.exception(f"DuckDB Subcontracts Query Failed")
-        return []
+        where,params = subcontracts_scope(name,years,agency,domain,psc,prime_vendor,sub_vendor)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if mode == 'lines':
+        sql = f"""SELECT n.* FROM v_network n WHERE {where}
+            ORDER BY subaward_value DESC,action_date,award_key,source_dedup_key LIMIT ? OFFSET ?"""
+    else:
+        sql = f"""WITH grouped AS (
+            SELECT n.sub_name AS sub_vendor,n.sub_cage,n.prime_name AS prime_vendor,n.prime_cage,
+                MAX(n.psc) AS raw_psc,
+                array_to_string((array_agg(DISTINCT n.description ORDER BY n.description))[1:3], ' | ') AS description,
+                COUNT(*) AS contract_count,SUM(n.subaward_value) AS subaward_value,MAX(n.action_date) AS action_date
+            FROM v_network n WHERE {where} GROUP BY 1,2,3,4
+        ), psc_mapping AS (
+            SELECT CAST(psc_code AS VARCHAR) AS psc_code,MAX(psc_description) AS psc_desc FROM v_summary GROUP BY 1
+        ) SELECT g.*,COALESCE(CAST(g.raw_psc AS VARCHAR),'UNKNOWN')||' - '||COALESCE(m.psc_desc,'Unclassified Component') AS psc
+            FROM grouped g LEFT JOIN psc_mapping m ON CAST(g.raw_psc AS VARCHAR)=m.psc_code
+            ORDER BY subaward_value DESC,prime_vendor,prime_cage,sub_vendor,sub_cage LIMIT ? OFFSET ?"""
+    return df_sanitize_for_json(platform_scoped_read(sql,params+[max(1,min(limit,500)),max(0,offset)])).to_dict(orient='records')
 
 
 
@@ -8052,7 +7826,7 @@ def get_company_opportunities(
         safe_domain = sanitize(domain).upper()
         # If domain looks like a code (e.g. "334" or "R425"), search naics/psc
         if len(safe_domain) > 0 and (safe_domain[0].isdigit() or (len(safe_domain) == 4 and safe_domain[0].isalpha())):
-            where_parts.append("(psc LIKE ? OR naics LIKE ?)")
+            where_parts.append("(CAST(psc AS VARCHAR) LIKE ? OR CAST(naics AS VARCHAR) LIKE ?)")
             params.extend([f"{safe_domain}%", f"{safe_domain}%"])
         else:
             # Otherwise, text search the title and description
@@ -11688,7 +11462,7 @@ def get_platform_announcements(name: str, limit: int = 10):
         )
     except Exception:
         logger.exception("Official DoD announcement lookup failed for platform %s", name)
-        return []
+        raise HTTPException(status_code=503, detail="Official announcements are temporarily unavailable.")
 
 
 # --- ADD THIS NEW FUNCTION ---
@@ -11993,7 +11767,7 @@ def get_pipeline_live(
         conds.append("(upper(COALESCE(sol_num, id)) NOT LIKE 'SPE%' AND upper(COALESCE(sol_num, id)) NOT LIKE 'SPM%' AND upper(COALESCE(sol_num, id)) NOT LIKE 'SPR%')")
         
     if naics:
-        conds.append("naics LIKE ?")
+        conds.append("CAST(naics AS VARCHAR) LIKE ?")
         params.append(f"%{sanitize(naics)}%")
     if set_aside:
         conds.append("upper(set_aside_type) LIKE ?")
@@ -12028,13 +11802,17 @@ def get_pipeline_live(
     if domain:
         safe_domain = sanitize(domain).upper()
         if len(safe_domain) > 0 and (safe_domain[0].isdigit() or (len(safe_domain) == 4 and safe_domain[0].isalpha())):
-            conds.append("(psc LIKE ? OR naics LIKE ?)")
+            conds.append("(CAST(psc AS VARCHAR) LIKE ? OR CAST(naics AS VARCHAR) LIKE ?)")
             params.extend([f"{safe_domain}%", f"{safe_domain}%"])
         else:
             safe_domain_like = f"%{safe_domain}%"
             conds.append("(upper(title) LIKE ? OR upper(description) LIKE ?)")
             params.extend([safe_domain_like, safe_domain_like])
             
+    if psc:
+        conds.append("REGEXP_REPLACE(UPPER(TRIM(CAST(psc AS VARCHAR))),'[.]0+$','')=?")
+        params.append(str(psc).split(' - ')[0].strip().upper())
+
     where_sql = " AND ".join(conds)
     
     count_query = f"SELECT count(*) as c FROM v_opportunities WHERE {where_sql}"

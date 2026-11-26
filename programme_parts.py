@@ -19,7 +19,8 @@ def buyer_name(value):
 
 
 def build_parts_query(name, years=None, agency=None, domain=None, include_zero=True,
-                      min_spend=0, limit=100, offset=0, count_only=False, reviewed_items=None):
+                      min_spend=0, limit=100, offset=0, count_only=False, reviewed_items=None,
+                      psc=None, shared_exposure=False):
     programme = str(name or '').strip().upper()
     if not programme:
         raise ValueError('Choose a programme.')
@@ -74,6 +75,9 @@ def build_parts_query(name, years=None, agency=None, domain=None, include_zero=T
     if domain:
         clauses.append('UPPER(TRIM(f.market_segment)) = ?')
         params.append(str(domain).strip().upper())
+    if psc:
+        clauses.append("REGEXP_REPLACE(UPPER(TRIM(f.psc)),'[.]0+$','') = ?")
+        params.append(str(psc).split(' - ')[0].strip().upper())
     where = ' AND '.join(clauses) or '1=1'
     sql = f"""
     WITH reference_bom AS (
@@ -93,6 +97,7 @@ def build_parts_query(name, years=None, agency=None, domain=None, include_zero=T
                t.market_segment, TRY_CAST(t.spend_amount AS DOUBLE) AS line_value,
                CAST(NULL AS DOUBLE) AS line_units, TRY_CAST(t.action_date AS DATE) AS last_sold,
                COALESCE(TRY_CAST(t.platform_count AS INTEGER),0) AS platform_count
+               {', CAST(t.psc AS VARCHAR) AS psc' if psc else ''}
         FROM v_transactions t
         WHERE NULLIF(TRIM(CAST(t.niin AS VARCHAR)),'') IS NOT NULL
            OR NULLIF(TRIM(CAST(t.nsn AS VARCHAR)),'') IS NOT NULL
@@ -102,6 +107,7 @@ def build_parts_query(name, years=None, agency=None, domain=None, include_zero=T
                UPPER(TRIM(s.parent_agency)), s.market_segment,
                TRY_CAST(s.total_revenue AS DOUBLE), TRY_CAST(s.total_units_sold AS DOUBLE),
                TRY_CAST(s.last_sold AS DATE), COALESCE(TRY_CAST(s.platform_count AS INTEGER),0)
+               {', CAST(s.psc AS VARCHAR)' if psc else ''}
         FROM v_nsn_supplier_lookup s CROSS JOIN cache_floor c
         WHERE s.year < COALESCE(c.first_fy,2201)
     ), scoped AS (
@@ -142,7 +148,10 @@ def build_parts_query(name, years=None, agency=None, domain=None, include_zero=T
     )
     """
     conditions = ['(? OR amount <> 0)', '(? = 0 OR amount >= ?)', '(? = FALSE OR '+financial_eligibility+')']
-    params.extend([bool(include_zero), minimum, minimum, bool(buyer or ys or domain)])
+    params.extend([bool(include_zero), minimum, minimum, bool(buyer or ys or domain or psc)])
+    if shared_exposure:
+        sql += " SELECT COALESCE(SUM(amount),0) AS shared_use_exposure,COUNT(*) AS niin_count FROM item_rows WHERE " + ' AND '.join(conditions) + ' AND platform_count > 1 AND financial_record_count > 0'
+        return sql,params
     select = ('COUNT(*) AS count, (SELECT first_fy FROM cache_floor) AS buyer_history_start_fy' if count_only
               else '*, COUNT(*) OVER() AS matching_item_count, (SELECT first_fy FROM cache_floor) AS buyer_history_start_fy')
     sql += f" SELECT {select} FROM item_rows WHERE " + ' AND '.join(conditions)

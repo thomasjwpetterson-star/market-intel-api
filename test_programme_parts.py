@@ -27,6 +27,15 @@ class BuyerItemFunding(unittest.TestCase):
         cursor=self.db.execute(sql,params)
         return [dict(zip([c[0] for c in cursor.description],r)) for r in cursor.fetchall()]
 
+    def test_shared_exposure_and_psc_follow_the_selected_financial_scope(self):
+        self.db.execute('ALTER TABLE v_transactions ADD COLUMN psc DOUBLE')
+        self.db.execute("UPDATE v_transactions SET psc=CASE WHEN niin='000000002' THEN 9999 ELSE 1510 END")
+        self.db.execute('ALTER TABLE v_nsn_supplier_lookup ADD COLUMN psc DOUBLE')
+        self.db.execute('UPDATE v_nsn_supplier_lookup SET psc=1510')
+        rows=self.read(years=[2025],agency='Navy',domain='AIR',psc='1510',shared_exposure=True)
+        self.assertEqual(rows,[{'shared_use_exposure':80.0,'niin_count':1}])
+        self.assertEqual(self.read(years=[1900],agency='Navy',psc='1510',shared_exposure=True),[{'shared_use_exposure':0.0,'niin_count':0}])
+
     def test_private_route_authentication_and_reviewed_item_null_money(self):
         import ast,hmac,os
         from typing import Any,Dict

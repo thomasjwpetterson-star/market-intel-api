@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+from dashboard_routes import BACKGROUND_ANALYSIS, is_dashboard_read
 
 ANALYTICAL_DEADLINE = ContextVar("mimir_analytical_deadline", default=None)
 ANALYTICAL_TRACE_ID = ContextVar("mimir_analytical_trace_id", default=None)
@@ -20,6 +21,9 @@ READ_BUDGETS = {
     ("POST", "/api/research/programme-records"): 28,
     ("POST", "/api/explorer/page"): 16,
     ("POST", "/api/explorer/count"): 16,
+    ("POST", "/api/explorer/preview"): 16,
+    ("POST", "/api/explorer/export"): 38,
+    ("POST", "/api/explorer/subcontract-descriptions"): 16,
     ("GET", "/api/platform/parts"): 28,
     ("GET", "/api/platform/parts/count"): 28,
     ("GET", "/api/search/global"): 16,
@@ -37,6 +41,9 @@ class AnalyticalAdmissionMiddleware:
         self.inflight = set()
 
     async def __call__(self, scope, receive, send):
+        if self.budgets is READ_BUDGETS and is_dashboard_read(scope):
+            # Browser traffic is admitted by DashboardCapacityMiddleware.
+            return await self.app(scope, receive, send)
         budget = self.budgets.get((scope.get("method"), scope.get("path")))
         if self.budgets is READ_BUDGETS and scope.get("method")=="GET" and scope.get("path", "").startswith("/api/platform/"):
             budget = 28
@@ -97,11 +104,13 @@ class AnalyticalAdmissionMiddleware:
     async def _serve(self, scope, receive, send, deadline, trace_id):
         token = ANALYTICAL_DEADLINE.set(deadline)
         trace_token = ANALYTICAL_TRACE_ID.set(trace_id)
+        background_token = BACKGROUND_ANALYSIS.set(not is_dashboard_read(scope))
         try:
             await self.app(scope, receive, send)
         finally:
             ANALYTICAL_DEADLINE.reset(token)
             ANALYTICAL_TRACE_ID.reset(trace_token)
+            BACKGROUND_ANALYSIS.reset(background_token)
             self.active -= 1
             self.slot.release()
 
