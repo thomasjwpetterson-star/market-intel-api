@@ -1322,8 +1322,7 @@ do not impose an FY2026 cutoff. Distinguish a missing or unmapped lane from zero
 
 Use leading_records, leading_companies and examples for named companies or contracts. The company
 ranking covers only the supporting detail records available for this scope, not the whole market.
-If the pack lacks records for
-a requested claim, say that the shared Market Explorer pack does not establish it. Do not infer a
+If the pack lacks records for a requested claim, say that the shared Market Explorer pack does not establish it. Do not infer a
 supplier relationship from a technology label or market membership alone. Do not substitute a
 different market report's totals for Market Explorer totals.
 
@@ -3138,6 +3137,17 @@ class LabRuntime:
                 cache_arguments = {
                     **arguments,
                     "_context_schema": "capability-market-v7-transaction-values",
+                }
+            elif name == "get_market_segment":
+                mapping_source = MARKET_MAPPING_SOURCE.get()
+                cache_arguments = {
+                    **arguments,
+                    "_market_mapping_source": mapping_source,
+                    "_market_release": (
+                        self.shared_market_segments.pin["market_release_id"]
+                        if mapping_source == "market_explorer" and self.shared_market_segments is not None
+                        else self.store.manifest["release_id"]
+                    ),
                 }
             elif name == "get_award_opportunity_context":
                 cache_arguments = {**arguments, "_context_schema": "award-context-v2"}
