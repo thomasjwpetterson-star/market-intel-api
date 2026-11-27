@@ -5,6 +5,8 @@ Research keeps its native relations. Reviewed multi-programme associations are
 expanded for browsing only; they are never an exclusive allocation of funding.
 """
 import json
+import logging
+import re
 import time
 
 
@@ -58,17 +60,40 @@ def build_code_projection(conn):
         FROM v_summary GROUP BY 1''')
 
 def build_explorer_projection(conn):
-    # Keep the native award grain and every source field. Moving the cold
-    # columnar read into release preparation lets wide preview queries use
-    # DuckDB storage and domain zone maps within the existing memory/spill cap.
+    # Prepare only Explorer's native fields, at the unchanged award grain.
+    # Avoid sorting wide descriptions during startup. Cast annual measures once
+    # using the exact same types/TRY_CAST semantics as the request builder.
     relations = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
     if 'v_contracts_rolled' not in relations:
         return
-    columns = {row[0] for row in conn.execute('DESCRIBE v_contracts_rolled').fetchall()}
+    columns = [row[0] for row in conn.execute('DESCRIBE v_contracts_rolled').fetchall()]
     if 'market_segment' not in columns:
         return
-    conn.execute('''CREATE OR REPLACE TABLE dashboard_explorer_awards AS
-        SELECT * FROM v_contracts_rolled ORDER BY market_segment,contract_id''')
+    native_fields = {
+        'award_key','contract_id','vendor_name','vendor_cage','parent_agency','sub_agency',
+        'city','state','country','place_of_performance_city','place_of_performance_state',
+        'place_of_performance_country','place_of_performance_zip','market_segment',
+        'platform_family','psc','naics_code','naics_description','nsn','niin',
+        'nsn_source_system','nsn_derivation_method','nsn_resolution_status','location_quality',
+        'description','base_award_description','latest_action_description',
+    }
+    selected = []
+    for column in columns:
+        quoted = '"' + column.replace('"','""') + '"'
+        annual = re.fullmatch(r'(obligations|action_count|earliest_action_date|latest_action_date)_fy[0-9]{4}',column)
+        if annual:
+            dtype = 'DOUBLE' if annual[1] == 'obligations' else 'BIGINT' if annual[1] == 'action_count' else 'DATE'
+            selected.append(f'TRY_CAST({quoted} AS {dtype}) AS {quoted}')
+        elif column in native_fields:
+            selected.append(quoted)
+    started = time.monotonic()
+    logger = logging.getLogger('mimir-api')
+    logger.info('EXPLORER PROJECTION BUILD fields=%s',len(selected))
+    conn.execute('CREATE OR REPLACE TABLE dashboard_explorer_awards AS SELECT '
+                 + ','.join(selected) + ' FROM v_contracts_rolled')
+    logger.info('EXPLORER PROJECTION READY rows=%s seconds=%.3f',
+                conn.execute('SELECT COUNT(*) FROM dashboard_explorer_awards').fetchone()[0],
+                time.monotonic()-started)
 
 
 def financial_sql(floor_relation="dashboard_cache_floor", include_psc=True):

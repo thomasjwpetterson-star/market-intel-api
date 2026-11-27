@@ -11,8 +11,8 @@ def test_prepared_dictionaries_preserve_air_awards_descriptions_and_signed_total
         db.execute('''CREATE TABLE v_summary(psc_code VARCHAR,psc_description VARCHAR,naics_code VARCHAR,naics_description VARCHAR)''')
         db.execute("INSERT INTO v_summary VALUES ('1510','Aircraft','336411','Aircraft manufacturing'),('1510','Fixed wing aircraft','336411','Z aircraft manufacturing'),('9999',NULL,'999999',NULL)")
         db.execute('''CREATE TABLE v_contracts_rolled(award_key VARCHAR,contract_id VARCHAR,market_segment VARCHAR,psc VARCHAR,naics_code VARCHAR,naics_description VARCHAR,
-            obligations_fy2025 DOUBLE,action_count_fy2025 BIGINT,earliest_action_date_fy2025 DATE,latest_action_date_fy2025 DATE)''')
-        db.execute("INSERT INTO v_contracts_rolled VALUES ('A','A','AIR','1510','336411',NULL,100,2,'2025-01-01','2025-02-01'),('B','B','AIR','1510','336411','Source description',-20,1,'2025-03-01','2025-03-01'),('C','C','AIR',NULL,'999999',NULL,0,1,'2025-04-01','2025-04-01'),('D','D','NAVAL','1510','336411',NULL,400,1,'2025-05-01','2025-05-01'),('E','A','AIR','1510','336411',NULL,50,1,'2025-06-01','2025-06-01')")
+            obligations_fy2025 VARCHAR,action_count_fy2025 VARCHAR,earliest_action_date_fy2025 VARCHAR,latest_action_date_fy2025 VARCHAR,unrelated_large_detail VARCHAR DEFAULT NULL)''')
+        db.execute("INSERT INTO v_contracts_rolled(award_key,contract_id,market_segment,psc,naics_code,naics_description,obligations_fy2025,action_count_fy2025,earliest_action_date_fy2025,latest_action_date_fy2025) VALUES ('A','A','AIR','1510','336411',NULL,100,2,'2025-01-01','2025-02-01'),('B','B','AIR','1510','336411','Source description',-20,1,'2025-03-01','2025-03-01'),('C','C','AIR',NULL,'999999',NULL,'invalid',1,'2025-04-01','2025-04-01'),('D','D','NAVAL','1510','336411',NULL,400,1,'2025-05-01','2025-05-01'),('E','A','AIR','1510','336411',NULL,50,1,'2025-06-01','2025-06-01')")
         ns=namespace()
         def columns(table):
             try:return {row[0] for row in db.execute('DESCRIBE '+table).fetchall()}
@@ -28,18 +28,23 @@ def test_prepared_dictionaries_preserve_air_awards_descriptions_and_signed_total
             for offset in [0,1]:
                 sql,params=build(payload,2,offset)
                 expected=db.execute(sql,params).fetchall()
-                cases.append((payload,offset,expected))
+                count_sql,count_params=build(payload,0,count_only=True)
+                cases.append((payload,offset,expected,db.execute(count_sql,count_params).fetchall()))
         build_code_projection(db)
         build_explorer_projection(db)
         assert db.execute('SELECT COUNT(*) FROM dashboard_explorer_awards').fetchone()[0] == 5
+        assert 'unrelated_large_detail' not in columns('dashboard_explorer_awards')
+        assert dict((r[0],r[1]) for r in db.execute('DESCRIBE dashboard_explorer_awards').fetchall())['obligations_fy2025']=='DOUBLE'
         db.execute('DROP TABLE v_contracts_rolled')
         db.execute('DROP TABLE v_summary')
-        for payload,offset,expected in cases:
+        for payload,offset,expected,expected_count in cases:
             sql,params=build(payload,2,offset)
             assert 'FROM dashboard_psc' in sql and 'FROM dashboard_naics' in sql
             assert 'FROM v_summary' not in sql
             assert 'FROM dashboard_explorer_awards r' in sql
             assert db.execute(sql,params).fetchall()==expected
+            count_sql,count_params=build(payload,0,count_only=True)
+            assert db.execute(count_sql,count_params).fetchall()==expected_count
         # Rebuilding refreshes both dictionary lanes from the new release.
         db.execute("CREATE TABLE v_summary AS SELECT '1510' AS psc_code,'Revised aircraft' AS psc_description,'336411' AS naics_code,'Revised NAICS' AS naics_description")
         build_code_projection(db)
