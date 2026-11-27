@@ -4338,7 +4338,7 @@ INTERNAL_DUCK_RELATIONS = {
     NSN_PRICE_SUMMARY_TABLE,
     NSN_OPPORTUNITY_SUMMARY_TABLE,
     NSN_OPPORTUNITY_DETAIL_TABLE,
-    "dashboard_psc", "dashboard_naics", "dashboard_explorer_awards",
+    "dashboard_psc", "dashboard_naics", "dashboard_explorer_awards", "dashboard_explorer_rank",
 }
 
 ALLOWED_EXPLORER_COLUMNS = {
@@ -5052,6 +5052,8 @@ def build_contract_awards_explorer_query_from_rollup(
         if f"action_count_fy{year}" in actual_cols
     ]
     obligations_expr = " + ".join(obligations_terms) if obligations_terms else "0.0"
+    if selected_years == available_years and "_explorer_all_year_obligations" in actual_cols:
+        obligations_expr = "r._explorer_all_year_obligations"
     actions_expr = " + ".join(action_terms) if action_terms else "0"
 
     earliest_terms = [
@@ -5183,8 +5185,18 @@ def build_contract_awards_explorer_query_from_rollup(
     if rank_only:
         if award_relation != "dashboard_explorer_awards":
             raise HTTPException(status_code=503,detail="The award serving projection is unavailable.")
-        return f"""SELECT r.rowid AS explorer_row_id,({obligations_expr}) AS explorer_rank_obligations
-            FROM {award_relation} r WHERE {where_clause}
+        rank_relation,rank_identity = award_relation,"r.rowid"
+        if not any(filters.get(key) not in (None,"",[]) for key in ("q","search","query")):
+            try:
+                rank_columns = get_duck_table_columns("dashboard_explorer_rank")
+                needed_columns = {filter_column_map.get(str(key).strip().lower()) for key,value in filters.items()
+                                  if value not in (None,"",[])} - {None}
+                if rank_columns and needed_columns <= rank_columns:
+                    rank_relation,rank_identity = "dashboard_explorer_rank","r._explorer_row_id"
+            except Exception:
+                pass
+        return f"""SELECT {rank_identity} AS explorer_row_id,({obligations_expr}) AS explorer_rank_obligations
+            FROM {rank_relation} r WHERE {where_clause}
             ORDER BY explorer_rank_obligations DESC NULLS LAST,r.contract_id
             LIMIT ? OFFSET ?""", params + [row_limit,offset]
 

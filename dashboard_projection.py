@@ -87,6 +87,9 @@ def build_explorer_projection(conn):
         elif column in native_fields:
             selected.append(quoted)
     selected.append('UPPER(TRIM(CAST(market_segment AS VARCHAR))) AS _explorer_market_domain')
+    totals = [f'COALESCE(TRY_CAST("{column}" AS DOUBLE),0.0)' for column in sorted(columns)
+              if re.fullmatch(r'obligations_fy[0-9]{4}',column)]
+    selected.append('(' + (' + '.join(totals) or '0.0') + ') AS _explorer_all_year_obligations')
     started = time.monotonic()
     logger = logging.getLogger('mimir-api')
     logger.info('EXPLORER PROJECTION BUILD fields=%s',len(selected))
@@ -95,6 +98,28 @@ def build_explorer_projection(conn):
     logger.info('EXPLORER PROJECTION READY rows=%s seconds=%.3f',
                 conn.execute('SELECT COUNT(*) FROM dashboard_explorer_awards').fetchone()[0],
                 time.monotonic()-started)
+    # Append one domain at a time. This clusters a compact ranking lane without
+    # an external wide sort (and its unbounded temporary-storage requirement).
+    rank_started = time.monotonic()
+    rank_fields = {
+        'contract_id','vendor_name','vendor_cage','parent_agency','sub_agency',
+        'city','state','country','place_of_performance_city','place_of_performance_state',
+        'place_of_performance_country','place_of_performance_zip','market_segment',
+        'platform_family','psc','naics_code',
+    }
+    rank_columns = [column for column in columns if column in rank_fields or
+        re.fullmatch(r'(obligations|action_count)_fy[0-9]{4}',column)]
+    rank_columns += ['_explorer_market_domain','_explorer_all_year_obligations']
+    rank_select = 'rowid AS _explorer_row_id,' + ','.join('"'+c.replace('"','""')+'"' for c in rank_columns)
+    conn.execute('CREATE OR REPLACE TABLE dashboard_explorer_rank AS SELECT '
+                 + rank_select + ' FROM dashboard_explorer_awards WHERE FALSE')
+    domains = conn.execute('SELECT DISTINCT _explorer_market_domain FROM dashboard_explorer_awards').fetchall()
+    for (domain,) in domains:
+        conn.execute('INSERT INTO dashboard_explorer_rank SELECT ' + rank_select
+                     + ' FROM dashboard_explorer_awards WHERE _explorer_market_domain IS NOT DISTINCT FROM ?', [domain])
+    logger.info('EXPLORER RANK READY rows=%s seconds=%.3f',
+                conn.execute('SELECT COUNT(*) FROM dashboard_explorer_rank').fetchone()[0],
+                time.monotonic()-rank_started)
 
 
 def financial_sql(floor_relation="dashboard_cache_floor", include_psc=True):
