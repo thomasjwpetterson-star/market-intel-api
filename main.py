@@ -4579,7 +4579,10 @@ def build_contract_awards_explorer_query_from_actions(
     payload: ExplorerRequest,
     row_limit: int,
     offset: int = 0,
-    count_only: bool = False
+    count_only: bool = False,
+    rank_only: bool = False,
+    contract_ids=None,
+    award_keys=None,
 ):
     actual_cols = get_duck_table_columns("v_transactions")
     if not actual_cols:
@@ -4794,6 +4797,9 @@ def build_contract_awards_explorer_query_from_actions(
 
     select_clause = ", ".join(select_parts) or "f.contract_id"
 
+    source_bound = ""
+    if contract_ids is not None:
+        source_bound = " WHERE contract_id IN (" + ",".join(["?"] * len(contract_ids)) + ")"
     source_ctes = f"""
         WITH source_actions AS NOT MATERIALIZED (
             SELECT
@@ -4830,7 +4836,7 @@ def build_contract_awards_explorer_query_from_actions(
                 {col_or_null("year", sql_type="INTEGER")},
                 COALESCE(TRY_CAST({quote_ident("spend_amount")} AS DOUBLE), 0.0) AS spend_amount,
                 {award_type_source_expr} AS award_type_code
-            FROM v_transactions
+            FROM v_transactions{source_bound}
         ),
         keyed_actions AS NOT MATERIALIZED (
             SELECT
@@ -4847,7 +4853,7 @@ def build_contract_awards_explorer_query_from_actions(
                 ) AS effective_award_key
             FROM source_actions
         ),
-        selected_actions AS NOT MATERIALIZED (
+        selected_actions AS {'MATERIALIZED' if contract_ids is not None else 'NOT MATERIALIZED'} (
             SELECT *
             FROM keyed_actions
             WHERE {selected_where_clause}
@@ -4872,10 +4878,21 @@ def build_contract_awards_explorer_query_from_actions(
     row_limit = safe_int(row_limit, 50, 1, 500_000)
     offset = safe_int(offset, 0, 0, 10_000_000)
 
+    if rank_only:
+        return source_ctes + """
+            SELECT effective_award_key, contract_id FROM selected_contracts
+            ORDER BY obligations_in_selected_period_usd DESC NULLS LAST, contract_id
+            LIMIT ? OFFSET ?
+        """, params + [row_limit, offset]
+
+    candidate_bound = ""
+    if award_keys is not None:
+        candidate_bound = " WHERE effective_award_key IN (" + ",".join(["?"] * len(award_keys)) + ")"
+
     detail_ctes = f"""
         , candidate_contracts AS (
             SELECT *
-            FROM selected_contracts
+            FROM selected_contracts{candidate_bound}
             ORDER BY obligations_in_selected_period_usd DESC NULLS LAST, contract_id
             LIMIT ? OFFSET ?
         ),
@@ -4980,6 +4997,9 @@ def build_contract_awards_explorer_query_from_actions(
         FROM final_rows f
         ORDER BY COALESCE(f.obligations_in_selected_period_usd, 0) DESC NULLS LAST, f.contract_id
     """
+    params = (list(contract_ids) if contract_ids is not None else []) + params
+    if award_keys is not None:
+        params.extend(award_keys)
     params.extend([row_limit, offset])
     return sql, params
 
@@ -5616,6 +5636,15 @@ def build_explorer_query(
 
 def fetch_explorer_page(payload, row_limit, offset=0, sanitize=True):
     read_options = {} if sanitize else {'sanitize':False}
+    def read_ranked_page(rank_sql,rank_params,followup):
+        result = duck_fetch_df(rank_sql,rank_params,followup=followup,**read_options)
+        if result.empty:
+            fields = [str(c).strip().lower() for c in (payload.columns or [])
+                      if str(c).strip().lower() in CONTRACT_AWARD_SYNTHETIC_COLUMNS]
+            # Empty ranked pages still expose the requested customer headers,
+            # including in CSV; internal rank identities are never data fields.
+            result = result.reindex(columns=fields or EXPLORER_DEFAULT_COLUMNS[CONTRACT_AWARD_EXPLORER_TABLE])
+        return result
     sql,params = build_explorer_query(payload,row_limit=row_limit,offset=offset)
     if payload.table == CONTRACT_AWARD_EXPLORER_TABLE and 'ranked_awards AS MATERIALIZED' in sql:
         rank_sql,rank_params = build_contract_awards_explorer_query_from_rollup(
@@ -5629,7 +5658,24 @@ def fetch_explorer_page(payload, row_limit, offset=0, sanitize=True):
             # even when the account's maximum allowance is 100,000 rows.
             bound_sql = detail_sql.replace(' IN (?)', ' IN ('+','.join(['?']*len(identities))+')', 1)
             return bound_sql,identities
-        return duck_fetch_df(rank_sql,rank_params,followup=followup,**read_options)
+        return read_ranked_page(rank_sql,rank_params,followup)
+    if payload.table == CONTRACT_AWARD_EXPLORER_TABLE and 'source_actions AS NOT MATERIALIZED' in sql:
+        rank_sql,rank_params = build_contract_awards_explorer_query_from_actions(
+            payload,row_limit,offset,rank_only=True)
+        detail_sql,detail_params = build_contract_awards_explorer_query_from_actions(
+            payload,row_limit,0,contract_ids=[None],award_keys=[None])
+        def action_followup(ranked):
+            contracts = list(dict.fromkeys(ranked['contract_id']))
+            keys = list(ranked['effective_award_key'])
+            # Resolve item/source matches on narrow fields first. Bind the
+            # actual contracts before reading lifetime descriptions, retaining
+            # native award keys and the original selected-action predicates.
+            bound_sql = detail_sql.replace('WHERE contract_id IN (?)',
+                'WHERE contract_id IN ('+','.join(['?']*len(contracts))+')',1)
+            bound_sql = bound_sql.replace('WHERE effective_award_key IN (?)',
+                'WHERE effective_award_key IN ('+','.join(['?']*len(keys))+')',1)
+            return bound_sql,contracts+detail_params[1:-3]+keys+[len(keys),0]
+        return read_ranked_page(rank_sql,rank_params,action_followup)
     return duck_fetch_df(sql,params,**read_options)
 
 

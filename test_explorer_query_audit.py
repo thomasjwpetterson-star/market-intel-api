@@ -190,6 +190,50 @@ def test_award_filters_agree_across_preview_count_page_and_csv(explorer,filters,
         assert actual['base_award_description']==wanted['base_award_description']
 
 
+@pytest.mark.parametrize('filters',[{'platform_family':['__MISSING__']},{'nsn':'9999999999999'}])
+def test_empty_award_export_keeps_requested_customer_headers(explorer,filters):
+    db,ns,calls=explorer
+    fields=['contract_id','obligations_in_selected_period_usd','base_award_description']
+    payload=SimpleNamespace(table='v_contract_awards_enriched',columns=fields,filters=filters)
+    response=ns['explorer_export'](payload,BackgroundTasks(),SimpleNamespace(headers={
+        'X-Mimir-Export-Key':'local-test-key','X-Mimir-Plan-Tier':'lite'}))
+    with open(response.path,newline='') as f:rows=list(csv.reader(f))
+    assert rows==[fields]
+    assert response.headers['x-export-row-count']=='0'
+
+
+@pytest.mark.parametrize('offset',[0,1,4])
+def test_item_award_details_bind_actual_contracts_and_keep_native_values(explorer,offset):
+    db,ns,calls=explorer
+    # Two native award identities can share a reported contract identifier.
+    db.execute("UPDATE v_transactions SET contract_id='A' WHERE contract_id='B'")
+    fields=sorted(ns['CONTRACT_AWARD_SYNTHETIC_COLUMNS'])
+    payload=SimpleNamespace(table='v_contract_awards_enriched',columns=fields,
+        filters={'nsn':'1234-00-000-0001','year':[2025]},limit=2,offset=offset)
+    sql,params=ns['build_contract_awards_explorer_query_from_actions'](payload,2,offset)
+    expected=ns['df_sanitize_for_json'](db.execute(sql,params).fetchdf())
+    captured=[]
+    original=ns['duck_fetch_df']
+    def fetch(sql,params,followup=None,**kw):
+        def details(ranked):
+            query,values=followup(ranked)
+            captured.append((ranked,query,values))
+            return query,values
+        return original(sql,params,followup=details,**kw)
+    ns['duck_fetch_df']=fetch
+    actual=ns['fetch_explorer_page'](payload,2,offset)
+    pd.testing.assert_frame_equal(actual.reset_index(drop=True),expected.reset_index(drop=True))
+    assert calls[-1]['followup']
+    assert len(captured)==1
+    ranked,detail_sql,detail_params=captured[0]
+    assert None not in detail_params
+    contracts=list(dict.fromkeys(ranked['contract_id']))
+    assert detail_params[:len(contracts)]==contracts
+    assert 'FROM v_transactions WHERE contract_id IN (' in detail_sql
+    assert 'selected_actions AS MATERIALIZED' in detail_sql
+    assert detail_params[-2:]==[len(ranked),0]
+
+
 GENERIC_CASES=[
     ('v_transactions',{'platform_family':['3DELRR']},4),
     ('v_transactions',{'vendor_cage':['11111','22222'],'year':[2025]},4),
