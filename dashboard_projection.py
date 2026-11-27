@@ -87,6 +87,21 @@ def build_item_filter_projection(conn):
             time.monotonic()-started)
 
 
+def explorer_item_action_scope(columns):
+    def value(column):
+        return '"'+column+'"' if column in columns else 'CAST(NULL AS VARCHAR)'
+    key = f'''COALESCE(NULLIF(TRIM(CAST({value('award_key')} AS VARCHAR)),''),
+        CONCAT(COALESCE(NULLIF(TRIM(CAST({value('source_system')} AS VARCHAR)),''),'UNKNOWN'),
+        '|PIID|',COALESCE(NULLIF(TRIM(CAST({value('contract_id')} AS VARCHAR)),''),'<NULL>'),
+        '|CAGE|',COALESCE(NULLIF(TRIM(CAST({value('vendor_cage')} AS VARCHAR)),''),'<NULL>')))'''
+    item_fields = sorted(columns & {'nsn','niin','source_of_supply','part_number'})
+    has_item = ' OR '.join('"'+c+'" IS NOT NULL' for c in item_fields) or 'FALSE'
+    # Keep every lifetime action for an item-associated native award, including
+    # earlier actions that have no item fields or reported contract identifier.
+    scope = f'{key} IN (SELECT DISTINCT {key} FROM v_transactions WHERE {has_item})'
+    return key,scope
+
+
 def build_explorer_action_projection(conn):
     relations = {row[0] for row in conn.execute('SHOW TABLES').fetchall()}
     if 'v_transactions' not in relations:
@@ -104,17 +119,12 @@ def build_explorer_action_projection(conn):
         'spend_amount','award_type_code','award_type','award_type_description',
     }
     selected = ['"'+c+'"' for c in sorted(columns & fields)]
-    def value(column):
-        return '"'+column+'"' if column in columns else 'CAST(NULL AS VARCHAR)'
-    key = f'''COALESCE(NULLIF(TRIM(CAST({value('award_key')} AS VARCHAR)),''),
-        CONCAT(COALESCE(NULLIF(TRIM(CAST({value('source_system')} AS VARCHAR)),''),'UNKNOWN'),
-        '|PIID|',COALESCE(NULLIF(TRIM(CAST({value('contract_id')} AS VARCHAR)),''),'<NULL>'),
-        '|CAGE|',COALESCE(NULLIF(TRIM(CAST({value('vendor_cage')} AS VARCHAR)),''),'<NULL>')))'''
+    key,scope = explorer_item_action_scope(columns)
     selected.extend(['ROW_NUMBER() OVER () AS _explorer_action_row_id',key+' AS _explorer_award_key'])
     started = time.monotonic()
     logging.getLogger('mimir-api').info('EXPLORER ACTION PROJECTION BUILD fields=%s',len(selected))
     conn.execute('CREATE OR REPLACE TABLE dashboard_explorer_actions AS SELECT '
-                 + ','.join(selected) + ' FROM v_transactions')
+                 + ','.join(selected) + ' FROM v_transactions WHERE '+scope)
     logging.getLogger('mimir-api').info('EXPLORER ACTION PROJECTION READY rows=%s seconds=%.3f',
         conn.execute('SELECT COUNT(*) FROM dashboard_explorer_actions').fetchone()[0],time.monotonic()-started)
 
@@ -194,7 +204,9 @@ def build_explorer_projection(conn, checkpoint_stage=None):
 def verify_explorer_projection(conn):
     relations = {row[0] for row in conn.execute('SHOW TABLES').fetchall()}
     if 'dashboard_explorer_actions' in relations:
-        native_actions = conn.execute('SELECT COUNT(*) FROM v_transactions').fetchone()[0]
+        columns = {r[0] for r in conn.execute('DESCRIBE v_transactions').fetchall()}
+        _,scope = explorer_item_action_scope(columns)
+        native_actions = conn.execute('SELECT COUNT(*) FROM v_transactions WHERE '+scope).fetchone()[0]
         prepared_actions = conn.execute('SELECT COUNT(*) FROM dashboard_explorer_actions').fetchone()[0]
         if native_actions != prepared_actions:
             raise RuntimeError('Explorer action rows differ from the native serving records.')

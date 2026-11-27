@@ -4594,8 +4594,10 @@ def build_contract_awards_explorer_query_from_actions(
     if not actual_cols:
         raise HTTPException(status_code=503, detail="v_transactions is not available yet. Reload may still be running.")
     action_relation = 'v_transactions'
+    active_item_filter = any(key in {'nsn','niin','part_number','source_of_supply'}
+        and value not in (None,'',[]) for key,value in (payload.filters or {}).items())
     try:
-        prepared_cols = get_duck_table_columns('dashboard_explorer_actions') if use_prepared else set()
+        prepared_cols = get_duck_table_columns('dashboard_explorer_actions') if use_prepared and active_item_filter else set()
     except Exception:
         prepared_cols = set()
     if {'_explorer_action_row_id','_explorer_award_key'} <= prepared_cols:

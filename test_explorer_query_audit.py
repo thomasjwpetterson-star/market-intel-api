@@ -303,6 +303,29 @@ def test_action_row_selection_retains_lifetime_rows_and_fallback_award_keys(expl
     assert a['base_award_description']=='Earlier native base'
 
 
+def test_item_projection_excludes_unrelated_awards_without_hiding_source_column_results(explorer):
+    db,ns,calls=explorer
+    db.execute("UPDATE v_transactions SET nsn=NULL,niin=NULL,part_number=NULL,source_of_supply=NULL WHERE award_key='F'")
+    build_explorer_action_projection(db)
+    assert db.execute('SELECT COUNT(*) FROM dashboard_explorer_actions').fetchone()[0]==10
+    assert db.execute("SELECT COUNT(*) FROM dashboard_explorer_actions WHERE award_key='F'").fetchone()[0]==0
+    fields=['award_key','contract_id','source_of_supply','lifetime_obligations_usd','number_of_actions_in_selected_period']
+    payload=SimpleNamespace(table='v_contract_awards_enriched',columns=fields,
+        filters={'year':[2025]},limit=2,offset=2)
+    sql,params=ns['build_contract_awards_explorer_query_from_actions'](payload,50,use_prepared=False)
+    expected=ns['df_sanitize_for_json'](db.execute(sql,params).fetchdf())
+    actual=ns['fetch_explorer_page'](payload,50)
+    pd.testing.assert_frame_equal(actual,expected)
+    assert set(actual.award_key)==set('ABCDEF')
+    assert ns['explorer_count'](payload)['count']==6
+    page=ns['explorer_page'](payload)
+    assert [r['award_key'] for r in page]==list(actual.award_key)[2:4]
+    response=ns['explorer_export'](payload,BackgroundTasks(),SimpleNamespace(headers={
+        'X-Mimir-Export-Key':'local-test-key','X-Mimir-Plan-Tier':'lite'}))
+    with open(response.path,newline='')as f:exported=list(csv.DictReader(f))
+    assert set(r['award_key'] for r in exported)==set('ABCDEF')
+
+
 GENERIC_CASES=[
     ('v_transactions',{'platform_family':['3DELRR']},4),
     ('v_transactions',{'vendor_cage':['11111','22222'],'year':[2025]},4),
