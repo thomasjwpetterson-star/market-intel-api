@@ -4340,6 +4340,7 @@ INTERNAL_DUCK_RELATIONS = {
     NSN_OPPORTUNITY_DETAIL_TABLE,
     "dashboard_psc", "dashboard_naics", "dashboard_explorer_awards", "dashboard_explorer_rank",
     "dashboard_explorer_nsn_filter", "dashboard_explorer_niin_filter",
+    "dashboard_explorer_actions",
 }
 
 ALLOWED_EXPLORER_COLUMNS = {
@@ -4584,10 +4585,19 @@ def build_contract_awards_explorer_query_from_actions(
     rank_only: bool = False,
     contract_ids=None,
     award_keys=None,
+    action_ids=None,
+    use_prepared=True,
 ):
     actual_cols = get_duck_table_columns("v_transactions")
     if not actual_cols:
         raise HTTPException(status_code=503, detail="v_transactions is not available yet. Reload may still be running.")
+    action_relation = 'v_transactions'
+    try:
+        prepared_cols = get_duck_table_columns('dashboard_explorer_actions') if use_prepared else set()
+    except Exception:
+        prepared_cols = set()
+    if {'_explorer_action_row_id','_explorer_award_key'} <= prepared_cols:
+        action_relation,actual_cols = 'dashboard_explorer_actions',prepared_cols
 
     requested_cols = payload.columns or EXPLORER_DEFAULT_COLUMNS[CONTRACT_AWARD_EXPLORER_TABLE]
     selected_fields = [str(c).strip().lower() for c in requested_cols if str(c).strip().lower() in CONTRACT_AWARD_SYNTHETIC_COLUMNS]
@@ -4804,11 +4814,21 @@ def build_contract_awards_explorer_query_from_actions(
     select_clause = ", ".join(select_parts) or "f.contract_id"
 
     source_bound = ""
-    if contract_ids is not None:
+    if action_ids is not None:
+        source_bound = ' WHERE "_explorer_action_row_id" IN (' + ','.join(['?']*len(action_ids)) + ')'
+    elif contract_ids is not None:
         source_bound = " WHERE contract_id IN (" + ",".join(["?"] * len(contract_ids)) + ")"
+    effective_key = '''COALESCE(NULLIF(TRIM(CAST(award_key AS VARCHAR)), ''),
+        CONCAT(COALESCE(NULLIF(TRIM(CAST(source_system AS VARCHAR)), ''), 'UNKNOWN'),
+        '|PIID|',COALESCE(NULLIF(TRIM(CAST(contract_id AS VARCHAR)), ''), '<NULL>'),
+        '|CAGE|',COALESCE(NULLIF(TRIM(CAST(vendor_cage AS VARCHAR)), ''), '<NULL>')))'''
+    if action_relation == 'dashboard_explorer_actions':
+        effective_key = '_explorer_award_key'
     source_ctes = f"""
         WITH source_actions AS NOT MATERIALIZED (
             SELECT
+                {col_or_null('_explorer_action_row_id',sql_type='BIGINT')},
+                {col_or_null('_explorer_award_key')},
                 {col_or_null("award_key")},
                 {col_or_null("source_system")},
                 {col_or_null("contract_id")},
@@ -4842,24 +4862,15 @@ def build_contract_awards_explorer_query_from_actions(
                 {col_or_null("year", sql_type="INTEGER")},
                 COALESCE(TRY_CAST({quote_ident("spend_amount")} AS DOUBLE), 0.0) AS spend_amount,
                 {award_type_source_expr} AS award_type_code
-            FROM v_transactions{source_bound}
+            FROM {action_relation}{source_bound}
         ),
         keyed_actions AS NOT MATERIALIZED (
             SELECT
                 *,
-                COALESCE(
-                    NULLIF(TRIM(CAST(award_key AS VARCHAR)), ''),
-                    CONCAT(
-                        COALESCE(NULLIF(TRIM(CAST(source_system AS VARCHAR)), ''), 'UNKNOWN'),
-                        '|PIID|',
-                        COALESCE(NULLIF(TRIM(CAST(contract_id AS VARCHAR)), ''), '<NULL>'),
-                        '|CAGE|',
-                        COALESCE(NULLIF(TRIM(CAST(vendor_cage AS VARCHAR)), ''), '<NULL>')
-                    )
-                ) AS effective_award_key
+                {effective_key} AS effective_award_key
             FROM source_actions
         ),
-        selected_actions AS {'MATERIALIZED' if contract_ids is not None else 'NOT MATERIALIZED'} (
+        selected_actions AS {'MATERIALIZED' if contract_ids is not None or action_ids is not None else 'NOT MATERIALIZED'} (
             SELECT *
             FROM keyed_actions
             WHERE {selected_where_clause}
@@ -4885,6 +4896,18 @@ def build_contract_awards_explorer_query_from_actions(
     offset = safe_int(offset, 0, 0, 10_000_000)
 
     if rank_only:
+        if action_relation == 'dashboard_explorer_actions':
+            return source_ctes + '''
+                , ranked_action_awards AS MATERIALIZED (
+                    SELECT * FROM selected_contracts
+                    ORDER BY obligations_in_selected_period_usd DESC NULLS LAST,contract_id
+                    LIMIT ? OFFSET ?
+                )
+                SELECT c.effective_award_key,c.contract_id,LIST(a._explorer_action_row_id) AS action_row_ids
+                FROM ranked_action_awards c JOIN keyed_actions a ON a.effective_award_key=c.effective_award_key
+                GROUP BY c.effective_award_key,c.contract_id,c.obligations_in_selected_period_usd
+                ORDER BY c.obligations_in_selected_period_usd DESC NULLS LAST,c.contract_id
+            ''',params+[row_limit,offset]
         return source_ctes + """
             SELECT effective_award_key, contract_id FROM selected_contracts
             ORDER BY obligations_in_selected_period_usd DESC NULLS LAST, contract_id
@@ -5003,7 +5026,8 @@ def build_contract_awards_explorer_query_from_actions(
         FROM final_rows f
         ORDER BY COALESCE(f.obligations_in_selected_period_usd, 0) DESC NULLS LAST, f.contract_id
     """
-    params = (list(contract_ids) if contract_ids is not None else []) + params
+    bound_values = action_ids if action_ids is not None else contract_ids
+    params = (list(bound_values) if bound_values is not None else []) + params
     if award_keys is not None:
         params.extend(award_keys)
     params.extend([row_limit, offset])
@@ -5675,19 +5699,27 @@ def fetch_explorer_page(payload, row_limit, offset=0, sanitize=True):
     if payload.table == CONTRACT_AWARD_EXPLORER_TABLE and 'source_actions AS NOT MATERIALIZED' in sql:
         rank_sql,rank_params = build_contract_awards_explorer_query_from_actions(
             payload,row_limit,offset,rank_only=True)
+        prepared_actions = 'FROM dashboard_explorer_actions' in rank_sql
         detail_sql,detail_params = build_contract_awards_explorer_query_from_actions(
-            payload,row_limit,0,contract_ids=[None],award_keys=[None])
+            payload,row_limit,0,contract_ids=None if prepared_actions else [None],
+            action_ids=[None] if prepared_actions else None,award_keys=[None])
         def action_followup(ranked):
             contracts = list(dict.fromkeys(ranked['contract_id']))
             keys = list(ranked['effective_award_key'])
             # Resolve item/source matches on narrow fields first. Bind the
             # actual contracts before reading lifetime descriptions, retaining
             # native award keys and the original selected-action predicates.
-            bound_sql = detail_sql.replace('WHERE contract_id IN (?)',
-                'WHERE contract_id IN ('+','.join(['?']*len(contracts))+')',1)
+            if prepared_actions:
+                identities = list(dict.fromkeys(int(v) for ids in ranked['action_row_ids'] for v in ids))
+                bound_sql = detail_sql.replace('WHERE "_explorer_action_row_id" IN (?)',
+                    'WHERE "_explorer_action_row_id" IN ('+','.join(['?']*len(identities))+')',1)
+            else:
+                identities = contracts
+                bound_sql = detail_sql.replace('WHERE contract_id IN (?)',
+                    'WHERE contract_id IN ('+','.join(['?']*len(contracts))+')',1)
             bound_sql = bound_sql.replace('WHERE effective_award_key IN (?)',
                 'WHERE effective_award_key IN ('+','.join(['?']*len(keys))+')',1)
-            return bound_sql,contracts+detail_params[1:-3]+keys+[len(keys),0]
+            return bound_sql,identities+detail_params[1:-3]+keys+[len(keys),0]
         return read_ranked_page(rank_sql,rank_params,action_followup)
     return duck_fetch_df(sql,params,**read_options)
 
@@ -5798,7 +5830,9 @@ def private_research_dataset(payload: Dict[str,Any],request: Request,response: R
         query=ExplorerRequest(**body);reader=lambda sql,params:df_sanitize_for_json(programme_read_df(sql,params)).to_dict(orient='records')
         count_only=operation=='count';limit=safe_int(body.get('limit'),11,1,501);offset=safe_int(body.get('offset'),0,0,100000)
         if query.table=='v_contract_awards_enriched':
-            sql,params=build_contract_awards_explorer_query_from_actions(query,row_limit=limit,offset=offset,count_only=count_only)
+            # The current-v7 adapter rewrites its native action relation. Keep
+            # that authority boundary when prepared Explorer rows are present.
+            sql,params=build_contract_awards_explorer_query_from_actions(query,row_limit=limit,offset=offset,count_only=count_only,use_prepared=False)
             reader=wrap_action_read(reference,reader,program)
             meta['source_grain']='AVAILABLE_ACTIONS_GROUPED_BY_NATIVE_AWARD_KEY'
         else:

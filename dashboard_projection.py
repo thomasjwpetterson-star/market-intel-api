@@ -87,8 +87,41 @@ def build_item_filter_projection(conn):
             time.monotonic()-started)
 
 
+def build_explorer_action_projection(conn):
+    relations = {row[0] for row in conn.execute('SHOW TABLES').fetchall()}
+    if 'v_transactions' not in relations:
+        return
+    columns = {row[0] for row in conn.execute('DESCRIBE v_transactions').fetchall()}
+    if 'contract_id' not in columns or 'spend_amount' not in columns:
+        return
+    fields = {
+        'award_key','source_system','contract_id','action_date','vendor_name','vendor_cage',
+        'parent_agency','sub_agency','city','state','country','place_of_performance_city',
+        'place_of_performance_state','place_of_performance_country','place_of_performance_zip',
+        'market_segment','platform_family','psc','naics_code','description','base_award_description',
+        'action_description','source_of_supply','nsn','niin','nsn_source_system',
+        'nsn_derivation_method','nsn_resolution_status','location_quality','part_number','year',
+        'spend_amount','award_type_code','award_type','award_type_description',
+    }
+    selected = ['"'+c+'"' for c in sorted(columns & fields)]
+    def value(column):
+        return '"'+column+'"' if column in columns else 'CAST(NULL AS VARCHAR)'
+    key = f'''COALESCE(NULLIF(TRIM(CAST({value('award_key')} AS VARCHAR)),''),
+        CONCAT(COALESCE(NULLIF(TRIM(CAST({value('source_system')} AS VARCHAR)),''),'UNKNOWN'),
+        '|PIID|',COALESCE(NULLIF(TRIM(CAST({value('contract_id')} AS VARCHAR)),''),'<NULL>'),
+        '|CAGE|',COALESCE(NULLIF(TRIM(CAST({value('vendor_cage')} AS VARCHAR)),''),'<NULL>')))'''
+    selected.extend(['ROW_NUMBER() OVER () AS _explorer_action_row_id',key+' AS _explorer_award_key'])
+    started = time.monotonic()
+    logging.getLogger('mimir-api').info('EXPLORER ACTION PROJECTION BUILD fields=%s',len(selected))
+    conn.execute('CREATE OR REPLACE TABLE dashboard_explorer_actions AS SELECT '
+                 + ','.join(selected) + ' FROM v_transactions')
+    logging.getLogger('mimir-api').info('EXPLORER ACTION PROJECTION READY rows=%s seconds=%.3f',
+        conn.execute('SELECT COUNT(*) FROM dashboard_explorer_actions').fetchone()[0],time.monotonic()-started)
+
+
 def build_explorer_projection(conn):
     build_item_filter_projection(conn)
+    build_explorer_action_projection(conn)
     # Prepare only Explorer's native fields, at the unchanged award grain.
     # Avoid sorting wide descriptions during startup. Cast annual measures once
     # using the exact same types/TRY_CAST semantics as the request builder.
@@ -156,6 +189,18 @@ def build_explorer_projection(conn):
 
 def verify_explorer_projection(conn):
     relations = {row[0] for row in conn.execute('SHOW TABLES').fetchall()}
+    if 'dashboard_explorer_actions' in relations:
+        native_actions = conn.execute('SELECT COUNT(*) FROM v_transactions').fetchone()[0]
+        prepared_actions = conn.execute('SELECT COUNT(*) FROM dashboard_explorer_actions').fetchone()[0]
+        if native_actions != prepared_actions:
+            raise RuntimeError('Explorer action rows differ from the native serving records.')
+        ids = [r[0] for r in conn.execute('SELECT _explorer_action_row_id FROM dashboard_explorer_actions LIMIT 10').fetchall()]
+        if ids:
+            matched = conn.execute('SELECT COUNT(*) FROM dashboard_explorer_actions WHERE _explorer_action_row_id IN ('
+                + ','.join(['?']*len(ids))+')',ids).fetchone()[0]
+            if matched != len(ids):
+                raise RuntimeError('Explorer action identities differ from the committed serving records.')
+        logging.getLogger('mimir-api').info('EXPLORER ACTION IDENTITY VERIFIED rows=%s sampled=%s',prepared_actions,len(ids))
     if 'dashboard_explorer_rank' not in relations:
         return
     native_count=conn.execute('SELECT COUNT(*) FROM dashboard_explorer_awards').fetchone()[0]

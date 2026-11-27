@@ -3,6 +3,7 @@ import ast
 import csv
 import datetime
 import hmac
+import json
 import logging
 import os
 from pathlib import Path
@@ -21,7 +22,7 @@ from starlette.responses import FileResponse
 
 from analytical_admission import ANALYTICAL_DEADLINE
 from analytical_deadline import query_deadline
-from dashboard_projection import build_code_projection, build_explorer_projection, build_item_filter_projection
+from dashboard_projection import build_code_projection, build_explorer_projection, build_item_filter_projection, build_explorer_action_projection
 from explorer_page_read import read_snapshot_page
 
 
@@ -199,6 +200,7 @@ def test_prepared_item_key_filters_preserve_native_formats_and_values(explorer,f
     for contract,value in zip('ABCDEF',['1234000000001','1234-00-000-0001','000000001','1','NSN:1234-00-000-0001',None]):
         db.execute(f'UPDATE v_transactions SET {field}=? WHERE contract_id=?',[value,contract])
     build_item_filter_projection(db)
+    build_explorer_action_projection(db)
     # Repeated actions share a raw key; neither formatting nor missing keys
     # may cause records to disappear or match a different native field.
     assert db.execute(f'SELECT COUNT(*) FROM dashboard_explorer_{field}_filter').fetchone()[0]==5
@@ -217,6 +219,7 @@ def test_prepared_item_key_filters_preserve_native_formats_and_values(explorer,f
     with open(response.path,newline='') as f:prepared_csv=list(csv.reader(f))
     db.execute('DROP TABLE dashboard_explorer_nsn_filter')
     db.execute('DROP TABLE dashboard_explorer_niin_filter')
+    db.execute('DROP TABLE dashboard_explorer_actions')
     assert ns['explorer_preview'](payload)==prepared
     assert ns['explorer_count'](payload)==prepared_count
     assert ns['explorer_page'](payload)==prepared_page
@@ -242,11 +245,13 @@ def test_item_award_details_bind_actual_contracts_and_keep_native_values(explore
     db,ns,calls=explorer
     # Two native award identities can share a reported contract identifier.
     db.execute("UPDATE v_transactions SET contract_id='A' WHERE contract_id='B'")
+    db.execute('DROP TABLE dashboard_explorer_actions')
     fields=sorted(ns['CONTRACT_AWARD_SYNTHETIC_COLUMNS'])
     payload=SimpleNamespace(table='v_contract_awards_enriched',columns=fields,
         filters={'nsn':'1234-00-000-0001','year':[2025]},limit=2,offset=offset)
     sql,params=ns['build_contract_awards_explorer_query_from_actions'](payload,2,offset)
     expected=ns['df_sanitize_for_json'](db.execute(sql,params).fetchdf())
+    build_explorer_action_projection(db)
     captured=[]
     original=ns['duck_fetch_df']
     def fetch(sql,params,followup=None,**kw):
@@ -262,11 +267,40 @@ def test_item_award_details_bind_actual_contracts_and_keep_native_values(explore
     assert len(captured)==1
     ranked,detail_sql,detail_params=captured[0]
     assert None not in detail_params
-    contracts=list(dict.fromkeys(ranked['contract_id']))
-    assert detail_params[:len(contracts)]==contracts
-    assert 'FROM v_transactions WHERE contract_id IN (' in detail_sql
+    identities=list(dict.fromkeys(int(v) for ids in ranked['action_row_ids'] for v in ids))
+    assert detail_params[:len(identities)]==identities
+    assert 'FROM dashboard_explorer_actions WHERE "_explorer_action_row_id" IN (' in detail_sql
     assert 'selected_actions AS MATERIALIZED' in detail_sql
     assert detail_params[-2:]==[len(ranked),0]
+    plan=json.loads(db.execute('EXPLAIN (FORMAT JSON) '+detail_sql,detail_params).fetchone()[1])
+    def action_scans(nodes):
+        for node in nodes:
+            extra=node.get('extra_info',{})
+            if 'dashboard_explorer_actions' in extra.get('Table',''):yield extra
+            yield from action_scans(node.get('children',[]))
+    scans=list(action_scans(plan))
+    assert scans and all('_explorer_action_row_id' in str(scan.get('Filters','')) for scan in scans)
+
+
+def test_action_row_selection_retains_lifetime_rows_and_fallback_award_keys(explorer):
+    db,ns,calls=explorer
+    db.execute("UPDATE v_transactions SET contract_id=NULL,nsn=NULL,niin=NULL,part_number=NULL,source_of_supply=NULL WHERE award_key='A' AND year=2024")
+    db.execute("UPDATE v_transactions SET base_award_description=CASE WHEN year=2024 THEN 'Earlier native base' ELSE NULL END WHERE award_key='A'")
+    db.execute("UPDATE v_transactions SET award_key=NULL WHERE award_key='C'")
+    fields=sorted(ns['CONTRACT_AWARD_SYNTHETIC_COLUMNS'])
+    payload=SimpleNamespace(table='v_contract_awards_enriched',columns=fields,
+        filters={'nsn':'1234000000001','year':[2025]})
+    db.execute('DROP TABLE dashboard_explorer_actions')
+    sql,params=ns['build_contract_awards_explorer_query_from_actions'](payload,50)
+    expected=ns['df_sanitize_for_json'](db.execute(sql,params).fetchdf())
+    build_explorer_action_projection(db)
+    actual=ns['fetch_explorer_page'](payload,50)
+    pd.testing.assert_frame_equal(actual,expected)
+    assert any(r['award_key']=='UNKNOWN|PIID|C|CAGE|11111' for r in actual.to_dict('records'))
+    a=actual[actual['award_key']=='A'].iloc[0]
+    assert a['number_of_actions_in_selected_period']==1
+    assert a['obligations_in_selected_period_usd']==-10.5
+    assert a['base_award_description']=='Earlier native base'
 
 
 GENERIC_CASES=[

@@ -98,10 +98,12 @@ class PrivateDatasetRoutes(unittest.TestCase):
         app=FastAPI();app.post('/query')(ns['private_research_dataset']);return TestClient(app),ns
     def test_current_v7_private_award_counts_and_buyer_totals_share_actions(self):
         from unittest.mock import patch
+        from dashboard_projection import build_explorer_action_projection
         import os
         for column,kind in [('action_date','DATE'),('description','VARCHAR'),('base_award_description','VARCHAR'),('action_description','VARCHAR')]:self.db.execute('ALTER TABLE v_transactions ADD COLUMN '+column+' '+kind)
         self.db.execute("UPDATE v_transactions SET action_date='2025-01-01'")
         [self.db.execute('ALTER TABLE v_summary ADD COLUMN '+c+' VARCHAR')for c in ['psc_description','naics_code','naics_description']]
+        build_explorer_action_projection(self.db)
         client,ns=self.client();body={'table':'v_contract_awards_enriched','columns':['award_key','contract_id','sub_agency','platform_family','obligations_in_selected_period_usd','number_of_actions_in_selected_period'],'filters':{'platform_family':'AMRAAM','year':[2025],'sub_agency':'DEPARTMENT OF THE AIR FORCE'},'limit':10}
         with patch.dict(os.environ,{'MIMIR_EXPORT_PROXY_SECRET':'fixture'}),patch('private_platform_reference.reference_for',return_value=self.ref):
             self.assertEqual(client.post('/query',json=body).status_code,401)
