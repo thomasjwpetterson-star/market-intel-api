@@ -51,7 +51,7 @@ from geographic_market import (
     resolve_state,
     state_market_follow_up_intent,
 )
-from market_segment import MarketSegmentStore, market_segment_follow_up_intent, resolve_market_segment
+from market_segment import market_segment_follow_up_intent
 from shared_market_explorer import SharedMarketExplorerStore
 from market_record_search import (
     MarketRecordSearchStore,
@@ -150,7 +150,7 @@ JOB_DEADLINE = contextvars.ContextVar(
 )
 REQUEST_CONTEXT = contextvars.ContextVar("ask_mimir_request_context", default=None)
 ANSWER_MODE = contextvars.ContextVar("ask_mimir_answer_mode", default="deep_research")
-MARKET_MAPPING_SOURCE = contextvars.ContextVar("ask_mimir_market_mapping_source", default="current")
+MARKET_MAPPING_SOURCE = contextvars.ContextVar("ask_mimir_market_mapping_source", default="market_explorer")
 CONVERSATION_INSTRUCTIONS = (
     "\n\nCONVERSATION MODE OUTPUT CONTRACT: Answer the user's actual question in "
     "roughly 200–400 words. Start with the answer and the key time period; then give "
@@ -2671,7 +2671,9 @@ class ActiveScope(BaseModel):
 class AskRequest(BaseModel):
     messages: List[ChatMessage] = Field(min_length=1, max_length=20)
     answer_mode: Literal["conversation", "deep_research"] = "deep_research"
-    market_mapping_source: Literal["current", "market_explorer"] = "current"
+    # Accept legacy clients that still submit "current", but route both values
+    # through the same Market Explorer component pinned by the platform root.
+    market_mapping_source: Literal["current", "market_explorer"] = "market_explorer"
     active_scope: Optional[ActiveScope] = None
     article_context: Optional[str] = Field(
         default=None,
@@ -2704,6 +2706,7 @@ class AskRequest(BaseModel):
     )
     @model_validator(mode="after")
     def required_template_value_is_present(self) -> "AskRequest":
+        self.market_mapping_source = "market_explorer"
         if self.messages[-1].role != "user":
             raise ValueError("The last message must contain the user's question.")
         message = incomplete_template_message(self.messages[-1].content)
@@ -2887,12 +2890,7 @@ class LabRuntime:
             ),
         )
         self.state_industrial_base = StateIndustrialBaseStore(data_root)
-        self.market_segments = MarketSegmentStore(data_root)
-        self.shared_market_segments = (
-            SharedMarketExplorerStore()
-            if os.getenv("ASK_MIMIR_MARKET_EXPLORER_PILOT", "0") == "1"
-            else None
-        )
+        self.shared_market_segments = SharedMarketExplorerStore()
         self.market_records = MarketRecordSearchStore(data_root)
         self.product_intelligence = ProductIntelligenceStore(
             data_root,
@@ -2923,7 +2921,6 @@ class LabRuntime:
             self.capability_discovery.ontology_path,
             *self.capability_discovery.paths.values(),
             *self.state_industrial_base.paths.values(),
-            *self.market_segments.paths.values(),
             *self.market_records.paths.values(),
             self.product_intelligence.definitions_path,
             *self.product_intelligence.paths.values(),
@@ -2934,17 +2931,14 @@ class LabRuntime:
             )
             if platform_context_manifest.exists():
                 release_sources.add(platform_context_manifest)
-        if self.market_segments.precomputed_dir is not None:
-            market_segment_manifest = self.market_segments.precomputed_dir / "manifest.json"
-            if market_segment_manifest.exists():
-                release_sources.add(market_segment_manifest)
-        if self.shared_market_segments is not None:
-            release_sources.update((
-                self.shared_market_segments.root / "pin.json",
-                self.shared_market_segments.root / "public.json.gz",
-                self.shared_market_segments.root / "technology-corpus.json.gz",
-            ))
-            release_sources.update((self.shared_market_segments.root / "details").glob("*.json.gz"))
+        release_sources.update((
+            self.shared_market_segments.root / "pin.json",
+            self.shared_market_segments.root / "public.json.gz",
+            self.shared_market_segments.root / "technology-corpus.json.gz",
+        ))
+        release_sources.update((self.shared_market_segments.root / "details").glob("*.json.gz"))
+        if self.shared_market_segments.scope_activity:
+            release_sources.add(self.shared_market_segments.root / "scope-membership-proof.json.gz")
         if self.capability_discovery.precomputed_dir is not None:
             capability_manifest = (
                 self.capability_discovery.precomputed_dir / "manifest.json"
@@ -3226,12 +3220,7 @@ class LabRuntime:
         elif name == "get_state_industrial_base":
             result = self.state_industrial_base.get(**arguments)
         elif name == "get_market_segment":
-            if MARKET_MAPPING_SOURCE.get() == "market_explorer":
-                if self.shared_market_segments is None:
-                    raise RuntimeError("Market Explorer pilot is not configured")
-                result = self.shared_market_segments.get(**arguments)
-            else:
-                result = self.market_segments.get(**arguments)
+            result = self.shared_market_segments.get(**arguments)
         elif name == "get_market_record_search":
             limit = int(arguments.get("limit", 50))
             spec = {key: value for key, value in arguments.items() if key != "limit"}
@@ -3921,11 +3910,8 @@ def _candidate_workflows(request: AskRequest) -> List[RoutingCandidate]:
             "defined_competitive_market",
             0.98,
         ))
-    segment_id = (
-        runtime.shared_market_segments.resolve(latest)
-        if request.market_mapping_source == "market_explorer" and runtime.shared_market_segments is not None
-        else resolve_market_segment(latest)
-    )
+    shared_market = getattr(runtime, "shared_market_segments", None)
+    segment_id = shared_market.resolve(latest) if shared_market is not None else None
     if segment_id and not record_search:
         add(_routing_candidate(
             "market_segment_intelligence",
@@ -6370,11 +6356,6 @@ def accept_ask_job(payload: AskRequest, request: Request, response: Response) ->
     access = access_from_request(request)
     if payload.answer_mode == "conversation" and not conversation_available_for_access(access):
         raise HTTPException(status_code=403, detail="Conversation mode is not available for this account.")
-    if payload.market_mapping_source == "market_explorer" and (
-        os.getenv("ASK_MIMIR_MARKET_EXPLORER_PILOT", "0") != "1"
-        or not conversation_available_for_access(access)
-    ):
-        raise HTTPException(status_code=403, detail="Market Explorer mapping pilot is not available for this account.")
     fingerprint = hashlib.sha256(payload.model_dump_json().encode()).hexdigest()
     try:
         payload = request_with_server_conversation_scope(payload, access)
@@ -7121,7 +7102,7 @@ def generate_answer(
     draft_text: Callable[[str | None], None] | None = None,
 ) -> Dict[str, Any]:
     token = ANSWER_MODE.set(request.answer_mode)
-    market_token = MARKET_MAPPING_SOURCE.set(request.market_mapping_source)
+    market_token = MARKET_MAPPING_SOURCE.set("market_explorer")
     try:
         return _generate_answer_impl(request, progress, routing, draft_text)
     finally:
@@ -7241,11 +7222,10 @@ def _generate_answer_impl(
         if selected_workflow == "capability_discovery"
         else None
     )
+    shared_market = getattr(runtime, "shared_market_segments", None)
     segment_id = (
-        (runtime.shared_market_segments.resolve(latest_question)
-         if request.market_mapping_source == "market_explorer" and runtime.shared_market_segments is not None
-         else resolve_market_segment(latest_question))
-        if selected_workflow == "market_segment_intelligence"
+        shared_market.resolve(latest_question)
+        if selected_workflow == "market_segment_intelligence" and shared_market is not None
         else None
     )
     if platform_query_candidate or platform_comparison_candidate or ground_vehicle_position_request:
@@ -7840,11 +7820,7 @@ def _generate_answer_impl(
             "Synthesizing activity across the included platforms and programs",
             68,
         )
-        market_prompt = (
-            SHARED_MARKET_SEGMENT_PROMPT
-            if request.market_mapping_source == "market_explorer"
-            else MARKET_SEGMENT_PROMPT
-        )
+        market_prompt = SHARED_MARKET_SEGMENT_PROMPT
         response = client.responses.create(
             model=runtime.model,
             instructions=market_prompt,

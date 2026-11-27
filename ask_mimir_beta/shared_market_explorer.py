@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,12 @@ LEGACY_SCOPE_IDS = {
     "US_C_UAS": "US_COUNTER_UAS",
     "US_NAVAL_SHIPBUILDING": "domain:naval",
 }
+SCOPE_GATES = (
+    "sourceFinancialConservation", "nativeSliceConservation", "priorMappings",
+    "priorWorkSubjects", "priorHolds", "activeScopeExtents", "dlaOverlapEligibility",
+    "nativeEntityLinks", "metadataMainBinding", "stockLinks", "priorReaderScopeParity",
+    "outputCatalogInventory", "scopeActivityMetricUnionParity",
+)
 
 
 def _read(path: Path) -> dict[str, Any]:
@@ -62,6 +69,34 @@ class SharedMarketExplorerStore:
         for bundle in (self.market, self.technology):
             if bundle.get("candidateId") != release or bundle.get("mainRelease") != main:
                 raise ValueError("Market and technology artifacts do not match the platform pin")
+        self.scope_activity = self.market.get("scopeActivity")
+        policy = self.market.get("scopeMembership")
+        if bool(policy) != bool(self.scope_activity):
+            raise ValueError("Market activity and its membership policy must be published together")
+        if self.scope_activity and (
+            self.scope_activity.get("schemaVersion") != 1
+            or self.scope_activity.get("candidateId") != release
+            or self.scope_activity.get("mainRelease") != main
+            or self.scope_activity.get("bindingSha256") != policy.get("bindingSha256")
+            or self.scope_activity.get("proofSha256") != policy.get("proofSha256")
+            or self.scope_activity.get("recordCountGrain") != "distinct-source-record-across-period"
+            or policy.get("activityMode") != "activity"
+            or policy.get("includeShared") is not True
+        ):
+            raise ValueError("Market activity does not match the approved native membership policy")
+        if self.scope_activity:
+            proof_path = self.root / "scope-membership-proof.json.gz"
+            if (not proof_path.exists()
+                or self.pin.get("scope_membership_proof_sha256") != policy["proofSha256"]
+                or hashlib.sha256(proof_path.read_bytes()).hexdigest() != policy["proofSha256"]):
+                raise ValueError("Market activity lacks its version-pinned membership proof")
+            proof = _read(proof_path)
+            if (proof.get("status") != "PASSED"
+                or proof.get("candidateId") != release
+                or proof.get("mainRelease") != main
+                or proof.get("bindingSha256") != policy["bindingSha256"]
+                or any(proof.get("gates", {}).get(name) != "PASSED" for name in SCOPE_GATES)):
+                raise ValueError("Market activity membership proof has failed gates")
         overlay = json.loads(Path(__file__).with_name("market_explorer_taxonomy_overlay.json").read_text())
         if overlay.get("schema_version") != 1 or not overlay.get("source_sha256"):
             raise ValueError("Market Explorer taxonomy overlay is incomplete")
@@ -80,6 +115,8 @@ class SharedMarketExplorerStore:
         for node in overlay["added"]:
             if node["id"] in present:
                 self.nodes[node["id"]] = node
+        if self.scope_activity and set(self.scope_activity.get("scopes", {})) != set(self.nodes):
+            raise ValueError("Market activity does not cover the published taxonomy")
         self.technologies = {node["id"]: node for node in self.technology["nodes"]}
         if len(self.nodes) < len(self.market["direct"]) or len(self.technologies) != len(self.technology["nodes"]):
             raise ValueError("Duplicate Market Explorer scope ID")
@@ -123,11 +160,30 @@ class SharedMarketExplorerStore:
             result.extend(self._descendants(child))
         return result
 
-    def _market_totals(self, ids: list[str]) -> dict[str, dict[str, Any]]:
+    def _market_totals(self, scope_id: str) -> dict[str, dict[str, Any]]:
+        if self.scope_activity:
+            selected = self.scope_activity.get("scopes", {}).get(scope_id)
+            if not isinstance(selected, dict):
+                raise ValueError(f"Market activity is missing scope {scope_id}")
+            totals = {}
+            for source, value in selected.items():
+                years = value.get("byFiscalYear")
+                if not isinstance(years, dict) or type(value.get("records")) is not int or value["records"] < 0:
+                    raise ValueError("Market activity has an invalid source measure")
+                amounts = {year: Decimal(str(amount)) for year, amount in years.items()}
+                if any(not re.fullmatch(r"20\d{2}", year) or not amount.is_finite()
+                       for year, amount in amounts.items()) or sum(amounts.values(), Decimal(0)) != Decimal(str(value.get("netUsd"))):
+                    raise ValueError("Market activity fiscal amounts do not reconcile")
+                totals[source] = {
+                    "records": value["records"],
+                    "by_fiscal_year_usd": {year: str(amount) for year, amount in sorted(amounts.items())},
+                    "net_usd": str(value["netUsd"]),
+                }
+            return totals
         amounts: dict[str, dict[str, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
         records: dict[str, int] = defaultdict(int)
-        for scope_id in ids:
-            for source, value in self.nodes[scope_id].get("sources", {}).items():
+        for child_id in self._descendants(scope_id):
+            for source, value in self.nodes[child_id].get("sources", {}).items():
                 direct = value.get("direct", {})
                 records[source] += int(direct.get("records") or 0)
                 for year, amount in direct.get("byFiscalYear", {}).items():
@@ -208,6 +264,7 @@ class SharedMarketExplorerStore:
 
     def get(self, segment_id: str, limit: int = 30) -> dict[str, Any]:
         bounded = min(max(int(limit), 1), 75)
+        segment_id = LEGACY_SCOPE_IDS.get(segment_id, segment_id)
         if segment_id.startswith("TECH:"):
             node = self.technologies.get(segment_id[5:])
             if node is None:
@@ -246,8 +303,8 @@ class SharedMarketExplorerStore:
         return {
             "context_type": "shared_market_explorer_segment",
             "scope": {"segment_id": segment_id, "display_name": node["name"], "level": node["level"], "parent": node.get("parent")},
-            "source_totals": self._market_totals(scope_ids),
-            "subsegments": [{"id": child, "name": self.nodes[child]["name"], "source_totals": self._market_totals(self._descendants(child))}
+            "source_totals": self._market_totals(segment_id),
+            "subsegments": [{"id": child, "name": self.nodes[child]["name"], "source_totals": self._market_totals(child)}
                             for child in self.children.get(segment_id, ())],
             "leading_records": details.get("leading_records", {}),
             "leading_companies": details.get("leading_companies", {}),
