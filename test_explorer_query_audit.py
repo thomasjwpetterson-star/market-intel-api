@@ -197,6 +197,41 @@ def test_prepared_source_first_pages_counts_and_fallbacks_keep_native_semantics(
     assert 'dashboard_explorer_source_pages' not in sql
 
 
+def test_cached_source_routes_share_numeric_details_and_export_native_fields(explorer):
+    from dashboard_projection import build_explorer_source_pages
+    db,ns,calls=explorer
+    fields=sorted(ns['CONTRACT_AWARD_SYNTHETIC_COLUMNS'])
+    payload=SimpleNamespace(table='v_contract_awards_enriched',columns=fields,
+        filters={'source_of_supply':'S9C'},limit=2,offset=1)
+    expected=ns['explorer_preview'](payload)
+    build_explorer_source_pages(db,minimum_actions=1,page_size=1000)
+    ns['GLOBAL_CACHE']['dashboard_projection']={'explorer_source_pages':{'S9C':1000}}
+    original_fetch=ns['duck_fetch_df']
+    lookups=[]
+    def bounded_fetch(sql,params,followup=None,**kwargs):
+        def resolve(ranked):
+            next_read=followup(ranked)
+            assert len(next_read)==3
+            lookups.append(next_read[0])
+            return next_read
+        return original_fetch(sql,params,followup=resolve if followup else None,**kwargs)
+    ns['duck_fetch_df']=bounded_fetch
+    assert ns['explorer_preview'](payload)==expected
+    assert 'dashboard_explorer_source_pages' in calls[-1]['sql'] and calls[-1]['followup']
+    assert ns['explorer_page'](payload)==expected[1:3]
+    assert ns['explorer_count'](payload)=={'count':len(expected)}
+    response=ns['explorer_export'](payload,BackgroundTasks(),SimpleNamespace(headers={
+        'X-Mimir-Export-Key':'local-test-key','X-Mimir-Plan-Tier':'lite'}))
+    with open(response.path,newline='') as file:
+        exported=list(csv.DictReader(file))
+    assert [row['contract_id'] for row in exported]==[row['contract_id'] for row in expected]
+    assert 'dashboard_explorer_source_pages' in calls[-1]['sql'] and calls[-1]['followup']
+    for row,wanted in zip(exported,expected):
+        assert float(row['obligations_in_selected_period_usd'])==wanted['obligations_in_selected_period_usd']
+        assert row['base_award_description']==wanted['base_award_description']
+    assert len(lookups)==3 and all('_explorer_action_row_id FROM dashboard_explorer_actions' in sql for sql in lookups)
+
+
 @pytest.mark.parametrize('filters,expected', AWARD_CASES)
 def test_award_filters_agree_across_preview_count_page_and_csv(explorer,filters,expected):
     db,ns,calls=explorer

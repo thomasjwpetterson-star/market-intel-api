@@ -5763,7 +5763,8 @@ def fetch_explorer_page(payload, row_limit, offset=0, sanitize=True):
     if payload.table == CONTRACT_AWARD_EXPLORER_TABLE and 'source_actions AS NOT MATERIALIZED' in sql:
         rank_sql,rank_params = build_contract_awards_explorer_query_from_actions(
             payload,row_limit,offset,rank_only=True)
-        prepared_actions = 'FROM dashboard_explorer_actions' in rank_sql
+        prepared_actions = any('FROM '+table in rank_sql for table in
+            ('dashboard_explorer_actions','dashboard_explorer_source_pages'))
         def action_followup(ranked):
             contracts = list(dict.fromkeys(ranked['contract_id']))
             keys = list(ranked['effective_award_key'])
