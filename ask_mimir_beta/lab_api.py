@@ -4291,20 +4291,8 @@ def access_from_request(request: Request) -> AccessContext:
 
 
 def conversation_available_for_access(access: AccessContext) -> bool:
-    """Admit a private Conversation pilot only for explicitly named accounts.
-
-    A UI preview is not an access boundary: both policy discovery and job
-    submission must use the same verified subject from the website proxy.
-    An enabled switch without an allowlist remains closed.
-    """
-    if os.getenv("ASK_MIMIR_CONVERSATION_ENABLED", "0") != "1" or not access.authenticated:
-        return False
-    allowed_subjects = {
-        subject.strip()
-        for subject in os.getenv("ASK_MIMIR_CONVERSATION_SUBJECT_ALLOWLIST", "").split(",")
-        if subject.strip()
-    }
-    return access.subject_id in allowed_subjects
+    """Conversation shares the normal Ask admission and allowance policy."""
+    return bool(access.subject_id)
 
 
 def _decode_base64url(value: str) -> bytes:
@@ -6350,9 +6338,6 @@ def create_ask_job(
 
 def accept_ask_job(payload: AskRequest, request: Request, response: Response) -> Dict[str, Any]:
     request_started_perf = time.perf_counter()
-    if (payload.answer_mode == "conversation"
-            and os.getenv("ASK_MIMIR_CONVERSATION_ENABLED", "0") != "1"):
-        raise HTTPException(status_code=422, detail="Conversation mode is not available yet.")
     access = access_from_request(request)
     if payload.answer_mode == "conversation" and not conversation_available_for_access(access):
         raise HTTPException(status_code=403, detail="Conversation mode is not available for this account.")
@@ -9241,9 +9226,6 @@ def ask_direct(payload: AskRequest, request: Request) -> Dict[str, Any]:
     # Synchronous evaluation must not bypass production admission control.
     if os.getenv("ASK_MIMIR_ENABLE_SYNC_EVALUATION", "0") != "1":
         raise HTTPException(status_code=410, detail="Use /api/ask/jobs to submit and recover research requests.")
-    if (payload.answer_mode == "conversation"
-            and os.getenv("ASK_MIMIR_CONVERSATION_ENABLED", "0") != "1"):
-        raise HTTPException(status_code=422, detail="Conversation mode is not available yet.")
     request_started_perf = time.perf_counter()
     access = access_from_request(request)
     if payload.answer_mode == "conversation" and not conversation_available_for_access(access):

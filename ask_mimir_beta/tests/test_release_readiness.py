@@ -1112,15 +1112,15 @@ class DurableJobTests(unittest.TestCase):
             for identity in ["guest:scanner", "guest:scanner", "guest:human"]:
                 response = client.get("/api/beta/policy", headers={"X-Ask-Mimir-Proxy-Secret": "test-secret", "X-Ask-Mimir-Subject": identity, "X-Ask-Mimir-Tier": "public"})
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.json()["answer_modes"], ["deep_research"])
+                self.assertEqual(response.json()["answer_modes"], ["conversation", "deep_research"])
             with patch.dict(os.environ, {
                 "ASK_MIMIR_CONVERSATION_ENABLED": "1",
                 "ASK_MIMIR_CONVERSATION_SUBJECT_ALLOWLIST": "user:pilot-account",
             }):
                 for subject, tier, expected in [
-                    ("guest:human", "public", ["deep_research"]),
+                    ("guest:human", "public", ["conversation", "deep_research"]),
                     ("pilot-account", "professional", ["conversation", "deep_research"]),
-                    ("other-account", "professional", ["deep_research"]),
+                    ("other-account", "professional", ["conversation", "deep_research"]),
                 ]:
                     response = client.get("/api/beta/policy", headers={
                         "X-Ask-Mimir-Proxy-Secret": "test-secret",
@@ -1133,34 +1133,15 @@ class DurableJobTests(unittest.TestCase):
         self.assertEqual(self.ledger.connection.execute("SELECT count(*) FROM ask_conversations").fetchone()[0], 0)
         self.manager.executor.submit.assert_not_called()
 
-    def test_conversation_request_is_rejected_before_job_creation_when_disabled(self):
-        request = self.request.model_copy(update={"answer_mode": "conversation"})
-        with patch.dict(os.environ, {"ASK_MIMIR_CONVERSATION_ENABLED": "0"}):
-            with self.assertRaises(HTTPException) as failure:
-                lab.accept_ask_job(request, None, None)
-        self.assertEqual(failure.exception.status_code, 422)
-        self.assertEqual(self.ledger.used_today("alice"), 0)
-        self.manager.executor.submit.assert_not_called()
-
-    def test_conversation_request_is_rejected_for_unlisted_account(self):
-        request = self.request.model_copy(update={"answer_mode": "conversation"})
+    def test_conversation_is_available_under_normal_ask_access_without_pilot_allowlist(self):
         with patch.dict(os.environ, {
-            "ASK_MIMIR_CONVERSATION_ENABLED": "1",
-            "ASK_MIMIR_CONVERSATION_SUBJECT_ALLOWLIST": "user:pilot-account",
-        }), patch.object(lab, "access_from_request", return_value=self.access):
-            with self.assertRaises(HTTPException) as failure:
-                lab.accept_ask_job(request, None, None)
-        self.assertEqual(failure.exception.status_code, 403)
-        self.assertEqual(self.ledger.used_today("alice"), 0)
-        self.manager.executor.submit.assert_not_called()
-
-    def test_conversation_switch_without_allowlist_stays_closed(self):
-        access = AccessContext("user:pilot-account", "professional", True)
-        with patch.dict(os.environ, {
-            "ASK_MIMIR_CONVERSATION_ENABLED": "1",
+            "ASK_MIMIR_CONVERSATION_ENABLED": "0",
             "ASK_MIMIR_CONVERSATION_SUBJECT_ALLOWLIST": "",
         }):
-            self.assertFalse(lab.conversation_available_for_access(access))
+            self.assertTrue(lab.conversation_available_for_access(
+                AccessContext("guest:human", "public", False)))
+            self.assertTrue(lab.conversation_available_for_access(
+                AccessContext("user:customer", "professional", True)))
 
     def test_routing_analytics_failure_does_not_block_job_admission(self):
         with patch.object(
