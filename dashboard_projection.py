@@ -46,10 +46,16 @@ def build_subcontract_projection(conn):
         FROM v_transactions t SEMI JOIN dashboard_network n ON t.award_key=n.award_key
         ORDER BY t.award_key''')
     conn.execute('CREATE INDEX dashboard_award_buyers_key ON dashboard_award_buyers(award_key)')
+    build_code_projection(conn)
+
+
+def build_code_projection(conn):
     conn.execute('''CREATE OR REPLACE TABLE dashboard_psc AS
         SELECT CAST(psc_code AS VARCHAR) AS psc_code,MAX(psc_description) AS psc_desc
         FROM v_summary GROUP BY 1''')
-
+    conn.execute('''CREATE OR REPLACE TABLE dashboard_naics AS
+        SELECT CAST(naics_code AS VARCHAR) AS naics_code,MAX(naics_description) AS naics_description
+        FROM v_summary GROUP BY 1''')
 
 def financial_sql(floor_relation="dashboard_cache_floor", include_psc=True):
     """Native item evidence, with history only before the current action floor."""

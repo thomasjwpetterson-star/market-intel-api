@@ -49,7 +49,7 @@ def dashboard(monkeypatch):
         prime_name VARCHAR,prime_cage VARCHAR,sub_name VARCHAR,sub_cage VARCHAR,description VARCHAR,subaward_value DOUBLE,action_date VARCHAR,source_dedup_key VARCHAR)''')
     for key,year in [('A',2025),('A',2024),('D',2025)]:
         db.execute('INSERT INTO v_network VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',[key,'Virginia Class (SSN 774)',year,'AIR','1510','Prime','11111',"O'BRIEN COMPONENTS",'55555','Subcontract',20,'2025-02-28',key+str(year)])
-    db.execute("CREATE TABLE v_summary AS SELECT '1510' AS psc_code,'Aircraft' AS psc_description")
+    db.execute("CREATE TABLE v_summary AS SELECT '1510' AS psc_code,'Aircraft' AS psc_description,'336413' AS naics_code,'Aircraft parts' AS naics_description")
     ns=routes(db,monkeypatch)
     yield db,ns
     db.close()

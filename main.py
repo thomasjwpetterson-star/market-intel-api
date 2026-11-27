@@ -4334,6 +4334,7 @@ INTERNAL_DUCK_RELATIONS = {
     NSN_PRICE_SUMMARY_TABLE,
     NSN_OPPORTUNITY_SUMMARY_TABLE,
     NSN_OPPORTUNITY_DETAIL_TABLE,
+    "dashboard_psc", "dashboard_naics",
 }
 
 ALLOWED_EXPLORER_COLUMNS = {
@@ -4706,6 +4707,20 @@ def build_contract_awards_explorer_query_from_actions(
             award_type_source_expr = f"CAST({quote_ident(candidate)} AS VARCHAR)"
             break
 
+    # Prepared dictionaries are rebuilt atomically with each serving release.
+    # Re-grouping the full summary for 50 preview rows can exceed the analysis
+    # deadline even when the award selection itself is fast.
+    psc_relation, psc_description, naics_relation = "v_summary", "psc_description", "v_summary"
+    try:
+        if get_duck_table_columns("dashboard_psc"):
+            psc_relation, psc_description = "dashboard_psc", "psc_desc"
+        if get_duck_table_columns("dashboard_naics"):
+            naics_relation = "dashboard_naics"
+    except Exception:
+        # Standalone/native readers without the serving projection retain the
+        # same dictionary semantics against the original summary.
+        pass
+
     field_exprs = {
         "award_key": "f.award_key",
         "contract_id": "f.contract_id",
@@ -4924,14 +4939,14 @@ def build_contract_awards_explorer_query_from_actions(
             GROUP BY a.effective_award_key
         ),
         psc_map AS (
-            SELECT psc_code, MAX(psc_description) AS psc_description
-            FROM v_summary
+            SELECT psc_code, MAX({psc_description}) AS psc_description
+            FROM {psc_relation}
             WHERE psc_code IS NOT NULL
             GROUP BY psc_code
         ),
         naics_map AS (
             SELECT naics_code, MAX(naics_description) AS naics_description
-            FROM v_summary
+            FROM {naics_relation}
             WHERE naics_code IS NOT NULL
             GROUP BY naics_code
         ),
@@ -5152,6 +5167,20 @@ def build_contract_awards_explorer_query_from_rollup(
     row_limit = safe_int(row_limit, 50, 1, 500_000)
     offset = safe_int(offset, 0, 0, 10_000_000)
 
+    # Prepared dictionaries are rebuilt atomically with each serving release.
+    # Re-grouping the full summary for 50 preview rows can exceed the analysis
+    # deadline even when the award selection itself is fast.
+    psc_relation, psc_description, naics_relation = "v_summary", "psc_description", "v_summary"
+    try:
+        if get_duck_table_columns("dashboard_psc"):
+            psc_relation, psc_description = "dashboard_psc", "psc_desc"
+        if get_duck_table_columns("dashboard_naics"):
+            naics_relation = "dashboard_naics"
+    except Exception:
+        # Standalone/native readers without the serving projection retain the
+        # same dictionary semantics against the original summary.
+        pass
+
     field_exprs = {
         "award_key": "f.award_key",
         "contract_id": "f.contract_id",
@@ -5222,14 +5251,14 @@ def build_contract_awards_explorer_query_from_rollup(
             LIMIT ? OFFSET ?
         ),
         psc_map AS (
-            SELECT psc_code, MAX(psc_description) AS psc_description
-            FROM v_summary
+            SELECT psc_code, MAX({psc_description}) AS psc_description
+            FROM {psc_relation}
             WHERE psc_code IS NOT NULL
             GROUP BY psc_code
         ),
         naics_map AS (
             SELECT naics_code, MAX(naics_description) AS naics_description
-            FROM v_summary
+            FROM {naics_relation}
             WHERE naics_code IS NOT NULL
             GROUP BY naics_code
         )
