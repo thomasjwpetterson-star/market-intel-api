@@ -4085,7 +4085,71 @@ def _request_with_resolved_geographic_clarification(request: AskRequest) -> AskR
     return request.model_copy(update={"messages": [ChatMessage(role="user", content=question)]})
 
 
+def _pending_company_clarification(request: AskRequest) -> str | None:
+    if len(request.messages) < 3 or request.active_scope:
+        return None
+    latest = request.messages[-1].content.strip(" .?!")
+    previous = request.messages[-2]
+    if (previous.role != "assistant" or not latest or len(latest.split()) > 5
+            or re.match(r"^(?:tell|show|give|find|explain|what|which|who|how)\b", latest, re.IGNORECASE)
+            or not re.search(r"^Which .+ site did you mean\?", previous.content)):
+        return None
+    return previous.content
+
+
+def _request_with_resolved_company_clarification(request: AskRequest) -> AskRequest:
+    """Resolve a short reply against the sites just offered, not a global search."""
+    previous_answer = _pending_company_clarification(request)
+    if not previous_answer:
+        return request
+    latest = request.messages[-1].content.strip(" .?!")
+    # The clarification is deterministic and contains the exact offered CAGE
+    # options. A location must select one of those options; the global company
+    # directory can contain unrelated organizations at the same location.
+    offered = re.findall(
+        r"^\s*[-*]\s+(.+?)\s+\(CAGE\s+([A-Z0-9]{5})\)\s*$",
+        previous_answer,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if not offered:
+        return request
+    normalized_reply = re.sub(r"[^A-Z0-9]+", " ", latest.upper()).strip()
+    parent_labels = re.findall(
+        r"^\s*[-*]\s+(.+?\bparent view\s*\(\d+\s+sites?\))\s*$",
+        previous_answer,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if any(re.search(
+        rf"\b{re.escape(normalized_reply)}\b",
+        re.sub(r"[^A-Z0-9]+", " ", label.upper()).strip(),
+    ) for label in parent_labels):
+        return request
+    selected = [
+        cage.upper() for label, cage in offered
+        if normalized_reply == cage.upper()
+        or re.search(
+            rf"\b{re.escape(normalized_reply)}\b",
+            re.sub(r"[^A-Z0-9]+", " ", label.upper()).strip(),
+        )
+    ]
+    if len(set(selected)) != 1:
+        return request
+    return request.model_copy(update={
+        "messages": [ChatMessage(
+            role="user",
+            content=f"Tell me everything about this defense supplier site: CAGE {selected[0]}",
+        )],
+    })
+
+
 def routing_decision_for_request(request: AskRequest) -> RoutingDecision:
+    resolved_company_reply = _request_with_resolved_company_clarification(request)
+    if resolved_company_reply is request and _pending_company_clarification(request):
+        return _route(
+            "company_site_intelligence", "unmatched_company_clarification",
+            0.99, clarification_needed=True,
+        )
+    request = resolved_company_reply
     request = _request_with_resolved_geographic_clarification(request)
     candidates = _candidate_workflows(request)
     scope = request.active_scope
@@ -7058,6 +7122,7 @@ def answer_messages_for_request(
 
 def request_for_execution(request: AskRequest, routing: RoutingDecision) -> AskRequest:
     """Never let historical scope override the authoritative routing decision."""
+    request = _request_with_resolved_company_clarification(request)
     request = _request_with_resolved_geographic_clarification(request)
     scope = request.active_scope
     compatible = bool(scope and SCOPE_WORKFLOWS.get(scope.scope_type) == routing.workflow)
@@ -7111,6 +7176,23 @@ def _generate_answer_impl(
     )
     routing = routing or routing_decision_for_request(request)
     if routing.clarification_needed:
+        if routing.reason == "unmatched_company_clarification":
+            prior = _pending_company_clarification(request) or ""
+            return {
+                "answer": "I could not match that reply to one of the sites offered.\n\n" + prior,
+                "response_id": "company-site-disambiguation",
+                "model": "deterministic-resolution",
+                "release_id": runtime.store.manifest["release_id"],
+                "requires_clarification": True,
+                "answer_type": "clarification",
+                "tool_trace": [],
+                "answer_artifacts": {},
+                "latency_ms": 0.0,
+                "response_calls": 0,
+                "usage": None,
+                "usage_by_response": [],
+                "estimated_cost": None,
+            }
         return routing_clarification_result(routing)
     request = request_for_execution(request, routing)
     selected_workflow = routing.workflow
