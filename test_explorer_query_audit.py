@@ -256,20 +256,24 @@ def test_item_award_details_bind_actual_contracts_and_keep_native_values(explore
     original=ns['duck_fetch_df']
     def fetch(sql,params,followup=None,**kw):
         def details(ranked):
-            query,values=followup(ranked)
-            captured.append((ranked,query,values))
-            return query,values
+            lookup,lookup_values,resolve=followup(ranked)
+            assert '_explorer_award_key' not in lookup
+            def capture(matched):
+                query,values=resolve(matched)
+                captured.append((ranked,matched,query,values))
+                return query,values
+            return lookup,lookup_values,capture
         return original(sql,params,followup=details,**kw)
     ns['duck_fetch_df']=fetch
     actual=ns['fetch_explorer_page'](payload,2,offset)
     pd.testing.assert_frame_equal(actual.reset_index(drop=True),expected.reset_index(drop=True))
     assert calls[-1]['followup']
     assert len(captured)==1
-    ranked,detail_sql,detail_params=captured[0]
+    ranked,matched,detail_sql,detail_params=captured[0]
     assert None not in detail_params
-    identities=list(dict.fromkeys(int(v) for ids in ranked['action_row_ids'] for v in ids))
+    identities=list(dict.fromkeys(int(v) for v in matched['_explorer_action_row_id']))
     assert detail_params[:len(identities)]==identities
-    assert 'FROM dashboard_explorer_actions WHERE "_explorer_action_row_id" IN (' in detail_sql
+    assert 'FROM dashboard_explorer_actions WHERE "_explorer_action_row_id" = ?' in detail_sql
     assert 'selected_actions AS MATERIALIZED' in detail_sql
     assert detail_params[-2:]==[len(ranked),0]
     plan=json.loads(db.execute('EXPLAIN (FORMAT JSON) '+detail_sql,detail_params).fetchone()[1])
@@ -280,6 +284,59 @@ def test_item_award_details_bind_actual_contracts_and_keep_native_values(explore
             yield from action_scans(node.get('children',[]))
     scans=list(action_scans(plan))
     assert scans and all('_explorer_action_row_id' in str(scan.get('Filters','')) for scan in scans)
+    assert all('optional' not in str(scan.get('Filters','')) for scan in scans)
+
+
+@pytest.mark.parametrize('legacy_hash',[False,True])
+def test_hash_lookup_collisions_and_older_prepared_readers_keep_exact_native_awards(explorer,legacy_hash):
+    db,ns,calls=explorer
+    fields=sorted(ns['CONTRACT_AWARD_SYNTHETIC_COLUMNS'])
+    payload=SimpleNamespace(table='v_contract_awards_enriched',columns=fields,
+        filters={'nsn':'1234000000001','year':[2025]},limit=2,offset=1)
+    sql,params=ns['build_contract_awards_explorer_query_from_actions'](payload,2,1,use_prepared=False)
+    expected=ns['df_sanitize_for_json'](db.execute(sql,params).fetchdf())
+    if legacy_hash:db.execute('ALTER TABLE dashboard_explorer_actions DROP COLUMN _explorer_award_hash')
+    else:db.execute('UPDATE dashboard_explorer_actions SET _explorer_award_hash=0')
+    actual=ns['fetch_explorer_page'](payload,2,1)
+    pd.testing.assert_frame_equal(actual,expected)
+
+
+@pytest.mark.parametrize('source',['v_transactions','v_contracts_rolled'])
+def test_normalized_cage_reads_preserve_native_case_spacing_and_nulls(explorer,source):
+    db,ns,calls=explorer
+    db.execute("UPDATE "+source+" SET vendor_cage=' 11aB1 ' WHERE contract_id='A'")
+    db.execute("UPDATE "+source+" SET vendor_cage=NULL WHERE contract_id='F'")
+    build_explorer_projection(db)
+    fields=['contract_id','vendor_cage','obligations_in_selected_period_usd']
+    if source=='v_transactions':fields.append('source_of_supply')
+    for value in ['11ab1',['11ab1']]:
+        payload=SimpleNamespace(table='v_contract_awards_enriched',columns=fields,filters={'vendor_cage':value})
+        rows=ns['explorer_preview'](payload)
+        assert len(rows)==1 and rows[0]['contract_id']=='A'
+        assert rows[0]['vendor_cage']==' 11aB1 '
+        assert ns['explorer_count'](payload)['count']==1
+        assert '_explorer_vendor_cage' in calls[-1]['sql']
+
+
+@pytest.mark.parametrize('kind',['actions','rollup'])
+@pytest.mark.parametrize('selection',['duplicates','empty','large'])
+def test_bounded_detail_identity_sets_keep_native_semantics_and_large_export_queries_small(explorer,kind,selection):
+    db,ns,calls=explorer
+    fields=['contract_id','vendor_cage','base_award_description','latest_action_description','obligations_in_selected_period_usd']
+    payload=SimpleNamespace(table='v_contract_awards_enriched',columns=fields,filters={'year':[2025]})
+    table,column=('dashboard_explorer_actions','_explorer_action_row_id')if kind=='actions'else('dashboard_explorer_awards','_explorer_row_id')
+    identities=[int(r[0])for r in db.execute('SELECT '+column+' FROM '+table).fetchall()]
+    identities=identities*2 if selection=='duplicates'else [] if selection=='empty'else identities+list(range(1000,1300))
+    if kind=='actions':
+        sql,params=ns['build_contract_awards_explorer_query_from_actions'](payload,50,action_ids=identities,award_keys=list('ABCDEF'))
+    else:
+        sql,params=ns['build_contract_awards_explorer_query_from_rollup'](payload,50,row_ids=identities)
+    actual=db.execute(sql,params).fetchall()
+    expected=[]if selection=='empty'else db.execute('''SELECT contract_id,vendor_cage,base_award_description,
+        latest_action_description,obligations_fy2025 FROM v_contracts_rolled
+        ORDER BY obligations_fy2025 DESC,contract_id''').fetchall()
+    assert actual==expected
+    assert len(sql)<100000
 
 
 def test_action_row_selection_retains_lifetime_rows_and_fallback_award_keys(explorer):

@@ -4609,7 +4609,8 @@ def build_contract_awards_explorer_query_from_actions(
     def col_or_null(col: str, alias: Optional[str] = None, sql_type: str = "VARCHAR") -> str:
         null_flag = f'_explorer_{col}_is_null'
         if action_relation == 'dashboard_explorer_actions' and null_flag in actual_cols:
-            fallback = '_explorer_award_key' if col == 'award_key' else 'description'
+            fallback = ('_explorer_award_key' if col == 'award_key' else
+                        '_explorer_vendor_cage' if col == 'vendor_cage' else 'description')
             return (f'CASE WHEN {quote_ident(null_flag)} THEN NULL ELSE '
                     f'COALESCE({quote_ident(col)},{quote_ident(fallback)}) END AS {quote_ident(alias or col)}')
         return _source_expr(actual_cols, col, alias, sql_type)
@@ -4704,13 +4705,15 @@ def build_contract_awards_explorer_query_from_actions(
             continue
 
         if requested_col in {"vendor_cage", "cage_code", "cage"} and not isinstance(val, list):
-            selected_where.append(f"UPPER(TRIM(CAST({quote_ident(actual_col)} AS VARCHAR))) = ?")
+            expression = '_explorer_vendor_cage' if '_explorer_vendor_cage' in actual_cols else f"UPPER(TRIM(CAST({quote_ident(actual_col)} AS VARCHAR)))"
+            selected_where.append(expression+' = ?')
             params.append(str(val).strip().upper())
             continue
 
         if isinstance(val, list) and len(val) > 0:
             placeholders = ",".join(["?"] * len(val))
-            selected_where.append(f"UPPER(TRIM(CAST({quote_ident(actual_col)} AS VARCHAR))) IN ({placeholders})")
+            expression = '_explorer_vendor_cage' if actual_col=='vendor_cage' and '_explorer_vendor_cage' in actual_cols else f"UPPER(TRIM(CAST({quote_ident(actual_col)} AS VARCHAR)))"
+            selected_where.append(f"{expression} IN ({placeholders})")
             params.extend([str(v).strip().upper() for v in val])
             continue
 
@@ -4821,8 +4824,20 @@ def build_contract_awards_explorer_query_from_actions(
     select_clause = ", ".join(select_parts) or "f.contract_id"
 
     source_bound = ""
+    source_relation = action_relation
     if action_ids is not None:
-        source_bound = ' WHERE "_explorer_action_row_id" IN (' + ','.join(['?']*len(action_ids)) + ')'
+        action_ids = list(dict.fromkeys(action_ids))
+        if not action_ids:
+            source_relation = '(SELECT * FROM '+action_relation+' WHERE FALSE)'
+        elif len(action_ids) <= 256:
+            # A multi-ID IN becomes an optional scan filter in DuckDB. Point
+            # branches apply equality before wide fields are decoded; cap the
+            # branch count so large exports keep a bounded query-plan size.
+            source_relation = '('+' UNION ALL '.join(
+                'SELECT * FROM '+action_relation+' WHERE "_explorer_action_row_id" = ?'
+                for _ in action_ids)+')'
+        else:
+            source_bound = ' WHERE "_explorer_action_row_id" IN (' + ','.join(['?']*len(action_ids)) + ')'
     elif contract_ids is not None:
         source_bound = " WHERE contract_id IN (" + ",".join(["?"] * len(contract_ids)) + ")"
     effective_key = '''COALESCE(NULLIF(TRIM(CAST(award_key AS VARCHAR)), ''),
@@ -4836,6 +4851,8 @@ def build_contract_awards_explorer_query_from_actions(
             SELECT
                 {col_or_null('_explorer_action_row_id',sql_type='BIGINT')},
                 {col_or_null('_explorer_award_key')},
+                {col_or_null('_explorer_award_hash',sql_type='UINTEGER')},
+                {col_or_null('_explorer_vendor_cage')},
                 {col_or_null("award_key")},
                 {col_or_null("source_system")},
                 {col_or_null("contract_id")},
@@ -4869,7 +4886,7 @@ def build_contract_awards_explorer_query_from_actions(
                 {col_or_null("year", sql_type="INTEGER")},
                 COALESCE(TRY_CAST({quote_ident("spend_amount")} AS DOUBLE), 0.0) AS spend_amount,
                 {award_type_source_expr} AS award_type_code
-            FROM {action_relation}{source_bound}
+            FROM {source_relation}{source_bound}
         ),
         keyed_actions AS NOT MATERIALIZED (
             SELECT
@@ -4885,6 +4902,7 @@ def build_contract_awards_explorer_query_from_actions(
         selected_contracts AS (
             SELECT
                 effective_award_key,
+                MIN(_explorer_award_hash) AS award_hash,
                 MAX_BY(contract_id, TRY_CAST(action_date AS DATE)) AS contract_id,
                 SUM(spend_amount) AS obligations_in_selected_period_usd,
                 COUNT(*) AS number_of_actions_in_selected_period,
@@ -4903,6 +4921,11 @@ def build_contract_awards_explorer_query_from_actions(
     offset = safe_int(offset, 0, 0, 10_000_000)
 
     if rank_only:
+        if action_relation == 'dashboard_explorer_actions' and '_explorer_award_hash' in actual_cols:
+            return source_ctes + ''' SELECT effective_award_key,contract_id,award_hash
+                FROM selected_contracts
+                ORDER BY obligations_in_selected_period_usd DESC NULLS LAST,contract_id
+                LIMIT ? OFFSET ?''',params+[row_limit,offset]
         if action_relation == 'dashboard_explorer_actions':
             return source_ctes + '''
                 , ranked_action_awards AS MATERIALIZED (
@@ -5067,11 +5090,12 @@ def build_contract_awards_explorer_query_from_rollup(
     prepared_awards = award_relation == 'dashboard_explorer_awards'
     actual_cols = get_duck_table_columns(award_relation)
     decoders = []
-    for column in ('base_award_description','latest_action_description'):
+    for column in ('base_award_description','latest_action_description','vendor_cage'):
         flag = f'_explorer_{column}_is_null'
         if prepared_awards and flag in actual_cols:
+            fallback = '_explorer_vendor_cage' if column=='vendor_cage' else 'description'
             decoders.append(f'CASE WHEN {quote_ident(flag)} THEN NULL ELSE '
-                f'COALESCE({quote_ident(column)},description) END AS {quote_ident(column)}')
+                f'COALESCE({quote_ident(column)},{fallback}) END AS {quote_ident(column)}')
     if decoders:
         award_relation = '(SELECT * REPLACE ('+','.join(decoders)+') FROM dashboard_explorer_awards)'
     available_years = _rolled_contract_years(actual_cols)
@@ -5222,12 +5246,15 @@ def build_contract_awards_explorer_query_from_rollup(
 
         has_valid_filter = True
         if requested_col in {"vendor_cage", "cage_code", "cage"} and not isinstance(val, list):
-            where_parts.append(f"UPPER(TRIM(CAST(r.{quote_ident(actual_col)} AS VARCHAR))) = ?")
+            expression = 'r._explorer_vendor_cage' if '_explorer_vendor_cage' in actual_cols else f"UPPER(TRIM(CAST(r.{quote_ident(actual_col)} AS VARCHAR)))"
+            where_parts.append(expression+' = ?')
             params.append(str(val).strip().upper())
         elif isinstance(val, list) and val:
             placeholders = ",".join(["?"] * len(val))
             domain_column = (actual_col == "market_segment" and "_explorer_market_domain" in actual_cols)
-            expression = 'r._explorer_market_domain' if domain_column else f"UPPER(TRIM(CAST(r.{quote_ident(actual_col)} AS VARCHAR)))"
+            expression = ('r._explorer_market_domain' if domain_column else
+                'r._explorer_vendor_cage' if actual_col=='vendor_cage' and '_explorer_vendor_cage' in actual_cols else
+                f"UPPER(TRIM(CAST(r.{quote_ident(actual_col)} AS VARCHAR)))")
             where_parts.append(f"{expression} IN ({placeholders})")
             params.extend([str(v).strip().upper() for v in val])
         elif not isinstance(val, list):
@@ -5359,14 +5386,21 @@ def build_contract_awards_explorer_query_from_rollup(
     if row_ids is not None:
         if not prepared_awards:
             raise HTTPException(status_code=503,detail="The award serving projection is unavailable.")
+        row_ids = list(dict.fromkeys(row_ids))
         placeholders = ','.join(['?'] * len(row_ids))
+        point_source = award_relation
+        point_where = f' WHERE {row_identity} IN ({placeholders or "NULL"})'
+        if 0 < len(row_ids) <= 256:
+            point_source = '('+' UNION ALL '.join(
+                'SELECT * FROM '+award_relation+' r WHERE '+row_identity+' = ?' for _ in row_ids)+')'
+            point_where = ''
         candidate_sql = f"""
             SELECT r.*,
                 ({obligations_expr}) AS obligations_in_selected_period_usd,
                 ({actions_expr}) AS number_of_actions_in_selected_period,
                 {earliest_expr} AS earliest_action_date_in_selected_period,
                 {latest_expr} AS latest_action_date_in_selected_period
-            FROM {award_relation} r WHERE {row_identity} IN ({placeholders or 'NULL'})
+            FROM {point_source} r{point_where}
         """
         params = list(row_ids)
     elif prepared_awards:
@@ -5702,40 +5736,38 @@ def fetch_explorer_page(payload, row_limit, offset=0, sanitize=True):
     if payload.table == CONTRACT_AWARD_EXPLORER_TABLE and 'ranked_awards AS MATERIALIZED' in sql:
         rank_sql,rank_params = build_contract_awards_explorer_query_from_rollup(
             payload,row_limit,offset,rank_only=True)
-        detail_sql,_ = build_contract_awards_explorer_query_from_rollup(
-            payload,row_limit,offset,row_ids=[None])
         def followup(ranked):
             identities = [int(value) for value in ranked['explorer_row_id']]
-            # Bind only returned identities. NULL padding disables scan-level
-            # IN filtering; sizing to actual rows also keeps small exports small
-            # even when the account's maximum allowance is 100,000 rows.
-            bound_sql = detail_sql.replace(' IN (?)', ' IN ('+','.join(['?']*len(identities))+')', 1)
-            return bound_sql,identities
+            return build_contract_awards_explorer_query_from_rollup(
+                payload,row_limit,offset,row_ids=identities)
         return read_ranked_page(rank_sql,rank_params,followup)
     if payload.table == CONTRACT_AWARD_EXPLORER_TABLE and 'source_actions AS NOT MATERIALIZED' in sql:
         rank_sql,rank_params = build_contract_awards_explorer_query_from_actions(
             payload,row_limit,offset,rank_only=True)
         prepared_actions = 'FROM dashboard_explorer_actions' in rank_sql
-        detail_sql,detail_params = build_contract_awards_explorer_query_from_actions(
-            payload,row_limit,0,contract_ids=None if prepared_actions else [None],
-            action_ids=[None] if prepared_actions else None,award_keys=[None])
         def action_followup(ranked):
             contracts = list(dict.fromkeys(ranked['contract_id']))
             keys = list(ranked['effective_award_key'])
             # Resolve item/source matches on narrow fields first. Bind the
             # actual contracts before reading lifetime descriptions, retaining
             # native award keys and the original selected-action predicates.
+            def details(identities):
+                return build_contract_awards_explorer_query_from_actions(
+                    payload,len(keys),0,contract_ids=None if prepared_actions else identities,
+                    action_ids=identities if prepared_actions else None,award_keys=keys)
+            if prepared_actions and 'award_hash' in ranked.columns:
+                hashes = list(dict.fromkeys(int(v) for v in ranked['award_hash']))
+                # Read only two numeric columns. Exact native keys are checked
+                # again by the detail query, so hash collisions cannot widen it.
+                lookup = ('SELECT _explorer_action_row_id FROM dashboard_explorer_actions '
+                    'WHERE _explorer_award_hash IN ('+','.join(['?']*len(hashes))+')')
+                return lookup,hashes,lambda matched:details(list(dict.fromkeys(
+                    int(v) for v in matched['_explorer_action_row_id'])))
             if prepared_actions:
                 identities = list(dict.fromkeys(int(v) for ids in ranked['action_row_ids'] for v in ids))
-                bound_sql = detail_sql.replace('WHERE "_explorer_action_row_id" IN (?)',
-                    'WHERE "_explorer_action_row_id" IN ('+','.join(['?']*len(identities))+')',1)
             else:
                 identities = contracts
-                bound_sql = detail_sql.replace('WHERE contract_id IN (?)',
-                    'WHERE contract_id IN ('+','.join(['?']*len(contracts))+')',1)
-            bound_sql = bound_sql.replace('WHERE effective_award_key IN (?)',
-                'WHERE effective_award_key IN ('+','.join(['?']*len(keys))+')',1)
-            return bound_sql,identities+detail_params[1:-3]+keys+[len(keys),0]
+            return details(identities)
         return read_ranked_page(rank_sql,rank_params,action_followup)
     return duck_fetch_df(sql,params,**read_options)
 

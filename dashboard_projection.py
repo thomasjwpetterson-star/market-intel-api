@@ -116,8 +116,9 @@ def build_explorer_action_projection(conn):
     key = explorer_effective_award_key(columns)
     selected = []
     for column in sorted(columns & fields):
-        fallback = key if column == 'award_key' else '"description"'
-        deduplicate = column == 'award_key' or (
+        fallback = (key if column == 'award_key' else
+                    'UPPER(TRIM(CAST(vendor_cage AS VARCHAR)))' if column == 'vendor_cage' else '"description"')
+        deduplicate = column in {'award_key','vendor_cage'} or (
             column in {'base_award_description','action_description'} and 'description' in columns)
         if deduplicate:
             # Keep a distinct value only when it differs. A separate null bit
@@ -128,7 +129,10 @@ def build_explorer_action_projection(conn):
             selected.append(f'"{column}" IS NULL AS "_explorer_{column}_is_null"')
         else:
             selected.append('"'+column+'"')
-    selected.extend(['ROW_NUMBER() OVER () AS _explorer_action_row_id',key+' AS _explorer_award_key'])
+    selected.extend(['ROW_NUMBER() OVER () AS _explorer_action_row_id',key+' AS _explorer_award_key',
+                     'CAST(hash('+key+') % 4294967296 AS UINTEGER) AS _explorer_award_hash'])
+    if 'vendor_cage' in columns:
+        selected.append('UPPER(TRIM(CAST(vendor_cage AS VARCHAR))) AS _explorer_vendor_cage')
     started = time.monotonic()
     logging.getLogger('mimir-api').info('EXPLORER ACTION PROJECTION BUILD fields=%s',len(selected))
     conn.execute('CREATE OR REPLACE TABLE dashboard_explorer_actions AS SELECT '
@@ -167,8 +171,9 @@ def build_explorer_projection(conn, checkpoint_stage=None):
             dtype = 'DOUBLE' if annual[1] == 'obligations' else 'BIGINT' if annual[1] == 'action_count' else 'DATE'
             selected.append(f'TRY_CAST({quoted} AS {dtype}) AS {quoted}')
         elif column in native_fields:
-            if column in {'base_award_description','latest_action_description'} and 'description' in columns:
-                selected.append(f'CASE WHEN {quoted} IS NOT DISTINCT FROM "description" '
+            if column == 'vendor_cage' or (column in {'base_award_description','latest_action_description'} and 'description' in columns):
+                fallback = 'UPPER(TRIM(CAST(vendor_cage AS VARCHAR)))' if column == 'vendor_cage' else '"description"'
+                selected.append(f'CASE WHEN {quoted} IS NOT DISTINCT FROM {fallback} '
                                 f'THEN NULL ELSE {quoted} END AS {quoted}')
                 selected.append(f'{quoted} IS NULL AS "_explorer_{column}_is_null"')
             else:
@@ -176,6 +181,8 @@ def build_explorer_projection(conn, checkpoint_stage=None):
     # Persist the identity as data. DuckDB's virtual rowid can change when the
     # surrounding readiness transaction commits newly created storage.
     selected.append('ROW_NUMBER() OVER () AS _explorer_row_id')
+    if 'vendor_cage' in columns:
+        selected.append('UPPER(TRIM(CAST(vendor_cage AS VARCHAR))) AS _explorer_vendor_cage')
     selected.append('UPPER(TRIM(CAST(market_segment AS VARCHAR))) AS _explorer_market_domain')
     totals = [f'COALESCE(TRY_CAST("{column}" AS DOUBLE),0.0)' for column in sorted(columns)
               if re.fullmatch(r'obligations_fy[0-9]{4}',column)]
@@ -202,6 +209,8 @@ def build_explorer_projection(conn, checkpoint_stage=None):
     rank_columns = [column for column in columns if column in rank_fields or
         re.fullmatch(r'(obligations|action_count)_fy[0-9]{4}',column)]
     rank_columns += ['_explorer_market_domain','_explorer_all_year_obligations']
+    if 'vendor_cage' in columns:
+        rank_columns.append('_explorer_vendor_cage')
     rank_select = '_explorer_row_id,' + ','.join('"'+c.replace('"','""')+'"' for c in rank_columns)
     conn.execute('CREATE OR REPLACE TABLE dashboard_explorer_rank AS SELECT '
                  + rank_select + ' FROM dashboard_explorer_awards WHERE FALSE')

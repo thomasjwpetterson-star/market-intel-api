@@ -14,7 +14,14 @@ def read_snapshot_page(cursor,sql,params,followup):
         rank_finished = time.monotonic()
         count = len(ranked)
         if count:
-            detail_sql,detail_params = followup(ranked)
+            next_read = followup(ranked)
+            if len(next_read) == 3:
+                # An optional narrow identity lookup uses this same reader,
+                # transaction and deadline before the bounded detail query.
+                lookup_sql,lookup_params,resolve = next_read
+                detail_sql,detail_params = resolve(cursor.execute(lookup_sql,lookup_params).fetchdf())
+            else:
+                detail_sql,detail_params = next_read
             result = cursor.execute(detail_sql,detail_params).fetchdf()
             if len(result) < count:
                 raise RuntimeError('Explorer details do not match the ranked page.')

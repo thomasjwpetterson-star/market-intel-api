@@ -12,7 +12,7 @@ from dashboard_projection import build_code_projection, build_explorer_projectio
 from test_programme_scope_counts import namespace
 
 
-@pytest.mark.parametrize('matching_rows', [1, 2, 13, 49])
+@pytest.mark.parametrize('matching_rows', [1, 2, 13, 49, 50])
 def test_partial_platform_pages_push_identity_filter_into_detail_scan(matching_rows):
     db = duckdb.connect()
     try:
