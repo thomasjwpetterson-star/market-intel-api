@@ -1319,9 +1319,13 @@ FIRST_TIER_REPORT and DLA_AWARD separate. For technology scopes, annual_activity
 allocated technology measures by source, and buying_markets may overlap. Never sum related
 technologies as though they partition a market. Present only observed fiscal years in the data;
 do not impose an FY2026 cutoff. Distinguish a missing or unmapped lane from zero activity.
+If earlier requested years are absent, do not infer growth, expansion, new market entry, greater
+concentration, or a shift in capabilities from a later year's mapped activity. A newly mapped
+year does not establish that the activity first occurred then.
 
 Use leading_records, leading_companies and examples for named companies or contracts. The company
 ranking covers only the supporting detail records available for this scope, not the whole market.
+Link named awards and parts to their Mimir record URLs when supplied in the pack.
 If the pack lacks records for a requested claim, say that the shared Market Explorer pack does not establish it. Do not infer a
 supplier relationship from a technology label or market membership alone. Do not substitute a
 different market report's totals for Market Explorer totals.

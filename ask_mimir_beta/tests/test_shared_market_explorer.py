@@ -31,7 +31,7 @@ class SharedMarketExplorerTests(unittest.TestCase):
             "nodes": [{"id": "radar.detection", "kind": "product", "label": "Radar detection systems",
                        "parent": None, "totals": {"PRIME_AWARD": {"2027": {"cents": "1250"}}},
                        "buyingMarkets": {"PRIME_AWARD": {"CUAS_DETECTION": {"2027": {"cents": "1250"}}}},
-                       "examples": {"contracts": [{"contract": "A", "cents": "1250"}]}}],
+                       "examples": {"contracts": [{"name": "FA873015C0002", "cents": "1250"}]}}],
         }
         with gzip.open(root / "public.json.gz", "wt") as stream:
             json.dump(market, stream)
@@ -56,6 +56,8 @@ class SharedMarketExplorerTests(unittest.TestCase):
         pack = store.get(scope)
         self.assertEqual(pack["annual_activity_usd"]["PRIME_AWARD"]["2027"], "12.5")
         self.assertEqual(pack["buying_markets"][0]["market_id"], "CUAS_DETECTION")
+        self.assertEqual(pack["examples"]["contracts"][0]["mimir_url"],
+                         "https://www.mimiradvisors.org/dashboard?view=AWARDS&award=FA873015C0002")
 
     def test_mismatched_release_fails_closed(self):
         with gzip.open(self.root / "public.json.gz", "rt") as stream:

@@ -10,6 +10,7 @@ from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from market_segment import MARKET_SEGMENTS, market_segment_follow_up_intent
 
@@ -30,6 +31,22 @@ def _read(path: Path) -> dict[str, Any]:
 
 def _normal(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def _award_url(contract: Any) -> str | None:
+    return ("https://www.mimiradvisors.org/dashboard?view=AWARDS&award="
+            + quote(str(contract), safe="")) if contract else None
+
+
+def _example_with_url(kind: str, row: dict[str, Any]) -> dict[str, Any]:
+    result = dict(row)
+    if kind == "contracts":
+        result["mimir_url"] = _award_url(row.get("name"))
+    elif kind == "subcontracts":
+        result["parent_award_url"] = _award_url(row.get("contract"))
+    elif kind == "parts" and row.get("nsn"):
+        result["mimir_url"] = "https://www.mimiradvisors.org/intelligence/nsn/" + quote(str(row["nsn"]), safe="")
+    return result
 
 
 class SharedMarketExplorerStore:
@@ -141,9 +158,17 @@ class SharedMarketExplorerStore:
         for source, group in rows.items():
             records = list(group.get("records", {}).values())
             records.sort(key=lambda item: abs(float(item.get("net") or 0)), reverse=True)
-            result["leading_records"][source] = [{key: item.get(key) for key in (
-                "id", "contract", "company", "companyId", "description", "net", "annual",
-            )} for item in records[:limit]]
+            result["leading_records"][source] = [
+                {
+                    **{key: item.get(key) for key in (
+                        "id", "contract", "company", "companyId", "description", "net", "annual",
+                    )},
+                    **({"parent_award_url": _award_url(item.get("contract"))}
+                       if source == "FIRST_TIER_REPORT" else
+                       {"mimir_url": _award_url(item.get("contract"))}),
+                }
+                for item in records[:limit]
+            ]
             companies: dict[str, dict[str, Any]] = {}
             for record in records:
                 company_id = str(record.get("companyId") or record.get("company") or "")
@@ -191,7 +216,8 @@ class SharedMarketExplorerStore:
                 year: str(Decimal(entry["cents"]) / 100)
                 for year, entry in annual.items()
             } for source, annual in node.get("totals", {}).items()}
-            examples = {kind: rows[:min(bounded, 8)] for kind, rows in (node.get("examples") or {}).items()}
+            examples = {kind: [_example_with_url(kind, row) for row in rows[:min(bounded, 8)]]
+                        for kind, rows in (node.get("examples") or {}).items()}
             buying_markets = []
             for market_id in {market for groups in (node.get("buyingMarkets") or {}).values() for market in groups}:
                 activity = {}
