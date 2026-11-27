@@ -249,7 +249,7 @@ def _close_all_duck_read_conns():
     _DUCK_POOL = None
     _DUCK_PUBLIC_POOL = None
 
-def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool = False, followup=None) -> pd.DataFrame:
+def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool = False, followup=None, sanitize: bool = True) -> pd.DataFrame:
     """
     Executes a DuckDB query using a pooled connection.
     This avoids opening many connections (OOM) while still preventing one slow query from blocking *all* code paths.
@@ -263,7 +263,7 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
     if use_writer:
         with DUCK_INIT_LOCK:
             df = DUCK_CONN.execute(sql, params).fetchdf()
-            return df_sanitize_for_json(df)
+            return df_sanitize_for_json(df) if sanitize else df
 
     # Read mode: use pool
     c = None
@@ -305,7 +305,7 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
                                    hashlib.sha256(sql.encode()).hexdigest()[:12],
                                    wait_seconds * 1000, query_seconds * 1000, pool.qsize(),
                                    "public_lookup" if public_lookup else "analytical", ANALYTICAL_TRACE_ID.get() or "-")
-            return df_sanitize_for_json(df)
+            return df_sanitize_for_json(df) if sanitize else df
         finally:
             if c is not None:
                 try:
@@ -4546,7 +4546,9 @@ def multi_platform_component_expr(actual_cols: set) -> Optional[str]:
 def normalised_niin_filter_expr(actual_col: str) -> str:
     col = quote_ident(actual_col)
     digits = f"REGEXP_REPLACE(CAST({col} AS VARCHAR), '[^0-9]', '', 'g')"
-    return f"RIGHT(LPAD({digits}, 9, '0'), 9)"
+    # LPAD truncates strings longer than its target length. Take the native
+    # nine-digit suffix first so a full NSN does not lose its NIIN suffix.
+    return f"LPAD(RIGHT({digits}, 9), 9, '0')"
 
 
 def _null_expr(alias: str, sql_type: str = "VARCHAR") -> str:
@@ -4645,7 +4647,7 @@ def build_contract_awards_explorer_query_from_actions(
             continue
 
         if requested_col in {"q", "search", "query"}:
-            if val is None or str(val).strip() == "":
+            if val is None or val == [] or str(val).strip() == "":
                 continue
             search_cols = [c for c in [
                 "contract_id", "vendor_name", "vendor_cage", "description",
@@ -4653,7 +4655,7 @@ def build_contract_awards_explorer_query_from_actions(
             ] if c in actual_cols]
             if search_cols:
                 p = _like_param_contains(str(val))
-                selected_where.append("(" + " OR ".join([f"UPPER(CAST({quote_ident(c)} AS VARCHAR)) LIKE ? ESCAPE '\\\\'" for c in search_cols]) + ")")
+                selected_where.append("(" + " OR ".join([f"UPPER(CAST({quote_ident(c)} AS VARCHAR)) LIKE ? ESCAPE '\\'" for c in search_cols]) + ")")
                 params.extend([p] * len(search_cols))
                 has_valid_filter = True
             continue
@@ -4662,18 +4664,20 @@ def build_contract_awards_explorer_query_from_actions(
         if not actual_col or actual_col not in actual_cols:
             continue
 
-        if val is None or str(val).strip() == "":
+        if val is None or val == [] or str(val).strip() == "":
             continue
 
         has_valid_filter = True
 
         if requested_col in {"nsn", "niin"}:
-            safe_niin = get_niin(str(val))
-            selected_where.append(f"{normalised_niin_filter_expr(actual_col)} = ?")
-            params.append(safe_niin)
+            values = val if isinstance(val, list) else [val]
+            niins = [get_niin(str(value)) for value in values]
+            placeholders = ','.join(['?']*len(niins))
+            selected_where.append(f"{normalised_niin_filter_expr(actual_col)} IN ({placeholders})")
+            params.extend(niins)
             continue
 
-        if requested_col in {"vendor_cage", "cage_code", "cage"}:
+        if requested_col in {"vendor_cage", "cage_code", "cage"} and not isinstance(val, list):
             selected_where.append(f"UPPER(TRIM(CAST({quote_ident(actual_col)} AS VARCHAR))) = ?")
             params.append(str(val).strip().upper())
             continue
@@ -5029,6 +5033,8 @@ def build_contract_awards_explorer_query_from_rollup(
     spend_max = None
 
     requested_year_values = filters.get("year")
+    if requested_year_values == []:
+        requested_year_values = None
     if requested_year_values is None:
         selected_years = available_years
     else:
@@ -5121,7 +5127,7 @@ def build_contract_awards_explorer_query_from_rollup(
                 pass
             continue
         if requested_col in {"q", "search", "query"}:
-            if val is None or str(val).strip() == "":
+            if val is None or val == [] or str(val).strip() == "":
                 continue
             search_cols = [
                 col for col in [
@@ -5134,7 +5140,7 @@ def build_contract_awards_explorer_query_from_rollup(
                 p = _like_param_contains(str(val))
                 where_parts.append(
                     "(" + " OR ".join([
-                        f"UPPER(CAST(r.{quote_ident(col)} AS VARCHAR)) LIKE ? ESCAPE '\\\\'"
+                        f"UPPER(CAST(r.{quote_ident(col)} AS VARCHAR)) LIKE ? ESCAPE '\\'"
                         for col in search_cols
                     ]) + ")"
                 )
@@ -5145,11 +5151,11 @@ def build_contract_awards_explorer_query_from_rollup(
         actual_col = filter_column_map.get(requested_col)
         if not actual_col or actual_col not in actual_cols:
             continue
-        if val is None or str(val).strip() == "":
+        if val is None or val == [] or str(val).strip() == "":
             continue
 
         has_valid_filter = True
-        if requested_col in {"vendor_cage", "cage_code", "cage"}:
+        if requested_col in {"vendor_cage", "cage_code", "cage"} and not isinstance(val, list):
             where_parts.append(f"UPPER(TRIM(CAST(r.{quote_ident(actual_col)} AS VARCHAR))) = ?")
             params.append(str(val).strip().upper())
         elif isinstance(val, list) and val:
@@ -5540,34 +5546,39 @@ def build_explorer_query(
         if not actual_col:
             continue
 
-        if val is None or str(val).strip() == "":
+        if val is None or val == [] or str(val).strip() == "":
             continue
 
         has_valid_filter = True
 
         # NSN / NIIN filters match the canonical 9-digit NIIN.
         if requested_col in {"nsn", "niin"}:
-            safe_niin = get_niin(str(val))
+            values = val if isinstance(val, list) else [val]
+            niins = [get_niin(str(value)) for value in values]
             if table == NSN_REF_TABLE and "niin" in actual_cols:
                 # The reference product guarantees a nine-character NIIN.
                 # Direct equality preserves Parquet row-group pushdown; the
                 # regex-normalized expression turns a sub-second lookup into a
                 # full 17.5-million-row scan.
-                where_parts.append(f"CAST({quote_ident('niin')} AS VARCHAR) = ?")
+                niin_expr = f"CAST({quote_ident('niin')} AS VARCHAR)"
             elif source_table in {
                 NSN_SUPPLY_STATE_TABLE,
                 NSN_PRICE_SUMMARY_TABLE,
                 NSN_OPPORTUNITY_SUMMARY_TABLE,
                 NSN_OPPORTUNITY_DETAIL_TABLE,
             }:
-                where_parts.append(f"CAST({quote_ident(actual_col)} AS VARCHAR) = ?")
+                niin_expr = f"CAST({quote_ident(actual_col)} AS VARCHAR)"
             else:
-                where_parts.append(f"{normalised_niin_filter_expr(actual_col)} = ?")
-            params.append(safe_niin)
+                niin_expr = normalised_niin_filter_expr(actual_col)
+            if len(niins) == 1:
+                where_parts.append(f"{niin_expr} = ?")
+            else:
+                where_parts.append(f"{niin_expr} IN ({','.join(['?']*len(niins))})")
+            params.extend(niins)
             continue
 
         # CAGE filters are exact.
-        if requested_col in {"cage", "cage_code", "vendor_cage"}:
+        if requested_col in {"cage", "cage_code", "vendor_cage"} and not isinstance(val, list):
             where_parts.append(f"UPPER(TRIM(CAST({quote_ident(actual_col)} AS VARCHAR))) = ?")
             params.append(str(val).strip().upper())
             continue
@@ -5603,20 +5614,23 @@ def build_explorer_query(
     return sql, params
 
 
-def fetch_explorer_page(payload, row_limit, offset=0):
+def fetch_explorer_page(payload, row_limit, offset=0, sanitize=True):
+    read_options = {} if sanitize else {'sanitize':False}
     sql,params = build_explorer_query(payload,row_limit=row_limit,offset=offset)
     if payload.table == CONTRACT_AWARD_EXPLORER_TABLE and 'ranked_awards AS MATERIALIZED' in sql:
         rank_sql,rank_params = build_contract_awards_explorer_query_from_rollup(
             payload,row_limit,offset,rank_only=True)
         detail_sql,_ = build_contract_awards_explorer_query_from_rollup(
-            payload,row_limit,offset,row_ids=[None]*row_limit)
+            payload,row_limit,offset,row_ids=[None])
         def followup(ranked):
             identities = [int(value) for value in ranked['explorer_row_id']]
-            # NULL padding disables DuckDB's scan-level IN filter for short
-            # pages. Repeating a selected ID preserves the set and pushdown.
-            return detail_sql,identities+[identities[-1]]*(row_limit-len(identities))
-        return duck_fetch_df(rank_sql,rank_params,followup=followup)
-    return duck_fetch_df(sql,params)
+            # Bind only returned identities. NULL padding disables scan-level
+            # IN filtering; sizing to actual rows also keeps small exports small
+            # even when the account's maximum allowance is 100,000 rows.
+            bound_sql = detail_sql.replace(' IN (?)', ' IN ('+','.join(['?']*len(identities))+')', 1)
+            return bound_sql,identities
+        return duck_fetch_df(rank_sql,rank_params,followup=followup,**read_options)
+    return duck_fetch_df(sql,params,**read_options)
 
 
 @app.post("/api/explorer/preview")
@@ -6112,6 +6126,8 @@ def explorer_subcontract_descriptions(payload: SubcontractDescriptionsRequest):
             },
             "methodology": methodology,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Subcontract Description Error: {e}")
         raise HTTPException(status_code=500, detail="Failed to load subcontract source details.")
@@ -6154,10 +6170,16 @@ def explorer_taxonomy_search(type: str = Query(...), q: str = Query(..., min_len
     """Powers the Autocomplete Dropdowns for NAICS and PSC codes"""
     col_code = "naics_code" if type == "naics" else "psc_code"
     col_desc = "naics_description" if type == "naics" else "psc_description"
+    source = "v_summary"
+    prepared = "dashboard_naics" if type == "naics" else "dashboard_psc"
+    if get_duck_table_columns(prepared):
+        source = prepared
+        if type != "naics":
+            col_desc = "psc_desc"
     
     sql = f"""
         SELECT {col_code} as code, MAX({col_desc}) as description
-        FROM v_summary 
+        FROM {source}
         WHERE {col_code} IS NOT NULL 
           AND (UPPER(CAST({col_code} AS VARCHAR)) LIKE ? OR UPPER({col_desc}) LIKE ?)
         GROUP BY {col_code}
@@ -6214,14 +6236,14 @@ def explorer_export(payload: ExplorerRequest, background_tasks: BackgroundTasks,
             if str(key).strip().lower() not in SUBCONTRACT_INTERNAL_EXPORT_COLUMNS
         }
 
-    sql, params = build_explorer_query(payload, row_limit=export_limit, offset=0)
-    
     filename = f"mimir_export_{uuid.uuid4().hex[:8]}.csv"
     filepath = str((LOCAL_CACHE_DIR / filename).resolve())
     
     try:
+        # All datasets use the same bounded reader as previews and pagination,
+        # including its snapshot, reader admission and execution deadline.
+        df = fetch_explorer_page(payload,export_limit,sanitize=False)
         if payload.table == NSN_REF_TABLE:
-            df = duck_fetch_df(sql, params)
             customer_headers = {
                 "nsn": "National Stock Number (NSN)",
                 "niin": "National Item Identification Number (NIIN)",
@@ -6251,10 +6273,10 @@ def explorer_export(payload: ExplorerRequest, background_tasks: BackgroundTasks,
             }
             df.rename(columns=customer_headers).to_csv(filepath, index=False)
         else:
-            with DUCK_LOCK:
-                conn = ensure_duck_conn()
-                copy_sql = f"COPY ({sql}) TO '{filepath}' (HEADER, DELIMITER ',');"
-                conn.execute(copy_sql, params)
+            # Match the previous DuckDB CSV spelling for boolean fields.
+            for column in df.select_dtypes(include=['bool','boolean']).columns:
+                df[column] = df[column].map({True:'true',False:'false'},na_action='ignore')
+            df.to_csv(filepath, index=False)
 
             if payload.table == SUBCONTRACT_EXPLORER_TABLE:
                 customer_headers = {
@@ -6303,9 +6325,11 @@ def explorer_export(payload: ExplorerRequest, background_tasks: BackgroundTasks,
         )
 
     except HTTPException:
+        Path(filepath).unlink(missing_ok=True)
         raise
 
     except Exception as e:
+        Path(filepath).unlink(missing_ok=True)
         logger.error(f"Explorer Export Error: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate export file.")
 
