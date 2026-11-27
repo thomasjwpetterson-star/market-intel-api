@@ -6,7 +6,7 @@ import pandas as pd
 from explorer_page_read import read_snapshot_page
 from types import SimpleNamespace
 import duckdb
-from dashboard_projection import build_code_projection, build_explorer_projection
+from dashboard_projection import build_code_projection, build_explorer_projection, verify_explorer_projection
 from test_programme_scope_counts import namespace
 
 
@@ -45,6 +45,7 @@ def test_prepared_dictionaries_preserve_air_awards_descriptions_and_signed_total
         build_code_projection(db)
         build_explorer_projection(db)
         db.execute('COMMIT')
+        verify_explorer_projection(db)
         assert db.execute('SELECT COUNT(*) FROM dashboard_explorer_awards').fetchone()[0] == 5
         assert 'unrelated_large_detail' not in columns('dashboard_explorer_awards')
         assert db.execute('SELECT COUNT(*) FROM dashboard_explorer_rank').fetchone()[0] == 5
@@ -100,5 +101,22 @@ def test_explorer_projection_refresh_and_rollback_keep_native_grain():
         assert db.execute('SELECT obligations_fy2025 FROM dashboard_explorer_awards').fetchone()[0] == -20
         build_explorer_projection(db)
         assert db.execute('SELECT obligations_fy2025 FROM dashboard_explorer_awards').fetchone()[0] == 30
+    finally:
+        db.close()
+
+
+def test_readiness_rejects_stale_transaction_ids_and_incomplete_ranking_rows():
+    import pytest
+    db=duckdb.connect()
+    try:
+        db.execute('CREATE TABLE dashboard_explorer_awards AS SELECT 1::BIGINT AS _explorer_row_id')
+        db.execute('CREATE TABLE dashboard_explorer_rank AS SELECT 4611686018427387904::BIGINT AS _explorer_row_id')
+        with pytest.raises(RuntimeError,match='identities differ'):
+            verify_explorer_projection(db)
+        db.execute('UPDATE dashboard_explorer_rank SET _explorer_row_id=1')
+        verify_explorer_projection(db)
+        db.execute('INSERT INTO dashboard_explorer_rank VALUES (2)')
+        with pytest.raises(RuntimeError,match='row count differs'):
+            verify_explorer_projection(db)
     finally:
         db.close()

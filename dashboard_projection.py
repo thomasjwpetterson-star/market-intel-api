@@ -125,6 +125,23 @@ def build_explorer_projection(conn):
                 time.monotonic()-rank_started)
 
 
+def verify_explorer_projection(conn):
+    relations = {row[0] for row in conn.execute('SHOW TABLES').fetchall()}
+    if 'dashboard_explorer_rank' not in relations:
+        return
+    native_count=conn.execute('SELECT COUNT(*) FROM dashboard_explorer_awards').fetchone()[0]
+    rank_count=conn.execute('SELECT COUNT(*) FROM dashboard_explorer_rank').fetchone()[0]
+    if native_count!=rank_count:
+        raise RuntimeError('Explorer ranking row count differs from the serving records.')
+    identities=[int(row[0]) for row in conn.execute('SELECT _explorer_row_id FROM dashboard_explorer_rank LIMIT 10').fetchall()]
+    if identities:
+        placeholders=','.join(['?']*len(identities))
+        matched=conn.execute('SELECT COUNT(*) FROM dashboard_explorer_awards WHERE _explorer_row_id IN ('+placeholders+')',identities).fetchone()[0]
+        if matched!=len(identities):
+            raise RuntimeError('Explorer ranking identities differ from the committed serving records.')
+    logging.getLogger('mimir-api').info('EXPLORER IDENTITY VERIFIED rows=%s sampled=%s',native_count,len(identities))
+
+
 def financial_sql(floor_relation="dashboard_cache_floor", include_psc=True):
     """Native item evidence, with history only before the current action floor."""
     sql = '''SELECT LPAD(COALESCE(NULLIF(TRIM(CAST(t.niin AS VARCHAR)),''),
@@ -196,5 +213,6 @@ def build_dashboard_projection(conn, reference, source_release):
     except BaseException:
         conn.execute('ROLLBACK')
         raise
+    verify_explorer_projection(conn)
     return {'source_release': source_release, 'mapping_release': getattr(reference, 'manifest', {}).get('release_id') if reference else None,
             'rows': counts, 'build_seconds': round(time.monotonic()-started,3)}
