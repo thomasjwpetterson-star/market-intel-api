@@ -86,6 +86,9 @@ def build_explorer_projection(conn):
             selected.append(f'TRY_CAST({quoted} AS {dtype}) AS {quoted}')
         elif column in native_fields:
             selected.append(quoted)
+    # Persist the identity as data. DuckDB's virtual rowid can change when the
+    # surrounding readiness transaction commits newly created storage.
+    selected.append('ROW_NUMBER() OVER () AS _explorer_row_id')
     selected.append('UPPER(TRIM(CAST(market_segment AS VARCHAR))) AS _explorer_market_domain')
     totals = [f'COALESCE(TRY_CAST("{column}" AS DOUBLE),0.0)' for column in sorted(columns)
               if re.fullmatch(r'obligations_fy[0-9]{4}',column)]
@@ -110,7 +113,7 @@ def build_explorer_projection(conn):
     rank_columns = [column for column in columns if column in rank_fields or
         re.fullmatch(r'(obligations|action_count)_fy[0-9]{4}',column)]
     rank_columns += ['_explorer_market_domain','_explorer_all_year_obligations']
-    rank_select = 'rowid AS _explorer_row_id,' + ','.join('"'+c.replace('"','""')+'"' for c in rank_columns)
+    rank_select = '_explorer_row_id,' + ','.join('"'+c.replace('"','""')+'"' for c in rank_columns)
     conn.execute('CREATE OR REPLACE TABLE dashboard_explorer_rank AS SELECT '
                  + rank_select + ' FROM dashboard_explorer_awards WHERE FALSE')
     domains = conn.execute('SELECT DISTINCT _explorer_market_domain FROM dashboard_explorer_awards').fetchall()

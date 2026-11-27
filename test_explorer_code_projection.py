@@ -41,15 +41,17 @@ def test_prepared_dictionaries_preserve_air_awards_descriptions_and_signed_total
                 expected=db.execute(sql,params).fetchall()
                 count_sql,count_params=build(payload,0,count_only=True)
                 cases.append((payload,offset,expected,db.execute(count_sql,count_params).fetchall()))
+        db.execute('BEGIN TRANSACTION')
         build_code_projection(db)
         build_explorer_projection(db)
+        db.execute('COMMIT')
         assert db.execute('SELECT COUNT(*) FROM dashboard_explorer_awards').fetchone()[0] == 5
         assert 'unrelated_large_detail' not in columns('dashboard_explorer_awards')
         assert db.execute('SELECT COUNT(*) FROM dashboard_explorer_rank').fetchone()[0] == 5
-        assert {r[0] for r in db.execute('SELECT _explorer_row_id FROM dashboard_explorer_rank').fetchall()} == set(range(5))
+        assert {r[0] for r in db.execute('SELECT _explorer_row_id FROM dashboard_explorer_rank').fetchall()} == set(range(1,6))
         assert not {'description','base_award_description','latest_action_description'} & columns('dashboard_explorer_rank')
         assert db.execute('''SELECT COUNT(*) FROM dashboard_explorer_rank r
-            JOIN dashboard_explorer_awards a ON a.rowid=r._explorer_row_id
+            JOIN dashboard_explorer_awards a ON a._explorer_row_id=r._explorer_row_id
             WHERE r.contract_id=a.contract_id AND r._explorer_all_year_obligations=a._explorer_all_year_obligations''').fetchone()[0] == 5
         assert dict((r[0],r[1]) for r in db.execute('DESCRIBE dashboard_explorer_awards').fetchall())['obligations_fy2025']=='DOUBLE'
         db.execute('DROP TABLE v_contracts_rolled')

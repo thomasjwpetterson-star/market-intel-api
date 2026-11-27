@@ -5005,6 +5005,7 @@ def build_contract_awards_explorer_query_from_rollup(
         pass
     actual_cols = get_duck_table_columns(award_relation)
     available_years = _rolled_contract_years(actual_cols)
+    row_identity = "r._explorer_row_id" if "_explorer_row_id" in actual_cols else "r.rowid"
     if not actual_cols or not available_years:
         raise HTTPException(
             status_code=503,
@@ -5185,7 +5186,7 @@ def build_contract_awards_explorer_query_from_rollup(
     if rank_only:
         if award_relation != "dashboard_explorer_awards":
             raise HTTPException(status_code=503,detail="The award serving projection is unavailable.")
-        rank_relation,rank_identity = award_relation,"r.rowid"
+        rank_relation,rank_identity = award_relation,row_identity
         if not any(filters.get(key) not in (None,"",[]) for key in ("q","search","query")):
             try:
                 rank_columns = get_duck_table_columns("dashboard_explorer_rank")
@@ -5293,7 +5294,7 @@ def build_contract_awards_explorer_query_from_rollup(
                 ({actions_expr}) AS number_of_actions_in_selected_period,
                 {earliest_expr} AS earliest_action_date_in_selected_period,
                 {latest_expr} AS latest_action_date_in_selected_period
-            FROM {award_relation} r WHERE r.rowid IN ({placeholders or 'NULL'})
+            FROM {award_relation} r WHERE {row_identity} IN ({placeholders or 'NULL'})
         """
         params = list(row_ids)
     elif award_relation == "dashboard_explorer_awards":
@@ -5301,7 +5302,7 @@ def build_contract_awards_explorer_query_from_rollup(
         # ranking scan from reading wide descriptions and period dates. Row IDs
         # also preserve distinct native awards that share a contract number.
         ranking_cte = f"""ranked_awards AS MATERIALIZED (
-            SELECT r.rowid AS explorer_row_id,
+            SELECT {row_identity} AS explorer_row_id,
                    ({obligations_expr}) AS obligations_in_selected_period_usd
             FROM {award_relation} r WHERE {where_clause}
             ORDER BY obligations_in_selected_period_usd DESC NULLS LAST,r.contract_id
@@ -5313,7 +5314,7 @@ def build_contract_awards_explorer_query_from_rollup(
                 {earliest_expr} AS earliest_action_date_in_selected_period,
                 {latest_expr} AS latest_action_date_in_selected_period
             FROM {award_relation} r
-            INNER JOIN ranked_awards p ON r.rowid=p.explorer_row_id
+            INNER JOIN ranked_awards p ON {row_identity}=p.explorer_row_id
         """
 
     sql = f"""
