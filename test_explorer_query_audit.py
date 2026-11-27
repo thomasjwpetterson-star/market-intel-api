@@ -93,7 +93,7 @@ def explorer(tmp_path, monkeypatch):
         '2025-01-02' AS report_action_date,10.25 AS report_amount,
         'Description '||i AS report_description,true AS is_current_source_version
         FROM range(2) t(i)''')
-    names = {'quote_ident','safe_int','_like_param_contains','_null_expr','_source_expr',
+    names = {'get_duck_table_columns','quote_ident','safe_int','_like_param_contains','_null_expr','_source_expr',
              '_contract_award_type_description_expr','_rolled_contract_years','resolve_explorer_column',
              'multi_platform_component_expr','normalised_niin_filter_expr','get_niin','df_sanitize_for_json',
              'build_contract_awards_explorer_query_from_actions','build_contract_awards_explorer_query_from_rollup',
@@ -104,7 +104,8 @@ def explorer(tmp_path, monkeypatch):
                  'NSN_OPPORTUNITY_SUMMARY_TABLE','NSN_OPPORTUNITY_DETAIL_TABLE','CONTRACT_AWARD_EXPLORER_TABLE',
                  'SUBCONTRACT_EXPLORER_TABLE','CONTRACT_AWARD_SYNTHETIC_COLUMNS','ALLOWED_EXPLORER_TABLES',
                  'ALLOWED_EXPLORER_COLUMNS','EXPLORER_DEFAULT_COLUMNS','EXPLORER_COLUMN_ALIASES',
-                 'EXPLORER_FILTER_REQUIRED_TABLES','SUBCONTRACT_INTERNAL_EXPORT_COLUMNS','SUBCONTRACT_RESEARCH_COLUMNS'}
+                 'EXPLORER_FILTER_REQUIRED_TABLES','SUBCONTRACT_INTERNAL_EXPORT_COLUMNS','SUBCONTRACT_RESEARCH_COLUMNS',
+                 'INTERNAL_DUCK_RELATIONS'}
     nodes = []
     for node in ast.parse(Path('main.py').read_text()).body:
         if isinstance(node,ast.FunctionDef) and node.name in names:
@@ -128,7 +129,8 @@ def explorer(tmp_path, monkeypatch):
             csv=csv,uuid=uuid,Path=Path,HTTPException=HTTPException,Request=Request,BackgroundTasks=BackgroundTasks,
             FileResponse=FileResponse,ExplorerRequest=SimpleNamespace,SubcontractDescriptionsRequest=SimpleNamespace,
             Query=Query,LOCAL_CACHE_DIR=tmp_path,
-            get_duck_table_columns=columns,duck_fetch_df=fetch,logger=logging.getLogger('audit'),
+            get_duck_table_columns=columns,_get_duck_table_columns_cached=lambda table,generation:columns(table),
+            GLOBAL_CACHE={},duck_fetch_df=fetch,logger=logging.getLogger('audit'),
             cleanup_temp_file=lambda path:Path(path).unlink(missing_ok=True))
     exec(compile(ast.Module(body=nodes,type_ignores=[]),'main.py','exec'),ns)
     build_code_projection(db);build_explorer_projection(db)

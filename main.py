@@ -4339,6 +4339,7 @@ INTERNAL_DUCK_RELATIONS = {
     NSN_OPPORTUNITY_SUMMARY_TABLE,
     NSN_OPPORTUNITY_DETAIL_TABLE,
     "dashboard_psc", "dashboard_naics", "dashboard_explorer_awards", "dashboard_explorer_rank",
+    "dashboard_explorer_nsn_filter", "dashboard_explorer_niin_filter",
 }
 
 ALLOWED_EXPLORER_COLUMNS = {
