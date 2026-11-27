@@ -4090,9 +4090,17 @@ def _pending_company_clarification(request: AskRequest) -> str | None:
         return None
     latest = request.messages[-1].content.strip(" .?!")
     previous = request.messages[-2]
-    if (previous.role != "assistant" or not latest or len(latest.split()) > 5
-            or re.match(r"^(?:tell|show|give|find|explain|what|which|who|how)\b", latest, re.IGNORECASE)
+    clicked_site = bool(re.fullmatch(
+        r"Tell me everything about this defense supplier site:\s*CAGE\s+[A-Z0-9]{5}",
+        latest, re.IGNORECASE,
+    ))
+    if (previous.role != "assistant" or not latest
             or not re.search(r"^Which .+ site did you mean\?", previous.content)):
+        return None
+    if not clicked_site and (len(latest.split()) > 5 or re.match(
+        r"^(?:tell|show|give|find|explain|what|which|who|how)\b",
+        latest, re.IGNORECASE,
+    )):
         return None
     return previous.content
 
@@ -4114,6 +4122,7 @@ def _request_with_resolved_company_clarification(request: AskRequest) -> AskRequ
     if not offered:
         return request
     normalized_reply = re.sub(r"[^A-Z0-9]+", " ", latest.upper()).strip()
+    selected_cage = re.search(r"\bCAGE\s+([A-Z0-9]{5})\b", latest, re.IGNORECASE)
     parent_labels = re.findall(
         r"^\s*[-*]\s+(.+?\bparent view\s*\(\d+\s+sites?\))\s*$",
         previous_answer,
@@ -4126,7 +4135,8 @@ def _request_with_resolved_company_clarification(request: AskRequest) -> AskRequ
         return request
     selected = [
         cage.upper() for label, cage in offered
-        if normalized_reply == cage.upper()
+        if (selected_cage and selected_cage.group(1).upper() == cage.upper())
+        or normalized_reply == cage.upper()
         or re.search(
             rf"\b{re.escape(normalized_reply)}\b",
             re.sub(r"[^A-Z0-9]+", " ", label.upper()).strip(),
@@ -4137,7 +4147,7 @@ def _request_with_resolved_company_clarification(request: AskRequest) -> AskRequ
     return request.model_copy(update={
         "messages": [ChatMessage(
             role="user",
-            content=f"Tell me everything about this defense supplier site: CAGE {selected[0]}",
+            content=selected[0],
         )],
     })
 

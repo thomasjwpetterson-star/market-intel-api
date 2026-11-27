@@ -1003,6 +1003,7 @@ class CompanyContextStore:
         self._dynamic_lock = threading.Lock()
         self._dynamic_builder = None
         self._dynamic_contexts: Dict[tuple[str, str], Dict[str, Any]] = {}
+        self._focused_site_contexts: Dict[tuple[str, str], Dict[str, Any]] = {}
         self._dynamic_groups: Dict[str, Dict[str, Any]] = {}
         release_identity = os.getenv("ASK_MIMIR_RELEASE_ID", "").strip()
         if not release_identity:
@@ -2094,7 +2095,12 @@ class CompanyContextStore:
         if focus not in FOCUS_SECTIONS:
             raise ValueError(f"unsupported company context focus: {focus}")
         clean_id = str(scope_id).strip().upper()
-        context = self.get_raw(scope_type, clean_id)
+        context = (
+            self._focused_site_raw(clean_id, focus)
+            if scope_type == "company_site"
+            and focus in {"conversation_overview", "conversation_award_sites"}
+            else self.get_raw(scope_type, clean_id)
+        )
         if context.get("platform_link_version") != LINK_VERSION and any(
             section in FOCUS_SECTIONS[focus]
             for section in ("platform_exposure", "future_demand_context")
@@ -2113,6 +2119,7 @@ class CompanyContextStore:
                 context["platform_link_version"] = LINK_VERSION
         if (
             scope_type == "company_site"
+            and "place_of_performance_activity" in FOCUS_SECTIONS[focus]
             and "place_of_performance_activity" not in context
         ):
             from company_context import CompanyContextBuilder
@@ -2259,6 +2266,47 @@ class CompanyContextStore:
             },
         }
         return result
+
+    def _focused_site_raw(self, cage: str, focus: str) -> Dict[str, Any]:
+        """Keep cold conversational evidence independent of the full dossier."""
+        key = ("company_site", cage)
+        if key in self._dynamic_contexts or key in self._context_paths or any(
+            row.get("scope", {}).get("scope_type") == "company_site"
+            and str(row.get("scope", {}).get("scope_id") or "").upper() == cage
+            for row in self.contexts
+        ):
+            return self.get_raw(*key)
+        cached_full = self._read_dynamic_cache(*key)
+        if cached_full is not None:
+            self._dynamic_contexts[key] = cached_full
+            return cached_full
+        focused_key = (cage, focus)
+        if focused_key in self._focused_site_contexts:
+            return self._focused_site_contexts[focused_key]
+        cache_path = self.dynamic_cache_dir / f"company_site-{cage}.{focus}.v1.json"
+        with self._dynamic_lock:
+            if focused_key in self._focused_site_contexts:
+                return self._focused_site_contexts[focused_key]
+            try:
+                context = json.loads(cache_path.read_text())
+                if (context.get("evidence_focus") != focus
+                        or context.get("scope", {}).get("scope_id") != cage):
+                    context = None
+            except (OSError, ValueError):
+                context = None
+            if context is None:
+                from company_context import CompanyContextBuilder
+
+                if self._dynamic_builder is None:
+                    self._dynamic_builder = CompanyContextBuilder(data_root=self.data_root)
+                context = self._dynamic_builder.build_site(cage, evidence_focus=focus)
+                if os.getenv("ASK_MIMIR_DISABLE_DYNAMIC_CACHE", "0") != "1":
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = cache_path.with_suffix(".json.tmp")
+                    temporary.write_text(json.dumps(context, default=str))
+                    temporary.replace(cache_path)
+            self._focused_site_contexts[focused_key] = context
+            return context
 
     def get_raw(self, scope_type: str, scope_id: str) -> Dict[str, Any]:
         clean_id = str(scope_id).strip().upper()

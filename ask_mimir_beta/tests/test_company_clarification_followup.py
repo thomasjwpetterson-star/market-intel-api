@@ -30,7 +30,8 @@ class CompanyClarificationFollowupTests(unittest.TestCase):
         request = self.request("East Hartford")
         resolved = lab._request_with_resolved_company_clarification(request)
         self.assertEqual(len(resolved.messages), 1)
-        self.assertIn("CAGE 52661", resolved.messages[0].content)
+        self.assertEqual(resolved.messages[0].content, "52661")
+        self.assertFalse(lab.company_detail_requested(resolved.messages[0].content))
         self.assertEqual(lab.company_site_dossier_cage(resolved.messages), "52661")
 
         runtime = SimpleNamespace(
@@ -43,6 +44,12 @@ class CompanyClarificationFollowupTests(unittest.TestCase):
         self.assertEqual(route.workflow, "company_site_intelligence")
         self.assertEqual(route.reason, "explicit_cage_identifier")
         self.assertEqual(lab.company_site_dossier_cage(execution.messages), "52661")
+
+    def test_clicked_site_option_uses_same_conversational_focus(self):
+        request = self.request("Tell me everything about this defense supplier site: CAGE 52661")
+        resolved = lab._request_with_resolved_company_clarification(request)
+        self.assertEqual(resolved.messages[0].content, "52661")
+        self.assertFalse(lab.company_detail_requested(resolved.messages[0].content))
 
     def test_unoffered_location_cannot_select_unrelated_supplier(self):
         request = self.request("Cambridge")

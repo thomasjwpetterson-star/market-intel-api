@@ -239,6 +239,7 @@ class CompanyContextBuilder:
         self,
         cage: str,
         fiscal_years: Sequence[int] = DEFAULT_FISCAL_YEARS,
+        evidence_focus: str | None = None,
     ) -> Dict[str, Any]:
         clean = clean_cage(cage)
         parent_match = None
@@ -262,6 +263,7 @@ class CompanyContextBuilder:
             cages=[clean],
             fiscal_years=fiscal_years,
             site_definitions=[site_definition] if site_definition else [],
+            evidence_focus=evidence_focus,
         )
         if parent_match:
             context["identity"]["parent_resolution"] = {
@@ -345,7 +347,12 @@ class CompanyContextBuilder:
         cages: Sequence[str],
         fiscal_years: Sequence[int],
         site_definitions: Sequence[Dict[str, Any] | None],
+        evidence_focus: str | None = None,
     ) -> Dict[str, Any]:
+        if evidence_focus not in {None, "conversation_overview", "conversation_award_sites"}:
+            raise ValueError(f"unsupported company evidence focus: {evidence_focus}")
+        full = evidence_focus is None
+        overview = evidence_focus == "conversation_overview"
         years = sorted({int(year) for year in fiscal_years})
         if not years:
             raise ValueError("at least one fiscal year is required")
@@ -360,21 +367,28 @@ class CompanyContextBuilder:
         context_id = (
             f"company_context_{evidence_fingerprint[:12]}_{scope_fingerprint}"
         )
-        product_evidence = self._product_and_part_evidence(cages, years)
-        capability_evidence = self._capability_evidence(cages, years)
-        site_capability_evidence = self._site_capability_evidence(cages, years)
+        product_evidence = self._product_and_part_evidence(cages, years) if full else {}
+        capability_evidence = self._capability_evidence(cages, years) if full or overview else {}
+        site_capability_evidence = self._site_capability_evidence(cages, years) if full else []
         top_awards = self._top_awards(cages, years)
-        network_context = self._network_context(cages, years)
-        platform_exposure = self._platform_exposure(cages, years)
-        place_of_performance_activity = self._place_of_performance_activity(
-            sites, years
+        network_context = self._network_context(cages, years) if full or overview else {}
+        platform_exposure = self._platform_exposure(cages, years) if full or overview else []
+        place_of_performance_activity = (
+            self._place_of_performance_activity(sites, years) if full else {}
         )
-        missile_program_trajectory = self._missile_program_trajectory(cages, years)
+        missile_program_trajectory = self._missile_program_trajectory(cages, years) if full else {}
+        # The overview already includes the top DLA items through capability
+        # evidence. Reuse those source rows for its evidence index rather than
+        # running the full part-number and competition traversal.
+        indexed_products = product_evidence if full else {
+            "niin_financial_observations": capability_evidence.get("dla_items", [])
+        }
         return {
             "context_id": context_id,
             "evidence_fingerprint": evidence_fingerprint,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "calculation_version": "mimir-company-context-2026-09-v11",
+            **({"evidence_focus": evidence_focus} if evidence_focus else {}),
             "scope": {
                 "scope_type": scope_type,
                 "scope_id": scope_id,
@@ -398,7 +412,7 @@ class CompanyContextBuilder:
             "annual_activity": self._annual_activity(cages, years),
             "site_financials": self._site_financials(cages, years),
             "site_capability_evidence": site_capability_evidence,
-            "location_footprint": self._location_footprint(cages, years, sites),
+            "location_footprint": self._location_footprint(cages, years, sites) if full else {},
             "place_of_performance_activity": place_of_performance_activity,
             "capability_evidence": capability_evidence,
             "product_and_part_evidence": product_evidence,
@@ -406,17 +420,16 @@ class CompanyContextBuilder:
             "platform_link_version": LINK_VERSION,
             "missile_program_trajectory": missile_program_trajectory,
             "future_demand_context": self._future_demand_context(
-                platform_exposure,
-                missile_program_trajectory,
-            ),
-            "customer_context": self._customer_context(cages, years),
+                platform_exposure, missile_program_trajectory,
+            ) if full else {},
+            "customer_context": self._customer_context(cages, years) if full or overview else [],
             "reported_subcontract_relationships": network_context,
             "top_awards": top_awards,
-            "open_solicitation_candidates": self._opportunity_candidates(cages, years),
+            "open_solicitation_candidates": self._opportunity_candidates(cages, years) if full else {},
             "evidence_index": self._evidence_index(
                 sites,
                 top_awards,
-                product_evidence,
+                indexed_products,
                 capability_evidence,
             ),
             "quality": self._quality_summary(cages, years, sites),
@@ -2479,6 +2492,7 @@ class CompanyContextBuilder:
     def _source_manifest(self) -> Dict[str, Any]:
         if self._source_manifest_cache is not None:
             return self._source_manifest_cache
+        verified_hashes = self._verified_release_hashes()
         self._source_manifest_cache = {
             "generated_on": str(date.today()),
             "identity_definition": {
@@ -2489,7 +2503,7 @@ class CompanyContextBuilder:
             "files": {
                 name: {
                     "path": str(path),
-                    "sha256": file_sha256(path),
+                    "sha256": verified_hashes.get(path.resolve()) or file_sha256(path),
                     "size_bytes": path.stat().st_size,
                 }
                 for name, path in self.paths.items()
@@ -2499,13 +2513,13 @@ class CompanyContextBuilder:
         if self.fydp_budget_path.exists():
             self._source_manifest_cache["fydp_budget"] = {
                 "path": str(self.fydp_budget_path),
-                "sha256": file_sha256(self.fydp_budget_path),
+                "sha256": verified_hashes.get(self.fydp_budget_path) or file_sha256(self.fydp_budget_path),
                 "size_bytes": self.fydp_budget_path.stat().st_size,
             }
         if self.dod_budget_path.exists():
             self._source_manifest_cache["dod_budget"] = {
                 "path": str(self.dod_budget_path),
-                "sha256": file_sha256(self.dod_budget_path),
+                "sha256": verified_hashes.get(self.dod_budget_path) or file_sha256(self.dod_budget_path),
                 "size_bytes": self.dod_budget_path.stat().st_size,
             }
         self._source_manifest_cache["fydp_platform_linkages"] = {
@@ -2514,6 +2528,30 @@ class CompanyContextBuilder:
             "version": self.fydp_platform_linkages.get("definition_version"),
         }
         return self._source_manifest_cache
+
+    def _verified_release_hashes(self) -> Dict[Path, str]:
+        """Reuse hashes checked by bootstrap for this immutable runtime release."""
+        release_root = self.data_root.parent
+        try:
+            manifest = json.loads((release_root / "runtime_manifest.json").read_text())
+            marker = json.loads((release_root / ".verified-release.json").read_text())
+            fingerprint = hashlib.sha256(json.dumps(
+                {"release_id": manifest.get("release_id"), "files": manifest.get("files", [])},
+                sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+            if marker.get("manifest_fingerprint") != fingerprint:
+                return {}
+            hashes: Dict[Path, str] = {}
+            for entry in manifest["files"]:
+                path = (release_root / entry["local_path"]).resolve()
+                if release_root not in path.parents or path.stat().st_size != int(entry["size"]):
+                    return {}
+                digest = str(entry.get("sha256") or "")
+                if digest:
+                    hashes[path] = digest
+            return hashes
+        except (OSError, KeyError, TypeError, ValueError):
+            return {}
 
 
 def write_context(context: Dict[str, Any], destination: Path) -> None:
