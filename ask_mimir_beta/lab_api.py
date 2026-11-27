@@ -2985,7 +2985,7 @@ class LabRuntime:
             "platform_contexts", "program_outlook", "company_opportunities",
             "platform_supply_chains", "program_momentum", "competitive_position",
             "competitor_discovery", "capability_discovery", "state_industrial_base",
-            "market_segments", "market_records", "product_intelligence",
+            "shared_market_segments", "market_records", "product_intelligence",
         ):
             immutable_methods = frozenset({"search", "mentions", "_platform_members"}) if name == "platform_contexts" else frozenset()
             setattr(self, name, SynchronizedStore(getattr(self, name), self.lock, immutable_methods))

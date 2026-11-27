@@ -1,3 +1,4 @@
+import ast
 import json
 import base64
 import hashlib
@@ -124,6 +125,31 @@ class DirectAccessTests(unittest.TestCase):
         self.assertLess(cors_definition, route_definition)
         self.assertIn('"https://www.mimiradvisors.org"', source[app_definition:route_definition])
         self.assertIn('allow_headers=["Authorization", "Content-Type", "X-Ask-Mimir-Client-Request-Id"]', source[app_definition:route_definition])
+
+    def test_runtime_synchronizes_only_initialized_stores(self):
+        source = Path(__file__).resolve().parents[1] / "lab_api.py"
+        tree = ast.parse(source.read_text())
+        runtime = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "LabRuntime")
+        initializer = next(node for node in runtime.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+        initialized = {
+            target.attr
+            for node in ast.walk(initializer)
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self"
+        }
+        synchronized = {
+            value.value
+            for node in ast.walk(initializer)
+            if isinstance(node, ast.For)
+            and isinstance(node.target, ast.Name) and node.target.id == "name"
+            and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Name) and child.func.id == "SynchronizedStore" for child in ast.walk(node))
+            and isinstance(node.iter, ast.Tuple)
+            for value in node.iter.elts
+            if isinstance(value, ast.Constant) and isinstance(value.value, str)
+        }
+        self.assertTrue(synchronized)
+        self.assertFalse(synchronized - initialized, f"Uninitialized stores: {sorted(synchronized - initialized)}")
 
 
 class StopAtEvidence(Exception):
