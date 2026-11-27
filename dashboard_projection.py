@@ -119,9 +119,11 @@ def build_explorer_action_projection(conn):
         conn.execute('SELECT COUNT(*) FROM dashboard_explorer_actions').fetchone()[0],time.monotonic()-started)
 
 
-def build_explorer_projection(conn):
+def build_explorer_projection(conn, checkpoint_stage=None):
     build_item_filter_projection(conn)
     build_explorer_action_projection(conn)
+    if checkpoint_stage:
+        checkpoint_stage('native_actions')
     # Prepare only Explorer's native fields, at the unchanged award grain.
     # Avoid sorting wide descriptions during startup. Cast annual measures once
     # using the exact same types/TRY_CAST semantics as the request builder.
@@ -163,6 +165,8 @@ def build_explorer_projection(conn):
     logger.info('EXPLORER PROJECTION READY rows=%s seconds=%.3f',
                 conn.execute('SELECT COUNT(*) FROM dashboard_explorer_awards').fetchone()[0],
                 time.monotonic()-started)
+    if checkpoint_stage:
+        checkpoint_stage('native_awards')
     # Append one domain at a time. This clusters a compact ranking lane without
     # an external wide sort (and its unbounded temporary-storage requirement).
     rank_started = time.monotonic()
@@ -270,7 +274,8 @@ def build_parts_projection(conn):
     conn.execute('CREATE INDEX dashboard_item_profiles_niin ON dashboard_item_profiles(niin)')
 
 
-def build_dashboard_projection(conn, reference, source_release, preparation_threads=None):
+def build_dashboard_projection(conn, reference, source_release, preparation_threads=None,
+                               initial_build=False):
     started = time.monotonic()
     runtime_threads = int(conn.execute("SELECT current_setting('threads')").fetchone()[0])
     # This replacement instance receives traffic only after readiness. Use the
@@ -279,13 +284,27 @@ def build_dashboard_projection(conn, reference, source_release, preparation_thre
     conn.execute('SET threads='+str(build_threads))
     logging.getLogger('mimir-api').info('DASHBOARD PREPARATION threads=%s runtime_threads=%s',build_threads,runtime_threads)
     transaction_started = False
+    def checkpoint_stage(stage):
+        nonlocal transaction_started
+        # Only a replacement instance that has never served may publish these
+        # intermediate tables. Checkpoint compressed storage before preparing
+        # the next large relation, rather than retaining every relation's
+        # uncommitted spill files together until the final release marker.
+        conn.execute('COMMIT')
+        transaction_started = False
+        conn.execute('CHECKPOINT')
+        logging.getLogger('mimir-api').info('DASHBOARD PREPARATION CHECKPOINT stage=%s',stage)
+        conn.execute('BEGIN TRANSACTION')
+        transaction_started = True
     try:
         conn.execute('BEGIN TRANSACTION')
         transaction_started = True
         build_action_projection(conn, reference)
         build_subcontract_projection(conn)
         build_parts_projection(conn)
-        build_explorer_projection(conn)
+        if initial_build:
+            checkpoint_stage('programme_dashboard')
+        build_explorer_projection(conn,checkpoint_stage if initial_build else None)
         conn.execute('''CREATE OR REPLACE TABLE dashboard_projection_release AS
             SELECT ? AS source_release,? AS mapping_release''',
             [source_release, getattr(reference, 'manifest', {}).get('release_id') if reference else None])

@@ -51,7 +51,8 @@ def complete_sources(db):
         action_date AS last_sold,platform_count,psc FROM v_transactions WHERE FALSE''')
 
 
-def test_cold_website_reads_keep_v7_overrides_and_need_no_native_scan(dashboard,monkeypatch):
+@pytest.mark.parametrize('initial_build',[False,True])
+def test_cold_website_reads_keep_v7_overrides_and_need_no_native_scan(dashboard,monkeypatch,initial_build):
     from private_platform_reference import reference_for
     import dashboard_projection
     db, ns = dashboard
@@ -68,7 +69,8 @@ def test_cold_website_reads_keep_v7_overrides_and_need_no_native_scan(dashboard,
         assert conn.execute("SELECT current_setting('threads')").fetchone()[0]==2
         return original(conn)
     monkeypatch.setattr(dashboard_projection,'build_explorer_action_projection',prepared_actions)
-    metadata = build_dashboard_projection(db,reference_for(None),'release-A',preparation_threads=2)
+    metadata = build_dashboard_projection(db,reference_for(None),'release-A',preparation_threads=2,
+                                          initial_build=initial_build)
     assert db.execute("SELECT current_setting('threads')").fetchone()[0]==1
     assert metadata['rows']['dashboard_actions']==6
     ns['GLOBAL_CACHE']['dashboard_projection_ready']=True
@@ -77,6 +79,29 @@ def test_cold_website_reads_keep_v7_overrides_and_need_no_native_scan(dashboard,
     assert ns['get_platform_subcontracts']('VIRGINIA CLASS (SSN 774)',years=[2025],agency='Navy',mode='lines')==expected_lines
     for scope, results in zip(scopes,expected):
         assert {fn:ns[fn](**scope) for fn in results}==results, scope
+
+
+def test_failed_initial_preparation_keeps_readiness_and_release_marker_unpublished(dashboard,monkeypatch):
+    from private_platform_reference import reference_for
+    import dashboard_projection
+    db,ns=dashboard;complete_sources(db)
+    db.execute('SET threads=1')
+    original=dashboard_projection.build_explorer_action_projection
+    def fail_after_actions(conn):
+        original(conn)
+        raise RuntimeError('Incomplete initial action preparation')
+    monkeypatch.setattr(dashboard_projection,'build_explorer_action_projection',fail_after_actions)
+    with pytest.raises(RuntimeError,match='Incomplete initial action'):
+        build_dashboard_projection(db,reference_for(None),'release-A',preparation_threads=2,initial_build=True)
+    relations={r[0] for r in db.execute('SHOW TABLES').fetchall()}
+    assert 'dashboard_actions' in relations # Prior stage was checkpointed.
+    assert 'dashboard_explorer_actions' not in relations # Failed stage rolled back.
+    assert 'dashboard_projection_release' not in relations
+    assert not ns['GLOBAL_CACHE'].get('dashboard_projection_ready')
+    assert db.execute("SELECT current_setting('threads')").fetchone()[0]==1
+    monkeypatch.setattr(dashboard_projection,'build_explorer_action_projection',original)
+    build_dashboard_projection(db,reference_for(None),'release-A',preparation_threads=2,initial_build=True)
+    assert db.execute('SELECT source_release FROM dashboard_projection_release').fetchone()[0]=='release-A'
 
 
 def test_projection_rebuild_is_atomic_and_release_bound(dashboard,monkeypatch):
