@@ -21,7 +21,7 @@ from starlette.responses import FileResponse
 
 from analytical_admission import ANALYTICAL_DEADLINE
 from analytical_deadline import query_deadline
-from dashboard_projection import build_code_projection, build_explorer_projection
+from dashboard_projection import build_code_projection, build_explorer_projection, build_item_filter_projection
 from explorer_page_read import read_snapshot_page
 
 
@@ -188,6 +188,39 @@ def test_award_filters_agree_across_preview_count_page_and_csv(explorer,filters,
     for actual,wanted in zip(exported,preview):
         assert float(actual['obligations_in_selected_period_usd'])==wanted['obligations_in_selected_period_usd']
         assert actual['base_award_description']==wanted['base_award_description']
+
+
+@pytest.mark.parametrize('field',['nsn','niin'])
+@pytest.mark.parametrize('table',['v_transactions','v_contract_awards_enriched'])
+def test_prepared_item_key_filters_preserve_native_formats_and_values(explorer,field,table):
+    db,ns,calls=explorer
+    for contract,value in zip('ABCDEF',['1234000000001','1234-00-000-0001','000000001','1','NSN:1234-00-000-0001',None]):
+        db.execute(f'UPDATE v_transactions SET {field}=? WHERE contract_id=?',[value,contract])
+    build_item_filter_projection(db)
+    # Repeated actions share a raw key; neither formatting nor missing keys
+    # may cause records to disappear or match a different native field.
+    assert db.execute(f'SELECT COUNT(*) FROM dashboard_explorer_{field}_filter').fetchone()[0]==5
+    fields=['contract_id','spend_amount'] if table=='v_transactions' else [
+        'contract_id','obligations_in_selected_period_usd','number_of_actions_in_selected_period',
+        'base_award_description','latest_action_description']
+    payload=SimpleNamespace(table=table,columns=fields,filters={field:['1234000000001']},limit=2,offset=2)
+    prepared=ns['explorer_preview'](payload)
+    assert len(prepared)==(10 if table=='v_transactions' else 5)
+    assert 'REGEXP_REPLACE' not in calls[-1]['sql']
+    assert f'dashboard_explorer_{field}_filter' in calls[-1]['sql']
+    prepared_count=ns['explorer_count'](payload)
+    prepared_page=ns['explorer_page'](payload)
+    response=ns['explorer_export'](payload,BackgroundTasks(),SimpleNamespace(headers={
+        'X-Mimir-Export-Key':'local-test-key','X-Mimir-Plan-Tier':'lite'}))
+    with open(response.path,newline='') as f:prepared_csv=list(csv.reader(f))
+    db.execute('DROP TABLE dashboard_explorer_nsn_filter')
+    db.execute('DROP TABLE dashboard_explorer_niin_filter')
+    assert ns['explorer_preview'](payload)==prepared
+    assert ns['explorer_count'](payload)==prepared_count
+    assert ns['explorer_page'](payload)==prepared_page
+    response=ns['explorer_export'](payload,BackgroundTasks(),SimpleNamespace(headers={
+        'X-Mimir-Export-Key':'local-test-key','X-Mimir-Plan-Tier':'lite'}))
+    with open(response.path,newline='') as f:assert list(csv.reader(f))==prepared_csv
 
 
 @pytest.mark.parametrize('filters',[{'platform_family':['__MISSING__']},{'nsn':'9999999999999'}])

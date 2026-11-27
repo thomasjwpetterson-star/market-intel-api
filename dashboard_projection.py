@@ -59,7 +59,36 @@ def build_code_projection(conn):
         SELECT CAST(naics_code AS VARCHAR) AS naics_code,MAX(naics_description) AS naics_description
         FROM v_summary GROUP BY 1''')
 
+def build_item_filter_projection(conn):
+    """Normalize distinct native item keys once per serving generation.
+
+    Keep the raw value alongside its normalized suffix. Queries can then join
+    native values without applying a regex to every action, while preserving
+    formatted, shortened and legacy values exactly as the native fallback.
+    """
+    relations = {row[0] for row in conn.execute('SHOW TABLES').fetchall()}
+    if 'v_transactions' not in relations:
+        return
+    columns = {row[0] for row in conn.execute('DESCRIBE v_transactions').fetchall()}
+    for column in ('nsn','niin'):
+        if column not in columns:
+            continue
+        started = time.monotonic()
+        conn.execute(f'''CREATE OR REPLACE TABLE dashboard_explorer_{column}_filter AS
+            WITH native_keys AS MATERIALIZED (
+                SELECT DISTINCT CAST("{column}" AS VARCHAR) AS source_value
+                FROM v_transactions WHERE "{column}" IS NOT NULL
+            )
+            SELECT source_value,
+                LPAD(RIGHT(REGEXP_REPLACE(source_value,'[^0-9]','','g'),9),9,'0') AS niin
+            FROM native_keys ORDER BY niin,source_value''')
+        logging.getLogger('mimir-api').info('EXPLORER ITEM FILTER READY field=%s keys=%s seconds=%.3f',
+            column,conn.execute(f'SELECT COUNT(*) FROM dashboard_explorer_{column}_filter').fetchone()[0],
+            time.monotonic()-started)
+
+
 def build_explorer_projection(conn):
+    build_item_filter_projection(conn)
     # Prepare only Explorer's native fields, at the unchanged award grain.
     # Avoid sorting wide descriptions during startup. Cast annual measures once
     # using the exact same types/TRY_CAST semantics as the request builder.

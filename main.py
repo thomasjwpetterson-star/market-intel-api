@@ -4676,7 +4676,12 @@ def build_contract_awards_explorer_query_from_actions(
             values = val if isinstance(val, list) else [val]
             niins = [get_niin(str(value)) for value in values]
             placeholders = ','.join(['?']*len(niins))
-            selected_where.append(f"{normalised_niin_filter_expr(actual_col)} IN ({placeholders})")
+            item_projection = f'dashboard_explorer_{actual_col}_filter'
+            if get_duck_table_columns(item_projection):
+                selected_where.append(f'CAST({quote_ident(actual_col)} AS VARCHAR) IN '
+                    f'(SELECT source_value FROM {item_projection} WHERE niin IN ({placeholders}))')
+            else:
+                selected_where.append(f"{normalised_niin_filter_expr(actual_col)} IN ({placeholders})")
             params.extend(niins)
             continue
 
@@ -5575,6 +5580,13 @@ def build_explorer_query(
         if requested_col in {"nsn", "niin"}:
             values = val if isinstance(val, list) else [val]
             niins = [get_niin(str(value)) for value in values]
+            item_projection = f'dashboard_explorer_{actual_col}_filter'
+            if table == 'v_transactions' and actual_col in {'nsn','niin'} and get_duck_table_columns(item_projection):
+                placeholders = ','.join(['?']*len(niins))
+                where_parts.append(f'CAST({quote_ident(actual_col)} AS VARCHAR) IN '
+                    f'(SELECT source_value FROM {item_projection} WHERE niin IN ({placeholders}))')
+                params.extend(niins)
+                continue
             if table == NSN_REF_TABLE and "niin" in actual_cols:
                 # The reference product guarantees a nine-character NIIN.
                 # Direct equality preserves Parquet row-group pushdown; the
