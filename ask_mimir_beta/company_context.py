@@ -380,13 +380,17 @@ class CompanyContextBuilder:
                 ):
                     destination = Path(temporary) / f"{name}.parquet"
                     started = time.perf_counter()
-                    parameters = [str(destination), str(original[name]), *cages]
+                    parameters = [str(original[name]), *cages]
                     if name == "network":
                         parameters.extend(cages)
                     parameters.extend(years)
+                    # Older deployed DuckDB versions do not accept a bound
+                    # COPY destination. This path is generated locally; quote
+                    # it as a SQL literal while binding every source/filter.
+                    destination_sql = "'" + str(destination).replace("'", "''") + "'"
                     self.connection.execute(
                         f"COPY (SELECT * FROM read_parquet(?) WHERE {condition} "
-                        f"AND year IN ({placeholders(years)})) TO ? (FORMAT PARQUET)",
+                        f"AND year IN ({placeholders(years)})) TO {destination_sql} (FORMAT PARQUET)",
                         parameters,
                     )
                     self.paths[name] = destination
