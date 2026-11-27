@@ -272,8 +272,15 @@ def build_parts_projection(conn):
 
 def build_dashboard_projection(conn, reference, source_release):
     started = time.monotonic()
-    conn.execute('BEGIN TRANSACTION')
+    runtime_threads = int(conn.execute("SELECT current_setting('threads')").fetchone()[0])
+    # This replacement instance receives traffic only after readiness. Use the
+    # existing two CPUs for preparation, then restore the serving query limit.
+    conn.execute('SET threads=2')
+    logging.getLogger('mimir-api').info('DASHBOARD PREPARATION threads=2 runtime_threads=%s',runtime_threads)
+    transaction_started = False
     try:
+        conn.execute('BEGIN TRANSACTION')
+        transaction_started = True
         build_action_projection(conn, reference)
         build_subcontract_projection(conn)
         build_parts_projection(conn)
@@ -285,8 +292,12 @@ def build_dashboard_projection(conn, reference, source_release):
                   for table in ('dashboard_actions','dashboard_network','dashboard_bom','dashboard_item_financial')}
         conn.execute('COMMIT')
     except BaseException:
-        conn.execute('ROLLBACK')
+        if transaction_started:
+            conn.execute('ROLLBACK')
         raise
+    finally:
+        conn.execute('SET threads='+str(runtime_threads))
+        logging.getLogger('mimir-api').info('DASHBOARD SERVING threads_restored=%s',runtime_threads)
     verify_explorer_projection(conn)
     return {'source_release': source_release, 'mapping_release': getattr(reference, 'manifest', {}).get('release_id') if reference else None,
             'rows': counts, 'build_seconds': round(time.monotonic()-started,3)}

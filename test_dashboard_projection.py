@@ -51,8 +51,9 @@ def complete_sources(db):
         action_date AS last_sold,platform_count,psc FROM v_transactions WHERE FALSE''')
 
 
-def test_cold_website_reads_keep_v7_overrides_and_need_no_native_scan(dashboard):
+def test_cold_website_reads_keep_v7_overrides_and_need_no_native_scan(dashboard,monkeypatch):
     from private_platform_reference import reference_for
+    import dashboard_projection
     db, ns = dashboard
     complete_sources(db)
     scopes = [dict(name='VIRGINIA CLASS (SSN 774)', years=year, agency=buyer, domain=domain, psc=psc)
@@ -61,7 +62,14 @@ def test_cold_website_reads_keep_v7_overrides_and_need_no_native_scan(dashboard)
     for scope in scopes:
         expected.append({fn: ns[fn](**scope) for fn in ('get_platform_profile','get_platform_contractors','get_platform_awards','get_platform_subcontracts')})
     expected_lines=ns['get_platform_subcontracts']('VIRGINIA CLASS (SSN 774)',years=[2025],agency='Navy',mode='lines')
+    db.execute('SET threads=1')
+    original=dashboard_projection.build_explorer_action_projection
+    def prepared_actions(conn):
+        assert conn.execute("SELECT current_setting('threads')").fetchone()[0]==2
+        return original(conn)
+    monkeypatch.setattr(dashboard_projection,'build_explorer_action_projection',prepared_actions)
     metadata = build_dashboard_projection(db,reference_for(None),'release-A')
+    assert db.execute("SELECT current_setting('threads')").fetchone()[0]==1
     assert metadata['rows']['dashboard_actions']==6
     ns['GLOBAL_CACHE']['dashboard_projection_ready']=True
     for table in ('v_transactions','v_network','v_summary','v_platform_bom','v_nsn_supplier_lookup','v_nsn_profile_lookup'):
@@ -74,11 +82,13 @@ def test_cold_website_reads_keep_v7_overrides_and_need_no_native_scan(dashboard)
 def test_projection_rebuild_is_atomic_and_release_bound(dashboard):
     from private_platform_reference import reference_for
     db,ns=dashboard;complete_sources(db);ref=reference_for(None)
+    db.execute('SET threads=1')
     build_dashboard_projection(db,ref,'release-A')
     original=db.execute('SELECT SUM(spend_amount) FROM dashboard_actions').fetchone()[0]
     db.execute('UPDATE v_transactions SET spend_amount=0')
     db.execute('DROP TABLE v_nsn_profile_lookup')
     with pytest.raises(Exception):build_dashboard_projection(db,ref,'release-B')
+    assert db.execute("SELECT current_setting('threads')").fetchone()[0]==1
     assert db.execute('SELECT source_release FROM dashboard_projection_release').fetchone()[0]=='release-A'
     assert db.execute('SELECT SUM(spend_amount) FROM dashboard_actions').fetchone()[0]==original
     db.execute("CREATE TABLE v_nsn_profile_lookup AS SELECT '000000001' AS niin,'1234000000001' AS nsn,'ITEM' AS item_name,'1234' AS fsc_code")
