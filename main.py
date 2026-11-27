@@ -5612,7 +5612,9 @@ def fetch_explorer_page(payload, row_limit, offset=0):
             payload,row_limit,offset,row_ids=[None]*row_limit)
         def followup(ranked):
             identities = [int(value) for value in ranked['explorer_row_id']]
-            return detail_sql,identities+[None]*(row_limit-len(identities))
+            # NULL padding disables DuckDB's scan-level IN filter for short
+            # pages. Repeating a selected ID preserves the set and pushdown.
+            return detail_sql,identities+[identities[-1]]*(row_limit-len(identities))
         return duck_fetch_df(rank_sql,rank_params,followup=followup)
     return duck_fetch_df(sql,params)
 
