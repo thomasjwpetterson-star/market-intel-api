@@ -169,6 +169,34 @@ AWARD_CASES = [
 ]
 
 
+def test_prepared_source_first_pages_counts_and_fallbacks_keep_native_semantics(explorer):
+    from dashboard_projection import build_explorer_source_pages
+    db,ns,_=explorer
+    filters={'source_of_supply':'s9c'}
+    payload=SimpleNamespace(table='v_contract_awards_enriched',columns=['contract_id'],filters=filters)
+    builder=ns['build_contract_awards_explorer_query_from_actions']
+    sql,args=builder(payload,50,rank_only=True)
+    native=db.execute(sql,args).fetchall()
+    build_explorer_source_pages(db,minimum_actions=1,page_size=3)
+    ns['GLOBAL_CACHE']['dashboard_projection']={'explorer_source_pages':{'S9C':3}}
+    for value in ('s9c',[' S9C ']):
+        payload.filters={'source_of_supply':value}
+        sql,args=builder(payload,2,offset=1,rank_only=True)
+        assert 'dashboard_explorer_source_pages' in sql
+        assert db.execute(sql,args).fetchall()==native[1:3]
+        sql,args=builder(payload,0,count_only=True)
+        assert db.execute(sql,args).fetchone()[0]==len(native)
+    for extra in ({},{'year':[2025]},{'min_spend':0},{'platform_family':['3DELRR']}):
+        payload.filters={**filters,**extra}
+        sql,args=builder(payload,4,rank_only=True)
+        assert 'dashboard_explorer_source_pages' not in sql
+        expected_sql,expected_args=builder(payload,4,rank_only=True,use_prepared=False)
+        assert [row[:2] for row in db.execute(sql,args).fetchall()]==db.execute(expected_sql,expected_args).fetchall()
+    payload.filters=filters
+    sql,args=builder(payload,2,rank_only=True,use_prepared=False)
+    assert 'dashboard_explorer_source_pages' not in sql
+
+
 @pytest.mark.parametrize('filters,expected', AWARD_CASES)
 def test_award_filters_agree_across_preview_count_page_and_csv(explorer,filters,expected):
     db,ns,calls=explorer

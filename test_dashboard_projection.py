@@ -65,9 +65,9 @@ def test_cold_website_reads_keep_v7_overrides_and_need_no_native_scan(dashboard,
     expected_lines=ns['get_platform_subcontracts']('VIRGINIA CLASS (SSN 774)',years=[2025],agency='Navy',mode='lines')
     db.execute('SET threads=1')
     original=dashboard_projection.build_explorer_action_projection
-    def prepared_actions(conn):
+    def prepared_actions(conn, **kwargs):
         assert conn.execute("SELECT current_setting('threads')").fetchone()[0]==2
-        return original(conn)
+        return original(conn, **kwargs)
     monkeypatch.setattr(dashboard_projection,'build_explorer_action_projection',prepared_actions)
     metadata = build_dashboard_projection(db,reference_for(None),'release-A',preparation_threads=2,
                                           initial_build=initial_build)
@@ -87,8 +87,8 @@ def test_failed_initial_preparation_keeps_readiness_and_release_marker_unpublish
     db,ns=dashboard;complete_sources(db)
     db.execute('SET threads=1')
     original=dashboard_projection.build_explorer_action_projection
-    def fail_after_actions(conn):
-        original(conn)
+    def fail_after_actions(conn, **kwargs):
+        original(conn, **kwargs)
         raise RuntimeError('Incomplete initial action preparation')
     monkeypatch.setattr(dashboard_projection,'build_explorer_action_projection',fail_after_actions)
     with pytest.raises(RuntimeError,match='Incomplete initial action'):
@@ -139,3 +139,48 @@ def test_reviewed_multi_programme_targets_do_not_duplicate_within_a_programme(da
     assert db.execute("SELECT COUNT(*) FROM dashboard_actions WHERE award_key='B'").fetchone()[0]==2
     assert db.execute("SELECT SUM(spend_amount) FROM dashboard_actions WHERE programme_key='OTHER PROGRAMME'").fetchone()[0]==50
     assert db.execute("SELECT COUNT(*) FROM dashboard_actions WHERE award_key='C'").fetchone()[0]==0
+
+
+def test_committed_physical_identities_survive_checkpoint_reopen_and_atomic_refresh(dashboard,tmp_path,monkeypatch):
+    import duckdb
+    import dashboard_projection
+    from private_platform_reference import reference_for
+    seed,_=dashboard;complete_sources(seed)
+    seed.execute('''CREATE TABLE v_contracts_rolled AS SELECT award_key,MAX(contract_id) AS contract_id,
+        MAX(vendor_cage) AS vendor_cage,MAX(market_segment) AS market_segment,
+        SUM(spend_amount) AS obligations_fy2025,COUNT(*) AS action_count_fy2025
+        FROM v_transactions GROUP BY award_key''')
+    path=str(tmp_path/'committed.duckdb')
+    db=duckdb.connect(path)
+    try:
+        for (name,) in seed.execute('SHOW TABLES').fetchall():
+            frame=seed.execute('SELECT * FROM '+name).fetchdf()
+            db.register('native_seed',frame)
+            db.execute('CREATE TABLE '+name+' AS SELECT * FROM native_seed')
+            db.unregister('native_seed')
+        db.execute('SET threads=1')
+        build_dashboard_projection(db,reference_for(None),'release-A',preparation_threads=2,initial_build=True)
+        expected={name:db.execute('SELECT * FROM '+name+' ORDER BY 1').fetchall()
+                  for name in ('dashboard_explorer_actions','dashboard_explorer_rank')}
+        db.execute('CHECKPOINT');db.close();db=duckdb.connect(path)
+        for name,rows in expected.items():
+            assert db.execute('SELECT * FROM '+name+' ORDER BY 1').fetchall()==rows
+        for name,identity in [('actions','_explorer_action_row_id'),('awards','_explorer_row_id')]:
+            assert db.execute('SELECT table_type FROM information_schema.tables WHERE table_name=?',['dashboard_explorer_'+name]).fetchone()[0]=='VIEW'
+            assert db.execute(f'SELECT COUNT(*) FROM dashboard_explorer_{name} a JOIN dashboard_explorer_{name}_data d ON a.{identity}=d.rowid').fetchone()[0]==db.execute('SELECT COUNT(*) FROM dashboard_explorer_'+name).fetchone()[0]
+        assert db.execute("SELECT COUNT(*) FROM duckdb_indexes() WHERE index_name='dashboard_explorer_rank_cage'").fetchone()[0]==1
+        original=dashboard_projection.build_explorer_projection
+        def fail(conn,checkpoint_stage=None):
+            original(conn,checkpoint_stage)
+            raise RuntimeError('incomplete refresh')
+        monkeypatch.setattr(dashboard_projection,'build_explorer_projection',fail)
+        with pytest.raises(RuntimeError,match='incomplete refresh'):
+            build_dashboard_projection(db,reference_for(None),'release-B')
+        assert db.execute('SELECT source_release FROM dashboard_projection_release').fetchone()[0]=='release-A'
+        assert db.execute('SELECT * FROM dashboard_explorer_actions ORDER BY 1').fetchall()==expected['dashboard_explorer_actions']
+        monkeypatch.setattr(dashboard_projection,'build_explorer_projection',original)
+        build_dashboard_projection(db,reference_for(None),'release-B')
+        assert db.execute('SELECT source_release FROM dashboard_projection_release').fetchone()[0]=='release-B'
+        assert db.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name IN ('dashboard_explorer_actions_data','dashboard_explorer_awards_data')").fetchone()[0]==0
+    finally:
+        db.close()

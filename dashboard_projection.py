@@ -97,7 +97,13 @@ def explorer_effective_award_key(columns):
     return key
 
 
-def build_explorer_action_projection(conn):
+def _drop_explorer_relation(conn, name):
+    kind = conn.execute('SELECT table_type FROM information_schema.tables WHERE table_catalog=current_database() AND table_schema=current_schema() AND table_name=?', [name]).fetchone()
+    if kind:
+        conn.execute(('DROP VIEW ' if kind[0] == 'VIEW' else 'DROP TABLE ') + name)
+
+
+def build_explorer_action_projection(conn, physical_ids=False):
     relations = {row[0] for row in conn.execute('SHOW TABLES').fetchall()}
     if 'v_transactions' not in relations:
         return
@@ -129,23 +135,34 @@ def build_explorer_action_projection(conn):
             selected.append(f'"{column}" IS NULL AS "_explorer_{column}_is_null"')
         else:
             selected.append('"'+column+'"')
-    selected.extend(['ROW_NUMBER() OVER () AS _explorer_action_row_id',key+' AS _explorer_award_key',
+    if not physical_ids:
+        selected.append('ROW_NUMBER() OVER () AS _explorer_action_row_id')
+    selected.extend([key+' AS _explorer_award_key',
                      'CAST(hash('+key+') % 4294967296 AS UINTEGER) AS _explorer_award_hash'])
     if 'vendor_cage' in columns:
         selected.append('UPPER(TRIM(CAST(vendor_cage AS VARCHAR))) AS _explorer_vendor_cage')
     started = time.monotonic()
     logging.getLogger('mimir-api').info('EXPLORER ACTION PROJECTION BUILD fields=%s',len(selected))
-    conn.execute('CREATE OR REPLACE TABLE dashboard_explorer_actions AS SELECT '
+    target = 'dashboard_explorer_actions_data' if physical_ids else 'dashboard_explorer_actions'
+    _drop_explorer_relation(conn, target)
+    conn.execute('CREATE TABLE '+target+' AS SELECT '
                  + ','.join(selected) + ' FROM v_transactions')
     logging.getLogger('mimir-api').info('EXPLORER ACTION PROJECTION READY rows=%s seconds=%.3f',
-        conn.execute('SELECT COUNT(*) FROM dashboard_explorer_actions').fetchone()[0],time.monotonic()-started)
+        conn.execute('SELECT COUNT(*) FROM '+target).fetchone()[0],time.monotonic()-started)
 
 
 def build_explorer_projection(conn, checkpoint_stage=None):
     build_item_filter_projection(conn)
-    build_explorer_action_projection(conn)
+    build_explorer_action_projection(conn, physical_ids=checkpoint_stage is not None)
     if checkpoint_stage:
         checkpoint_stage('native_actions')
+        _drop_explorer_relation(conn, 'dashboard_explorer_actions')
+        conn.execute('CREATE VIEW dashboard_explorer_actions AS SELECT *,rowid AS _explorer_action_row_id FROM dashboard_explorer_actions_data')
+    else:
+        _drop_explorer_relation(conn, 'dashboard_explorer_actions_data')
+    build_explorer_source_pages(conn)
+    if checkpoint_stage:
+        checkpoint_stage('source_pages')
     # Prepare only Explorer's native fields, at the unchanged award grain.
     # Avoid sorting wide descriptions during startup. Cast annual measures once
     # using the exact same types/TRY_CAST semantics as the request builder.
@@ -178,9 +195,10 @@ def build_explorer_projection(conn, checkpoint_stage=None):
                 selected.append(f'{quoted} IS NULL AS "_explorer_{column}_is_null"')
             else:
                 selected.append(quoted)
-    # Persist the identity as data. DuckDB's virtual rowid can change when the
-    # surrounding readiness transaction commits newly created storage.
-    selected.append('ROW_NUMBER() OVER () AS _explorer_row_id')
+    # Physical positions are exposed only after their creation has committed.
+    # Atomic refreshes retain persisted identities until their final commit.
+    if not checkpoint_stage:
+        selected.append('ROW_NUMBER() OVER () AS _explorer_row_id')
     if 'vendor_cage' in columns:
         selected.append('UPPER(TRIM(CAST(vendor_cage AS VARCHAR))) AS _explorer_vendor_cage')
     selected.append('UPPER(TRIM(CAST(market_segment AS VARCHAR))) AS _explorer_market_domain')
@@ -190,13 +208,19 @@ def build_explorer_projection(conn, checkpoint_stage=None):
     started = time.monotonic()
     logger = logging.getLogger('mimir-api')
     logger.info('EXPLORER PROJECTION BUILD fields=%s',len(selected))
-    conn.execute('CREATE OR REPLACE TABLE dashboard_explorer_awards AS SELECT '
+    target = 'dashboard_explorer_awards_data' if checkpoint_stage else 'dashboard_explorer_awards'
+    _drop_explorer_relation(conn, target)
+    conn.execute('CREATE TABLE '+target+' AS SELECT '
                  + ','.join(selected) + ' FROM v_contracts_rolled')
     logger.info('EXPLORER PROJECTION READY rows=%s seconds=%.3f',
-                conn.execute('SELECT COUNT(*) FROM dashboard_explorer_awards').fetchone()[0],
+                conn.execute('SELECT COUNT(*) FROM '+target).fetchone()[0],
                 time.monotonic()-started)
     if checkpoint_stage:
         checkpoint_stage('native_awards')
+        _drop_explorer_relation(conn, 'dashboard_explorer_awards')
+        conn.execute('CREATE VIEW dashboard_explorer_awards AS SELECT *,rowid AS _explorer_row_id FROM dashboard_explorer_awards_data')
+    else:
+        _drop_explorer_relation(conn, 'dashboard_explorer_awards_data')
     # Append one domain at a time. This clusters a compact ranking lane without
     # an external wide sort (and its unbounded temporary-storage requirement).
     rank_started = time.monotonic()
@@ -221,6 +245,45 @@ def build_explorer_projection(conn, checkpoint_stage=None):
     logger.info('EXPLORER RANK READY rows=%s seconds=%.3f',
                 conn.execute('SELECT COUNT(*) FROM dashboard_explorer_rank').fetchone()[0],
                 time.monotonic()-rank_started)
+
+
+def build_explorer_source_pages(conn, minimum_actions=100_000, page_size=1000):
+    """Bounded first pages for every high-cardinality source facet.
+
+    Native award grain, signed totals and ranking are unchanged. Compound
+    filters, larger pages and offsets use the ordinary exact query builder.
+    """
+    conn.execute('''CREATE OR REPLACE TABLE dashboard_explorer_source_pages(
+        source_of_supply VARCHAR,effective_award_key VARCHAR,contract_id VARCHAR,
+        award_hash UINTEGER,obligations DOUBLE)''')
+    conn.execute('''CREATE OR REPLACE TABLE dashboard_explorer_source_counts(
+        source_of_supply VARCHAR,award_count BIGINT,page_size BIGINT)''')
+    if 'dashboard_explorer_actions' not in {row[0] for row in conn.execute('SHOW TABLES').fetchall()}:
+        return
+    columns = {row[0] for row in conn.execute('DESCRIBE dashboard_explorer_actions').fetchall()}
+    if 'source_of_supply' not in columns:
+        return
+    sources = conn.execute('''SELECT UPPER(TRIM(CAST(source_of_supply AS VARCHAR))) AS source
+        FROM dashboard_explorer_actions WHERE NULLIF(TRIM(source_of_supply),'') IS NOT NULL
+        GROUP BY 1 HAVING COUNT(*) >= ? ORDER BY 1''', [minimum_actions]).fetchall()
+    for (source,) in sources:
+        started = time.monotonic()
+        conn.execute('''CREATE OR REPLACE TEMP TABLE explorer_source_rank AS
+            SELECT _explorer_award_key AS effective_award_key,
+                MAX_BY(contract_id,TRY_CAST(action_date AS DATE)) AS contract_id,
+                MIN(_explorer_award_hash) AS award_hash,
+                SUM(COALESCE(TRY_CAST(spend_amount AS DOUBLE),0.0)) AS obligations
+            FROM dashboard_explorer_actions
+            WHERE UPPER(TRIM(CAST(source_of_supply AS VARCHAR)))=?
+                AND contract_id IS NOT NULL AND TRIM(CAST(contract_id AS VARCHAR))<>''
+            GROUP BY _explorer_award_key''', [source])
+        count = conn.execute('SELECT COUNT(*) FROM explorer_source_rank').fetchone()[0]
+        conn.execute('INSERT INTO dashboard_explorer_source_counts VALUES (?,?,?)',[source,count,page_size])
+        conn.execute('''INSERT INTO dashboard_explorer_source_pages
+            SELECT ?,effective_award_key,contract_id,award_hash,obligations
+            FROM explorer_source_rank ORDER BY obligations DESC NULLS LAST,contract_id LIMIT ?''', [source,page_size])
+        conn.execute('DROP TABLE explorer_source_rank')
+        logging.getLogger('mimir-api').info('EXPLORER SOURCE PAGE READY source=%s awards=%s seconds=%.3f',source,count,time.monotonic()-started)
 
 
 def verify_explorer_projection(conn):
@@ -306,6 +369,16 @@ def build_parts_projection(conn):
     conn.execute('CREATE INDEX dashboard_item_profiles_niin ON dashboard_item_profiles(niin)')
 
 
+def build_explorer_rank_index(conn):
+    if 'dashboard_explorer_rank' not in {row[0] for row in conn.execute('SHOW TABLES').fetchall()}:
+        return
+    columns = {row[0] for row in conn.execute('DESCRIBE dashboard_explorer_rank').fetchall()}
+    if '_explorer_vendor_cage' in columns:
+        started = time.monotonic()
+        conn.execute('CREATE INDEX IF NOT EXISTS dashboard_explorer_rank_cage ON dashboard_explorer_rank(_explorer_vendor_cage)')
+        logging.getLogger('mimir-api').info('EXPLORER CONTRACTOR INDEX READY seconds=%.3f',time.monotonic()-started)
+
+
 def build_dashboard_projection(conn, reference, source_release, preparation_threads=None,
                                initial_build=False):
     started = time.monotonic()
@@ -342,6 +415,8 @@ def build_dashboard_projection(conn, reference, source_release, preparation_thre
             [source_release, getattr(reference, 'manifest', {}).get('release_id') if reference else None])
         counts = {table: conn.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]
                   for table in ('dashboard_actions','dashboard_network','dashboard_bom','dashboard_item_financial')}
+        if not initial_build:
+            build_explorer_rank_index(conn)
         conn.execute('COMMIT')
     except BaseException:
         if transaction_started:
@@ -350,6 +425,10 @@ def build_dashboard_projection(conn, reference, source_release, preparation_thre
     finally:
         conn.execute('SET threads='+str(runtime_threads))
         logging.getLogger('mimir-api').info('DASHBOARD SERVING threads_restored=%s',runtime_threads)
+    if initial_build:
+        build_explorer_rank_index(conn)
     verify_explorer_projection(conn)
+    source_pages = dict(conn.execute('SELECT source_of_supply,page_size FROM dashboard_explorer_source_counts').fetchall())
     return {'source_release': source_release, 'mapping_release': getattr(reference, 'manifest', {}).get('release_id') if reference else None,
+            'explorer_source_pages': source_pages,
             'rows': counts, 'build_seconds': round(time.monotonic()-started,3)}

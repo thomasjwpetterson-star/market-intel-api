@@ -4622,6 +4622,24 @@ def build_contract_awards_explorer_query_from_actions(
     spend_min = None
     spend_max = None
 
+    active_filters = {str(key).strip().lower():value for key,value in filters.items()
+                      if value is not None and value != [] and str(value).strip() != ''}
+    if action_relation == 'dashboard_explorer_actions' and set(active_filters) == {'source_of_supply'} and (rank_only or count_only):
+        values = active_filters['source_of_supply']
+        values = values if isinstance(values,list) else [values]
+        if len(values) == 1:
+            source = str(values[0]).strip().upper()
+            page_size = GLOBAL_CACHE.get('dashboard_projection',{}).get('explorer_source_pages',{}).get(source)
+            if page_size is not None:
+                if count_only:
+                    return 'SELECT award_count AS count FROM dashboard_explorer_source_counts WHERE source_of_supply=?',[source]
+                limit = safe_int(row_limit,50,1,500_000)
+                page_offset = safe_int(offset,0,0,10_000_000)
+                if limit + page_offset <= page_size:
+                    return '''SELECT effective_award_key,contract_id,award_hash
+                        FROM dashboard_explorer_source_pages WHERE source_of_supply=?
+                        ORDER BY obligations DESC NULLS LAST,contract_id LIMIT ? OFFSET ?''',[source,limit,page_offset]
+
     filter_column_map = {
         "contract_id": "contract_id",
         "year": "year",
@@ -5277,15 +5295,8 @@ def build_contract_awards_explorer_query_from_rollup(
         params.append(spend_max)
 
     where_clause = " AND ".join(where_parts)
-    if count_only:
-        return f"SELECT COUNT(*) AS count FROM {award_relation} r WHERE {where_clause}", params
-
-    row_limit = safe_int(row_limit, 50, 1, 500_000)
-    offset = safe_int(offset, 0, 0, 10_000_000)
-    if rank_only:
-        if not prepared_awards:
-            raise HTTPException(status_code=503,detail="The award serving projection is unavailable.")
-        rank_relation,rank_identity = award_relation,row_identity
+    rank_relation,rank_identity = award_relation,row_identity
+    if prepared_awards and (count_only or rank_only):
         if not any(filters.get(key) not in (None,"",[]) for key in ("q","search","query")):
             try:
                 rank_columns = get_duck_table_columns("dashboard_explorer_rank")
@@ -5295,6 +5306,14 @@ def build_contract_awards_explorer_query_from_rollup(
                     rank_relation,rank_identity = "dashboard_explorer_rank","r._explorer_row_id"
             except Exception:
                 pass
+    if count_only:
+        return f"SELECT COUNT(*) AS count FROM {rank_relation} r WHERE {where_clause}", params
+
+    row_limit = safe_int(row_limit, 50, 1, 500_000)
+    offset = safe_int(offset, 0, 0, 10_000_000)
+    if rank_only:
+        if not prepared_awards:
+            raise HTTPException(status_code=503,detail="The award serving projection is unavailable.")
         return f"""SELECT {rank_identity} AS explorer_row_id,({obligations_expr}) AS explorer_rank_obligations
             FROM {rank_relation} r WHERE {where_clause}
             ORDER BY explorer_rank_obligations DESC NULLS LAST,r.contract_id
