@@ -180,6 +180,12 @@ class BootstrapReleaseMarkerTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=True), patch(
                 "bootstrap_data.boto3.client", return_value=CandidateS3(manifest)
+            ), patch(
+                "bootstrap_data.resolve_platform_release", return_value={"platform": {
+                    "release_id": "platform-run-1", "components": {"ask_mimir": {"release_id": "friday-v7"}},
+                }}
+            ), patch(
+                "bootstrap_data.stage_shared_market_explorer", return_value=root / "market-explorer"
             ):
                 self.assertEqual(bootstrap()["release_id"], "friday-v7")
                 selected = Path(os.environ["ASK_MIMIR_TRANSACTIONS"])
