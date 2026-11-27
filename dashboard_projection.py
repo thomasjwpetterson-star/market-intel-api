@@ -57,6 +57,20 @@ def build_code_projection(conn):
         SELECT CAST(naics_code AS VARCHAR) AS naics_code,MAX(naics_description) AS naics_description
         FROM v_summary GROUP BY 1''')
 
+def build_explorer_projection(conn):
+    # Keep the native award grain and every source field. Moving the cold
+    # columnar read into release preparation lets wide preview queries use
+    # DuckDB storage and domain zone maps within the existing memory/spill cap.
+    relations = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
+    if 'v_contracts_rolled' not in relations:
+        return
+    columns = {row[0] for row in conn.execute('DESCRIBE v_contracts_rolled').fetchall()}
+    if 'market_segment' not in columns:
+        return
+    conn.execute('''CREATE OR REPLACE TABLE dashboard_explorer_awards AS
+        SELECT * FROM v_contracts_rolled ORDER BY market_segment,contract_id''')
+
+
 def financial_sql(floor_relation="dashboard_cache_floor", include_psc=True):
     """Native item evidence, with history only before the current action floor."""
     sql = '''SELECT LPAD(COALESCE(NULLIF(TRIM(CAST(t.niin AS VARCHAR)),''),
@@ -118,6 +132,7 @@ def build_dashboard_projection(conn, reference, source_release):
         build_action_projection(conn, reference)
         build_subcontract_projection(conn)
         build_parts_projection(conn)
+        build_explorer_projection(conn)
         conn.execute('''CREATE OR REPLACE TABLE dashboard_projection_release AS
             SELECT ? AS source_release,? AS mapping_release''',
             [source_release, getattr(reference, 'manifest', {}).get('release_id') if reference else None])

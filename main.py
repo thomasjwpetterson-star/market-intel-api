@@ -4334,7 +4334,7 @@ INTERNAL_DUCK_RELATIONS = {
     NSN_PRICE_SUMMARY_TABLE,
     NSN_OPPORTUNITY_SUMMARY_TABLE,
     NSN_OPPORTUNITY_DETAIL_TABLE,
-    "dashboard_psc", "dashboard_naics",
+    "dashboard_psc", "dashboard_naics", "dashboard_explorer_awards",
 }
 
 ALLOWED_EXPLORER_COLUMNS = {
@@ -4991,7 +4991,13 @@ def build_contract_awards_explorer_query_from_rollup(
     offset: int = 0,
     count_only: bool = False,
 ):
-    actual_cols = get_duck_table_columns("v_contracts_rolled")
+    award_relation = "v_contracts_rolled"
+    try:
+        if get_duck_table_columns("dashboard_explorer_awards"):
+            award_relation = "dashboard_explorer_awards"
+    except Exception:
+        pass
+    actual_cols = get_duck_table_columns(award_relation)
     available_years = _rolled_contract_years(actual_cols)
     if not actual_cols or not available_years:
         raise HTTPException(
@@ -5162,7 +5168,7 @@ def build_contract_awards_explorer_query_from_rollup(
 
     where_clause = " AND ".join(where_parts)
     if count_only:
-        return f"SELECT COUNT(*) AS count FROM v_contracts_rolled r WHERE {where_clause}", params
+        return f"SELECT COUNT(*) AS count FROM {award_relation} r WHERE {where_clause}", params
 
     row_limit = safe_int(row_limit, 50, 1, 500_000)
     offset = safe_int(offset, 0, 0, 10_000_000)
@@ -5237,19 +5243,41 @@ def build_contract_awards_explorer_query_from_rollup(
         select_parts.append(expr if " AS " in expr else f"{expr} AS {quote_ident(field)}")
     select_clause = ", ".join(select_parts) or "f.contract_id"
 
-    sql = f"""
-        WITH candidate_contracts AS (
+    candidate_sql = f"""
             SELECT
                 r.*,
                 ({obligations_expr}) AS obligations_in_selected_period_usd,
                 ({actions_expr}) AS number_of_actions_in_selected_period,
                 {earliest_expr} AS earliest_action_date_in_selected_period,
                 {latest_expr} AS latest_action_date_in_selected_period
-            FROM v_contracts_rolled r
+            FROM {award_relation} r
             WHERE {where_clause}
             ORDER BY obligations_in_selected_period_usd DESC NULLS LAST, r.contract_id
             LIMIT ? OFFSET ?
-        ),
+        """
+    ranking_cte = ""
+    if award_relation == "dashboard_explorer_awards":
+        # A materialized page of stable native DuckDB row IDs prevents the
+        # ranking scan from reading wide descriptions and period dates. Row IDs
+        # also preserve distinct native awards that share a contract number.
+        ranking_cte = f"""ranked_awards AS MATERIALIZED (
+            SELECT r.rowid AS explorer_row_id,
+                   ({obligations_expr}) AS obligations_in_selected_period_usd
+            FROM {award_relation} r WHERE {where_clause}
+            ORDER BY obligations_in_selected_period_usd DESC NULLS LAST,r.contract_id
+            LIMIT ? OFFSET ?
+        ),"""
+        candidate_sql = f"""
+            SELECT r.*,p.obligations_in_selected_period_usd,
+                ({actions_expr}) AS number_of_actions_in_selected_period,
+                {earliest_expr} AS earliest_action_date_in_selected_period,
+                {latest_expr} AS latest_action_date_in_selected_period
+            FROM {award_relation} r
+            INNER JOIN ranked_awards p ON r.rowid=p.explorer_row_id
+        """
+
+    sql = f"""
+        WITH {ranking_cte} candidate_contracts AS ({candidate_sql}),
         psc_map AS (
             SELECT psc_code, MAX({psc_description}) AS psc_description
             FROM {psc_relation}
