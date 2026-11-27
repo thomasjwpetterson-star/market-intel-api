@@ -21,6 +21,12 @@ from etl_automation.platform_release import (
     promote_platform_manifest,
     validate_platform_manifest,
 )
+from production_consumer_rollover import (
+    consumer_state,
+    deployment_hooks,
+    matches_release,
+    refresh_consumers,
+)
 
 
 DEFAULT_BUCKET = "a-and-d-intel-lake-newaccount"
@@ -160,6 +166,15 @@ def main() -> None:
     if not children["ask_mimir"].get("files"):
         raise RuntimeError("Ask Mimir child has no files")
 
+    hooks = None
+    if arguments.execute:
+        # Fail before touching the pointer if either consumer cannot be rolled
+        # forward or is already serving a different platform root.
+        hooks = deployment_hooks()
+        current_platform = load_json(s3, arguments.bucket, PLATFORM_CURRENT_KEY)
+        if not matches_release(consumer_state(), current_platform):
+            raise RuntimeError("Main and Ask must be healthy on the current platform root before promotion")
+
     pre_cutover = {
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "git_commit": arguments.git_commit,
@@ -203,6 +218,7 @@ def main() -> None:
             promote_platform_manifest(s3, arguments.bucket, platform)
         )
         result["executed"] = True
+        result["consumer_rollover"] = refresh_consumers(platform, hooks)
     print(json.dumps(result, indent=2, sort_keys=True))
 
 

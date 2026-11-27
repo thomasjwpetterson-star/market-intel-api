@@ -501,10 +501,9 @@ def bootstrap() -> Dict[str, Any]:
     root_ask = market_platform["platform"]["components"]["ask_mimir"]["release_id"]
     if root_ask != manifest["release_id"]:
         raise RuntimeError("Ask and Market Explorer must follow the same platform root")
-    if platform_release is not None:
-        platform = platform_release["platform"]
-        os.environ["MIMIR_PLATFORM_RELEASE_ID"] = str(platform["release_id"])
-        os.environ["MIMIR_PLATFORM_ETL_RUN_ID"] = str(platform["etl_run_id"])
+    platform = market_platform["platform"]
+    os.environ["MIMIR_PLATFORM_RELEASE_ID"] = str(platform["release_id"])
+    os.environ["MIMIR_PLATFORM_ETL_RUN_ID"] = str(platform.get("etl_run_id") or "")
     os.environ["ASK_MIMIR_MARKET_EXPLORER_DIR"] = str(
         stage_shared_market_explorer(s3, bucket, market_platform, release_root,
                                      str(manifest["release_id"]))

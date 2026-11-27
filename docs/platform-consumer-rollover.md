@@ -1,0 +1,9 @@
+# Platform data cutover: consumer rollover
+
+`promote_production_cutover.py --execute` changes the production platform pointer only after its candidate checks. The same command now requires the Main API and Ask beta to be healthy on the current root, reads their existing Render deploy hooks from AWS Secrets Manager, writes the new pointer, triggers both deployments, and waits until both health endpoints report the new platform and child release IDs. The command fails if either consumer has not reached the new release within 20 minutes; its pre-cutover snapshot remains the rollback record. The hook URLs are never printed or stored in the change-control snapshot.
+
+The hooks are `mimir/render/market-intel-api/deploy-hook` and `mimir/render/ask-mimir-beta/deploy-hook` in us-east-1. The release runner needs `secretsmanager:GetSecretValue` for those two secrets and permission to promote the S3 pointer. Ask beta must have `MIMIR_USE_PLATFORM_MANIFEST=1` and must not pin `MIMIR_PLATFORM_MANIFEST_VERSION_ID` to an older root. The command refuses to switch the pointer if the live Ask health endpoint does not confirm root mode.
+
+Main's public Market Explorer reads the S3 root with a 30-second process-local poll, but Main's analytical API and Ask beta pin their data at startup. A code push auto-deploys Main, while Ask beta has auto-deploy disabled. Neither service redeploys merely because S3 changed. Do not switch the pointer with a direct S3 write or the low-level `promote_platform_manifest` helper; those paths bypass the consumer rollover.
+
+After any rollback of the platform pointer, trigger both Render services again and verify their health endpoints report the restored root and child release IDs. Do not consider a pointer-only rollback complete while either process still serves the superseded in-memory release.

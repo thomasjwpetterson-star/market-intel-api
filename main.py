@@ -671,6 +671,7 @@ async def private_reference_unavailable(request: Request, error: Exception):
 
 def get_readiness_state() -> Dict[str, Any]:
     cache = GLOBAL_CACHE
+    platform_bundle = globals().get("PINNED_PLATFORM_BUNDLE")
 
     is_loading = bool(cache.get("is_loading", False))
     last_loaded = cache.get("last_loaded", 0)
@@ -691,6 +692,8 @@ def get_readiness_state() -> Dict[str, Any]:
         "dashboard_projection_ok": bool(cache.get("dashboard_projection_ready", False)),
         "is_loading": bool(is_loading),
         "last_loaded": last_loaded,
+        "platform_release_id": (platform_bundle or {}).get("platform", {}).get("release_id"),
+        "main_release_id": (platform_bundle or {}).get("components", {}).get("main", {}).get("release_id"),
     }
 
 
@@ -706,6 +709,8 @@ async def ready_check(response: Response):
         "ready": bool(s["ready"]),
         "is_loading": bool(s["is_loading"]),
         "last_loaded": s["last_loaded"],
+        "platform_release_id": s["platform_release_id"],
+        "main_release_id": s["main_release_id"],
         "duck_ok": bool(s["duck_ok"]),
         "geo_ok": bool(s["geo_ok"]),
         "profiles_ok": bool(s["profiles_ok"]),

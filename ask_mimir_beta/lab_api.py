@@ -6250,6 +6250,8 @@ def health() -> Dict[str, Any]:
         "application_revision": os.getenv("RENDER_GIT_COMMIT"),
         "application_schema": "release-readiness-20260915-v1",
         "runtime_release_id": os.getenv("ASK_MIMIR_RELEASE_ID"),
+        "platform_release_id": os.getenv("MIMIR_PLATFORM_RELEASE_ID"),
+        "platform_manifest_enabled": os.getenv("MIMIR_USE_PLATFORM_MANIFEST", "0").strip().lower() in {"1", "true", "yes", "on"},
         "release_id": runtime.store.manifest["release_id"],
         "analysis_fy": runtime.store.manifest["analysis_fy"],
         "model": runtime.model,
