@@ -7,8 +7,11 @@ import copy
 from contextlib import contextmanager
 import hashlib
 import json
+import logging
 import os
 import re
+import tempfile
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
@@ -40,6 +43,7 @@ DEFAULT_FYDP_BUDGET_FILE = (
 )
 DEFAULT_OUTPUT_DIR = ROOT / "validation-output" / "company-context"
 DEFAULT_FISCAL_YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
+LOGGER = logging.getLogger(__name__)
 
 
 SOURCE_FILES = {
@@ -339,6 +343,60 @@ class CompanyContextBuilder:
         return context
 
     def _build_context(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        scope_name: str,
+        cages: Sequence[str],
+        fiscal_years: Sequence[int],
+        site_definitions: Sequence[Dict[str, Any] | None],
+        evidence_focus: str | None = None,
+    ) -> Dict[str, Any]:
+        args = dict(scope_type=scope_type, scope_id=scope_id, scope_name=scope_name,
+                    cages=cages, fiscal_years=fiscal_years,
+                    site_definitions=site_definitions, evidence_focus=evidence_focus)
+        if evidence_focus is None:
+            return self._build_context_core(**args)
+        # The provenance manifest must describe the complete pinned sources,
+        # before the per-site read optimization temporarily changes paths.
+        self._source_manifest()
+        with self._focused_source_files(cages, fiscal_years):
+            return self._build_context_core(**args)
+
+    @contextmanager
+    def _focused_source_files(self, cages: Sequence[str], years: Sequence[int]):
+        """Read each large source once, then reuse exact site/year rows."""
+        scratch_root = Path(os.getenv(
+            "ASK_MIMIR_DUCKDB_TEMP", os.getenv("ASK_MIMIR_DUCKDB_TEMP_DIR", "/tmp/ask-mimir-duckdb")
+        ))
+        scratch_root.mkdir(parents=True, exist_ok=True)
+        original = {name: self.paths[name] for name in ("transactions", "network")}
+        with tempfile.TemporaryDirectory(prefix="company-focused-", dir=scratch_root) as temporary:
+            try:
+                for name, condition in (
+                    ("transactions", f"vendor_cage IN ({placeholders(cages)})"),
+                    ("network", f"(sub_cage IN ({placeholders(cages)}) OR prime_cage IN ({placeholders(cages)}))"),
+                ):
+                    destination = Path(temporary) / f"{name}.parquet"
+                    started = time.perf_counter()
+                    parameters = [str(destination), str(original[name]), *cages]
+                    if name == "network":
+                        parameters.extend(cages)
+                    parameters.extend(years)
+                    self.connection.execute(
+                        f"COPY (SELECT * FROM read_parquet(?) WHERE {condition} "
+                        f"AND year IN ({placeholders(years)})) TO ? (FORMAT PARQUET)",
+                        parameters,
+                    )
+                    self.paths[name] = destination
+                    LOGGER.info("company_focused_source_slice source=%s cage=%s latency_ms=%.0f",
+                                name, ",".join(cages), (time.perf_counter() - started) * 1000)
+                yield
+            finally:
+                self.paths.update(original)
+
+    def _build_context_core(
         self,
         *,
         scope_type: str,

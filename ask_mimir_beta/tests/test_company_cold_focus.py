@@ -2,9 +2,11 @@ import hashlib
 import json
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import Mock
 
+import duckdb
 from company_context import CompanyContextBuilder
 from company_context_store import CompanyContextStore, LINK_VERSION, FYDP_PLATFORM_LINKAGE_VERSION
 
@@ -15,6 +17,7 @@ class CompanyColdFocusTests(unittest.TestCase):
         builder._parent_action_names = ()
         builder._exact_parent_actions = False
         builder._source_manifest = Mock(return_value={"identity_definition": {"version": "v1"}, "files": {}})
+        builder._focused_source_files = Mock(return_value=nullcontext())
         values = {
             "_site_identities": [{"cage": "52661", "vendor_name": "RTX", "city": "East Hartford"}],
             "_product_and_part_evidence": {
@@ -93,6 +96,40 @@ class CompanyColdFocusTests(unittest.TestCase):
             self.assertEqual(builder._verified_release_hashes(), {source.resolve(): digest})
             source.write_bytes(b"changed size")
             self.assertEqual(builder._verified_release_hashes(), {})
+
+    def test_focused_source_slices_preserve_only_selected_site_and_year(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            builder = object.__new__(CompanyContextBuilder)
+            builder.connection = duckdb.connect()
+            builder.paths = {
+                "transactions": root / "transactions.parquet",
+                "network": root / "network.parquet",
+            }
+            original = dict(builder.paths)
+            builder.connection.execute(
+                "COPY (SELECT * FROM (VALUES "
+                "('52661', 2026, 10), ('52661', 2025, 20), "
+                "('15090', 2026, 30)) t(vendor_cage, year, spend_amount)) "
+                "TO ? (FORMAT PARQUET)", [str(original["transactions"])]
+            )
+            builder.connection.execute(
+                "COPY (SELECT * FROM (VALUES "
+                "('52661', '15090', 2026), ('15090', '52661', 2026), "
+                "('15090', '15090', 2026), ('52661', '15090', 2025)) "
+                "t(sub_cage, prime_cage, year)) TO ? (FORMAT PARQUET)",
+                [str(original["network"])]
+            )
+            with builder._focused_source_files(["52661"], [2026]):
+                self.assertEqual(builder.connection.execute(
+                    "SELECT SUM(spend_amount) FROM read_parquet(?)",
+                    [str(builder.paths["transactions"])],
+                ).fetchone()[0], 10)
+                self.assertEqual(builder.connection.execute(
+                    "SELECT COUNT(*) FROM read_parquet(?)",
+                    [str(builder.paths["network"])],
+                ).fetchone()[0], 2)
+            self.assertEqual(builder.paths, original)
 
 
 if __name__ == "__main__":
