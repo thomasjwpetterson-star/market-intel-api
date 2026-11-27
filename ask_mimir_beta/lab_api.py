@@ -5073,7 +5073,6 @@ def company_detail_requested(question: str) -> bool:
         r"parts?|NSNs?|NIINs?)|specific\s+(?:CAGE\s+)?(?:sites?|facilities|"
         r"awards?|parts?|NSNs?|NIINs?)|(?:every|all)\s+(?:sites?|facilities|"
         r"CAGEs?|parts?|NSNs?|NIINs?)|site.by.site|"
-        r"CAGE\s*[:#-]?\s*[A-Z0-9]{5}|"
         r"(?:NSN|NIIN)\s*[:#-]?\s*[A-Z0-9][A-Z0-9-]{4,})\b",
         question, re.IGNORECASE,
     ))
@@ -5081,9 +5080,11 @@ def company_detail_requested(question: str) -> bool:
             and not explicit_detail:
         return False
     return bool(re.search(
-        r"\b(?:CAGE\s*[:#-]?\s*[A-Z0-9]{5}|every\s+site|all\s+sites|"
+        r"\b(?:every\s+site|all\s+sites|"
         r"part\s+numbers?|NIINs?|NSNs?|product\s+lines?|third.party\s+DLA|"
-        r"supply\s+chain|suppliers?|sub[- ]?contracts?|sub[- ]?contractors?|"
+        r"supply\s+chain|suppliers|(?:all|every|complete|exhaustive)\s+"
+        r"(?:reported\s+)?sub[- ]?contracts?|"
+        r"(?:all|every|complete|exhaustive)\s+sub[- ]?contractors?|"
         r"site.by.site|FYDP|future\s+demand|"
         r"budget\s+line|solicitations?)\b",
         question, re.IGNORECASE,

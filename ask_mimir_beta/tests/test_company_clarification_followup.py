@@ -51,6 +51,16 @@ class CompanyClarificationFollowupTests(unittest.TestCase):
         self.assertEqual(resolved.messages[0].content, "52661")
         self.assertFalse(lab.company_detail_requested(resolved.messages[0].content))
 
+    def test_direct_site_identifier_uses_overview_unless_detail_is_requested(self):
+        self.assertFalse(lab.company_detail_requested(
+            "Tell me about this defense supplier site: CAGE 52661"))
+        self.assertFalse(lab.company_detail_requested("CAGE 52661"))
+        self.assertTrue(lab.company_detail_requested(
+            "Show the subcontracts and part numbers for CAGE 52661"))
+        self.assertFalse(lab.company_detail_requested("What about their subcontracts?"))
+        self.assertTrue(lab.company_detail_requested(
+            "List all reported subcontracts for CAGE 52661"))
+
     def test_unoffered_location_cannot_select_unrelated_supplier(self):
         request = self.request("Cambridge")
         self.assertIs(lab._request_with_resolved_company_clarification(request), request)
