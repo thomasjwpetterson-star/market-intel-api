@@ -4594,10 +4594,8 @@ def build_contract_awards_explorer_query_from_actions(
     if not actual_cols:
         raise HTTPException(status_code=503, detail="v_transactions is not available yet. Reload may still be running.")
     action_relation = 'v_transactions'
-    active_item_filter = any(key in {'nsn','niin','part_number','source_of_supply'}
-        and value not in (None,'',[]) for key,value in (payload.filters or {}).items())
     try:
-        prepared_cols = get_duck_table_columns('dashboard_explorer_actions') if use_prepared and active_item_filter else set()
+        prepared_cols = get_duck_table_columns('dashboard_explorer_actions') if use_prepared else set()
     except Exception:
         prepared_cols = set()
     if {'_explorer_action_row_id','_explorer_award_key'} <= prepared_cols:
@@ -4609,6 +4607,11 @@ def build_contract_awards_explorer_query_from_actions(
         selected_fields = EXPLORER_DEFAULT_COLUMNS[CONTRACT_AWARD_EXPLORER_TABLE]
 
     def col_or_null(col: str, alias: Optional[str] = None, sql_type: str = "VARCHAR") -> str:
+        null_flag = f'_explorer_{col}_is_null'
+        if action_relation == 'dashboard_explorer_actions' and null_flag in actual_cols:
+            fallback = '_explorer_award_key' if col == 'award_key' else 'description'
+            return (f'CASE WHEN {quote_ident(null_flag)} THEN NULL ELSE '
+                    f'COALESCE({quote_ident(col)},{quote_ident(fallback)}) END AS {quote_ident(alias or col)}')
         return _source_expr(actual_cols, col, alias, sql_type)
 
     selected_where = ["contract_id IS NOT NULL", "TRIM(CAST(contract_id AS VARCHAR)) <> ''"]
@@ -5061,7 +5064,16 @@ def build_contract_awards_explorer_query_from_rollup(
             award_relation = "dashboard_explorer_awards"
     except Exception:
         pass
+    prepared_awards = award_relation == 'dashboard_explorer_awards'
     actual_cols = get_duck_table_columns(award_relation)
+    decoders = []
+    for column in ('base_award_description','latest_action_description'):
+        flag = f'_explorer_{column}_is_null'
+        if prepared_awards and flag in actual_cols:
+            decoders.append(f'CASE WHEN {quote_ident(flag)} THEN NULL ELSE '
+                f'COALESCE({quote_ident(column)},description) END AS {quote_ident(column)}')
+    if decoders:
+        award_relation = '(SELECT * REPLACE ('+','.join(decoders)+') FROM dashboard_explorer_awards)'
     available_years = _rolled_contract_years(actual_cols)
     row_identity = "r._explorer_row_id" if "_explorer_row_id" in actual_cols else "r.rowid"
     if not actual_cols or not available_years:
@@ -5244,7 +5256,7 @@ def build_contract_awards_explorer_query_from_rollup(
     row_limit = safe_int(row_limit, 50, 1, 500_000)
     offset = safe_int(offset, 0, 0, 10_000_000)
     if rank_only:
-        if award_relation != "dashboard_explorer_awards":
+        if not prepared_awards:
             raise HTTPException(status_code=503,detail="The award serving projection is unavailable.")
         rank_relation,rank_identity = award_relation,row_identity
         if not any(filters.get(key) not in (None,"",[]) for key in ("q","search","query")):
@@ -5345,7 +5357,7 @@ def build_contract_awards_explorer_query_from_rollup(
         """
     ranking_cte = ""
     if row_ids is not None:
-        if award_relation != "dashboard_explorer_awards":
+        if not prepared_awards:
             raise HTTPException(status_code=503,detail="The award serving projection is unavailable.")
         placeholders = ','.join(['?'] * len(row_ids))
         candidate_sql = f"""
@@ -5357,7 +5369,7 @@ def build_contract_awards_explorer_query_from_rollup(
             FROM {award_relation} r WHERE {row_identity} IN ({placeholders or 'NULL'})
         """
         params = list(row_ids)
-    elif award_relation == "dashboard_explorer_awards":
+    elif prepared_awards:
         # A materialized page of stable native DuckDB row IDs prevents the
         # ranking scan from reading wide descriptions and period dates. Row IDs
         # also preserve distinct native awards that share a contract number.

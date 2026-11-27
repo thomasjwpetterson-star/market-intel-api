@@ -303,12 +303,12 @@ def test_action_row_selection_retains_lifetime_rows_and_fallback_award_keys(expl
     assert a['base_award_description']=='Earlier native base'
 
 
-def test_item_projection_excludes_unrelated_awards_without_hiding_source_column_results(explorer):
+def test_prepared_actions_keep_nonitem_awards_for_source_column_results(explorer):
     db,ns,calls=explorer
     db.execute("UPDATE v_transactions SET nsn=NULL,niin=NULL,part_number=NULL,source_of_supply=NULL WHERE award_key='F'")
     build_explorer_action_projection(db)
-    assert db.execute('SELECT COUNT(*) FROM dashboard_explorer_actions').fetchone()[0]==10
-    assert db.execute("SELECT COUNT(*) FROM dashboard_explorer_actions WHERE award_key='F'").fetchone()[0]==0
+    assert db.execute('SELECT COUNT(*) FROM dashboard_explorer_actions').fetchone()[0]==12
+    assert db.execute("SELECT COUNT(*) FROM dashboard_explorer_actions WHERE _explorer_award_key='F'").fetchone()[0]==2
     fields=['award_key','contract_id','source_of_supply','lifetime_obligations_usd','number_of_actions_in_selected_period']
     payload=SimpleNamespace(table='v_contract_awards_enriched',columns=fields,
         filters={'year':[2025]},limit=2,offset=2)
@@ -324,6 +324,48 @@ def test_item_projection_excludes_unrelated_awards_without_hiding_source_column_
         'X-Mimir-Export-Key':'local-test-key','X-Mimir-Plan-Tier':'lite'}))
     with open(response.path,newline='')as f:exported=list(csv.DictReader(f))
     assert set(r['award_key'] for r in exported)==set('ABCDEF')
+
+
+@pytest.mark.parametrize('description,base,action,key',[
+    ('same','same','same','A'),('same',None,None,None),
+    (None,'base','action',''),('','','',' A '),
+    ('word',' word','WORD','A'),('word','','',None),
+])
+def test_prepared_action_encoding_is_lossless_for_native_text_and_identity(explorer,description,base,action,key):
+    db,ns,calls=explorer
+    db.execute('UPDATE v_transactions SET description=?,base_award_description=?,action_description=?,award_key=? WHERE contract_id=\'A\'',
+               [description,base,action,key])
+    fields='award_key,description,base_award_description,action_description,action_date'
+    expected=db.execute('SELECT '+fields+' FROM v_transactions WHERE contract_id=\'A\' ORDER BY action_date').fetchall()
+    build_explorer_action_projection(db)
+    payload=SimpleNamespace(table='v_contract_awards_enriched',columns=['source_of_supply'],filters={'year':[2025]})
+    sql,params=ns['build_contract_awards_explorer_query_from_actions'](payload,50,count_only=True)
+    source=sql.split(',\n        keyed_actions AS',1)[0]
+    actual=db.execute(source+' SELECT '+fields+' FROM source_actions WHERE contract_id=\'A\' ORDER BY action_date').fetchall()
+    assert actual==expected
+    if description==base==action=='same':
+        assert db.execute("SELECT COUNT(*) FROM dashboard_explorer_actions WHERE contract_id='A' AND base_award_description IS NULL AND action_description IS NULL AND award_key IS NULL").fetchone()[0]==2
+
+
+@pytest.mark.parametrize('description,base,latest',[
+    ('same','same','same'),('same',None,None),(None,'base','latest'),
+    ('','',''),('word',' word','WORD'),('word','',''),
+])
+def test_prepared_award_description_encoding_keeps_native_preview_page_and_csv(explorer,description,base,latest):
+    db,ns,calls=explorer
+    db.execute("UPDATE v_contracts_rolled SET description=?,base_award_description=?,latest_action_description=? WHERE contract_id='A'",[description,base,latest])
+    db.execute('DROP TABLE dashboard_explorer_awards');db.execute('DROP TABLE dashboard_explorer_rank')
+    fields=['contract_id','base_award_description','latest_action_description','obligations_in_selected_period_usd']
+    payload=SimpleNamespace(table='v_contract_awards_enriched',columns=fields,filters={'platform_family':['3DELRR']},limit=1,offset=1)
+    expected=ns['explorer_preview'](payload)
+    build_explorer_projection(db)
+    assert ns['explorer_preview'](payload)==expected
+    assert ns['explorer_page'](payload)==expected[1:2]
+    response=ns['explorer_export'](payload,BackgroundTasks(),SimpleNamespace(headers={
+        'X-Mimir-Export-Key':'local-test-key','X-Mimir-Plan-Tier':'lite'}))
+    with open(response.path,newline='')as f:exported=list(csv.DictReader(f))
+    assert [r['base_award_description'] for r in exported]==[r['base_award_description'] or '' for r in expected]
+    assert [r['latest_action_description'] for r in exported]==[r['latest_action_description'] or '' for r in expected]
 
 
 GENERIC_CASES=[

@@ -87,19 +87,14 @@ def build_item_filter_projection(conn):
             time.monotonic()-started)
 
 
-def explorer_item_action_scope(columns):
+def explorer_effective_award_key(columns):
     def value(column):
         return '"'+column+'"' if column in columns else 'CAST(NULL AS VARCHAR)'
     key = f'''COALESCE(NULLIF(TRIM(CAST({value('award_key')} AS VARCHAR)),''),
         CONCAT(COALESCE(NULLIF(TRIM(CAST({value('source_system')} AS VARCHAR)),''),'UNKNOWN'),
         '|PIID|',COALESCE(NULLIF(TRIM(CAST({value('contract_id')} AS VARCHAR)),''),'<NULL>'),
         '|CAGE|',COALESCE(NULLIF(TRIM(CAST({value('vendor_cage')} AS VARCHAR)),''),'<NULL>')))'''
-    item_fields = sorted(columns & {'nsn','niin','source_of_supply','part_number'})
-    has_item = ' OR '.join('"'+c+'" IS NOT NULL' for c in item_fields) or 'FALSE'
-    # Keep every lifetime action for an item-associated native award, including
-    # earlier actions that have no item fields or reported contract identifier.
-    scope = f'{key} IN (SELECT DISTINCT {key} FROM v_transactions WHERE {has_item})'
-    return key,scope
+    return key
 
 
 def build_explorer_action_projection(conn):
@@ -118,13 +113,26 @@ def build_explorer_action_projection(conn):
         'nsn_derivation_method','nsn_resolution_status','location_quality','part_number','year',
         'spend_amount','award_type_code','award_type','award_type_description',
     }
-    selected = ['"'+c+'"' for c in sorted(columns & fields)]
-    key,scope = explorer_item_action_scope(columns)
+    key = explorer_effective_award_key(columns)
+    selected = []
+    for column in sorted(columns & fields):
+        fallback = key if column == 'award_key' else '"description"'
+        deduplicate = column == 'award_key' or (
+            column in {'base_award_description','action_description'} and 'description' in columns)
+        if deduplicate:
+            # Keep a distinct value only when it differs. A separate null bit
+            # distinguishes native NULL from a duplicate of the fallback text.
+            # This is lossless for NULL, empty, whitespace and differing values.
+            selected.append(f'CASE WHEN "{column}" IS NOT DISTINCT FROM {fallback} '
+                            f'THEN NULL ELSE "{column}" END AS "{column}"')
+            selected.append(f'"{column}" IS NULL AS "_explorer_{column}_is_null"')
+        else:
+            selected.append('"'+column+'"')
     selected.extend(['ROW_NUMBER() OVER () AS _explorer_action_row_id',key+' AS _explorer_award_key'])
     started = time.monotonic()
     logging.getLogger('mimir-api').info('EXPLORER ACTION PROJECTION BUILD fields=%s',len(selected))
     conn.execute('CREATE OR REPLACE TABLE dashboard_explorer_actions AS SELECT '
-                 + ','.join(selected) + ' FROM v_transactions WHERE '+scope)
+                 + ','.join(selected) + ' FROM v_transactions')
     logging.getLogger('mimir-api').info('EXPLORER ACTION PROJECTION READY rows=%s seconds=%.3f',
         conn.execute('SELECT COUNT(*) FROM dashboard_explorer_actions').fetchone()[0],time.monotonic()-started)
 
@@ -159,7 +167,12 @@ def build_explorer_projection(conn, checkpoint_stage=None):
             dtype = 'DOUBLE' if annual[1] == 'obligations' else 'BIGINT' if annual[1] == 'action_count' else 'DATE'
             selected.append(f'TRY_CAST({quoted} AS {dtype}) AS {quoted}')
         elif column in native_fields:
-            selected.append(quoted)
+            if column in {'base_award_description','latest_action_description'} and 'description' in columns:
+                selected.append(f'CASE WHEN {quoted} IS NOT DISTINCT FROM "description" '
+                                f'THEN NULL ELSE {quoted} END AS {quoted}')
+                selected.append(f'{quoted} IS NULL AS "_explorer_{column}_is_null"')
+            else:
+                selected.append(quoted)
     # Persist the identity as data. DuckDB's virtual rowid can change when the
     # surrounding readiness transaction commits newly created storage.
     selected.append('ROW_NUMBER() OVER () AS _explorer_row_id')
@@ -204,9 +217,7 @@ def build_explorer_projection(conn, checkpoint_stage=None):
 def verify_explorer_projection(conn):
     relations = {row[0] for row in conn.execute('SHOW TABLES').fetchall()}
     if 'dashboard_explorer_actions' in relations:
-        columns = {r[0] for r in conn.execute('DESCRIBE v_transactions').fetchall()}
-        _,scope = explorer_item_action_scope(columns)
-        native_actions = conn.execute('SELECT COUNT(*) FROM v_transactions WHERE '+scope).fetchone()[0]
+        native_actions = conn.execute('SELECT COUNT(*) FROM v_transactions').fetchone()[0]
         prepared_actions = conn.execute('SELECT COUNT(*) FROM dashboard_explorer_actions').fetchone()[0]
         if native_actions != prepared_actions:
             raise RuntimeError('Explorer action rows differ from the native serving records.')
