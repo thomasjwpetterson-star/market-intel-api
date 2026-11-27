@@ -86,6 +86,7 @@ def build_explorer_projection(conn):
             selected.append(f'TRY_CAST({quoted} AS {dtype}) AS {quoted}')
         elif column in native_fields:
             selected.append(quoted)
+    selected.append('UPPER(TRIM(CAST(market_segment AS VARCHAR))) AS _explorer_market_domain')
     started = time.monotonic()
     logger = logging.getLogger('mimir-api')
     logger.info('EXPLORER PROJECTION BUILD fields=%s',len(selected))

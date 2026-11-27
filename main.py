@@ -249,7 +249,7 @@ def _close_all_duck_read_conns():
     _DUCK_POOL = None
     _DUCK_PUBLIC_POOL = None
 
-def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool = False) -> pd.DataFrame:
+def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool = False, followup=None) -> pd.DataFrame:
     """
     Executes a DuckDB query using a pooled connection.
     This avoids opening many connections (OOM) while still preventing one slow query from blocking *all* code paths.
@@ -291,7 +291,11 @@ def duck_fetch_df(sql: str, params: Optional[List[Any]] = None, use_writer: bool
             cursor = c.cursor()
             try:
                 with query_deadline(cursor):
-                    df = cursor.execute(sql, params).fetchdf()
+                    if followup is None:
+                        df = cursor.execute(sql, params).fetchdf()
+                    else:
+                        from explorer_page_read import read_snapshot_page
+                        df = read_snapshot_page(cursor,sql,params,followup)
             finally:
                 cursor.close()
                 query_seconds = time.perf_counter() - query_started
@@ -4990,6 +4994,8 @@ def build_contract_awards_explorer_query_from_rollup(
     row_limit: int,
     offset: int = 0,
     count_only: bool = False,
+    rank_only: bool = False,
+    row_ids=None,
 ):
     award_relation = "v_contracts_rolled"
     try:
@@ -5145,12 +5151,14 @@ def build_contract_awards_explorer_query_from_rollup(
             params.append(str(val).strip().upper())
         elif isinstance(val, list) and val:
             placeholders = ",".join(["?"] * len(val))
-            where_parts.append(
-                f"UPPER(TRIM(CAST(r.{quote_ident(actual_col)} AS VARCHAR))) IN ({placeholders})"
-            )
+            domain_column = (actual_col == "market_segment" and "_explorer_market_domain" in actual_cols)
+            expression = 'r._explorer_market_domain' if domain_column else f"UPPER(TRIM(CAST(r.{quote_ident(actual_col)} AS VARCHAR)))"
+            where_parts.append(f"{expression} IN ({placeholders})")
             params.extend([str(v).strip().upper() for v in val])
         elif not isinstance(val, list):
-            where_parts.append(f"UPPER(TRIM(CAST(r.{quote_ident(actual_col)} AS VARCHAR))) = ?")
+            domain_column = (actual_col == "market_segment" and "_explorer_market_domain" in actual_cols)
+            expression = 'r._explorer_market_domain' if domain_column else f"UPPER(TRIM(CAST(r.{quote_ident(actual_col)} AS VARCHAR)))"
+            where_parts.append(f"{expression} = ?")
             params.append(str(val).strip().upper())
 
     if not has_valid_filter:
@@ -5172,6 +5180,13 @@ def build_contract_awards_explorer_query_from_rollup(
 
     row_limit = safe_int(row_limit, 50, 1, 500_000)
     offset = safe_int(offset, 0, 0, 10_000_000)
+    if rank_only:
+        if award_relation != "dashboard_explorer_awards":
+            raise HTTPException(status_code=503,detail="The award serving projection is unavailable.")
+        return f"""SELECT r.rowid AS explorer_row_id,({obligations_expr}) AS explorer_rank_obligations
+            FROM {award_relation} r WHERE {where_clause}
+            ORDER BY explorer_rank_obligations DESC NULLS LAST,r.contract_id
+            LIMIT ? OFFSET ?""", params + [row_limit,offset]
 
     # Prepared dictionaries are rebuilt atomically with each serving release.
     # Re-grouping the full summary for 50 preview rows can exceed the analysis
@@ -5256,7 +5271,20 @@ def build_contract_awards_explorer_query_from_rollup(
             LIMIT ? OFFSET ?
         """
     ranking_cte = ""
-    if award_relation == "dashboard_explorer_awards":
+    if row_ids is not None:
+        if award_relation != "dashboard_explorer_awards":
+            raise HTTPException(status_code=503,detail="The award serving projection is unavailable.")
+        placeholders = ','.join(['?'] * len(row_ids))
+        candidate_sql = f"""
+            SELECT r.*,
+                ({obligations_expr}) AS obligations_in_selected_period_usd,
+                ({actions_expr}) AS number_of_actions_in_selected_period,
+                {earliest_expr} AS earliest_action_date_in_selected_period,
+                {latest_expr} AS latest_action_date_in_selected_period
+            FROM {award_relation} r WHERE r.rowid IN ({placeholders or 'NULL'})
+        """
+        params = list(row_ids)
+    elif award_relation == "dashboard_explorer_awards":
         # A materialized page of stable native DuckDB row IDs prevents the
         # ranking scan from reading wide descriptions and period dates. Row IDs
         # also preserve distinct native awards that share a contract number.
@@ -5298,7 +5326,8 @@ def build_contract_awards_explorer_query_from_rollup(
           ON TRIM(CAST(f.naics_code AS VARCHAR)) = TRIM(CAST(nm.naics_code AS VARCHAR))
         ORDER BY f.obligations_in_selected_period_usd DESC NULLS LAST, f.contract_id
     """
-    params.extend([row_limit, offset])
+    if row_ids is None:
+        params.extend([row_limit, offset])
     return sql, params
 
 
@@ -5561,12 +5590,24 @@ def build_explorer_query(
     return sql, params
 
 
+def fetch_explorer_page(payload, row_limit, offset=0):
+    sql,params = build_explorer_query(payload,row_limit=row_limit,offset=offset)
+    if payload.table == CONTRACT_AWARD_EXPLORER_TABLE and 'ranked_awards AS MATERIALIZED' in sql:
+        rank_sql,rank_params = build_contract_awards_explorer_query_from_rollup(
+            payload,row_limit,offset,rank_only=True)
+        detail_sql,_ = build_contract_awards_explorer_query_from_rollup(
+            payload,row_limit,offset,row_ids=[None]*row_limit)
+        def followup(ranked):
+            identities = [int(value) for value in ranked['explorer_row_id']]
+            return detail_sql,identities+[None]*(row_limit-len(identities))
+        return duck_fetch_df(rank_sql,rank_params,followup=followup)
+    return duck_fetch_df(sql,params)
+
+
 @app.post("/api/explorer/preview")
 def explorer_preview(payload: ExplorerRequest):
-    sql, params = build_explorer_query(payload, row_limit=50, offset=0)
-
     try:
-        df = duck_fetch_df(sql, params)
+        df = fetch_explorer_page(payload,50)
         if df.empty:
             return []
         return df_sanitize_for_json(df).to_dict(orient="records")
@@ -5591,10 +5632,8 @@ def explorer_page(payload: ExplorerRequest):
     page_limit = safe_int(payload.limit, 100, 1, 500)
     page_offset = safe_int(payload.offset, 0, 0, 10_000_000)
 
-    sql, params = build_explorer_query(payload, row_limit=page_limit, offset=page_offset)
-
     try:
-        df = duck_fetch_df(sql, params)
+        df = fetch_explorer_page(payload,page_limit,page_offset)
         if df.empty:
             return []
         return df_sanitize_for_json(df).to_dict(orient="records")
