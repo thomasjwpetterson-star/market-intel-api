@@ -270,13 +270,14 @@ def build_parts_projection(conn):
     conn.execute('CREATE INDEX dashboard_item_profiles_niin ON dashboard_item_profiles(niin)')
 
 
-def build_dashboard_projection(conn, reference, source_release):
+def build_dashboard_projection(conn, reference, source_release, preparation_threads=None):
     started = time.monotonic()
     runtime_threads = int(conn.execute("SELECT current_setting('threads')").fetchone()[0])
     # This replacement instance receives traffic only after readiness. Use the
     # existing two CPUs for preparation, then restore the serving query limit.
-    conn.execute('SET threads=2')
-    logging.getLogger('mimir-api').info('DASHBOARD PREPARATION threads=2 runtime_threads=%s',runtime_threads)
+    build_threads = runtime_threads if preparation_threads is None else int(preparation_threads)
+    conn.execute('SET threads='+str(build_threads))
+    logging.getLogger('mimir-api').info('DASHBOARD PREPARATION threads=%s runtime_threads=%s',build_threads,runtime_threads)
     transaction_started = False
     try:
         conn.execute('BEGIN TRANSACTION')

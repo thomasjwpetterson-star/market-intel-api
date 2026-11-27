@@ -4190,7 +4190,8 @@ def reload_all_data():
         source_release = (platform_bundle or {}).get('components', {}).get('main', {}).get('release_id')
         dashboard_reference = reference_for(source_release) if source_release else None
         with DUCK_INIT_LOCK:
-            projection = build_dashboard_projection(conn, dashboard_reference, source_release)
+            projection = build_dashboard_projection(conn, dashboard_reference, source_release,
+                preparation_threads=2 if not GLOBAL_CACHE.get('last_loaded') else None)
         new_global_cache['dashboard_projection_ready'] = True
         new_global_cache['dashboard_projection'] = projection
         logger.info('DASHBOARD PROJECTION READY %s', json.dumps(projection, sort_keys=True))

@@ -68,7 +68,7 @@ def test_cold_website_reads_keep_v7_overrides_and_need_no_native_scan(dashboard,
         assert conn.execute("SELECT current_setting('threads')").fetchone()[0]==2
         return original(conn)
     monkeypatch.setattr(dashboard_projection,'build_explorer_action_projection',prepared_actions)
-    metadata = build_dashboard_projection(db,reference_for(None),'release-A')
+    metadata = build_dashboard_projection(db,reference_for(None),'release-A',preparation_threads=2)
     assert db.execute("SELECT current_setting('threads')").fetchone()[0]==1
     assert metadata['rows']['dashboard_actions']==6
     ns['GLOBAL_CACHE']['dashboard_projection_ready']=True
@@ -79,20 +79,28 @@ def test_cold_website_reads_keep_v7_overrides_and_need_no_native_scan(dashboard,
         assert {fn:ns[fn](**scope) for fn in results}==results, scope
 
 
-def test_projection_rebuild_is_atomic_and_release_bound(dashboard):
+def test_projection_rebuild_is_atomic_and_release_bound(dashboard,monkeypatch):
     from private_platform_reference import reference_for
+    import dashboard_projection
     db,ns=dashboard;complete_sources(db);ref=reference_for(None)
     db.execute('SET threads=1')
-    build_dashboard_projection(db,ref,'release-A')
+    observed=[]
+    original_builder=dashboard_projection.build_action_projection
+    def actions(conn,reference):
+        observed.append(conn.execute("SELECT current_setting('threads')").fetchone()[0])
+        return original_builder(conn,reference)
+    monkeypatch.setattr(dashboard_projection,'build_action_projection',actions)
+    build_dashboard_projection(db,ref,'release-A',preparation_threads=2)
     original=db.execute('SELECT SUM(spend_amount) FROM dashboard_actions').fetchone()[0]
     db.execute('UPDATE v_transactions SET spend_amount=0')
     db.execute('DROP TABLE v_nsn_profile_lookup')
-    with pytest.raises(Exception):build_dashboard_projection(db,ref,'release-B')
+    with pytest.raises(Exception):build_dashboard_projection(db,ref,'release-B',preparation_threads=2)
     assert db.execute("SELECT current_setting('threads')").fetchone()[0]==1
     assert db.execute('SELECT source_release FROM dashboard_projection_release').fetchone()[0]=='release-A'
     assert db.execute('SELECT SUM(spend_amount) FROM dashboard_actions').fetchone()[0]==original
     db.execute("CREATE TABLE v_nsn_profile_lookup AS SELECT '000000001' AS niin,'1234000000001' AS nsn,'ITEM' AS item_name,'1234' AS fsc_code")
     build_dashboard_projection(db,ref,'release-B')
+    assert observed==[2,2,1]
     assert db.execute('SELECT source_release FROM dashboard_projection_release').fetchone()[0]=='release-B'
     assert db.execute('SELECT SUM(spend_amount) FROM dashboard_actions').fetchone()[0]==0
 
