@@ -16,6 +16,8 @@ def read_snapshot_page(cursor,sql,params,followup):
         if count:
             detail_sql,detail_params = followup(ranked)
             result = cursor.execute(detail_sql,detail_params).fetchdf()
+            if len(result) < count:
+                raise RuntimeError('Explorer details do not match the ranked page.')
         else:
             result = ranked
         cursor.execute('COMMIT')

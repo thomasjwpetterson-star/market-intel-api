@@ -53,3 +53,15 @@ def test_second_statement_shares_the_original_deadline_and_reader_remains_usable
     finally:
         ANALYTICAL_DEADLINE.reset(token)
         db.close()
+
+
+def test_missing_detail_rows_fail_instead_of_reporting_an_empty_result():
+    db=duckdb.connect()
+    try:
+        with pytest.raises(RuntimeError,match='do not match the ranked page'):
+            read_snapshot_page(db,'SELECT 1 AS id',[],lambda _: ('SELECT 1 AS id WHERE FALSE',[]))
+        assert db.execute('SELECT 1').fetchone()[0]==1
+        db.execute('BEGIN TRANSACTION')
+        db.execute('ROLLBACK')
+    finally:
+        db.close()
